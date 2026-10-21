@@ -14,14 +14,11 @@
 //! ```
 //!
 //! The windows then combine by Horner's rule: shift by c doublings, add the next window.
-//! Cost: about (255 / c) * (n + 2^c) additions, minimized near c = log_2(n) - 2.
+//! Cost: about (b / c) * (n + 2^c) additions for b-bit scalars, minimized near c = log_2(n) - 2.
 
 use std::ops::AddAssign;
 
 use crate::Scalar;
-
-/// Bit length of the scalar field modulus; the top window never needs more.
-const SCALAR_BITS: usize = 255;
 
 /// The group operations the bucket method needs.
 ///
@@ -59,7 +56,11 @@ pub(crate) fn multi_exp<G: PippengerGroup>(points: &[G::Affine], scalars: &[Scal
     // Phase 1: leave Montgomery form once, so digits can be read off the integer bits.
     let digits: Vec<[u64; 4]> = scalars.iter().map(Scalar::to_canonical).collect();
     let width = window_width(points.len());
-    let windows = SCALAR_BITS.div_ceil(width);
+
+    // Only windows below the longest scalar can hold a nonzero digit.
+    // Short scalars, such as 128-bit batch coefficients, skip the empty top windows.
+    let bits = digits.iter().map(bit_length).max().unwrap_or(0);
+    let windows = bits.div_ceil(width);
 
     // Phase 2: process windows from the most significant down, Horner style.
     let mut buckets = vec![G::NEUTRAL; (1 << width) - 1];
@@ -103,6 +104,15 @@ fn window_width(n: usize) -> usize {
     (log2 * 69 / 100 + 2).clamp(2, 16)
 }
 
+/// Number of significant bits of a little-endian integer, zero for zero.
+fn bit_length(limbs: &[u64; 4]) -> usize {
+    // The highest nonzero limb decides; each limb below it contributes 64 bits.
+    limbs
+        .iter()
+        .rposition(|limb| *limb != 0)
+        .map_or(0, |top| 64 * top + 64 - limbs[top].leading_zeros() as usize)
+}
+
 /// Reads the width-bit digit starting at bit offset start of a little-endian integer.
 fn read_digit(limbs: &[u64; 4], start: usize, width: usize) -> usize {
     let limb = start / 64;
@@ -135,6 +145,14 @@ mod tests {
         assert_eq!(read_digit(&limbs, 60, 8), 0xab);
         // The top window reads past bit 255 only into implicit zeros.
         assert_eq!(read_digit(&[0, 0, 0, 1 << 63], 252, 8), 0x8);
+    }
+
+    #[test]
+    fn bit_length_counts_significant_bits() {
+        // Zero has no bits, one has one, and 2^128 needs 129.
+        assert_eq!(bit_length(&[0, 0, 0, 0]), 0);
+        assert_eq!(bit_length(&[1, 0, 0, 0]), 1);
+        assert_eq!(bit_length(&[0, 0, 1, 0]), 129);
     }
 
     #[test]
