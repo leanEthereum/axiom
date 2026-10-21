@@ -29,3 +29,18 @@ impl Container for SigningData {
         })
     }
 }
+
+impl SigningData {
+    /// The root a signature over an object in a domain actually signs.
+    ///
+    /// Mixing the domain into the root stops a signature from being replayed elsewhere.
+    /// See `compute_signing_root` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn signing_root<T: Ssz>(object: &T, domain: Domain) -> Root {
+        Self {
+            object_root: object.hash_tree_root(),
+            domain,
+        }
+        .hash_tree_root()
+    }
+}

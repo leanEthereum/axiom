@@ -61,3 +61,29 @@ impl Container for ForkData {
         })
     }
 }
+
+impl ForkData {
+    /// Root of a fork version bound to a chain.
+    ///
+    /// See `compute_fork_data_root` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn root(current_version: Version, genesis_validators_root: Root) -> Root {
+        Self {
+            current_version,
+            genesis_validators_root,
+        }
+        .hash_tree_root()
+    }
+}
+
+impl Fork {
+    /// Version that signs messages of an epoch, which may predate the latest fork.
+    #[must_use]
+    pub fn version_at(&self, epoch: Epoch) -> Version {
+        if epoch < self.epoch {
+            self.previous_version
+        } else {
+            self.current_version
+        }
+    }
+}

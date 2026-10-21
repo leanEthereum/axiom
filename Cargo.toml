@@ -62,6 +62,9 @@ doc_markdown = "allow"
 # A match on an option, with a comment per arm, reads better than a combinator chain.
 option_if_let_else = "allow"
 single_match_else = "allow"
+# Axiom targets 64-bit platforms only, asserted at compile time in axiom-types.
+# A u64 index then converts to usize without loss.
+cast_possible_truncation = "allow"
 # Conflicts with rustc's unreachable_pub, which this workspace keeps.
 redundant_pub_crate = "allow"
 

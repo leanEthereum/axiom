@@ -5,10 +5,11 @@ use axiom_ssz::{
 };
 
 use crate::{
-    BeaconBlockHeader, Bytes32, Checkpoint, Epoch, Eth1Data, ExecutionPayloadHeader, Fork, Gwei,
-    HistoricalSummary, ParticipationFlags, PendingConsolidation, PendingDeposit,
-    PendingPartialWithdrawal, Preset, Root, Slot, SyncCommittee, Validator, ValidatorIndex,
-    WithdrawalIndex, constants::JUSTIFICATION_BITS_LENGTH,
+    BeaconBlockHeader, BlsPubkey, Bytes32, Checkpoint, Domain, DomainType, Epoch, Eth1Data,
+    ExecutionPayloadHeader, Fork, Gwei, HistoricalSummary, ParticipationFlags,
+    PendingConsolidation, PendingDeposit, PendingPartialWithdrawal, Preset, Root, Slot,
+    SyncCommittee, Validator, ValidatorIndex, WithdrawalIndex,
+    constants::JUSTIFICATION_BITS_LENGTH,
 };
 
 /// Recent block roots.
@@ -305,5 +306,177 @@ impl<P: Preset> Container for BeaconState<P> {
             pending_consolidations: fields.field()?,
             proposer_lookahead: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> BeaconState<P> {
+    /// Epoch of the state's slot.
+    #[must_use]
+    pub const fn current_epoch(&self) -> Epoch {
+        self.slot.epoch::<P>()
+    }
+
+    /// Epoch before the current one, or genesis at genesis.
+    #[must_use]
+    pub const fn previous_epoch(&self) -> Epoch {
+        self.current_epoch().saturating_sub(1)
+    }
+
+    /// Root of the block at a recent slot.
+    ///
+    /// Returns nothing unless the slot is in the past and still in the ring buffer.
+    /// See `get_block_root_at_slot` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn block_root_at_slot(&self, slot: Slot) -> Option<Root> {
+        let in_range =
+            slot < self.slot && self.slot.0 <= slot.0.saturating_add(P::SLOTS_PER_HISTORICAL_ROOT);
+        in_range.then(|| self.block_roots[(slot % P::SLOTS_PER_HISTORICAL_ROOT) as usize])
+    }
+
+    /// Root of the block at the start of a recent epoch.
+    #[must_use]
+    pub fn block_root(&self, epoch: Epoch) -> Option<Root> {
+        self.block_root_at_slot(epoch.start_slot::<P>())
+    }
+
+    /// Randao mix of a recent epoch.
+    #[must_use]
+    pub fn randao_mix(&self, epoch: Epoch) -> Bytes32 {
+        self.randao_mixes[(epoch % P::EPOCHS_PER_HISTORICAL_VECTOR) as usize]
+    }
+
+    /// Indices of the validators active at an epoch, in registry order.
+    #[must_use]
+    pub fn active_validator_indices(&self, epoch: Epoch) -> Vec<ValidatorIndex> {
+        self.validators
+            .iter()
+            .enumerate()
+            .filter(|(_, validator)| validator.is_active_at(epoch))
+            .map(|(index, _)| ValidatorIndex::from(index))
+            .collect()
+    }
+
+    /// Seed for a domain at an epoch.
+    ///
+    /// The mix comes from MIN_SEED_LOOKAHEAD + 1 epochs earlier.
+    /// That mix was fixed before anyone could know which seed it would feed.
+    /// See `get_seed` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn seed(&self, epoch: Epoch, domain_type: DomainType) -> Bytes32 {
+        // Adding the vector length first keeps the subtraction from underflowing near genesis.
+        let mix_epoch =
+            Epoch(epoch.0 + P::EPOCHS_PER_HISTORICAL_VECTOR - P::MIN_SEED_LOOKAHEAD - 1);
+        let mix = self.randao_mix(mix_epoch);
+
+        let mut preimage = [0; 4 + 8 + 32];
+        preimage[..4].copy_from_slice(&domain_type.0);
+        preimage[4..12].copy_from_slice(&epoch.0.to_le_bytes());
+        preimage[12..].copy_from_slice(&mix.0);
+        Bytes32(Root::sha256(&preimage).0)
+    }
+
+    /// Committees per slot at an epoch, between 1 and the preset maximum.
+    ///
+    /// See `get_committee_count_per_slot` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn committee_count_per_slot(&self, active_validator_count: usize) -> u64 {
+        (active_validator_count as u64 / P::SLOTS_PER_EPOCH / P::TARGET_COMMITTEE_SIZE)
+            .clamp(1, P::MAX_COMMITTEES_PER_SLOT)
+    }
+
+    /// Sum of the effective balances of some validators, at least one increment.
+    ///
+    /// The floor keeps every division by a total balance well defined.
+    #[must_use]
+    pub fn total_balance(&self, indices: impl IntoIterator<Item = ValidatorIndex>) -> Gwei {
+        let sum: Gwei = indices
+            .into_iter()
+            .map(|index| self.validators[index.as_usize()].effective_balance)
+            .sum();
+        sum.max(P::EFFECTIVE_BALANCE_INCREMENT)
+    }
+
+    /// Sum of the effective balances of the validators active in the current epoch.
+    #[must_use]
+    pub fn total_active_balance(&self) -> Gwei {
+        let epoch = self.current_epoch();
+        let sum: Gwei = self
+            .validators
+            .iter()
+            .filter(|validator| validator.is_active_at(epoch))
+            .map(|validator| validator.effective_balance)
+            .sum();
+        sum.max(P::EFFECTIVE_BALANCE_INCREMENT)
+    }
+
+    /// Signature domain of a message type at an epoch.
+    ///
+    /// Messages from before the latest fork sign with the previous fork version.
+    /// See `get_domain` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn domain(&self, domain_type: DomainType, epoch: Epoch) -> Domain {
+        Domain::compute(
+            domain_type,
+            self.fork.version_at(epoch),
+            self.genesis_validators_root,
+        )
+    }
+
+    /// Proposer of the current slot, read from the lookahead.
+    ///
+    /// See `get_beacon_proposer_index` in the Fulu beacon chain spec.
+    #[must_use]
+    pub fn beacon_proposer_index(&self) -> ValidatorIndex {
+        self.proposer_lookahead[self.slot.index_in_epoch::<P>() as usize]
+    }
+
+    /// Epochs since the last finalized checkpoint, counted from the previous epoch.
+    #[must_use]
+    pub fn finality_delay(&self) -> u64 {
+        self.previous_epoch() - self.finalized_checkpoint.epoch
+    }
+
+    /// Whether finality has stalled long enough for the inactivity leak.
+    ///
+    /// The leak drains non-participants until the participants hold two thirds again.
+    #[must_use]
+    pub fn is_in_inactivity_leak(&self) -> bool {
+        self.finality_delay() > P::MIN_EPOCHS_TO_INACTIVITY_PENALTY
+    }
+
+    /// Validators that earn rewards or penalties for the previous epoch.
+    ///
+    /// Slashed validators stay eligible until withdrawable, so they keep paying penalties.
+    #[must_use]
+    pub fn eligible_validator_indices(&self) -> Vec<ValidatorIndex> {
+        let previous_epoch = self.previous_epoch();
+        self.validators
+            .iter()
+            .enumerate()
+            .filter(|(_, validator)| {
+                validator.is_active_at(previous_epoch)
+                    || (validator.slashed && previous_epoch + 1 < validator.withdrawable_epoch)
+            })
+            .map(|(index, _)| ValidatorIndex::from(index))
+            .collect()
+    }
+
+    /// Balance already queued for partial withdrawal from a validator.
+    #[must_use]
+    pub fn pending_balance_to_withdraw(&self, index: ValidatorIndex) -> Gwei {
+        self.pending_partial_withdrawals
+            .iter()
+            .filter(|withdrawal| withdrawal.validator_index == index)
+            .map(|withdrawal| withdrawal.amount)
+            .sum()
+    }
+
+    /// Index of the validator with a public key, scanning the registry.
+    #[must_use]
+    pub fn validator_index_of(&self, pubkey: &BlsPubkey) -> Option<ValidatorIndex> {
+        self.validators
+            .iter()
+            .position(|validator| validator.pubkey == *pubkey)
+            .map(ValidatorIndex::from)
     }
 }
