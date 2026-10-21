@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["bin/axiom", "crates/*"]
+members = ["bin/*", "crates/*"]
 default-members = ["bin/axiom"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/leanEthereum/axiom"
 homepage = "https://github.com/leanEthereum/axiom"
@@ -14,10 +14,14 @@ authors = ["Thomas Coratger <thomas.coratger@ethereum.org>"]
 publish = false
 
 [workspace.lints.rust]
+missing_docs = "warn"
 missing_debug_implementations = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 unreachable_pub = "warn"
 unused_must_use = "deny"
+unused_qualifications = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+trivial_numeric_casts = "warn"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
@@ -27,13 +31,57 @@ private_intra_doc_links = "warn"
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-doc_markdown = "allow"
+# Restriction lints picked one by one.
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+exit = "warn"
+get_unwrap = "warn"
+if_then_some_else_none = "warn"
+mem_forget = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+rc_buffer = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+same_name_method = "warn"
+semicolon_inside_block = "warn"
+str_to_string = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_self_imports = "warn"
+unwrap_used = "warn"
+verbose_file_reads = "warn"
+# Pedantic lints that fight the domain.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 similar_names = "allow"
+doc_markdown = "allow"
+# A match on an option, with a comment per arm, reads better than a combinator chain.
+option_if_let_else = "allow"
+single_match_else = "allow"
+# Conflicts with rustc's unreachable_pub, which this workspace keeps.
+redundant_pub_crate = "allow"
 
 [workspace.dependencies]
+# Internal crates.
+axiom-ssz = { path = "crates/ssz" }
+axiom-yaml = { path = "crates/yaml" }
+axiom-snappy = { path = "crates/snappy" }
+axiom-bls12-381 = { path = "crates/bls12-381" }
+axiom-bls = { path = "crates/bls" }
+axiom-kzg = { path = "crates/kzg" }
+axiom-types = { path = "crates/types" }
+axiom-state-transition = { path = "crates/state-transition" }
+axiom-fork-choice = { path = "crates/fork-choice" }
+
+# SHA-256 with hardware acceleration where the CPU offers it.
+sha2 = "0.10"
+
+# Test-only.
+proptest = "1.7"
 
 [profile.release]
 lto = "thin"

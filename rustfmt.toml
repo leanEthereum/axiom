@@ -1,5 +1,15 @@
+# Unstable options need nightly rustfmt: `cargo +nightly fmt --all`.
 edition = "2024"
 style_edition = "2024"
+max_width = 100
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
 reorder_imports = true
+reorder_modules = true
 use_field_init_shorthand = true
 use_try_shorthand = true
+format_code_in_doc_comments = true
+normalize_doc_attributes = true
+format_macro_matchers = true
+hex_literal_case = "Lower"
+newline_style = "Unix"

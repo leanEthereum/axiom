@@ -8,3 +8,6 @@ proptest-regressions/
 .vscode/
 *.swp
 .DS_Store
+
+# Consensus spec vectors, downloaded by testing/ef-tests/Makefile
+/testing/vectors/
