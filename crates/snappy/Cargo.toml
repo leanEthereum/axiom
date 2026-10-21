@@ -1,0 +1,17 @@
+[package]
+name = "axiom-snappy"
+description = "Snappy compression: the raw block format, the framing format, and CRC-32C"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
