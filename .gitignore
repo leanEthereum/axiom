@@ -1,0 +1,10 @@
+/target
+
+# Proptest regression files
+proptest-regressions/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
