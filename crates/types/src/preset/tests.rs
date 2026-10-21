@@ -1,9 +1,7 @@
 use axiom_ssz::Length;
 
 use super::*;
-use crate::constants::{
-    BYTES_PER_FIELD_ELEMENT, EPOCHS_PER_ETH1_VOTING_PERIOD, SYNC_COMMITTEE_SUBNET_COUNT,
-};
+use crate::constants::{BYTES_PER_FIELD_ELEMENT, SYNC_COMMITTEE_SUBNET_COUNT};
 
 /// Every length type, with the constant expression it stands for.
 #[expect(
@@ -56,7 +54,7 @@ fn length_table<P: Preset>() -> Vec<(&'static str, usize, u64)> {
         (
             "Eth1DataVotesLimit",
             P::Eth1DataVotesLimit::LEN,
-            EPOCHS_PER_ETH1_VOTING_PERIOD * P::SLOTS_PER_EPOCH,
+            P::EPOCHS_PER_ETH1_VOTING_PERIOD * P::SLOTS_PER_EPOCH,
         ),
         (
             "MaxProposerSlashings",

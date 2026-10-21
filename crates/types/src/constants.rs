@@ -12,9 +12,6 @@ pub const JUSTIFICATION_BITS_LENGTH: usize = 4;
 /// Depth of the deposit contract's merkle tree, so it holds 2^32 deposits.
 pub const DEPOSIT_CONTRACT_TREE_DEPTH: usize = 32;
 
-/// Epochs in an eth1 data voting period.
-pub const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 64;
-
 /// Bytes of a BLS12-381 scalar field element in a blob.
 pub const BYTES_PER_FIELD_ELEMENT: u64 = 32;
 

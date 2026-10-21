@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["bin/*", "crates/*"]
+members = ["bin/*", "crates/*", "testing/ef-tests"]
 default-members = ["bin/axiom"]
 
 [workspace.package]
@@ -40,7 +40,6 @@ if_then_some_else_none = "warn"
 mem_forget = "warn"
 print_stderr = "warn"
 print_stdout = "warn"
-rc_buffer = "warn"
 redundant_type_annotations = "warn"
 rest_pat_in_fully_bound_structs = "warn"
 same_name_method = "warn"
