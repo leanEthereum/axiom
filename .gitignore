@@ -11,3 +11,6 @@ proptest-regressions/
 
 # Consensus spec vectors, downloaded by testing/ef-tests/Makefile
 /testing/vectors/
+
+# Agent worktrees
+/.claude/
