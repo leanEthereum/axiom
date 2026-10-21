@@ -41,11 +41,11 @@ impl<P: Preset> EpochProcessor<'_, P> {
             self.unslashed_participating_balance(TIMELY_TARGET_FLAG_INDEX, self.current_epoch);
 
         let state = &mut self.state.beacon;
-        let old_previous_justified = state.previous_justified_checkpoint.clone();
-        let old_current_justified = state.current_justified_checkpoint.clone();
+        let old_previous_justified = state.previous_justified_checkpoint;
+        let old_current_justified = state.current_justified_checkpoint;
 
         // Shift the history one epoch older.
-        state.previous_justified_checkpoint = state.current_justified_checkpoint.clone();
+        state.previous_justified_checkpoint = state.current_justified_checkpoint;
         let mut bits = [false; 4];
         for (index, bit) in bits.iter_mut().enumerate().skip(1) {
             *bit = state.justification_bits.get(index - 1).unwrap_or(false);
@@ -74,13 +74,13 @@ impl<P: Preset> EpochProcessor<'_, P> {
 
         let current = self.current_epoch;
         if bits[1..4].iter().all(|bit| *bit) && old_previous_justified.epoch + 3 == current {
-            state.finalized_checkpoint = old_previous_justified.clone();
+            state.finalized_checkpoint = old_previous_justified;
         }
         if bits[1..3].iter().all(|bit| *bit) && old_previous_justified.epoch + 2 == current {
             state.finalized_checkpoint = old_previous_justified;
         }
         if bits[0..3].iter().all(|bit| *bit) && old_current_justified.epoch + 2 == current {
-            state.finalized_checkpoint = old_current_justified.clone();
+            state.finalized_checkpoint = old_current_justified;
         }
         if bits[0..2].iter().all(|bit| *bit) && old_current_justified.epoch + 1 == current {
             state.finalized_checkpoint = old_current_justified;

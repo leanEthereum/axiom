@@ -17,15 +17,35 @@ name = "axiom-bls"
 version = "0.1.0"
 
 [[package]]
+name = "axiom-das"
+version = "0.1.0"
+dependencies = [
+ "axiom-ssz",
+ "axiom-types",
+]
+
+[[package]]
 name = "axiom-ef-tests"
 version = "0.1.0"
 dependencies = [
  "axiom-bls",
+ "axiom-das",
+ "axiom-fork-choice",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-types",
  "axiom-yaml",
+]
+
+[[package]]
+name = "axiom-fork-choice"
+version = "0.1.0"
+dependencies = [
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "proptest",
 ]
 
 [[package]]

@@ -81,6 +81,28 @@ pub struct Report {
     pub failed: Vec<(String, Failure)>,
 }
 
+/// What happened to one case.
+#[derive(Debug)]
+enum Outcome {
+    /// The case met its expected outcome.
+    Passed,
+    /// The case was deliberately not run.
+    Skipped(&'static str),
+    /// The case did not meet its expected outcome.
+    Failed(Failure),
+}
+
+impl Report {
+    /// Tallies one case.
+    fn record(&mut self, label: String, outcome: Outcome) {
+        match outcome {
+            Outcome::Passed => self.passed += 1,
+            Outcome::Skipped(reason) => self.skipped.push((label, reason)),
+            Outcome::Failed(failure) => self.failed.push((label, failure)),
+        }
+    }
+}
+
 /// Every case of one runner, for one preset and one fork.
 #[derive(Clone, Debug)]
 pub struct Suite {
@@ -105,6 +127,7 @@ impl Suite {
     /// # Panics
     ///
     /// Panics when a case fails, listing every failure.
+    #[expect(clippy::print_stderr, reason = "the report is the test's output")]
     pub fn run(runner: &impl Runner, preset: &str, fork: &str) {
         let Some(suite) = Self::new(preset, fork, runner.name()) else {
             eprintln!(
@@ -140,29 +163,26 @@ impl Suite {
         let next = Mutex::new(cases.iter());
         let workers = thread::available_parallelism().map_or(4, usize::from);
 
+        // The queue's lock is held only while popping, never while a case runs.
+        let take = || next.lock().ok().and_then(|mut cases| cases.next());
+
         thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
-                    loop {
-                        let Some((handler, case)) =
-                            next.lock().map_or(None, |mut cases| cases.next())
-                        else {
-                            break;
-                        };
+                    while let Some((handler, case)) = take() {
                         let label = format!("{handler}/{}", case.path().display());
                         let skip = runner
                             .skip_handler(handler)
                             .or_else(|| runner.skip_case(handler, case));
                         let outcome = match skip {
-                            Some(reason) => Err(Ok(reason)),
-                            None => runner.run_case(handler, case).map_err(Err),
+                            Some(reason) => Outcome::Skipped(reason),
+                            None => match runner.run_case(handler, case) {
+                                Ok(()) => Outcome::Passed,
+                                Err(failure) => Outcome::Failed(failure),
+                            },
                         };
                         if let Ok(mut report) = report.lock() {
-                            match outcome {
-                                Ok(()) => report.passed += 1,
-                                Err(Ok(reason)) => report.skipped.push((label, reason)),
-                                Err(Err(failure)) => report.failed.push((label, failure)),
-                            }
+                            report.record(label, outcome);
                         }
                     }
                 });

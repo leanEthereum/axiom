@@ -3,6 +3,8 @@
 mod blocks;
 mod epoch_processing;
 mod fork;
+mod fork_choice;
+mod networking;
 mod operations;
 mod rewards;
 mod shuffling;
@@ -13,6 +15,8 @@ use axiom_types::{ChainConfig, Preset};
 pub use blocks::Blocks;
 pub use epoch_processing::EpochProcessing;
 pub use fork::Fork;
+pub use fork_choice::ForkChoice;
+pub use networking::Networking;
 pub use operations::Operations;
 pub use rewards::Rewards;
 pub use shuffling::Shuffling;

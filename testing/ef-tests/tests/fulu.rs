@@ -4,7 +4,8 @@
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, Operations, Rewards, Shuffling, SszStatic, Suite, Transition,
+    Blocks, EpochProcessing, Fork, ForkChoice, Networking, Operations, Rewards, Shuffling,
+    SszStatic, Suite, Transition,
 };
 use axiom_types::{Mainnet, Minimal};
 
@@ -107,4 +108,24 @@ fn shuffling_minimal() {
 #[test]
 fn shuffling_mainnet() {
     Suite::run(&Shuffling::<Mainnet>::default(), "mainnet", "phase0");
+}
+
+#[test]
+fn fork_choice_minimal() {
+    Suite::run(&ForkChoice::<Minimal>::default(), "minimal", "fulu");
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    Suite::run(&ForkChoice::<Mainnet>::default(), "mainnet", "fulu");
+}
+
+#[test]
+fn networking_minimal() {
+    Suite::run(&Networking::<Minimal>::default(), "minimal", "fulu");
+}
+
+#[test]
+fn networking_mainnet() {
+    Suite::run(&Networking::<Mainnet>::default(), "mainnet", "fulu");
 }

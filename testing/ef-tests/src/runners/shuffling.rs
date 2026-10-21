@@ -21,7 +21,7 @@ impl<P: Preset> Runner for Shuffling<P> {
         let yaml = case.yaml("mapping.yaml")?;
         let seed = yaml
             .get("seed")
-            .and_then(|seed| seed.as_hex_array::<32>())
+            .and_then(Yaml::as_hex_array::<32>)
             .ok_or_else(|| Failure::new("mapping.yaml has no seed"))?;
         let count = yaml
             .get("count")

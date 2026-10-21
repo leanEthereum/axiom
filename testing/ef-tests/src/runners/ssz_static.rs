@@ -20,6 +20,7 @@ use axiom_types::{
     SyncAggregatorSelectionData, SyncCommittee, SyncCommitteeContribution, SyncCommitteeMessage,
     Validator, VoluntaryExit, Withdrawal, WithdrawalRequest,
 };
+use axiom_yaml::Yaml;
 
 use crate::{Case, Failure, Runner};
 
@@ -37,7 +38,7 @@ impl<P: Preset> SszStatic<P> {
         let expected = case
             .yaml("roots.yaml")?
             .get("root")
-            .and_then(|root| root.as_hex_array::<32>())
+            .and_then(Yaml::as_hex_array::<32>)
             .ok_or_else(|| Failure::new("roots.yaml has no root"))?;
         let root = value.hash_tree_root();
         if root != Root(expected) {
