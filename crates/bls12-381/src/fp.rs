@@ -211,15 +211,27 @@ impl Fp {
     ///
     /// The running time depends on the exponent, never on the base.
     /// Use it only with public exponents.
+    ///
+    /// # Performance
+    ///
+    /// Fixed 4-bit windows: one product per four exponent bits instead of one per set bit.
+    /// A 381-bit exponent costs about 384 squarings and 105 products, against 574 operations bit by bit.
     #[must_use]
     pub fn pow_vartime(&self, exponent: &[u64]) -> Self {
+        // Phase 1: table[i] = self^i for every 4-bit digit i.
+        let mut table = [Self::ONE; 16];
+        for i in 1..16 {
+            table[i] = table[i - 1] * self;
+        }
+
+        // Phase 2: left to right, four squarings then one table product per digit.
         let mut result = Self::ONE;
-        // Left-to-right square-and-multiply, from the most significant bit down.
         for limb in exponent.iter().rev() {
-            for bit in (0..64).rev() {
-                result = result.square();
-                if (limb >> bit) & 1 == 1 {
-                    result *= self;
+            for shift in (0..64).step_by(4).rev() {
+                result = result.square().square().square().square();
+                let digit = (limb >> shift) & 0xf;
+                if digit != 0 {
+                    result *= table[usize::try_from(digit).unwrap_or(0)];
                 }
             }
         }
@@ -313,35 +325,83 @@ impl Fp {
     ///
     /// Inputs must be below p.
     /// The result is below 2p before the final subtraction, and below p after it.
-    #[allow(
-        clippy::needless_range_loop,
-        reason = "the limb index drives two arrays at once"
-    )]
     fn montgomery_mul(a: &[u64; 6], b: &[u64; 6]) -> [u64; 6] {
-        let mut t = [0_u64; 6];
-        for i in 0..6 {
-            // Phase 1: fold in the lowest limb of a * b_i.
-            let (t0, mut carry_ab) = mac(t[0], a[0], b[i], 0);
+        // One round per limb of b, written out so the compiler keeps t in registers.
+        let t = Self::montgomery_round([0; 6], a, b[0]);
+        let t = Self::montgomery_round(t, a, b[1]);
+        let t = Self::montgomery_round(t, a, b[2]);
+        let t = Self::montgomery_round(t, a, b[3]);
+        let t = Self::montgomery_round(t, a, b[4]);
+        let t = Self::montgomery_round(t, a, b[5]);
+        Self::subtract_modulus_if_needed(t)
+    }
 
-            // Phase 2: pick m so that t0 + m * p_0 = 0 mod 2^64.
-            let m = t0.wrapping_mul(INV);
-            let (_, mut carry_mp) = mac(t0, m, MODULUS[0], 0);
+    /// One CIOS round: returns (t + a * b_i + m * p) / 2^64 for the m that makes the division exact.
+    #[inline(always)]
+    #[allow(
+        clippy::inline_always,
+        reason = "six inlined rounds keep the accumulator in registers; a call per round spills it"
+    )]
+    fn montgomery_round(t: [u64; 6], a: &[u64; 6], b_i: u64) -> [u64; 6] {
+        // Phase 1: fold in the lowest limb of a * b_i.
+        let (t0, mut carry_ab) = mac(t[0], a[0], b_i, 0);
 
-            // Phase 3: add the remaining limbs of a * b_i and m * p, shifting down one limb.
-            //
-            //     t_{j-1} <- t_j + a_j b_i + m p_j + carries
-            for j in 1..6 {
-                let (tj, carry) = mac(t[j], a[j], b[i], carry_ab);
-                carry_ab = carry;
-                let (shifted, carry) = mac(tj, m, MODULUS[j], carry_mp);
-                carry_mp = carry;
-                t[j - 1] = shifted;
+        // Phase 2: pick m so that t0 + m * p_0 = 0 mod 2^64.
+        let m = t0.wrapping_mul(INV);
+        let (_, mut carry_mp) = mac(t0, m, MODULUS[0], 0);
+
+        // Phase 3: add the remaining limbs of a * b_i and m * p, shifting down one limb.
+        //
+        //     t_{j-1} <- t_j + a_j b_i + m p_j + carries
+        let mut out = [0; 6];
+        for j in 1..6 {
+            let (tj, carry) = mac(t[j], a[j], b_i, carry_ab);
+            carry_ab = carry;
+            (out[j - 1], carry_mp) = mac(tj, m, MODULUS[j], carry_mp);
+        }
+
+        // Both carries fit in the top limb thanks to the spare bits of p.
+        out[5] = carry_ab.wrapping_add(carry_mp);
+        out
+    }
+
+    /// Returns a_0 b_0 + a_1 b_1 mod p with a single Montgomery reduction.
+    ///
+    /// # Algorithm
+    ///
+    /// Lazy reduction of a sum of products, eprint 2022/367 algorithm 2.
+    /// Each round adds limb j of both left factors times the full right factors, then reduces once.
+    ///
+    /// ```text
+    ///     separate : 2 products, 2 reductions, 1 modular addition
+    ///     fused    : 2 products, 1 reduction
+    /// ```
+    ///
+    /// Bound: the final value is (a_0 b_0 + a_1 b_1 + K p) / R with K < R.
+    /// With p < R / 4 that is below 1.5 p, so one conditional subtraction reduces it.
+    /// Intermediate values stay below 3p < 2^384, inside six limbs plus a carry limb.
+    pub(crate) fn sum_of_products(lefts: [Self; 2], rights: [Self; 2]) -> Self {
+        let mut acc = [0_u64; 6];
+        for limb_index in 0..6 {
+            // Phase 1: t = acc + sum_i lefts_i[limb_index] * rights_i, in seven limbs.
+            let mut t = [acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], 0];
+            for (left, right) in lefts.iter().zip(&rights) {
+                let mut carry = 0;
+                for (limb, right_limb) in t.iter_mut().zip(right.0) {
+                    (*limb, carry) = mac(*limb, left.0[limb_index], right_limb, carry);
+                }
+                t[6] = t[6].wrapping_add(carry);
             }
 
-            // Both carries fit in the top limb thanks to the spare bits of p.
-            t[5] = carry_ab.wrapping_add(carry_mp);
+            // Phase 2: add m p with m chosen to clear the low limb, then shift down one limb.
+            let m = t[0].wrapping_mul(INV);
+            let (_, mut carry) = mac(t[0], m, MODULUS[0], 0);
+            for i in 1..6 {
+                (acc[i - 1], carry) = mac(t[i], m, MODULUS[i], carry);
+            }
+            acc[5] = t[6].wrapping_add(carry);
         }
-        Self::subtract_modulus_if_needed(t)
+        Self(Self::subtract_modulus_if_needed(acc))
     }
 
     /// Maps a value in [0, 2p) to [0, p) without branching.
@@ -679,6 +739,16 @@ pub(crate) mod tests {
         #[test]
         fn montgomery_product_matches_reference(a in arb_fp(), b in arb_fp()) {
             prop_assert_eq!(a * b, mul_by_doubling(&a, &b));
+        }
+
+        #[test]
+        fn fused_sum_of_products_matches_separate_products(
+            a0 in arb_fp(), a1 in arb_fp(), b0 in arb_fp(), b1 in arb_fp()
+        ) {
+            prop_assert_eq!(Fp::sum_of_products([a0, a1], [b0, b1]), a0 * b0 + a1 * b1);
+            // Boundary: every operand p - 1 drives the accumulator to its largest value.
+            let top = -Fp::ONE;
+            prop_assert_eq!(Fp::sum_of_products([top, top], [top, top]), Fp::from_u64(2));
         }
 
         #[test]

@@ -10,6 +10,28 @@ use std::{
 
 use crate::Fp;
 
+/// The element 1 / 2 = (p + 1) / 2, in Montgomery form.
+const HALF: Fp = Fp::from_montgomery([
+    0x1804_0000_0001_5554,
+    0x8550_0005_3ab0_0001,
+    0x633c_b57c_253c_276f,
+    0x6e22_d1ec_31eb_b502,
+    0xd391_6126_f2d1_4ca2,
+    0x17fb_b857_1a00_6596,
+]);
+
+/// The exponent (p - 3) / 4, as little-endian limbs.
+///
+/// For a nonzero t, y = t^{(p-3)/4} gives both t y = t^{(p+1)/4}, a root candidate, and t y^2, the Legendre symbol.
+const P_MINUS_3_OVER_4: [u64; 6] = [
+    0xee7f_bfff_ffff_eaaa,
+    0x07aa_ffff_ac54_ffff,
+    0xd9cc_34a8_3dac_3d89,
+    0xd91d_d2e1_3ce1_44af,
+    0x92c6_e9ed_90d2_eb35,
+    0x0680_447a_8e5f_f9a6,
+];
+
 /// An element c0 + c1 * u of F_{p^2}, where u^2 = -1.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Fp2 {
@@ -129,9 +151,19 @@ impl Fp2 {
     /// Write the root as x0 + x1 u and expand its square:
     ///
     /// ```text
-    ///     x0^2 - x1^2 = a,    2 x0 x1 = b,    x0^2 + x1^2 = sqrt(a^2 + b^2)
-    ///     =>  x0^2 = (a + sqrt(a^2 + b^2)) / 2,    x1 = b / (2 x0)
+    ///     x0^2 - x1^2 = a,    2 x0 x1 = b,    x0^2 + x1^2 = sqrt(a^2 + b^2) = s
+    ///     =>  x0^2 = t = (a + s) / 2,    x1 = b / (2 x0)
     /// ```
+    ///
+    /// One base-field power y = t^{(p-3)/4} serves every remaining step:
+    ///
+    /// ```text
+    ///     t square    : t y^2 = 1,   x0 = t y,         x1 = b y / 2
+    ///     t non-square: t y^2 = -1,  x0 = b y / 2,     x1 = -t y
+    /// ```
+    ///
+    /// In the second case (b y / 2)^2 = -b^2 / (4 t) = (a - s) / 2, the conjugate choice of sign.
+    /// Two exponentiations in total, and no inversion.
     #[must_use]
     pub fn sqrt(&self) -> Option<Self> {
         let a = self.c0;
@@ -148,21 +180,23 @@ impl Fp2 {
             };
         }
 
-        // The norm of a square is a square in F_p.
+        // Exponentiation 1: the norm of a square is a square in F_p.
         // A non-square norm proves the input has no root.
         let norm_root = self.norm().sqrt()?;
 
-        // One of (a +- sqrt(norm)) / 2 is a square; the other choice of sign is not.
-        let half = Fp::from_u64(2).invert()?;
-        let x0 = ((a + norm_root) * half)
-            .sqrt()
-            .or_else(|| ((a - norm_root) * half).sqrt())?;
+        // Exponentiation 2: y = t^{(p-3)/4}, so that t y^2 = t^{(p-1)/2} is the Legendre symbol of t.
+        // t is nonzero: (a + s)(a - s) = a^2 - s^2 = -b^2 is nonzero.
+        let t = (a + norm_root) * HALF;
+        let y = t.pow_vartime(&P_MINUS_3_OVER_4);
+        let t_y = t * y;
+        let half_b_y = b * y * HALF;
+        let root = if t_y * y == Fp::ONE {
+            Self::new(t_y, half_b_y)
+        } else {
+            Self::new(half_b_y, -t_y)
+        };
 
-        // Recover the u coefficient from 2 x0 x1 = b.
-        // x0 is nonzero here: x0 = 0 would force b = 0.
-        let x1 = b * x0.double().invert()?;
-
-        let root = Self::new(x0, x1);
+        // The final check also rejects any input the shortcuts above misjudge.
         (root.square() == *self).then_some(root)
     }
 
@@ -208,13 +242,14 @@ impl Fp2 {
     /// Returns self * rhs.
     #[inline]
     fn mul_impl(&self, rhs: &Self) -> Self {
-        // Karatsuba: three base-field products instead of four.
+        // Schoolbook with lazy reduction: four limb products, but only two reductions.
+        // Reductions dominate, so this beats Karatsuba's three full products.
         //
-        //     (a0 + a1 u)(b0 + b1 u) = (a0 b0 - a1 b1) + ((a0 + a1)(b0 + b1) - a0 b0 - a1 b1) u
-        let t0 = self.c0 * rhs.c0;
-        let t1 = self.c1 * rhs.c1;
-        let cross = (self.c0 + self.c1) * (rhs.c0 + rhs.c1);
-        Self::new(t0 - t1, cross - t0 - t1)
+        //     (a0 + a1 u)(b0 + b1 u) = (a0 b0 + (-a1) b1) + (a0 b1 + a1 b0) u
+        Self::new(
+            Fp::sum_of_products([self.c0, -self.c1], [rhs.c0, rhs.c1]),
+            Fp::sum_of_products([self.c0, self.c1], [rhs.c1, rhs.c0]),
+        )
     }
 
     /// Returns -self.
