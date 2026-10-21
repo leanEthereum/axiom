@@ -1,0 +1,20 @@
+[package]
+name = "axiom-bls12-381"
+description = "The BLS12-381 pairing-friendly curve: fields, groups, pairing, and hashing to G2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

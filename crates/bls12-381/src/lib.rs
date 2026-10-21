@@ -1,0 +1,31 @@
+//! The BLS12-381 pairing-friendly elliptic curve.
+
+mod arithmetic;
+mod encoding;
+mod error;
+mod fp;
+mod fp12;
+mod fp2;
+mod fp6;
+mod g1;
+mod g2;
+mod hash_to_curve;
+mod msm;
+mod pairing;
+mod scalar;
+
+pub use error::PointDecodeError;
+pub use fp::{FP_BYTES, Fp};
+pub use fp2::Fp2;
+pub use fp6::Fp6;
+pub use fp12::Fp12;
+pub use g1::{G1_COMPRESSED_BYTES, G1_UNCOMPRESSED_BYTES, G1Affine, G1Projective};
+pub use g2::{G2_COMPRESSED_BYTES, G2_UNCOMPRESSED_BYTES, G2Affine, G2Projective};
+pub use pairing::Gt;
+pub use scalar::{SCALAR_BYTES, Scalar};
+
+/// The absolute value of the curve parameter x = -0xd201000000010000.
+///
+/// Everything about the curve derives from x: p = (x - 1)^2 (x^4 - x^2 + 1) / 3 + x and r = x^4 - x^2 + 1.
+/// It has only six set bits, which keeps the Miller loop and the subgroup checks short.
+pub(crate) const BLS_X: u64 = 0xd201_0000_0001_0000;

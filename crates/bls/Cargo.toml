@@ -1,0 +1,21 @@
+[package]
+name = "axiom-bls"
+description = "BLS signatures over BLS12-381 with proof of possession, as used by Ethereum consensus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls12-381.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
