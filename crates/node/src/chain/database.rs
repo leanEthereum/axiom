@@ -189,6 +189,7 @@ impl<P: Preset> ChainDatabase<P> {
     ///
     /// # Arguments
     ///
+    /// - `previous`: the finalized checkpoint being superseded, whose state is no longer needed.
     /// - `checkpoint`: the new finalized checkpoint.
     /// - `state`: the finalized block's post-state, the anchor to resume from.
     /// - `chain`: the newly finalized blocks as slot and root pairs.
@@ -199,6 +200,7 @@ impl<P: Preset> ChainDatabase<P> {
     /// Fails when the write fails.
     pub fn finalize(
         &self,
+        previous: Checkpoint,
         checkpoint: Checkpoint,
         state: &BeaconState<P>,
         chain: &[(Slot, Root)],
@@ -206,7 +208,10 @@ impl<P: Preset> ChainDatabase<P> {
     ) -> Result<(), ChainError> {
         let mut batch = Batch::new();
 
-        // The previous anchor state is superseded, but older states stay as history.
+        // Only the newest anchor state is kept: a full state is hundreds of megabytes on mainnet.
+        if previous.root != checkpoint.root {
+            batch.delete(self.states, &previous.root.0)?;
+        }
         batch.put(self.states, &checkpoint.root.0, &state.encode())?;
         batch.put(self.meta, FINALIZED_KEY, &checkpoint.encode())?;
 
@@ -309,14 +314,29 @@ mod tests {
         };
         let state = BeaconState::<Minimal>::default();
 
+        // The first anchor at block 1, then finality moving on to block 3.
+        let first = Checkpoint {
+            epoch: Epoch(0),
+            root: roots[0],
+        };
+        database
+            .finalize(first, first, &state, &[(Slot(1), roots[0])], &[])
+            .unwrap();
         database
             .finalize(
+                first,
                 checkpoint,
                 &state,
-                &[(Slot(1), roots[0]), (Slot(3), roots[2])],
+                &[(Slot(3), roots[2])],
                 &[roots[1]],
             )
             .unwrap();
+
+        // The superseded anchor state is gone; only the newest is kept.
+        let old: Option<BeaconState<Minimal>> = database
+            .read(database.states, &roots[0].0, "state")
+            .unwrap();
+        assert_eq!(old, None);
 
         // The anchor reads back whole.
         assert_eq!(database.finalized().unwrap(), Some((checkpoint, state)));

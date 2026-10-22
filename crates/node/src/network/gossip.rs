@@ -1,6 +1,6 @@
 //! Gossip messages: decoded, validated on the chain thread, reported, then used.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axiom_gossip::{GossipError, GossipValidator};
 use axiom_kzg::Kzg;
@@ -16,6 +16,7 @@ use axiom_types::{
     SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof, SignedVoluntaryExit,
     SingleAttestation, SubnetId, SyncCommitteeMessage,
 };
+use tokio::time;
 use tracing::{debug, warn};
 
 use crate::{Chain, ChainHandle, Clock, ExecutionLayer};
@@ -304,8 +305,19 @@ impl<P: Preset> GossipHandler<P> {
         let outcome = match accepted {
             Accepted::Block(block) => {
                 let payload = self.execution.verdict(&block.message).await;
+                // Gossip admits a block up to the clock disparity early; it waits for its slot.
+                let slot = block.message.slot;
+                if let Ok(start) = self.chain.run(move |chain| chain.slot_start_ms(slot)).await {
+                    let early = start.saturating_sub(self.clock.now_ms());
+                    time::sleep(Duration::from_millis(early)).await;
+                }
+                let now = self.clock.now_ms();
                 self.chain
-                    .run(move |chain| chain.submit_block(block, payload).map(|_| ()))
+                    .run(move |chain| {
+                        // The store's clock may lag the ticker, so bring it to now first.
+                        chain.on_tick(now)?;
+                        chain.submit_block(block, payload).map(|_| ())
+                    })
                     .await
             }
             Accepted::Aggregate(aggregate) => {

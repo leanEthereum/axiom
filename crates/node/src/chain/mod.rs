@@ -13,7 +13,7 @@ use std::{
 
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, ReadyBlock};
-use axiom_fork_choice::{DataAvailability, ExecutionStatus, PayloadStatus, Store};
+use axiom_fork_choice::{DataAvailability, ExecutionStatus, ForkChoiceError, PayloadStatus, Store};
 use axiom_gossip::{ChainView, GossipValidator};
 use axiom_ssz::Ssz;
 use axiom_state_transition::{EpochCommittees, State, Verification};
@@ -132,7 +132,7 @@ impl<P: Preset> Chain<P> {
             .beacon();
         chain
             .database
-            .finalize(checkpoint, anchor_state, &[(slot, root)], &[])?;
+            .finalize(checkpoint, checkpoint, anchor_state, &[(slot, root)], &[])?;
         Ok(chain)
     }
 
@@ -347,10 +347,20 @@ impl<P: Preset> Chain<P> {
         payload: PayloadStatus,
     ) -> Result<Submission, ChainError> {
         let root = block.message.hash_tree_root();
-        match self
-            .availability
-            .offer_block(root, ReadyBlock { block, payload })
-        {
+        if self.store.blocks().contains(&root) {
+            return Ok(Submission::Imported(root));
+        }
+        // Peers serve columns only for recent epochs, so older blocks are not sampled.
+        // See the note on the retention window in the Fulu fork choice spec.
+        let window = self.config().min_epochs_for_data_column_sidecars_requests;
+        let epoch = block.message.slot.epoch::<P>();
+        let ready = ReadyBlock { block, payload };
+        if epoch.0.saturating_add(window) < self.store.current_epoch().0 {
+            return self
+                .import_ready(root, &ready)
+                .map(|()| Submission::Imported(root));
+        }
+        match self.availability.offer_block(root, ready) {
             Some(ready) => self
                 .import_ready(root, &ready)
                 .map(|()| Submission::Imported(root)),
@@ -404,14 +414,40 @@ impl<P: Preset> Chain<P> {
     fn import_ready(&mut self, root: Root, ready: &ReadyBlock<P>) -> Result<(), ChainError> {
         let columns = self.availability.take_columns(&root);
         match self.import_block(&ready.block, DataAvailability::Available, ready.payload) {
-            Ok(_) => self.database.put_columns(root, &columns),
+            Ok(_) => {
+                // An earlier refusal, for want of a parent or of time, no longer holds.
+                self.gossip.forget(&root);
+                self.database.put_columns(root, &columns)
+            }
             Err(error) => {
-                // Remember the refusal, so gossip refuses the block's descendants too.
-                let invalid_payload = matches!(ready.payload, PayloadStatus::Invalid { .. });
-                self.gossip.refuse(root, &ready.block, invalid_payload);
+                // Only a block that can never import condemns its descendants on gossip.
+                // A missing parent or an early arrival may still resolve.
+                if Self::is_permanent(&error) {
+                    let invalid_payload = matches!(ready.payload, PayloadStatus::Invalid { .. });
+                    self.gossip.refuse(root, &ready.block, invalid_payload);
+                }
                 Err(error)
             }
         }
+    }
+
+    /// Whether a block failure would recur on every retry.
+    const fn is_permanent(error: &ChainError) -> bool {
+        matches!(
+            error,
+            ChainError::ForkChoice(
+                ForkChoiceError::InvalidBlock(_)
+                    | ForkChoiceError::DataUnavailable
+                    | ForkChoiceError::NotDescendantOfFinalized
+                    | ForkChoiceError::BeforeFinalized(_)
+            )
+        )
+    }
+
+    /// Start of a slot, in milliseconds since the Unix epoch.
+    #[must_use]
+    pub const fn slot_start_ms(&self, slot: Slot) -> u64 {
+        self.store.genesis_time_ms() + slot.0 * self.config().slot_duration_ms
     }
 
     /// Counts a vote received on its own, outside any block.
@@ -431,7 +467,6 @@ impl<P: Preset> Chain<P> {
     /// Counts one validator's vote, received alone on an attestation subnet.
     ///
     /// The vote becomes an attestation with one committee and one participant, as aggregates carry them.
-    /// Gossip validation already checked its signature, so the store does not check it again.
     ///
     /// # Errors
     ///
@@ -466,8 +501,10 @@ impl<P: Preset> Chain<P> {
             signature: single.signature,
             committee_bits,
         };
+        // The signature is checked again against the committee the store resolves.
+        // A committee read from a fork with another shuffling then fails instead of crediting the wrong validator.
         self.store
-            .on_attestation(&attestation, false, Verification::Skip)?;
+            .on_attestation(&attestation, false, Verification::Verify)?;
         Ok(())
     }
 
@@ -539,13 +576,22 @@ impl<P: Preset> Chain<P> {
         if head == previous {
             return Ok(());
         }
+
+        // A head off the previous head's chain is a reorg; measure it before pruning can hide it.
+        let reorg = (head.root != previous.root
+            && !self.store.blocks().is_ancestor(head.root, previous.root))
+        .then(|| self.reorg_depth(previous, head));
+
+        // Invariant: finality reaches the disk before the head moves.
+        // A failed write leaves the head as it was, so the next update tries again.
+        let finalized = head.finalized.epoch > previous.finalized.epoch;
+        if finalized {
+            self.finalize(previous.finalized, head.finalized)?;
+        }
+
         self.head = head;
         self.record_head(head, head.slot.epoch::<P>() != previous.slot.epoch::<P>());
-
-        // A head off the previous head's chain is a reorg.
-        if head.root != previous.root && !self.store.blocks().is_ancestor(head.root, previous.root)
-        {
-            let depth = self.reorg_depth(previous, head);
+        if let Some(depth) = reorg {
             warn!(from = %previous.root, to = %head.root, depth, "chain reorganized");
             self.metrics.reorgs.inc();
             self.announce(ChainEvent::Reorg {
@@ -559,8 +605,7 @@ impl<P: Preset> Chain<P> {
         }
         self.announce(ChainEvent::Head(head));
 
-        if head.finalized.epoch > previous.finalized.epoch {
-            self.finalize(previous.finalized, head.finalized)?;
+        if finalized {
             // Waiting blocks and refused ones at or before finality can never matter again.
             let finalized_slot = head.finalized.epoch.start_slot::<P>();
             self.availability.prune(finalized_slot);
@@ -571,7 +616,9 @@ impl<P: Preset> Chain<P> {
         Ok(())
     }
 
-    /// Persists a new finality and forgets what it excluded.
+    /// Persists a new finality, then forgets what it excluded.
+    ///
+    /// The database write comes first: if it fails, the store keeps everything and nothing is lost.
     fn finalize(&mut self, previous: Checkpoint, finalized: Checkpoint) -> Result<(), ChainError> {
         // Walk back from the new finalized block to the old one: the newly finalized chain.
         let blocks = self.store.blocks();
@@ -586,22 +633,27 @@ impl<P: Preset> Chain<P> {
         }
         let canonical: HashSet<Root> = chain.iter().map(|(_, root)| *root).collect();
 
-        // The anchor state must be read before pruning reshapes the store.
+        // Blocks neither on the finalized chain nor after it are orphaned forks.
+        let orphans: Vec<Root> = blocks
+            .iter()
+            .map(|(root, _)| *root)
+            .filter(|root| {
+                !canonical.contains(root)
+                    && *root != previous.root
+                    && !blocks.is_ancestor(*root, finalized.root)
+            })
+            .collect();
         let state = self
             .store
             .block_state(&finalized.root)
             .ok_or(ChainError::MissingState(finalized.root))?
-            .beacon()
-            .clone();
+            .beacon();
+        self.database
+            .finalize(previous, finalized, state, &chain, &orphans)?;
 
-        // Everything dropped that is not on the finalized chain is an orphaned fork.
-        let orphans: Vec<Root> = self
-            .store
-            .prune()
-            .into_iter()
-            .filter(|root| !canonical.contains(root) && *root != previous.root)
-            .collect();
-        self.database.finalize(finalized, &state, &chain, &orphans)
+        // Only now that the disk agrees, drop the excluded blocks from memory.
+        self.store.prune();
+        Ok(())
     }
 
     /// Blocks on the old head's chain after the common ancestor with the new head.

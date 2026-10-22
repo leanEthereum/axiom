@@ -21,6 +21,12 @@ pub(crate) struct GossipMemory {
 }
 
 impl GossipMemory {
+    /// Forgets a block once it imports, so its refusal and stale status stop shadowing the store.
+    pub(crate) fn forget(&mut self, root: &Root) {
+        self.unimported.remove(root);
+        self.payload_statuses.remove(root);
+    }
+
     /// Forgets refused blocks at or before a slot, which finality made irrelevant.
     ///
     /// A block that old can never be a parent the rules consult again.
