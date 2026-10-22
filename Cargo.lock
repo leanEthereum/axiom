@@ -30,6 +30,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-crypto"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sha2",
+]
+
+[[package]]
 name = "axiom-das"
 version = "0.1.0"
 dependencies = [

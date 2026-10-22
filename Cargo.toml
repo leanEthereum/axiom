@@ -86,6 +86,7 @@ axiom-node = { path = "crates/node" }
 axiom-json = { path = "crates/json" }
 axiom-http = { path = "crates/http" }
 axiom-execution = { path = "crates/execution" }
+axiom-crypto = { path = "crates/crypto" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"
