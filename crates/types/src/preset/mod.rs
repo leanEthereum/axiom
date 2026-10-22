@@ -2,15 +2,18 @@
 //!
 //! The spec ships two presets.
 //! Mainnet is the real chain, and minimal shrinks committees and epochs so tests run fast.
+//! The gnosis chain adds a third, with shorter epochs and a lower reward factor.
 //!
 //! Values come from `presets/{mainnet,minimal}/*.yaml` in the consensus specs.
 
+mod gnosis;
 mod mainnet;
 mod minimal;
 
 use std::{fmt::Debug, hash::Hash};
 
 use axiom_ssz::Length;
+pub use gnosis::Gnosis;
 pub use mainnet::Mainnet;
 pub use minimal::Minimal;
 
@@ -958,5 +961,33 @@ mod tests {
     #[test]
     fn minimal_lengths_match_constants() {
         assert_lengths_match_constants::<Minimal>();
+    }
+
+    #[test]
+    fn gnosis_lengths_match_constants() {
+        assert_lengths_match_constants::<Gnosis>();
+    }
+
+    #[test]
+    fn gnosis_changes_six_mainnet_keys() {
+        // The gnosis preset files change exactly these keys and copy the rest from mainnet.
+        let mainnet = Mainnet::entries();
+        let changed: Vec<_> = Gnosis::entries()
+            .into_iter()
+            .zip(&mainnet)
+            .filter(|(gnosis, mainnet)| gnosis != *mainnet)
+            .map(|(gnosis, _)| gnosis)
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                ("SLOTS_PER_EPOCH", 16),
+                ("BASE_REWARD_FACTOR", 25),
+                ("EPOCHS_PER_SYNC_COMMITTEE_PERIOD", 512),
+                ("MAX_WITHDRAWALS_PER_PAYLOAD", 8),
+                ("MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP", 8192),
+                ("MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP", 6),
+            ]
+        );
     }
 }

@@ -233,10 +233,25 @@ impl ChainConfig {
         let mut config = match yaml.get("PRESET_BASE").and_then(Yaml::as_str) {
             None | Some("mainnet") => Self::mainnet(),
             Some("minimal") => Self::minimal(),
+            // The gnosis chain keeps mainnet's defaults but schedules no blob parameter changes.
+            Some("gnosis") => Self {
+                blob_schedule: BlobSchedule::new(Vec::new()),
+                ..Self::mainnet()
+            },
             Some(other) => return Err(ConfigError::UnknownPresetBase(other.to_owned())),
         };
         for (key, value) in mapping {
             ConfigEntry::new(key, value).apply_to(&mut config)?;
+        }
+        // Configurations written before Fulu give the slot in whole seconds only.
+        if yaml.get("SLOT_DURATION_MS").is_none()
+            && let Some(value) = yaml.get("SECONDS_PER_SLOT")
+        {
+            let seconds = value.as_u64().ok_or_else(|| ConfigError::InvalidValue {
+                key: "SECONDS_PER_SLOT".to_owned(),
+                expected: "an integer",
+            })?;
+            config.slot_duration_ms = seconds.saturating_mul(1000);
         }
         Ok(config)
     }
@@ -895,11 +910,51 @@ mod tests {
 
     #[test]
     fn an_unknown_preset_base_is_named() {
-        // Only mainnet and minimal exist as preset bases.
-        let yaml = Yaml::parse("PRESET_BASE: gnosis\n").unwrap();
+        // Only mainnet, minimal, and gnosis exist as preset bases.
+        let yaml = Yaml::parse("PRESET_BASE: holesky\n").unwrap();
         assert_eq!(
             ChainConfig::from_yaml(&yaml),
-            Err(ConfigError::UnknownPresetBase("gnosis".to_owned()))
+            Err(ConfigError::UnknownPresetBase("holesky".to_owned()))
+        );
+    }
+
+    #[test]
+    fn the_gnosis_base_drops_the_mainnet_blob_schedule() {
+        // Mainnet schedules blob limits from epoch 412672; the gnosis chain schedules none.
+        let yaml = Yaml::parse("PRESET_BASE: gnosis\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml).unwrap(),
+            ChainConfig {
+                blob_schedule: BlobSchedule::new(Vec::new()),
+                ..ChainConfig::mainnet()
+            }
+        );
+    }
+
+    #[test]
+    fn whole_seconds_set_the_slot_unless_milliseconds_are_given() {
+        // Gnosis configurations give a 5 second slot as SECONDS_PER_SLOT alone.
+        let seconds = Yaml::parse("SECONDS_PER_SLOT: 5\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&seconds).unwrap().slot_duration_ms,
+            5000
+        );
+
+        // Mainnet gives both, and the milliseconds win whatever the order.
+        let both = Yaml::parse("SECONDS_PER_SLOT: 12\nSLOT_DURATION_MS: 11500\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&both).unwrap().slot_duration_ms,
+            11_500
+        );
+
+        // A slot in words is refused with its key.
+        let words = Yaml::parse("SECONDS_PER_SLOT: five\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&words),
+            Err(ConfigError::InvalidValue {
+                key: "SECONDS_PER_SLOT".to_owned(),
+                expected: "an integer",
+            })
         );
     }
 
