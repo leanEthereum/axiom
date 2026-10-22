@@ -6,9 +6,10 @@ use std::{
     os::unix::fs::FileExt,
 };
 
+use axiom_snappy::Crc32c;
+
 use crate::{
     Error,
-    crc::Crc32c,
     directory::Directory,
     format::{ENTRY_HEADER_LEN, EntryHeader, FILE_HEADER_LEN, FileHeader, Kind},
     slot::Location,

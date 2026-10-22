@@ -56,7 +56,7 @@ impl<R: Read> FrameDecoder<R> {
     /// Returns false at a clean end of stream, between chunks.
     fn next_chunk(&mut self) -> io::Result<bool> {
         let mut header = [0; ChunkHeader::LEN];
-        match read_full(&mut self.inner, &mut header)? {
+        match Self::read_full(&mut self.inner, &mut header)? {
             // End of stream between chunks: clean, once the identifier was seen.
             0 if self.chunks.started() => return Ok(false),
             0 => return Err(SnappyError::MissingStreamIdentifier.into()),
@@ -88,7 +88,7 @@ impl<R: Read> FrameDecoder<R> {
 
         // Data and identifier bodies are bounded by the header check above.
         self.body.resize(len, 0);
-        let read = read_full(&mut self.inner, &mut self.body)?;
+        let read = Self::read_full(&mut self.inner, &mut self.body)?;
         if read != len {
             return Err(SnappyError::UnexpectedEnd {
                 needed: len,
@@ -100,6 +100,23 @@ impl<R: Read> FrameDecoder<R> {
         self.position = 0;
         self.chunks.body(header, &self.body, &mut self.chunk)?;
         Ok(true)
+    }
+
+    /// Reads until the buffer is full or the source ends, and returns the count read.
+    ///
+    /// Unlike the standard exact read, a short count is not an error.
+    /// The caller then tells a clean end between chunks from a cut inside one.
+    fn read_full(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match reader.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(filled)
     }
 }
 
@@ -117,23 +134,6 @@ impl<R: Read> Read for FrameDecoder<R> {
         self.position += n;
         Ok(n)
     }
-}
-
-/// Reads until the buffer is full or the source ends, and returns the count read.
-///
-/// Unlike the standard exact read, a short count is not an error.
-/// The caller then tells a clean end between chunks from a cut inside one.
-fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(filled)
 }
 
 #[cfg(test)]

@@ -99,7 +99,6 @@
 
 mod batch;
 mod compaction;
-mod crc;
 mod directory;
 mod error;
 mod format;

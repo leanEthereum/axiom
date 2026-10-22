@@ -2,11 +2,10 @@
 
 use std::mem;
 
+use axiom_snappy::raw;
+
 use super::payload::PayloadDecoder;
-use crate::eth::{
-    max_compressed_len,
-    reqresp::{Protocol, ReqRespError},
-};
+use crate::eth::reqresp::{Protocol, ReqRespError};
 
 /// Longest varint length prefix.
 const MAX_PREFIX_LEN: usize = 10;
@@ -166,7 +165,7 @@ impl RequestDecoder {
     /// The largest number of bytes a request of this method can take on the wire.
     const fn max_framed_len(&self) -> usize {
         let max_ssz = *self.protocol.request_bounds().end();
-        MAX_PREFIX_LEN + STREAM_IDENTIFIER_LEN + max_compressed_len(max_ssz) as usize
+        MAX_PREFIX_LEN + STREAM_IDENTIFIER_LEN + raw::max_compressed_len(max_ssz as usize)
     }
 }
 

@@ -13,9 +13,12 @@
 //! Each HTTP request carries a fresh token in its authorization field.
 //! The execution client accepts an issued-at within 60 seconds of its own clock.
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use axiom_json::{Data, HexError, Json, Object};
+use axiom_json::{Data, HexError, Json};
 use thiserror::Error;
 
 use super::{base64url::Base64Url, hmac::HmacSha256};
@@ -61,13 +64,11 @@ impl JwtSecret {
             .map_err(JwtError::InvalidSecret)
     }
 
-    /// Issues a token stamped with a time in seconds since the epoch.
+    /// Issues a token carrying claims.
     #[must_use]
-    pub fn token(&self, issued_at: u64) -> String {
+    pub fn token(&self, claims: Claims) -> String {
         // The claims are a single member object, serialized compactly.
-        let mut claims = Object::new();
-        claims.insert("iat", Json::from(issued_at));
-        let claims = Json::Object(claims).to_string();
+        let claims = Json::from([("iat", Json::from(claims.issued_at))]).to_string();
 
         // Sign the ASCII of "header.claims" and append the signature as a third segment.
         let signing_input = format!("{HEADER}.{}", Base64Url(claims.as_bytes()));
@@ -188,11 +189,25 @@ impl<'a> Segment<'a> {
     }
 }
 
-/// The claims of a verified token.
+/// The claims of a token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Claims {
     /// When the token was issued, in seconds since the epoch.
     pub issued_at: u64,
+}
+
+impl Claims {
+    /// Claims issued now, on the local clock.
+    ///
+    /// The engine compares the issue time to its own clock, so both hosts need sane time.
+    #[must_use]
+    pub fn issued_now() -> Self {
+        // A clock set before 1970 reads as the epoch itself rather than failing.
+        let issued_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        Self { issued_at }
+    }
 }
 
 /// A secret or token that fails the authentication rules.
@@ -264,7 +279,7 @@ mod tests {
     #[test]
     fn issued_token_verifies_within_skew() {
         // Issued at t = 1000, checked at 1000, 1060, and 940: all within 60 seconds.
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
         for now in [1000, 1060, 940] {
             assert_eq!(secret().verify(&token, now), Ok(Claims { issued_at: 1000 }));
         }
@@ -299,14 +314,14 @@ mod tests {
     #[test]
     fn token_matches_an_independent_computation() {
         // Claims {"iat":1000} encode to "eyJpYXQiOjEwMDB9".
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
         let (signing_input, _) = token.rsplit_once('.').unwrap();
         assert_eq!(signing_input, format!("{HEADER}.eyJpYXQiOjEwMDB9"));
     }
 
     #[test]
     fn tampering_is_detected() {
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
 
         // Another secret, one byte different, rejects the signature.
         let mut other = [0_u8; 32];
@@ -339,7 +354,7 @@ mod tests {
 
     #[test]
     fn malformed_segments_are_named() {
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
         let parts: Vec<&str> = token.split('.').collect();
 
         // "!" is outside the base64url alphabet, so the header fails to decode.
@@ -392,7 +407,7 @@ mod tests {
             position in any::<prop::sample::Index>(),
         ) {
             let secret = JwtSecret::new(key);
-            let token = secret.token(issued_at);
+            let token = secret.token(Claims { issued_at });
             prop_assert_eq!(secret.verify(&token, issued_at).map(|claims| claims.issued_at), Ok(issued_at));
 
             // Replacing any one character with a different symbol breaks the token.

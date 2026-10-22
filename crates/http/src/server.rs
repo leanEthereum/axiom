@@ -9,11 +9,7 @@ use tokio::{
     time,
 };
 
-use crate::{
-    Limits, Router,
-    race::{Either, race},
-    session::Session,
-};
+use crate::{Limits, Router, race::Either, session::Session};
 
 /// How a server treats its connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,13 +118,14 @@ impl Server {
             while tasks.try_join_next().is_some() {}
 
             // Phase 1: wait for a free slot, unless shutdown comes first.
-            let permit = match race(Arc::clone(&permits).acquire_owned(), shutdown.as_mut()).await {
-                Either::Left(Ok(permit)) => permit,
-                Either::Left(Err(_)) | Either::Right(()) => break,
-            };
+            let permit =
+                match Either::race(Arc::clone(&permits).acquire_owned(), shutdown.as_mut()).await {
+                    Either::Left(Ok(permit)) => permit,
+                    Either::Left(Err(_)) | Either::Right(()) => break,
+                };
 
             // Phase 2: wait for a client, unless shutdown comes first.
-            let stream = match race(listener.accept(), shutdown.as_mut()).await {
+            let stream = match Either::race(listener.accept(), shutdown.as_mut()).await {
                 Either::Left(Ok((stream, _))) => stream,
                 // Accept errors such as a full file table are transient.
                 // A short pause keeps the loop from spinning while they last.

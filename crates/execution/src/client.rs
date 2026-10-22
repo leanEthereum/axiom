@@ -2,7 +2,7 @@
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
@@ -10,8 +10,8 @@ use axiom_json::{Json, Limits as JsonLimits};
 use axiom_types::{NewPayloadRequest, Preset, VersionedHash};
 
 use crate::{
-    EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec, JwtSecret,
-    PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, WireError, WireErrorKind,
+    Claims, EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec,
+    JwtSecret, PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, WireError, WireErrorKind,
     rpc::Call,
     wire::{BlobAndProof, Items, Reader},
 };
@@ -118,7 +118,7 @@ impl EngineClient {
         let call = Call::new(self.next_id.fetch_add(1, Ordering::Relaxed), method, params);
 
         // Phase 2: a token issued now, so the engine's 60-second window always holds it.
-        let token = self.secret.token(unix_now());
+        let token = self.secret.token(Claims::issued_now());
         let request = Request::new(Method::Post, self.http.endpoint().path())
             .with_header("authorization", format!("Bearer {token}"))
             .with_body("application/json", call.to_bytes());
@@ -292,13 +292,4 @@ impl EngineClient {
         self.call_typed("eth_syncing", Vec::new(), LOOKUP_TIMEOUT)
             .await
     }
-}
-
-/// Seconds since the Unix epoch on the local clock.
-///
-/// The engine compares the token's issued-at to its own clock, so both hosts need sane time.
-pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }

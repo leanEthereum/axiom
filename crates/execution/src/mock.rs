@@ -12,7 +12,7 @@ use axiom_http::{Method, Request, Response, Router, Server, ServerConfig, Status
 use axiom_json::{Json, Object};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use crate::{JwtSecret, RpcError, client::unix_now};
+use crate::{Claims, JwtSecret, RpcError};
 
 /// A scripted engine on a loopback port.
 ///
@@ -155,6 +155,11 @@ impl MockEngine {
 }
 
 impl MockState {
+    /// The 401 a real engine sends for a missing or invalid token.
+    fn unauthorized(reason: &str) -> Response {
+        Response::new(StatusCode::UNAUTHORIZED).with_body("text/plain", reason.as_bytes().to_vec())
+    }
+
     /// Stores a canned reply.
     fn set(&self, method: &str, reply: Reply) {
         self.replies().push((method.to_owned(), reply));
@@ -181,11 +186,12 @@ impl MockState {
             .headers
             .get("authorization")
             .and_then(|value| value.strip_prefix("Bearer "));
-        let claims = match token.map(|token| self.secret.verify(token, unix_now())) {
-            Some(Ok(claims)) => claims,
-            Some(Err(error)) => return unauthorized(&error.to_string()),
-            None => return unauthorized("missing bearer token"),
-        };
+        let claims =
+            match token.map(|token| self.secret.verify(token, Claims::issued_now().issued_at)) {
+                Some(Ok(claims)) => claims,
+                Some(Err(error)) => return Self::unauthorized(&error.to_string()),
+                None => return Self::unauthorized("missing bearer token"),
+            };
 
         // Phase 2: read the JSON-RPC request.
         let Ok(call) = Json::parse(&request.body) else {
@@ -225,9 +231,4 @@ impl MockState {
             );
         reply.into_response(id)
     }
-}
-
-/// The 401 a real engine sends for a missing or invalid token.
-fn unauthorized(reason: &str) -> Response {
-    Response::new(StatusCode::UNAUTHORIZED).with_body("text/plain", reason.as_bytes().to_vec())
 }

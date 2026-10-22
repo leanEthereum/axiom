@@ -293,6 +293,7 @@ dependencies = [
 name = "axiom-store"
 version = "0.1.0"
 dependencies = [
+ "axiom-snappy",
  "criterion",
  "proptest",
  "thiserror",

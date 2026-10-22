@@ -41,7 +41,7 @@ impl NodeRoutes {
     fn version<P: Preset>(_context: ApiContext<P>, _request: Request) -> Ready<ApiResult> {
         // Nothing to wait for: the answer is a constant.
         ready(Ok(Reply::data(
-            Reply::object([("version", VERSION.into())]),
+            Json::from([("version", VERSION.into())]),
             None,
         )))
     }
@@ -67,7 +67,7 @@ impl NodeRoutes {
             .query(|chain| Ok((chain.head(), Self::distance(chain))))
             .await?;
         Ok(Reply::data(
-            Reply::object([
+            Json::from([
                 ("head_slot", Reply::number(head.slot.0)),
                 ("sync_distance", Reply::number(distance)),
                 ("is_syncing", (distance >= SYNCING_DISTANCE).into()),
@@ -86,7 +86,7 @@ impl NodeRoutes {
         };
         let metadata = &identity.metadata;
         let attnets = metadata.attnets.load(Ordering::Relaxed);
-        let data = Reply::object([
+        let data = Json::from([
             ("peer_id", Reply::text(&identity.peer_id)),
             ("enr", identity.enr.clone().into()),
             (
@@ -105,7 +105,7 @@ impl NodeRoutes {
             ),
             (
                 "metadata",
-                Reply::object([
+                Json::from([
                     (
                         "seq_number",
                         Reply::number(metadata.seq_number.load(Ordering::Relaxed)),

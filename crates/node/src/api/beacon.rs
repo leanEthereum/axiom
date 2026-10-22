@@ -1,6 +1,7 @@
 //! The beacon namespace: genesis, blocks, headers, and state summaries.
 
 use axiom_http::{Request, Response, StatusCode};
+use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{BeaconState, Preset, Root, SignedBlockContents};
@@ -51,7 +52,7 @@ impl BeaconRoutes {
                     .ok_or_else(|| ApiError::not_found("no head state"))?;
                 let beacon = state.beacon();
                 Ok(Reply::data(
-                    Reply::object([
+                    Json::from([
                         ("genesis_time", Reply::number(beacon.genesis_time)),
                         (
                             "genesis_validators_root",
@@ -77,12 +78,12 @@ impl BeaconRoutes {
                 let message = &block.message;
                 let canonical = chain.canonical_root(message.slot)? == Some(root);
                 let header = message.header();
-                let data = Reply::object([
+                let data = Json::from([
                     ("root", Reply::text(&root)),
                     ("canonical", canonical.into()),
                     (
                         "header",
-                        Reply::object([
+                        Json::from([
                             ("message", Reply::header(&header)),
                             ("signature", Reply::text(&block.signature)),
                         ]),
@@ -102,7 +103,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
-                let data = Reply::object([("root", Reply::text(&root))]);
+                let data = Json::from([("root", Reply::text(&root))]);
                 Ok(Reply::data(
                     data,
                     Some(ApiContext::freshness(chain, root, block.message.slot)),
@@ -159,7 +160,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
-                let data = Reply::object([("root", Reply::text(&block.message.state_root))]);
+                let data = Json::from([("root", Reply::text(&block.message.state_root))]);
                 Ok(Reply::data(
                     data,
                     Some(ApiContext::freshness(chain, root, block.message.slot)),
@@ -175,7 +176,7 @@ impl BeaconRoutes {
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
                 let fork = &Self::held_state(chain, root)?.fork;
-                let data = Reply::object([
+                let data = Json::from([
                     ("previous_version", Reply::text(&fork.previous_version)),
                     ("current_version", Reply::text(&fork.current_version)),
                     ("epoch", Reply::number(fork.epoch.0)),
@@ -198,7 +199,7 @@ impl BeaconRoutes {
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
                 let state = Self::held_state(chain, root)?;
-                let data = Reply::object([
+                let data = Json::from([
                     (
                         "previous_justified",
                         Reply::checkpoint(state.previous_justified_checkpoint),

@@ -18,7 +18,7 @@ use std::fmt;
 use axiom_json::{Data, Json};
 use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, Withdrawals};
 
-use super::{Fields, JsonCodec, PayloadStatus, Reader, object};
+use super::{Fields, JsonCodec, PayloadStatus, Reader};
 use crate::WireError;
 
 /// The execution blocks the consensus layer considers head, safe, and finalized.
@@ -38,7 +38,7 @@ pub struct ForkchoiceState {
 
 impl JsonCodec for ForkchoiceState {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("headBlockHash", self.head_block_hash.to_json()),
             ("safeBlockHash", self.safe_block_hash.to_json()),
             ("finalizedBlockHash", self.finalized_block_hash.to_json()),
@@ -78,7 +78,7 @@ pub struct PayloadAttributes<P: Preset> {
 
 impl<P: Preset> JsonCodec for PayloadAttributes<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("timestamp", self.timestamp.to_json()),
             ("prevRandao", self.prev_randao.to_json()),
             (
@@ -139,7 +139,7 @@ pub struct ForkchoiceUpdated {
 
 impl JsonCodec for ForkchoiceUpdated {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("payloadStatus", self.payload_status.to_json()),
             ("payloadId", self.payload_id.to_json()),
         ])

@@ -2,10 +2,10 @@
 
 use std::{mem, ops::RangeInclusive};
 
-use axiom_snappy::frame;
+use axiom_snappy::{frame, raw};
 
 use crate::{
-    eth::{max_compressed_len, reqresp::ReqRespError},
+    eth::reqresp::ReqRespError,
     varint::{Varint, VarintError},
 };
 
@@ -103,7 +103,7 @@ impl PayloadDecoder {
             self.out = Vec::with_capacity(expected.min(1 << 20));
             self.stage = Stage::Frames {
                 expected,
-                max_compressed: max_compressed_len(len) as usize,
+                max_compressed: raw::max_compressed_len(expected),
                 framed: 0,
             };
         }

@@ -3,7 +3,6 @@
 use super::{
     MAX_CHUNK_DATA_LEN,
     chunk::{ChunkHeader, TYPE_COMPRESSED, TYPE_UNCOMPRESSED},
-    mask,
 };
 use crate::{Crc32c, raw::Encoder};
 
@@ -29,7 +28,7 @@ impl ChunkEncoder {
     pub(super) fn encode(&mut self, data: &[u8], out: &mut Vec<u8>) {
         debug_assert!(data.len() <= MAX_CHUNK_DATA_LEN);
         let start = out.len();
-        let checksum = mask(Crc32c::checksum(data));
+        let checksum = Crc32c::masked(data);
 
         // Header placeholder, then checksum, then the compressed block.
         out.extend_from_slice(&[TYPE_COMPRESSED, 0, 0, 0]);

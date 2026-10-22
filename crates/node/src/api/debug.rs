@@ -62,7 +62,7 @@ impl DebugRoutes {
                     .iter()
                     .filter(|(root, _)| blocks.children(root).is_empty())
                     .map(|(root, node)| {
-                        Reply::object([
+                        Json::from([
                             ("root", Reply::text(&root)),
                             ("slot", Reply::number(node.slot.0)),
                             (

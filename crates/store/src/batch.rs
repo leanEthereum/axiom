@@ -1,8 +1,9 @@
 //! Write batches, the unit of atomicity.
 
+use axiom_snappy::Crc32c;
+
 use crate::{
     Error, Table,
-    crc::Crc32c,
     format::{ENTRY_HEADER_LEN, EntryHeader, FRAME_HEADER_LEN, FrameHeader, Kind},
 };
 

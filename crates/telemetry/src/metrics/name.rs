@@ -14,7 +14,7 @@ impl MetricName {
     /// Checks a name against the metric grammar.
     pub(crate) fn parse(name: &str) -> Result<Self, RegistryError> {
         // Colons are legal anywhere, digits everywhere but the first byte.
-        if is_identifier(name, |byte| byte == b':') {
+        if Grammar::Metric.accepts(name) {
             Ok(Self(name.to_owned()))
         } else {
             Err(RegistryError::InvalidMetricName(name.to_owned()))
@@ -44,7 +44,7 @@ impl LabelName {
     /// Checks a name against the label grammar and the reserved prefix.
     pub(crate) fn parse(name: &str) -> Result<Self, RegistryError> {
         // Labels allow no colon, and the double underscore prefix is reserved.
-        if is_identifier(name, |_| false) && !name.starts_with("__") {
+        if Grammar::Label.accepts(name) && !name.starts_with("__") {
             Ok(Self(name.to_owned()))
         } else {
             Err(RegistryError::InvalidLabelName(name.to_owned()))
@@ -80,24 +80,40 @@ impl LabelName {
     }
 }
 
-/// Whether a name is an identifier, with extra bytes allowed by a predicate.
+/// The two Prometheus name grammars, which differ only in the colon.
 ///
 /// ```text
-///     first byte   letter, underscore, or extra
-///     later bytes  letter, digit, underscore, or extra
+///     metric   [a-zA-Z_:][a-zA-Z0-9_:]*
+///     label    [a-zA-Z_][a-zA-Z0-9_]*
 /// ```
-fn is_identifier(name: &str, extra: impl Fn(u8) -> bool) -> bool {
-    // An empty name names nothing.
-    let Some((&first, rest)) = name.as_bytes().split_first() else {
-        return false;
-    };
-    // The first byte may not be a digit, so a name never reads as a number.
-    let head = first.is_ascii_alphabetic() || first == b'_' || extra(first);
-    // Every later byte is a word byte or an extra one.
-    let tail = rest
-        .iter()
-        .all(|&byte| byte.is_ascii_alphanumeric() || byte == b'_' || extra(byte));
-    head && tail
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grammar {
+    /// Metric names, where a colon is a word byte.
+    Metric,
+    /// Label names, which allow no colon.
+    Label,
+}
+
+impl Grammar {
+    /// Whether a name follows the grammar.
+    fn accepts(self, name: &str) -> bool {
+        // An empty name names nothing.
+        let Some((&first, rest)) = name.as_bytes().split_first() else {
+            return false;
+        };
+        // The first byte may not be a digit, so a name never reads as a number.
+        let head = first.is_ascii_alphabetic() || first == b'_' || self.extra(first);
+        // Every later byte is a word byte or an extra one.
+        let tail = rest
+            .iter()
+            .all(|&byte| byte.is_ascii_alphanumeric() || byte == b'_' || self.extra(byte));
+        head && tail
+    }
+
+    /// Whether a byte beyond letters, digits, and underscores is allowed.
+    const fn extra(self, byte: u8) -> bool {
+        matches!(self, Self::Metric) && byte == b':'
+    }
 }
 
 #[cfg(test)]

@@ -27,13 +27,13 @@
 use axiom_json::Json;
 use axiom_types::{ExecutionPayload, Preset, Withdrawal};
 
-use super::{Fields, JsonCodec, object};
+use super::{Fields, JsonCodec};
 use crate::WireError;
 
 impl JsonCodec for Withdrawal {
     /// WithdrawalV1: the amount stays in Gwei, as the consensus layer counts it.
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("index", self.index.to_json()),
             ("validatorIndex", self.validator_index.to_json()),
             ("address", self.address.to_json()),
@@ -54,7 +54,7 @@ impl JsonCodec for Withdrawal {
 
 impl<P: Preset> JsonCodec for ExecutionPayload<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("parentHash", self.parent_hash.to_json()),
             ("feeRecipient", self.fee_recipient.to_json()),
             ("stateRoot", self.state_root.to_json()),

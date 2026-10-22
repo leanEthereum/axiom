@@ -8,6 +8,6 @@ mod topic;
 
 pub use gossip::{
     GossipDecodeError, GossipEncoding, MAX_PAYLOAD_SIZE, MESSAGE_DOMAIN_INVALID_SNAPPY,
-    MESSAGE_DOMAIN_VALID_SNAPPY, max_compressed_len,
+    MESSAGE_DOMAIN_VALID_SNAPPY,
 };
 pub use topic::{GossipKind, GossipTopic, TopicError};

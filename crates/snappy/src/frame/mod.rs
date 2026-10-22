@@ -44,15 +44,6 @@ const CHECKSUM_LEN: usize = 4;
 /// Most uncompressed bytes one data chunk may carry, fixed by the framing format.
 pub const MAX_CHUNK_DATA_LEN: usize = 1 << 16;
 
-/// Masks a CRC so that checksums of data holding checksums stay well distributed.
-///
-/// ```text
-/// masked = rotate_right(crc, 15) + 0xa282ead8   (mod 2^32)
-/// ```
-const fn mask(crc: u32) -> u32 {
-    crc.rotate_right(15).wrapping_add(0xa282_ead8)
-}
-
 /// Compresses bytes into a framed stream.
 ///
 /// An empty input gives a stream holding only the identifier.
@@ -122,7 +113,7 @@ mod tests {
             .unwrap()
             .to_le_bytes();
         let mut chunk = vec![TYPE_UNCOMPRESSED, len[0], len[1], len[2]];
-        chunk.extend_from_slice(&mask(Crc32c::checksum(data)).to_le_bytes());
+        chunk.extend_from_slice(&Crc32c::masked(data).to_le_bytes());
         chunk.extend_from_slice(data);
         chunk
     }
@@ -141,8 +132,8 @@ mod tests {
     #[test]
     fn mask_matches_the_reference_formula() {
         // Masking zero is the bare constant; masking rotates before it adds.
-        assert_eq!(mask(0), 0xa282_ead8);
-        assert_eq!(mask(1 << 15), 0xa282_ead9);
+        assert_eq!(Crc32c::mask(0), 0xa282_ead8);
+        assert_eq!(Crc32c::mask(1 << 15), 0xa282_ead9);
     }
 
     #[test]
@@ -246,13 +237,13 @@ mod tests {
     fn checksum_mismatch_reports_both_values() {
         // Flip one data bit after the checksum was computed.
         let mut chunk = stored_chunk(b"abc");
-        let stored = mask(Crc32c::checksum(b"abc"));
+        let stored = Crc32c::masked(b"abc");
         chunk[8] ^= 1;
         assert_eq!(
             decompress(&stream(&[&chunk]), 10),
             Err(SnappyError::ChecksumMismatch {
                 stored,
-                computed: mask(Crc32c::checksum(b"`bc")),
+                computed: Crc32c::masked(b"`bc"),
             })
         );
     }

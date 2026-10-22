@@ -15,14 +15,6 @@ pub const MESSAGE_DOMAIN_VALID_SNAPPY: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
 /// MESSAGE_DOMAIN_INVALID_SNAPPY: separates identifiers of undecodable payloads.
 pub const MESSAGE_DOMAIN_INVALID_SNAPPY: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 
-/// Worst-case snappy output for an input of n bytes: 32 + n + n / 6.
-///
-/// The phase0 p2p-interface spec takes the bound from snappy.cc.
-#[must_use]
-pub const fn max_compressed_len(n: u64) -> u64 {
-    32 + n + n / 6
-}
-
 /// The ssz_snappy gossip encoding under one payload limit.
 ///
 /// A payload travels as one raw snappy block, with no framing.
@@ -43,8 +35,8 @@ impl GossipEncoding {
     /// Largest gossip RPC frame: the compressed payload bound plus 1 KiB of framing, at least 1 MiB.
     #[must_use]
     pub fn max_message_size(self) -> usize {
-        let bound = (max_compressed_len(self.max_payload_size) + 1024).max(1024 * 1024);
-        usize::try_from(bound).unwrap_or(usize::MAX)
+        // The phase0 p2p spec takes the compressed bound from snappy itself.
+        (raw::max_compressed_len(self.max_payload_size as usize) + 1024).max(1024 * 1024)
     }
 
     /// Compresses an SSZ payload into one raw snappy block.
@@ -56,7 +48,7 @@ impl GossipEncoding {
     /// Decompresses a gossip payload, enforcing both size limits of the spec.
     pub fn decode(self, data: &[u8]) -> Result<Vec<u8>, GossipDecodeError> {
         // The compressed size is bounded before any work is done.
-        let max_compressed = max_compressed_len(self.max_payload_size);
+        let max_compressed = raw::max_compressed_len(self.max_payload_size as usize) as u64;
         if data.len() as u64 > max_compressed {
             return Err(GossipDecodeError::CompressedTooLarge {
                 len: data.len(),
@@ -167,7 +159,10 @@ mod tests {
     #[test]
     fn size_bounds() {
         // 10 MiB payload → 32 + 10485760 + 1747626 = 12233418 compressed.
-        assert_eq!(max_compressed_len(MAX_PAYLOAD_SIZE), 12_233_418);
+        assert_eq!(
+            raw::max_compressed_len(MAX_PAYLOAD_SIZE as usize),
+            12_233_418
+        );
         // Plus 1024 bytes of framing.
         assert_eq!(
             GossipEncoding::new(MAX_PAYLOAD_SIZE).max_message_size(),

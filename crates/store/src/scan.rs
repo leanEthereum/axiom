@@ -2,8 +2,9 @@
 
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 
+use axiom_snappy::Crc32c;
+
 use crate::{
-    crc::Crc32c,
     format::{ENTRY_HEADER_LEN, EntryHeader, FILE_HEADER_LEN, FRAME_HEADER_LEN, FrameHeader},
     record::Record,
     segment::Segment,

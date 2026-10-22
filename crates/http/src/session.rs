@@ -10,9 +10,7 @@ use tokio::{
 
 use crate::{
     BodyLength, HttpError, Method, Request, Response, Router, ServerConfig, StatusCode,
-    connection::Connection,
-    date::HttpDate,
-    race::{Either, race},
+    connection::Connection, date::HttpDate, race::Either,
 };
 
 /// The server side of one accepted connection.
@@ -57,7 +55,7 @@ impl Session {
         loop {
             // Wait for the next head; an idle connection also yields to shutdown.
             let stopped = &mut self.stopped;
-            let waited = race(
+            let waited = Either::race(
                 time::timeout(
                     self.config.idle_timeout,
                     self.connection.read_request_head(),

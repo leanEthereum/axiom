@@ -133,11 +133,6 @@ impl Reply {
             .with_body(SSZ, bytes)
     }
 
-    /// An object from named members.
-    pub(crate) fn object<const N: usize>(members: [(&str, Json); N]) -> Json {
-        Json::from(members.into_iter().collect::<Object>())
-    }
-
     /// A number as the beacon API writes it: a decimal string.
     pub(crate) fn number(value: u64) -> Json {
         Json::from(value.to_string())
@@ -150,7 +145,7 @@ impl Reply {
 
     /// A header in the beacon API's JSON form.
     pub(crate) fn header(header: &BeaconBlockHeader) -> Json {
-        Self::object([
+        Json::from([
             ("slot", Self::number(header.slot.0)),
             ("proposer_index", Self::number(header.proposer_index.0)),
             ("parent_root", Self::text(&header.parent_root)),
@@ -161,7 +156,7 @@ impl Reply {
 
     /// A checkpoint in the beacon API's JSON form.
     pub(crate) fn checkpoint(checkpoint: Checkpoint) -> Json {
-        Self::object([
+        Json::from([
             ("epoch", Self::number(checkpoint.epoch.0)),
             ("root", Self::text(&checkpoint.root)),
         ])

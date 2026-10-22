@@ -13,7 +13,7 @@ use std::fmt;
 use axiom_json::Json;
 use axiom_types::Hash32;
 
-use super::{Fields, JsonCodec, object};
+use super::{Fields, JsonCodec};
 use crate::{WireError, WireErrorKind};
 
 /// The five verdicts the engine API defines.
@@ -116,7 +116,7 @@ impl PayloadStatus {
 
 impl JsonCodec for PayloadStatus {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("status", self.status.to_json()),
             ("latestValidHash", self.latest_valid_hash.to_json()),
             ("validationError", self.validation_error.to_json()),

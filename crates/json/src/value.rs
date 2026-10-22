@@ -180,6 +180,13 @@ impl From<Object> for Json {
     }
 }
 
+impl<K: Into<String>, const N: usize> From<[(K, Self); N]> for Json {
+    /// An object of named members, in order.
+    fn from(members: [(K, Self); N]) -> Self {
+        Self::Object(members.into_iter().collect())
+    }
+}
+
 impl<T: Into<Self>> From<Option<T>> for Json {
     /// Maps an absent value to null, as JSON-RPC does for optional fields.
     fn from(value: Option<T>) -> Self {

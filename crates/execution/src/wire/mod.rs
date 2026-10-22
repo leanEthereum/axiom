@@ -23,7 +23,7 @@ mod requests;
 mod status;
 mod syncing;
 
-use axiom_json::{Json, Object};
+use axiom_json::Json;
 pub use blobs::{BlobAndProof, Blobs, BlobsBundle, CellProofs};
 pub use forkchoice::{ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadId};
 pub use get_payload::GetPayloadResponse;
@@ -47,13 +47,4 @@ pub trait JsonCodec: Sized {
     ///
     /// Fails when the value has the wrong type, encoding, or length, naming where.
     fn from_json(value: &Json) -> Result<Self, WireError>;
-}
-
-/// Builds an object from members in order.
-pub(crate) fn object<const N: usize>(members: [(&str, Json); N]) -> Json {
-    let mut object = Object::new();
-    for (name, value) in members {
-        object.insert(name, value);
-    }
-    Json::Object(object)
 }

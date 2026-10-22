@@ -3,7 +3,6 @@
 use super::{
     MAX_CHUNK_DATA_LEN, STREAM_IDENTIFIER,
     chunk::{ChunkHeader, ChunkType, DataChunk, TYPE_STREAM_IDENTIFIER},
-    mask,
 };
 use crate::{Crc32c, SnappyError, raw};
 
@@ -83,7 +82,7 @@ impl ChunkDecoder {
         };
 
         // The checksum covers the uncompressed bytes of this chunk.
-        let computed = mask(Crc32c::checksum(&out[start..]));
+        let computed = Crc32c::masked(&out[start..]);
         if computed != checksum {
             out.truncate(start);
             return Err(SnappyError::ChecksumMismatch {
