@@ -1,6 +1,6 @@
 //! The tree of blocks the store knows, and ancestry queries over it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axiom_types::{Hash32, Root, Slot, ValidatorIndex};
 
@@ -137,6 +137,31 @@ impl BlockTree {
         }
     }
 
+    /// Keeps only a block and its descendants, returning the roots dropped.
+    ///
+    /// The kept block becomes the tree's anchor.
+    /// Its parent link stays, though the parent itself is gone.
+    pub fn retain_subtree(&mut self, root: Root) -> Vec<Root> {
+        // Insertion order is topological, so one forward pass sees every parent first.
+        let mut kept = HashSet::from([root]);
+        for candidate in &self.order {
+            if kept.contains(&self.nodes[candidate].parent_root) {
+                kept.insert(*candidate);
+            }
+        }
+
+        // Split the old order into the surviving roots and the dropped ones.
+        let (order, dropped): (Vec<Root>, Vec<Root>) = self
+            .order
+            .iter()
+            .partition(|candidate| kept.contains(candidate));
+        // Child lists of kept blocks only ever name kept blocks, so whole lists go or stay.
+        self.nodes.retain(|candidate, _| kept.contains(candidate));
+        self.children.retain(|parent, _| kept.contains(parent));
+        self.order = order;
+        dropped
+    }
+
     /// Whether one block descends from another, or is it.
     ///
     /// See `is_ancestor` in the phase0 fork choice spec.
@@ -205,6 +230,26 @@ mod tests {
         tree.mark_invalid(root(2));
         assert_eq!(tree.get(&root(3)).unwrap().status, ExecutionStatus::Invalid);
         assert_eq!(tree.get(&root(4)).unwrap().status, ExecutionStatus::Invalid);
+    }
+
+    #[test]
+    fn retaining_a_subtree_drops_ancestors_and_side_branches() {
+        // Fixture state: keep the subtree of b, then add e under the pruned root a.
+        //
+        //     a(0) -> b(1) -> c(3)        kept:    b, c, d
+        //       \       \                 dropped: a, e
+        //        e(1)    d(2)
+        let mut tree = fixture();
+        tree.insert(root(5), node(1, 1));
+
+        let mut dropped = tree.retain_subtree(root(2));
+        dropped.sort();
+
+        assert_eq!(dropped, [root(1), root(5)]);
+        let kept: Vec<Root> = tree.iter().map(|(root, _)| *root).collect();
+        assert_eq!(kept, [root(2), root(3), root(4)]);
+        assert_eq!(tree.children(&root(2)), [root(3), root(4)]);
+        assert!(tree.children(&root(1)).is_empty());
     }
 
     #[test]

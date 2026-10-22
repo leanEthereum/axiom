@@ -19,6 +19,7 @@ mod handlers;
 mod head;
 mod payload;
 mod proposer_head;
+mod prune;
 mod store;
 mod votes;
 
