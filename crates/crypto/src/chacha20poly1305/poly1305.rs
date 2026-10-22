@@ -94,6 +94,7 @@ impl Poly1305 {
     /// The tag of one message under a one-time key.
     #[must_use]
     pub fn mac(key: &[u8; Self::KEY_LEN], message: &[u8]) -> [u8; Self::TAG_LEN] {
+        // One-shot form of new, update, finalize.
         let mut mac = Self::new(key);
         mac.update(message);
         mac.finalize()
@@ -131,6 +132,7 @@ impl Poly1305 {
     /// The AEAD construction of RFC 8439, section 2.8, pads each field this way.
     /// The zero-padded block counts as a whole block and keeps its 2^128 bit.
     pub(crate) fn update_padded(&mut self, data: &[u8]) {
+        // Absorb the bytes, then flush a partial block padded with zeros.
         self.update(data);
         if self.filled > 0 {
             self.buffer[self.filled..].fill(0);
@@ -194,6 +196,7 @@ impl Poly1305 {
     ///
     /// The high bit argument is 2^40 for a whole block, placing the pad bit at 2^128.
     fn absorb(&mut self, block: &[u8; BLOCK_LEN], high_bit: u64) {
+        // Work on local copies of the limbs.
         let [r0, r1, r2] = self.r;
         let [mut h0, mut h1, mut h2] = self.h;
 

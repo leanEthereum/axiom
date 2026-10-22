@@ -1,12 +1,14 @@
 //! Portable AES-128 encryption without lookup tables, the reference for the hardware path.
 //!
-//! Table-driven AES leaks its key through cache timing, as Bernstein and Osvik et al. showed in 2005.
+//! Table-driven AES leaks its key through cache timing, as Bernstein showed in 2005.
 //! Here the S-box is a fixed Boolean circuit over bit planes, so no address depends on data.
 
 /// Rounds of AES-128, per FIPS 197, section 5.
 pub(super) const ROUNDS: usize = 10;
 
-/// Round constants of the key schedule: successive powers of x in GF(2^8), per FIPS 197, section 5.2.
+/// Round constants of the key schedule, per FIPS 197, section 5.2.
+///
+/// They are the successive powers of x in GF(2^8).
 const RCON: [u8; ROUNDS] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
 
 /// The eleven round keys of one AES-128 key, in the byte order of the state.
@@ -19,6 +21,7 @@ pub(super) type RoundKeys = [[u8; 16]; ROUNDS + 1];
 /// w[i] = w[i - 4] ^ w[i - 1]                            otherwise
 /// ```
 pub(super) fn expand_key(key: &[u8; 16]) -> RoundKeys {
+    // Round key 0 is the key itself.
     let mut keys = [[0_u8; 16]; ROUNDS + 1];
     keys[0] = *key;
     for round in 1..=ROUNDS {
@@ -26,7 +29,8 @@ pub(super) fn expand_key(key: &[u8; 16]) -> RoundKeys {
 
         // RotWord then SubWord on the last word of the previous round key.
         //
-        // The S-box circuit works on 16 bytes at once; the other 12 lanes are idle.
+        // The S-box circuit works on 16 bytes at once.
+        // The other 12 lanes are idle.
         let mut word = [0_u8; 16];
         word[..4].copy_from_slice(&[previous[13], previous[14], previous[15], previous[12]]);
         sub_bytes(&mut word);
@@ -47,6 +51,7 @@ pub(super) fn expand_key(key: &[u8; 16]) -> RoundKeys {
 
 /// Encrypts one block in place, per FIPS 197, section 5.1.
 pub(super) fn encrypt_block(keys: &RoundKeys, block: &mut [u8; 16]) {
+    // Initial whitening, then nine full rounds.
     add_round_key(block, &keys[0]);
     for key in &keys[1..ROUNDS] {
         sub_bytes(block);
@@ -62,6 +67,7 @@ pub(super) fn encrypt_block(keys: &RoundKeys, block: &mut [u8; 16]) {
 
 /// XORs a round key into the state.
 fn add_round_key(block: &mut [u8; 16], key: &[u8; 16]) {
+    // Byte-wise XOR: the only step that involves the key.
     for (byte, k) in block.iter_mut().zip(key) {
         *byte ^= k;
     }
@@ -78,6 +84,7 @@ fn add_round_key(block: &mut [u8; 16], key: &[u8; 16]) {
 /// row 3:  s3  s7  s11 s15        s15 s3  s7  s11
 /// ```
 fn shift_rows(block: &mut [u8; 16]) {
+    // Read from a copy, since the rotation overwrites its own sources.
     let old = *block;
     for c in 0..4 {
         for r in 0..4 {
@@ -88,6 +95,7 @@ fn shift_rows(block: &mut [u8; 16]) {
 
 /// Multiplies every column by the fixed polynomial 3x^3 + x^2 + x + 2, per FIPS 197, section 5.1.3.
 fn mix_columns(block: &mut [u8; 16]) {
+    // Each 4-byte column is one polynomial over GF(2^8).
     let (columns, _) = block.as_chunks_mut::<4>();
     for column in columns {
         let [a0, a1, a2, a3] = *column;
@@ -104,7 +112,8 @@ fn mix_columns(block: &mut [u8; 16]) {
 
 /// Multiplies by x in GF(2^8) modulo x^8 + x^4 + x^3 + x + 1, without branching.
 const fn xtime(byte: u8) -> u8 {
-    // The top bit decides the reduction; turn it into a mask instead of a branch.
+    // The top bit decides the reduction.
+    // Turn it into a mask instead of a branch.
     (byte << 1) ^ (0x1b & 0_u8.wrapping_sub(byte >> 7))
 }
 
@@ -120,7 +129,8 @@ const fn xtime(byte: u8) -> u8 {
 /// planes                -> transposes back       ->  bytes
 /// ```
 pub(super) fn sub_bytes(block: &mut [u8; 16]) {
-    // Phase 1: each half is an 8 x 8 bit matrix; transposing turns its rows into planes.
+    // Phase 1: each half is an 8 x 8 bit matrix.
+    // Transposing turns its rows into planes.
     let (halves, _) = block.as_chunks::<8>();
     let low = transpose_8x8(u64::from_le_bytes(halves[0]));
     let high = transpose_8x8(u64::from_le_bytes(halves[1]));
@@ -134,7 +144,8 @@ pub(super) fn sub_bytes(block: &mut [u8; 16]) {
     // Phase 2: the circuit.
     sbox_circuit(&mut planes);
 
-    // Phase 3: gather the planes back and transpose again; the transpose is its own inverse.
+    // Phase 3: gather the planes back and transpose again.
+    // The transpose is its own inverse.
     let mut low = 0_u64;
     let mut high = 0_u64;
     for (i, plane) in planes.iter().enumerate() {
@@ -147,8 +158,10 @@ pub(super) fn sub_bytes(block: &mut [u8; 16]) {
 
 /// Transposes an 8 x 8 bit matrix: bit 8r + c moves to bit 8c + r.
 ///
-/// Three delta swaps exchange 1 x 1, then 2 x 2, then 4 x 4 off-diagonal blocks, per Hacker's Delight, section 7-3.
+/// Three delta swaps exchange off-diagonal blocks of size 1, 2, then 4.
+/// The method is that of Hacker's Delight, section 7-3.
 const fn transpose_8x8(mut x: u64) -> u64 {
+    // Swap 1 x 1 blocks: bit (r, c) with (r + 1, c - 1) for even r and odd c.
     let t = (x ^ (x >> 7)) & 0x00aa_00aa_00aa_00aa;
     x ^= t ^ (t << 7);
     let t = (x ^ (x >> 14)) & 0x0000_cccc_0000_cccc;

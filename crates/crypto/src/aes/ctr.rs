@@ -13,7 +13,8 @@ use crate::ct::wipe;
 /// keystream block i = AES_K(IV + i mod 2^128)
 /// ```
 ///
-/// The whole 16-byte block is one big-endian counter, the standard incrementing function of SP 800-38A, appendix B.1.
+/// The whole 16-byte block is one big-endian counter.
+/// That is the standard incrementing function of SP 800-38A, appendix B.1.
 /// discv5 masks packet headers this way, with the masking IV of each packet as the initial counter.
 ///
 /// # Examples
@@ -34,7 +35,7 @@ pub struct Aes128Ctr {
     counter: u128,
     /// Keystream left over from a block a previous call cut short.
     leftover: [u8; BLOCK_LEN],
-    /// Bytes of the leftover block already used; the block size when none remain.
+    /// Bytes of the leftover block already used, or 16 when none remain.
     used: usize,
 }
 

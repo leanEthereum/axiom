@@ -53,7 +53,7 @@ pub struct ChaCha20 {
     state: [u32; 16],
     /// Keystream left over from a block a previous call cut short.
     leftover: [u8; BLOCK_LEN],
-    /// Bytes of the leftover block already used; the block size when none remain.
+    /// Bytes of the leftover block already used, or 64 when none remain.
     used: usize,
     /// Blocks the 32-bit counter can still produce before it wraps.
     remaining_blocks: u64,
@@ -63,6 +63,7 @@ impl ChaCha20 {
     /// A keystream starting at the given block.
     #[must_use]
     pub fn new(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Self {
+        // The four constant words come first.
         let mut state = [0_u32; 16];
         state[..4].copy_from_slice(&SIGMA);
 
@@ -121,6 +122,7 @@ impl ChaCha20 {
 
     /// One keystream block, advancing the counter.
     pub(crate) fn next_block(&mut self) -> [u8; BLOCK_LEN] {
+        // Run the block function on the current state, then step the counter.
         let words = Self::block(&self.state);
         self.state[COUNTER] = self.state[COUNTER].wrapping_add(1);
         let mut out = [0_u8; BLOCK_LEN];
@@ -133,6 +135,7 @@ impl ChaCha20 {
 
     /// Claims blocks from the counter, refusing to wrap it.
     fn reserve_blocks(&mut self, blocks: usize) {
+        // Invariant: a wrapped counter would repeat keystream, so refuse it.
         let blocks = blocks as u64;
         assert!(
             blocks <= self.remaining_blocks,
@@ -143,9 +146,12 @@ impl ChaCha20 {
 
     /// XORs whole blocks with the fastest path the CPU supports.
     fn xor_whole_blocks(&mut self, data: &mut [u8]) {
+        // Hardware path first.
+        // It leaves fewer than eight blocks for the portable loop.
         #[cfg(target_arch = "x86_64")]
         let data = if is_x86_feature_detected!("avx2") {
-            // Eight blocks at a time in the vector lanes; the rest falls through.
+            // Eight blocks at a time in the vector lanes.
+            // The rest falls through.
             let batch = avx2::BLOCKS * BLOCK_LEN;
             let split = data.len() - data.len() % batch;
             let (wide, rest) = data.split_at_mut(split);
@@ -165,6 +171,7 @@ impl ChaCha20 {
 
     /// XORs whole blocks one at a time, the reference for every vector path.
     pub(crate) fn xor_whole_blocks_portable(&mut self, data: &mut [u8]) {
+        // One 64-byte keystream block per 64 bytes of data.
         for chunk in data.as_chunks_mut::<BLOCK_LEN>().0 {
             let block = self.next_block();
             for (byte, key) in chunk.iter_mut().zip(block) {
@@ -189,6 +196,7 @@ impl ChaCha20 {
     ///
     /// Each vertical line of four is one quarter round.
     pub(crate) fn block(input: &[u32; 16]) -> [u32; 16] {
+        // Rounds run on a copy, so the input stays available for the feed-forward.
         let mut x = *input;
         for _ in 0..10 {
             // Column round: quarter rounds down the four columns.
@@ -215,6 +223,7 @@ impl ChaCha20 {
     #[inline]
     #[expect(clippy::many_single_char_names, reason = "the names follow RFC 8439")]
     const fn quarter_round(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+        // Four add-xor-rotate steps with rotations 16, 12, 8, 7.
         x[a] = x[a].wrapping_add(x[b]);
         x[d] = (x[d] ^ x[a]).rotate_left(16);
         x[c] = x[c].wrapping_add(x[d]);

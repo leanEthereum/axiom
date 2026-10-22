@@ -98,8 +98,9 @@ impl Scalar {
 
     /// Decodes 32 big-endian bytes, refusing values at or above n.
     ///
-    /// The check runs in constant time; only its outcome is revealed.
+    /// The check runs in constant time and reveals only its outcome.
     pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        // Big-endian bytes to little-endian limbs, then the range check.
         let limbs = limbs_from_be_bytes(bytes);
         let (_, borrow) = sub_with_borrow(limbs, N);
         Mask::from_bit(borrow).reveal().then_some(Self(limbs))
@@ -131,6 +132,7 @@ impl Scalar {
 
     /// Holds when the scalar is zero.
     pub(super) fn is_zero(self) -> Mask {
+        // OR all limbs together and test the result.
         Mask::is_zero(self.0[0] | self.0[1] | self.0[2] | self.0[3])
     }
 
@@ -143,6 +145,7 @@ impl Scalar {
 
     /// The first scalar when the condition holds, the second otherwise.
     pub(super) fn select(condition: Mask, if_true: Self, if_false: Self) -> Self {
+        // Limb by limb, through the mask.
         Self(array::from_fn(|i| {
             condition.select(if_true.0[i], if_false.0[i])
         }))
@@ -150,14 +153,16 @@ impl Scalar {
 
     /// The 4-bit digit at window i, bits 4i to 4i + 3.
     ///
-    /// The window index is public; the digit is secret and returned as a word.
+    /// The window index is public, and the digit stays a secret word.
     pub(super) const fn nibble(self, window: usize) -> u64 {
+        // Sixteen 4-bit windows per 64-bit limb.
         (self.0[window / 16] >> ((window % 16) * 4)) & 0xf
     }
 
     /// The bit at position i.
     #[cfg(test)]
     pub(super) const fn bit(self, position: usize) -> u64 {
+        // Sixty-four bits per limb.
         (self.0[position / 64] >> (position % 64)) & 1
     }
 
@@ -201,7 +206,8 @@ impl Scalar {
     /// The exponent is public, so the digit sequence leaks nothing about the input.
     #[must_use]
     pub(super) fn invert(self) -> Self {
-        // Phase 1: powers of a in Montgomery form; R mod n stands for 1.
+        // Phase 1: powers of a in Montgomery form.
+        // R mod n stands for 1.
         let base = montgomery_mul(self.0, R2);
         let one = montgomery_mul([1, 0, 0, 0], R2);
         let mut table = [one; 16];
@@ -228,6 +234,8 @@ impl Scalar {
     /// Every non-zero digit is odd and in (-2^(w-1), 2^(w-1)), and any two are w positions apart.
     /// Used only on public scalars: the digit pattern depends on the value.
     pub(super) fn wnaf_vartime(self, width: u32) -> [i8; 257] {
+        // Digit i multiplies 2^i.
+        // Most digits stay zero.
         let mut digits = [0_i8; 257];
         let window = 1_u64 << width;
 
@@ -245,7 +253,8 @@ impl Scalar {
                     digits[position] = (low as u8).cast_signed();
                     sub_small(&mut k, low);
                 } else {
-                    // A negative digit low - 2^w: add its magnitude, below 2^(w-1) since low is odd.
+                    // A negative digit low - 2^w: add its magnitude.
+                    // The magnitude is below 2^(w-1), since low is odd.
                     let magnitude = window - low;
                     digits[position] = -(magnitude as u8).cast_signed();
                     add_small(&mut k, magnitude);
@@ -273,6 +282,7 @@ impl Scalar {
 ///
 /// The result lies in [0, 2n), and one masked subtraction brings it under n.
 fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+    // Six words: four for t, one for its carry, one spare for the row's overflow.
     let mut t = [0_u64; 6];
     for &bi in &b {
         // Row: t += a * b_i.
@@ -286,7 +296,8 @@ fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
         t[4] = sum as u64;
         t[5] = (sum >> 64) as u64;
 
-        // Reduction: t += m n makes the low word zero; then shift down one word.
+        // Reduction: t += m n makes the low word zero.
+        // Then shift down one word.
         let m = t[0].wrapping_mul(N0_INV);
         let sum = u128::from(t[0]) + u128::from(m) * u128::from(N[0]);
         let mut carry = sum >> 64;
@@ -309,6 +320,7 @@ fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 /// Adds a small value to a five-limb integer.
 fn add_small(k: &mut [u64; 5], value: u64) {
+    // Ripple the carry upwards.
     let mut carry = value;
     for limb in k.iter_mut() {
         let (sum, overflow) = limb.overflowing_add(carry);
@@ -319,6 +331,7 @@ fn add_small(k: &mut [u64; 5], value: u64) {
 
 /// Subtracts a small value from a five-limb integer that is at least that value.
 fn sub_small(k: &mut [u64; 5], value: u64) {
+    // Ripple the borrow upwards.
     let mut borrow = value;
     for limb in k.iter_mut() {
         let (difference, underflow) = limb.overflowing_sub(borrow);
@@ -329,6 +342,7 @@ fn sub_small(k: &mut [u64; 5], value: u64) {
 
 /// Halves a five-limb integer, dropping the low bit.
 fn shift_right_one(k: &mut [u64; 5]) {
+    // Each limb takes the low bit of the limb above as its new top bit.
     for i in 0..5 {
         let next = if i < 4 { k[i + 1] } else { 0 };
         k[i] = (k[i] >> 1) | (next << 63);
@@ -353,6 +367,7 @@ pub(super) mod tests {
 
     /// The product by shift-and-add, using only addition.
     fn mul_reference(a: Scalar, b: Scalar) -> Scalar {
+        // Scan the bits of b from the top: acc = 2 acc + bit * a.
         let mut acc = Scalar::ZERO;
         for bit in (0..256).rev() {
             acc = acc.add(acc);
@@ -393,7 +408,8 @@ pub(super) mod tests {
 
     #[test]
     fn high_half_boundary() {
-        // n/2 rounded down is low; one more is high.
+        // n/2 rounded down is low.
+        // One more is high.
         assert!(!Scalar(HALF_N).is_high().reveal());
         assert!(
             Scalar([HALF_N[0] + 1, HALF_N[1], HALF_N[2], HALF_N[3]])
@@ -433,7 +449,8 @@ pub(super) mod tests {
             for (i, &digit) in digits.iter().enumerate().rev() {
                 rebuilt = rebuilt.add(rebuilt);
                 let magnitude = Scalar([u64::from(digit.unsigned_abs()), 0, 0, 0]);
-                rebuilt = if digit >= 0 { rebuilt.add(magnitude) } else { rebuilt.add(magnitude.neg()) };
+                let signed = if digit >= 0 { magnitude } else { magnitude.neg() };
+                rebuilt = rebuilt.add(signed);
                 if digit != 0 {
                     prop_assert_eq!(digit % 2 != 0, true);
                     prop_assert!(i32::from(digit).abs() < 1 << (width - 1));

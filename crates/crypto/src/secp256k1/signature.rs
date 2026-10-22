@@ -35,6 +35,7 @@ impl Signature {
     ///
     /// Fails when r or s is zero or not below n.
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, Secp256k1Error> {
+        // r occupies the first 32 bytes, s the last 32.
         let (r_bytes, s_bytes) = bytes.split_at(32);
         let r = Self::component(r_bytes)?;
         let s = Self::component(s_bytes)?;
@@ -43,6 +44,7 @@ impl Signature {
 
     /// Decodes one component, refusing zero and values at or above n.
     fn component(bytes: &[u8]) -> Result<Scalar, Secp256k1Error> {
+        // Exactly 32 bytes, then 1 <= value < n.
         let bytes: &[u8; 32] = bytes
             .try_into()
             .map_err(|_| Secp256k1Error::InvalidSignature)?;
@@ -55,6 +57,7 @@ impl Signature {
     /// The 64-byte compact form r || s.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; 64] {
+        // r then s, each 32 bytes big-endian.
         let mut out = [0_u8; 64];
         out[..32].copy_from_slice(&self.r.to_bytes());
         out[32..].copy_from_slice(&self.s.to_bytes());
@@ -84,6 +87,7 @@ impl Signature {
     /// (r, s) and (r, n - s) both verify, so either form can be normalized to the low one.
     #[must_use]
     pub fn normalize_s(&self) -> Self {
+        // Replace s by n - s exactly when s is high.
         let high = self.s.is_high();
         Self {
             r: self.r,
@@ -112,6 +116,7 @@ impl RecoveryId {
     ///
     /// Fails for values above 3.
     pub const fn new(id: u8) -> Result<Self, Secp256k1Error> {
+        // Two bits: y parity and x overflow.
         if id > 3 {
             return Err(Secp256k1Error::InvalidRecoveryId(id));
         }
@@ -164,6 +169,7 @@ impl RecoverableSignature {
     ///
     /// Fails when r or s is out of range or v is above 3.
     pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, Secp256k1Error> {
+        // The compact signature, then one byte of recovery identifier.
         let (compact, id) = bytes.split_at(64);
         let compact: &[u8; 64] = compact
             .try_into()
@@ -179,6 +185,7 @@ impl RecoverableSignature {
     /// The 65-byte form r || s || v.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; 65] {
+        // The compact signature, then the recovery identifier.
         let mut out = [0_u8; 65];
         out[..64].copy_from_slice(&self.signature.to_bytes());
         out[64] = self.recovery_id.to_byte();
@@ -220,7 +227,8 @@ impl RecoverableSignature {
         // Phase 1: rebuild the nonce point R.
         let mut x_limbs = r.limbs();
         if self.recovery_id.is_x_reduced() {
-            // x = r + n must stay below p; a carry or an overflow past p means no such point.
+            // x = r + n must stay below p.
+            // A carry, or a value past p, means no such point.
             let (sum, carry) = add_with_carry(x_limbs, Scalar::ORDER);
             if carry == 1 {
                 return Err(Secp256k1Error::RecoveryFailed);

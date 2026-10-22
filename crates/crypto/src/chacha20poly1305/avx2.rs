@@ -74,6 +74,7 @@ pub(crate) fn xor_blocks(state: &[u32; 16], data: &mut [u8; BLOCKS * BLOCK_LEN])
 #[target_feature(enable = "avx2")]
 #[expect(clippy::many_single_char_names, reason = "the names follow RFC 8439")]
 fn quarter_round(x: &mut [__m256i; 16], a: usize, b: usize, c: usize, d: usize) {
+    // The scalar quarter round, lane-wise: add, XOR, rotate, four times.
     x[a] = _mm256_add_epi32(x[a], x[b]);
     x[d] = rotate_16(_mm256_xor_si256(x[d], x[a]));
     x[c] = _mm256_add_epi32(x[c], x[d]);
@@ -121,7 +122,8 @@ fn rotate_8(v: __m256i) -> __m256i {
 ///
 /// # Algorithm
 ///
-/// Rows r0..r7 hold word i of blocks 0..7; the output holds blocks.
+/// Row r_i holds word i of blocks 0..7.
+/// Output j holds words 0..7 of block j.
 ///
 /// ```text
 /// unpack 32 : [r0.0 r1.0 r0.1 r1.1 | r0.4 r1.4 r0.5 r1.5]   pairs of rows
@@ -154,7 +156,8 @@ fn transpose(rows: &[__m256i]) -> [__m256i; 8] {
     let u6 = _mm256_unpacklo_epi64(t5, t7);
     let u7 = _mm256_unpackhi_epi64(t5, t7);
 
-    // Stage 3: join the 128-bit halves; selector 0x20 takes both lows, 0x31 both highs.
+    // Stage 3: join the 128-bit halves.
+    // Selector 0x20 takes both lows, 0x31 both highs.
     [
         _mm256_permute2x128_si256::<0x20>(u0, u4),
         _mm256_permute2x128_si256::<0x20>(u1, u5),
@@ -175,8 +178,9 @@ fn transpose(rows: &[__m256i]) -> [__m256i; 8] {
     reason = "the unaligned load and store accept any address"
 )]
 fn xor_into(data: &mut [u8; 32], keystream: __m256i) {
+    // Unaligned access: the data has no alignment guarantee.
     let pointer = data.as_mut_ptr().cast::<__m256i>();
-    // SAFETY: the pointer covers exactly 32 writable bytes, and the unaligned forms accept any address.
+    // SAFETY: the pointer covers 32 writable bytes, and unaligned accesses accept any address.
     unsafe {
         let mixed = _mm256_xor_si256(_mm256_loadu_si256(pointer), keystream);
         _mm256_storeu_si256(pointer, mixed);

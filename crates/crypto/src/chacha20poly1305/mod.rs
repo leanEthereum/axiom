@@ -72,6 +72,7 @@ impl ChaCha20Poly1305 {
     /// Panics when the plaintext exceeds 256 GiB, the ChaCha20 counter range.
     #[must_use]
     pub fn seal(&self, nonce: &[u8; Self::NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+        // Copy the plaintext, encrypt it in place, then append the tag.
         let mut sealed = Vec::with_capacity(plaintext.len() + Self::TAG_LEN);
         sealed.extend_from_slice(plaintext);
         let tag = self.seal_in_place_detached(nonce, aad, &mut sealed);
@@ -90,6 +91,8 @@ impl ChaCha20Poly1305 {
         aad: &[u8],
         sealed: &[u8],
     ) -> Result<Vec<u8>, AeadError> {
+        // The tag is the last 16 bytes.
+        // Anything shorter cannot be a sealed message.
         let Some(split) = sealed.len().checked_sub(Self::TAG_LEN) else {
             return Err(AeadError);
         };
@@ -111,6 +114,7 @@ impl ChaCha20Poly1305 {
         aad: &[u8],
         buffer: &mut [u8],
     ) -> [u8; Self::TAG_LEN] {
+        // Encrypt first, then authenticate the ciphertext.
         let (mut mac, mut stream) = self.start(nonce);
         stream.apply_keystream(buffer);
         Self::finish(&mut mac, aad, buffer);
@@ -164,6 +168,7 @@ impl ChaCha20Poly1305 {
 
     /// Feeds the padded AAD, the padded ciphertext, and both lengths.
     fn finish(mac: &mut Poly1305, aad: &[u8], ciphertext: &[u8]) {
+        // Each variable-length field is padded so the next starts on a block boundary.
         mac.update_padded(aad);
         mac.update_padded(ciphertext);
         mac.update(&(aad.len() as u64).to_le_bytes());

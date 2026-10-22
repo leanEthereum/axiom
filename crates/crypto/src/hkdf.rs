@@ -40,6 +40,7 @@ impl Hkdf {
     /// An empty salt equals a salt of 32 zero bytes, since HMAC zero-pads its key.
     #[must_use]
     pub fn extract(salt: &[u8], ikm: &[u8]) -> Self {
+        // PRK = HMAC-SHA256(key = salt, message = IKM), per RFC 5869, section 2.2.
         Self {
             prk: HmacSha256::mac(salt, ikm),
         }
@@ -170,7 +171,8 @@ mod tests {
 
     #[test]
     fn rfc_5869_long_inputs() {
-        // RFC 5869, appendix A.2: 80-byte IKM, salt, and info; 82-byte output over three blocks.
+        // RFC 5869, appendix A.2: 80-byte IKM, salt, and info.
+        // 82-byte output over three blocks.
         let ikm: Vec<u8> = (0x00..=0x4f).collect();
         let salt: Vec<u8> = (0x60..=0xaf).collect();
         let info: Vec<u8> = (0xb0..=0xff).collect();
@@ -217,7 +219,10 @@ mod tests {
 
     proptest! {
         #[test]
-        fn shorter_outputs_are_prefixes(len in 0_usize..200, info in prop::collection::vec(any::<u8>(), 0..40)) {
+        fn shorter_outputs_are_prefixes(
+            len in 0_usize..200,
+            info in prop::collection::vec(any::<u8>(), 0..40),
+        ) {
             // Expansion is a stream: asking for fewer bytes cuts the longer output.
             let hkdf = Hkdf::extract(b"salt", b"ikm");
             let mut long = [0_u8; 200];

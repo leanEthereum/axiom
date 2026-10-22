@@ -41,6 +41,7 @@ impl SecretKey {
     /// The public key: the scalar times the base point 9.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
+        // The base point has u = 9.
         PublicKey(Self::ladder(&self.0, &BASE_POINT))
     }
 
@@ -52,6 +53,7 @@ impl SecretKey {
     /// That happens exactly when the peer key lies in the small subgroup.
     /// RFC 7748, section 6.1, lets protocols reject it, and Noise does.
     pub fn diffie_hellman(&self, peer: &PublicKey) -> Result<SharedSecret, X25519Error> {
+        // The ladder on the peer's u-coordinate.
         let shared = SharedSecret(Self::ladder(&self.0, &peer.0));
 
         // Timing: the zero check reads all 32 bytes.
@@ -229,6 +231,7 @@ mod tests {
 
     /// One application of X25519 through the public API.
     fn x25519(k: [u8; 32], u: [u8; 32]) -> [u8; 32] {
+        // The vectors never hit a low-order point, so the exchange succeeds.
         *SecretKey::from_bytes(k)
             .diffie_hellman(&PublicKey::from_bytes(u))
             .unwrap()

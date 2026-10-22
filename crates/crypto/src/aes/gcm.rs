@@ -67,6 +67,7 @@ impl Aes128Gcm {
 
     /// A cipher around an existing block cipher.
     fn with_cipher(cipher: Aes128) -> Self {
+        // The hash key is the encryption of the zero block, per SP 800-38D, section 6.4.
         let mut hash_key = [0_u8; BLOCK_LEN];
         cipher.encrypt_block(&mut hash_key);
         Self { cipher, hash_key }
@@ -79,6 +80,7 @@ impl Aes128Gcm {
     /// Panics when the plaintext exceeds 2^32 - 2 blocks, about 64 GiB.
     #[must_use]
     pub fn seal(&self, nonce: &[u8; Self::NONCE_LEN], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+        // Copy the plaintext, encrypt it in place, then append the tag.
         let mut sealed = Vec::with_capacity(plaintext.len() + Self::TAG_LEN);
         sealed.extend_from_slice(plaintext);
         let tag = self.seal_in_place_detached(nonce, aad, &mut sealed);
@@ -97,6 +99,8 @@ impl Aes128Gcm {
         aad: &[u8],
         sealed: &[u8],
     ) -> Result<Vec<u8>, AeadError> {
+        // The tag is the last 16 bytes.
+        // Anything shorter cannot be a sealed message.
         let Some(split) = sealed.len().checked_sub(Self::TAG_LEN) else {
             return Err(AeadError);
         };
@@ -118,6 +122,7 @@ impl Aes128Gcm {
         aad: &[u8],
         buffer: &mut [u8],
     ) -> [u8; Self::TAG_LEN] {
+        // Encrypt first, then authenticate the ciphertext, as GCM specifies.
         assert!(
             buffer.len() as u64 <= MAX_PLAINTEXT_LEN,
             "AES-GCM plaintext too long"
@@ -140,6 +145,7 @@ impl Aes128Gcm {
         buffer: &mut [u8],
         tag: &[u8; Self::TAG_LEN],
     ) -> Result<(), AeadError> {
+        // A buffer past the GCM limit cannot have come from a valid sealer.
         if buffer.len() as u64 > MAX_PLAINTEXT_LEN {
             return Err(AeadError);
         }
@@ -191,6 +197,7 @@ impl Aes128Gcm {
 
     /// The counter block nonce || counter, the counter big-endian.
     fn counter_block(nonce: &[u8; Self::NONCE_LEN], counter: u32) -> [u8; BLOCK_LEN] {
+        // The 96-bit nonce fills the first 12 bytes, the counter the last 4.
         let mut block = [0_u8; BLOCK_LEN];
         block[..Self::NONCE_LEN].copy_from_slice(nonce);
         block[Self::NONCE_LEN..].copy_from_slice(&counter.to_be_bytes());
@@ -235,11 +242,12 @@ mod tests {
 
     #[test]
     fn sp_800_38d_test_cases() {
-        // The AES-128 GCM test cases 1 to 4 of McGrew and Viega, adopted by NIST's validation suite.
+        // AES-128 GCM test cases 1 to 4 of McGrew and Viega, adopted by NIST's suite.
         let zero_key = [0_u8; 16];
         let zero_nonce = [0_u8; 12];
 
-        // Case 1: empty plaintext and AAD; the tag is AES_0(J0) alone.
+        // Case 1: empty plaintext and AAD.
+        // The tag is AES_0(J0) alone.
         assert_eq!(
             seal_both(&zero_key, &zero_nonce, &[], &[]),
             hex("58e2fccefa7e3061367f1d57a4e7455a")
@@ -251,7 +259,8 @@ mod tests {
             hex("0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")
         );
 
-        // Cases 3 and 4 share key, nonce, and plaintext; case 4 drops 4 bytes and adds AAD.
+        // Cases 3 and 4 share key, nonce, and plaintext.
+        // Case 4 drops 4 bytes and adds AAD.
         let key: [u8; 16] = hex("feffe9928665731c6d6a8f9467308308").try_into().unwrap();
         let nonce: [u8; 12] = hex("cafebabefacedbaddecaf888").try_into().unwrap();
         let plaintext = hex(concat!(

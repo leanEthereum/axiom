@@ -21,7 +21,7 @@ const MASK_51: u64 = (1 << 51) - 1;
 /// # Invariants
 ///
 /// Every operation returns limbs below 2^52.
-/// The value itself may exceed p; only the byte encoding is canonical.
+/// The value itself may exceed p, and only the byte encoding is canonical.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct FieldElement([u64; 5]);
 
@@ -36,6 +36,7 @@ impl FieldElement {
     ///
     /// Values in [p, 2^255) are accepted and reduce on use, as the RFC requires.
     pub(super) fn from_bytes(bytes: &[u8; 32]) -> Self {
+        // Four little-endian 64-bit words.
         let (words, _) = bytes.as_chunks::<8>();
         let w: [u64; 4] = array::from_fn(|i| u64::from_le_bytes(words[i]));
 
@@ -93,6 +94,7 @@ impl FieldElement {
 
     /// The sum, carried back under 2^52 per limb.
     pub(super) fn add(self, other: Self) -> Self {
+        // Limb-wise sum: each limb stays below 2^53 before the carry.
         let mut sum = self.0;
         for (limb, b) in sum.iter_mut().zip(other.0) {
             *limb += b;
@@ -122,6 +124,7 @@ impl FieldElement {
 
     /// The product.
     pub(super) fn mul(self, other: Self) -> Self {
+        // Limbs of both operands.
         let [a0, a1, a2, a3, a4] = self.0;
         let [b0, b1, b2, b3, b4] = other.0;
 
@@ -144,11 +147,14 @@ impl FieldElement {
 
     /// The square.
     pub(super) fn square(self) -> Self {
+        // The general product.
+        // The ladder's cost is dominated by its five products.
         self.mul(self)
     }
 
     /// The square taken k times in a row.
     pub(super) fn square_times(self, k: u32) -> Self {
+        // Repeated squaring raises to the power 2^k.
         let mut x = self;
         for _ in 0..k {
             x = x.square();
@@ -158,6 +164,7 @@ impl FieldElement {
 
     /// The product with a small constant below 2^25.
     pub(super) fn mul_small(self, small: u32) -> Self {
+        // Each limb times a 17-bit constant fits easily in 128 bits.
         let mut wide = [0_u128; 5];
         for (column, limb) in wide.iter_mut().zip(self.0) {
             *column = u128::from(limb) * u128::from(small);
@@ -177,6 +184,7 @@ impl FieldElement {
     /// z^(2^255 - 21) = (z^(2^250 - 1))^(2^5) * z^11
     /// ```
     pub(super) fn invert(self) -> Self {
+        // Names give exponents: z_a_b is z^(2^a - 2^b).
         let z = self;
         let z2 = z.square();
         let z9 = z2.square_times(2).mul(z);
@@ -194,6 +202,7 @@ impl FieldElement {
 
     /// Swaps the two elements when the condition holds, without branching.
     pub(super) fn conditional_swap(a: &mut Self, b: &mut Self, swap: Mask) {
+        // Limb by limb, so all five limbs move or none do.
         for (x, y) in a.0.iter_mut().zip(b.0.iter_mut()) {
             // Masked XOR swap: the difference flows both ways only under the mask.
             let t = swap.word() & (*x ^ *y);
@@ -204,6 +213,7 @@ impl FieldElement {
 
     /// Carries every limb into the next, folding the top carry back with a factor of 19.
     fn carried(self) -> Self {
+        // One pass from limb 0 to limb 4.
         let mut h = self.0;
         let mut carry = 0;
         for limb in &mut h {
@@ -211,13 +221,15 @@ impl FieldElement {
             carry = *limb >> 51;
             *limb &= MASK_51;
         }
-        // 2^255 = 19 mod p; the folded carry is small, so limb 0 stays below 2^52.
+        // 2^255 = 19 mod p.
+        // The folded carry is small, so limb 0 stays below 2^52.
         h[0] += carry * 19;
         Self(h)
     }
 
     /// Reduces five 128-bit columns to limbs below 2^52.
     fn carry_wide(c: [u128; 5]) -> Self {
+        // Carry each column into the next, keeping 51 bits.
         let mut h = [0_u64; 5];
         let mut carry = 0_u128;
         for (limb, column) in h.iter_mut().zip(c) {
@@ -226,7 +238,8 @@ impl FieldElement {
             carry = value >> 51;
         }
 
-        // The top carry is below 2^62; times 19 it still fits a 64-bit word plus limb 0.
+        // The top carry is below 2^62.
+        // Times 19 it still fits a 64-bit word plus limb 0.
         let folded = u128::from(h[0]) + carry * 19;
         h[0] = (folded as u64) & MASK_51;
         h[1] += (folded >> 51) as u64;
@@ -242,6 +255,7 @@ mod tests {
 
     /// The 32-byte encoding of p - 1, the largest canonical value.
     fn p_minus_one() -> [u8; 32] {
+        // p - 1 = 2^255 - 20: low byte 0xec, top byte 0x7f, all others 0xff.
         let mut bytes = [0xff_u8; 32];
         bytes[0] = 0xec;
         bytes[31] = 0x7f;
@@ -289,7 +303,9 @@ mod tests {
             // Any value below 2^255 - 19 survives decode then encode.
             bytes[31] &= 0x7f;
             let encoded = FieldElement::from_bytes(&bytes).to_bytes();
-            let value_below_p = bytes[31] < 0x7f || bytes[1..31].iter().any(|&b| b != 0xff) || bytes[0] < 0xed;
+            // Values in [p, 2^255) have top byte 0x7f, 30 bytes 0xff, and low byte at least 0xed.
+            let value_below_p =
+                bytes[31] < 0x7f || bytes[1..31].iter().any(|&b| b != 0xff) || bytes[0] < 0xed;
             if value_below_p {
                 prop_assert_eq!(encoded, bytes);
             }
@@ -297,7 +313,9 @@ mod tests {
 
         #[test]
         fn field_laws(a in any::<[u8; 32]>(), b in any::<[u8; 32]>(), c in any::<[u8; 32]>()) {
-            let (a, b, c) = (FieldElement::from_bytes(&a), FieldElement::from_bytes(&b), FieldElement::from_bytes(&c));
+            let a = FieldElement::from_bytes(&a);
+            let b = FieldElement::from_bytes(&b);
+            let c = FieldElement::from_bytes(&c);
 
             // Distributivity ties the multiplier to the adder: a (b + c) = a b + a c.
             prop_assert_eq!(a.mul(b.add(c)).to_bytes(), a.mul(b).add(a.mul(c)).to_bytes());
@@ -308,7 +326,8 @@ mod tests {
             // Small multiplication equals multiplication by the encoded constant.
             let mut k = [0_u8; 32];
             k[..4].copy_from_slice(&121_665_u32.to_le_bytes());
-            prop_assert_eq!(a.mul_small(121_665).to_bytes(), a.mul(FieldElement::from_bytes(&k)).to_bytes());
+            let expected = a.mul(FieldElement::from_bytes(&k)).to_bytes();
+            prop_assert_eq!(a.mul_small(121_665).to_bytes(), expected);
 
             // Every non-zero element has an inverse.
             if a.to_bytes() != [0; 32] {

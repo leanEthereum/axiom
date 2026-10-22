@@ -43,8 +43,9 @@ impl FieldElement {
 
     /// Decodes 32 big-endian bytes, refusing values at or above p.
     ///
-    /// The check runs in constant time; only its outcome is revealed.
+    /// The check runs in constant time and reveals only its outcome.
     pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        // Big-endian bytes to little-endian limbs.
         let limbs = limbs_from_be_bytes(bytes);
 
         // The value is canonical exactly when subtracting p borrows.
@@ -69,6 +70,7 @@ impl FieldElement {
 
     /// Holds when the two elements are equal.
     pub(super) fn equals(self, other: Self) -> Mask {
+        // Canonical form: equal elements have equal limbs, so OR the limb differences.
         let difference = (self.0[0] ^ other.0[0])
             | (self.0[1] ^ other.0[1])
             | (self.0[2] ^ other.0[2])
@@ -78,6 +80,7 @@ impl FieldElement {
 
     /// The first element when the condition holds, the second otherwise.
     pub(super) fn select(condition: Mask, if_true: Self, if_false: Self) -> Self {
+        // Limb by limb, through the mask.
         Self(array::from_fn(|i| {
             condition.select(if_true.0[i], if_false.0[i])
         }))
@@ -111,26 +114,31 @@ impl FieldElement {
     /// The additive inverse.
     #[must_use]
     pub(super) fn neg(self) -> Self {
+        // -a = 0 - a, with the wrap-around of subtraction.
         Self::ZERO.sub(self)
     }
 
     /// Twice the element.
     #[must_use]
     pub(super) fn double(self) -> Self {
+        // 2a = a + a.
         self.add(self)
     }
 
     /// The product.
     #[must_use]
     pub(super) fn mul(self, other: Self) -> Self {
-        // Schoolbook product into eight limbs, one row of partial products per limb of b.
+        // Operand scanning: one row of partial products per limb of b.
+        //
+        //     row i : a * b_i, added in at limb offset i
+        //
+        // Each step fits 128 bits: (2^64 - 1)^2 + 2 (2^64 - 1) = 2^128 - 1.
         let a = self.0;
         let b = other.0;
         let mut wide = [0_u64; 8];
         for (i, &bi) in b.iter().enumerate() {
             let mut carry = 0_u64;
             for (j, &aj) in a.iter().enumerate() {
-                // Fits: (2^64 - 1)^2 + 2 (2^64 - 1) = 2^128 - 1.
                 let t =
                     u128::from(aj) * u128::from(bi) + u128::from(wide[i + j]) + u128::from(carry);
                 wide[i + j] = t as u64;
@@ -141,15 +149,55 @@ impl FieldElement {
         Self::reduce_wide(wide)
     }
 
-    /// The square.
+    /// The square, with 10 limb products instead of 16.
+    ///
+    /// Each cross product a_i a_j with i < j appears twice in a^2, so compute it once and double.
+    ///
+    /// ```text
+    /// a^2 = 2 * sum_(i < j) a_i a_j 2^(64 (i + j))  +  sum_i a_i^2 2^(128 i)
+    /// ```
     #[must_use]
     pub(super) fn square(self) -> Self {
-        self.mul(self)
+        let a = self.0;
+
+        // Phase 1: the six cross products, accumulated row by row.
+        let mut wide = [0_u64; 8];
+        for i in 0..3 {
+            let mut carry = 0_u64;
+            for j in i + 1..4 {
+                let t = u128::from(a[i]) * u128::from(a[j])
+                    + u128::from(wide[i + j])
+                    + u128::from(carry);
+                wide[i + j] = t as u64;
+                carry = (t >> 64) as u64;
+            }
+            wide[i + 4] = carry;
+        }
+
+        // Phase 2: double them.
+        // The cross sum is below 2^511, so the shift loses nothing.
+        for i in (1..8).rev() {
+            wide[i] = (wide[i] << 1) | (wide[i - 1] >> 63);
+        }
+        wide[0] <<= 1;
+
+        // Phase 3: add the four squares a_i^2 on the diagonal, at limbs 2i and 2i + 1.
+        let mut carry = 0_u128;
+        for i in 0..4 {
+            let square = u128::from(a[i]) * u128::from(a[i]);
+            let low = u128::from(wide[2 * i]) + (square & u128::from(u64::MAX)) + carry;
+            wide[2 * i] = low as u64;
+            let high = u128::from(wide[2 * i + 1]) + (square >> 64) + (low >> 64);
+            wide[2 * i + 1] = high as u64;
+            carry = high >> 64;
+        }
+        Self::reduce_wide(wide)
     }
 
     /// The square taken k times in a row.
     #[must_use]
     fn square_times(self, k: u32) -> Self {
+        // Repeated squaring raises to the power 2^k.
         let mut x = self;
         for _ in 0..k {
             x = x.square();
@@ -180,7 +228,8 @@ impl FieldElement {
         }
         let top = carry as u64;
 
-        // Fold 2: top * C is below 2^67; add it and ripple the carry.
+        // Fold 2: top * C is below 2^67.
+        // Add it and ripple the carry.
         let mut carry = u128::from(top) * u128::from(C);
         for limb in &mut r {
             let t = u128::from(*limb) + carry;
@@ -240,6 +289,8 @@ impl FieldElement {
 
     /// The powers a^(2^k - 1) for k = 2, 22 and 223, shared by inversion and square roots.
     fn blocks_of_ones(self) -> (Self, Self, Self) {
+        // x_k = a^(2^k - 1).
+        // Joining x_a and x_b gives x_(a+b) = x_a^(2^b) x_b.
         let x2 = self.square().mul(self);
         let x3 = x2.square().mul(self);
         let x6 = x3.square_times(3).mul(x3);
@@ -264,6 +315,7 @@ pub(super) fn limbs_from_be_bytes(bytes: &[u8; 32]) -> [u64; 4] {
 
 /// The 32-byte big-endian encoding of little-endian limbs.
 pub(super) fn limbs_to_be_bytes(limbs: [u64; 4]) -> [u8; 32] {
+    // Limb 3 is the most significant, so it goes first.
     let mut out = [0_u8; 32];
     let (words, _) = out.as_chunks_mut::<8>();
     for (word, limb) in words.iter_mut().zip(limbs.iter().rev()) {
@@ -274,28 +326,29 @@ pub(super) fn limbs_to_be_bytes(limbs: [u64; 4]) -> [u8; 32] {
 
 /// The 256-bit sum and its carry bit.
 pub(super) fn add_with_carry(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
+    // A 128-bit sum per limb lets the compiler emit one add-with-carry chain.
     let mut out = [0_u64; 4];
-    let mut carry = 0_u64;
+    let mut carry = 0_u128;
     for i in 0..4 {
-        let (s1, c1) = a[i].overflowing_add(b[i]);
-        let (s2, c2) = s1.overflowing_add(carry);
-        out[i] = s2;
-        carry = u64::from(c1) | u64::from(c2);
+        let t = u128::from(a[i]) + u128::from(b[i]) + carry;
+        out[i] = t as u64;
+        carry = t >> 64;
     }
-    (out, carry)
+    (out, carry as u64)
 }
 
 /// The 256-bit difference and its borrow bit.
 pub(super) fn sub_with_borrow(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
+    // A 128-bit difference per limb lets the compiler emit one subtract-with-borrow chain.
+    // A borrow leaves the top half all ones, so its top bit is the borrow.
     let mut out = [0_u64; 4];
-    let mut borrow = 0_u64;
+    let mut borrow = 0_u128;
     for i in 0..4 {
-        let (d1, b1) = a[i].overflowing_sub(b[i]);
-        let (d2, b2) = d1.overflowing_sub(borrow);
-        out[i] = d2;
-        borrow = u64::from(b1) | u64::from(b2);
+        let t = u128::from(a[i]).wrapping_sub(u128::from(b[i]) + borrow);
+        out[i] = t as u64;
+        borrow = t >> 127;
     }
-    (out, borrow)
+    (out, borrow as u64)
 }
 
 #[cfg(test)]
@@ -319,6 +372,7 @@ pub(super) mod tests {
     ///
     /// It uses only addition, so it pins the multiplier and its reduction independently.
     fn mul_reference(a: FieldElement, b: FieldElement) -> FieldElement {
+        // Scan the bits of b from the top: acc = 2 acc + bit * a.
         let mut acc = FieldElement::ZERO;
         for bit in (0..256).rev() {
             acc = acc.double();
@@ -357,7 +411,8 @@ pub(super) mod tests {
 
     #[test]
     fn square_roots_of_known_values() {
-        // 4 has roots 2 and p - 2; the exponent picks one of them.
+        // 4 has roots 2 and p - 2.
+        // The exponent picks one of them.
         let four = FieldElement([4, 0, 0, 0]);
         let root = four.sqrt().unwrap();
         assert!(root == FieldElement([2, 0, 0, 0]) || root == FieldElement([2, 0, 0, 0]).neg());
@@ -371,6 +426,12 @@ pub(super) mod tests {
         fn multiplication_matches_shift_and_add(a in arb_field(), b in arb_field()) {
             // The fast product and its three-fold reduction equal repeated addition.
             prop_assert_eq!(a.mul(b), mul_reference(a, b));
+        }
+
+        #[test]
+        fn square_matches_multiplication(a in arb_field()) {
+            // The halved cross products and the diagonal rebuild the full product.
+            prop_assert_eq!(a.square(), a.mul(a));
         }
 
         #[test]

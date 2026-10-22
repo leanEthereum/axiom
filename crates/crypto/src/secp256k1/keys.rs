@@ -45,12 +45,13 @@ pub struct SecretKey {
 impl SecretKey {
     /// A key from its 32-byte big-endian encoding.
     ///
-    /// The range check runs in constant time; only its outcome is revealed.
+    /// The range check runs in constant time and reveals only its outcome.
     ///
     /// # Errors
     ///
     /// Fails when the value is zero or not below n.
     pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self, Secp256k1Error> {
+        // Zero is a valid scalar but not a valid key: its public key is the identity.
         match Scalar::from_bytes(bytes) {
             Some(scalar) if !scalar.is_zero().reveal() => Ok(Self { scalar }),
             _ => Err(Secp256k1Error::InvalidSecretKey),
@@ -66,6 +67,7 @@ impl SecretKey {
     /// The public key d G, computed in constant time.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
+        // Fixed-base comb over the precomputed generator table.
         let point = GeneratorTable::get().mul_ct(&self.scalar);
         // Invariant: 1 <= d < n and G has order n, so d G is never the identity.
         PublicKey::from_point(point.to_affine().expect("d G is finite for d in [1, n)"))
@@ -74,6 +76,7 @@ impl SecretKey {
     /// Signs a 32-byte message hash with a deterministic nonce, returning a low-s signature.
     #[must_use]
     pub fn sign(&self, hash: &[u8; 32]) -> Signature {
+        // The plain signature drops the recovery identifier.
         self.sign_recoverable(hash).signature()
     }
 
@@ -94,6 +97,7 @@ impl SecretKey {
     /// The scalar multiplication, both inversions, and the low-s choice run in constant time.
     #[must_use]
     pub fn sign_recoverable(&self, hash: &[u8; 32]) -> RecoverableSignature {
+        // z: the hash as an integer modulo n, bits2int then reduction.
         let (z, _) = Scalar::from_bytes_reduced(hash);
         let mut secret = self.scalar.to_bytes();
         let mut nonces = NonceGenerator::new(&secret, &z.to_bytes());
@@ -108,12 +112,14 @@ impl SecretKey {
                 .to_affine()
                 .expect("k G is finite for k in [1, n)");
 
-            // r = x mod n; x >= n happens with probability about 2^-128 and sets recovery bit 1.
+            // r = x mod n.
+            // The case x >= n has probability about 2^-128 and sets recovery bit 1.
             let (r, x_reduced) = Scalar::from_bytes_reduced(&big_r.x.to_bytes());
             let s = k.invert().mul(z.add(r.mul(self.scalar)));
             wipe(slice::from_mut(&mut k));
 
-            // Timing: r = 0 or s = 0 happens with probability about 2^-256; retrying is public.
+            // Timing: r = 0 or s = 0 happens with probability about 2^-256.
+            // Retrying is public.
             if r.is_zero().reveal() || s.is_zero().reveal() {
                 continue;
             }
@@ -133,6 +139,7 @@ impl SecretKey {
     /// The Diffie-Hellman shared point d Q with a peer's public key, in constant time.
     #[must_use]
     pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
+        // Fixed-window ladder with full-scan table reads.
         let point = peer.point.to_jacobian().mul_ct(&self.scalar);
         // Invariant: Q has order n and 1 <= d < n, so d Q is never the identity.
         SharedSecret {
@@ -181,6 +188,7 @@ impl PublicKey {
     ///
     /// Fails on any length other than 33 or 65, a wrong prefix, or a point off the curve.
     pub fn from_sec1_bytes(bytes: &[u8]) -> Result<Self, Secp256k1Error> {
+        // Dispatch on length: 33 bytes compressed, 65 bytes uncompressed.
         if let Ok(compressed) = bytes.try_into() {
             return Self::from_compressed(compressed);
         }
@@ -196,6 +204,7 @@ impl PublicKey {
     ///
     /// Fails on a wrong prefix, x not below p, or x with no point on the curve.
     pub fn from_compressed(bytes: &[u8; 33]) -> Result<Self, Secp256k1Error> {
+        // The prefix byte carries the parity of y.
         let (tag, x) = bytes
             .split_first()
             .ok_or(Secp256k1Error::InvalidPublicKey)?;
@@ -218,6 +227,7 @@ impl PublicKey {
     ///
     /// Fails on a wrong prefix, a coordinate not below p, or a point off the curve.
     pub fn from_uncompressed(bytes: &[u8; 65]) -> Result<Self, Secp256k1Error> {
+        // Only the plain uncompressed prefix is accepted.
         if bytes[0] != TAG_UNCOMPRESSED {
             return Err(Secp256k1Error::InvalidPublicKey);
         }
@@ -230,6 +240,7 @@ impl PublicKey {
 
     /// Decodes one coordinate, refusing values not below p.
     fn coordinate(bytes: &[u8]) -> Result<FieldElement, Secp256k1Error> {
+        // Exactly 32 bytes, then the range check against p.
         let bytes: &[u8; 32] = bytes
             .try_into()
             .map_err(|_| Secp256k1Error::InvalidPublicKey)?;
@@ -245,6 +256,7 @@ impl PublicKey {
     /// The 65-byte uncompressed form.
     #[must_use]
     pub fn to_uncompressed(&self) -> [u8; 65] {
+        // Prefix 0x04, then x and y big-endian.
         let mut out = [0_u8; 65];
         out[0] = TAG_UNCOMPRESSED;
         out[1..33].copy_from_slice(&self.point.x.to_bytes());
@@ -275,6 +287,7 @@ impl PublicKey {
     ///
     /// Fails with a high-s error, or when the signature does not verify.
     pub fn verify(&self, hash: &[u8; 32], signature: &Signature) -> Result<(), Secp256k1Error> {
+        // Strict low-s, per BIP 62 and libsecp256k1.
         let Signature { r, s } = *signature;
         if s.is_high().reveal() {
             return Err(Secp256k1Error::HighS);
@@ -358,6 +371,7 @@ impl fmt::Debug for SharedSecret {
 
 /// The 33-byte SEC 1 compressed encoding of a point, per section 2.3.3.
 fn compress(point: &AffinePoint) -> [u8; 33] {
+    // Prefix 0x02 or 0x03 by parity of y, then x big-endian.
     let mut out = [0_u8; 33];
     // Timing: the parity bit is added, not branched on, since a shared point is secret.
     out[0] = TAG_EVEN + point.y.is_odd().bit() as u8;

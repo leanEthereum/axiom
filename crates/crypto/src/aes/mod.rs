@@ -97,14 +97,17 @@ impl Aes128 {
 
     /// Encrypts one block in place.
     pub fn encrypt_block(&self, block: &mut [u8; BLOCK_LEN]) {
+        // One block is a batch of one.
         self.encrypt_blocks(slice::from_mut(block));
     }
 
     /// Encrypts every block in place.
     pub fn encrypt_blocks(&self, blocks: &mut [[u8; BLOCK_LEN]]) {
+        // Hardware path: AES-NI, eight blocks in flight.
         #[cfg(target_arch = "x86_64")]
         if self.hardware {
-            // SAFETY: the flag is set only when the CPU reports AES-NI and SSE2, the features the function enables.
+            // SAFETY: the flag is set only when the CPU reports AES-NI and SSE2.
+            // Those are the features the function enables.
             unsafe {
                 ni::encrypt_blocks(&self.keys, blocks);
             }
@@ -159,7 +162,8 @@ mod tests {
 
     #[test]
     fn fips_197_vectors() {
-        // Appendix B: the worked example; appendix C.1: the AES-128 known answer.
+        // Appendix B: the worked example.
+        // Appendix C.1: the AES-128 known answer.
         let cases = [
             (
                 [

@@ -34,6 +34,7 @@ const POLY: i64 = 0x87;
 /// The four products accumulate unreduced in 256 bits, then reduce once.
 #[target_feature(enable = "pclmulqdq,ssse3,sse2")]
 pub(super) fn update(powers: &[u128; 4], acc: u128, blocks: &[[u8; BLOCK_LEN]]) -> u128 {
+    // Move H^1..H^4 and the running value into registers, in the natural bit order.
     let [h1, h2, h3, h4] = powers.map(|power| from_u128(power));
     let mut running = from_u128(acc);
 
@@ -71,6 +72,7 @@ pub(super) fn update(powers: &[u128; 4], acc: u128, blocks: &[[u8; BLOCK_LEN]]) 
 #[inline]
 #[target_feature(enable = "pclmulqdq,sse2")]
 fn product(a: __m128i, b: __m128i) -> (__m128i, __m128i, __m128i) {
+    // The two outer products need no preprocessing.
     let low = _mm_clmulepi64_si128::<0x00>(a, b);
     let high = _mm_clmulepi64_si128::<0x11>(a, b);
 
@@ -123,7 +125,7 @@ fn reduce(high: __m128i, middle: __m128i, low: __m128i) -> __m128i {
     reason = "the unaligned load accepts any address"
 )]
 fn to_natural(block: &[u8; BLOCK_LEN]) -> __m128i {
-    // SAFETY: each pointer covers exactly 16 readable bytes, and the unaligned load accepts any address.
+    // SAFETY: each pointer covers 16 readable bytes, and unaligned loads accept any address.
     let (value, into_high, into_low) = unsafe {
         (
             _mm_loadu_si128(block.as_ptr().cast::<__m128i>()),
@@ -161,7 +163,7 @@ fn from_u128(value: u128) -> __m128i {
 )]
 fn to_u128(value: __m128i) -> u128 {
     let mut bytes = [0_u8; 16];
-    // SAFETY: the pointer covers exactly 16 writable bytes, and the unaligned store accepts any address.
+    // SAFETY: the pointer covers 16 writable bytes, and unaligned stores accept any address.
     unsafe {
         _mm_storeu_si128(bytes.as_mut_ptr().cast::<__m128i>(), value);
     }

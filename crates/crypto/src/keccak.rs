@@ -1,4 +1,4 @@
-//! Keccak-f[1600] and Keccak-256, the hash Ethereum uses for addresses and node identities.
+//! Keccak-f\[1600\] and Keccak-256, the hash Ethereum uses for addresses and node identities.
 //!
 //! # Overview
 //!
@@ -15,7 +15,7 @@
 /// Lanes of the permutation state, a 5 x 5 grid of 64-bit words.
 const LANES: usize = 25;
 
-/// Rounds of Keccak-f[1600]: 12 + 2 * log_2(64), per the Keccak reference, section 1.2.
+/// Rounds of Keccak-f\[1600\]: 12 + 2 * log_2(64), per the Keccak reference, section 1.2.
 const ROUNDS: usize = 24;
 
 /// Bytes absorbed per permutation for a 256-bit output.
@@ -110,6 +110,7 @@ impl KeccakF1600 {
     /// iota  : lane (0, 0) absorbs the round constant
     /// ```
     pub fn permute(&mut self) {
+        // Lanes in place, 24 rounds.
         let a = &mut self.lanes;
         for &round_constant in &ROUND_CONSTANTS {
             // Theta, phase 1: parity of each of the five columns.
@@ -160,6 +161,8 @@ impl KeccakF1600 {
 
     /// XORs one rate-sized block into the leading lanes.
     fn absorb_block(&mut self, block: &[u8; RATE]) {
+        // 17 little-endian words fill the 136-byte rate.
+        // The 8 capacity lanes stay untouched.
         let (words, _) = block.as_chunks::<8>();
         for (lane, word) in self.lanes.iter_mut().zip(words) {
             *lane ^= u64::from_le_bytes(*word);
@@ -206,6 +209,7 @@ impl Keccak256 {
     /// The digest of one byte string.
     #[must_use]
     pub fn digest(data: &[u8]) -> [u8; Self::OUTPUT_LEN] {
+        // One-shot form of new, update, finalize.
         let mut hasher = Self::new();
         hasher.update(data);
         hasher.finalize()

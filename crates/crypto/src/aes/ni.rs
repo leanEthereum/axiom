@@ -20,6 +20,7 @@ const LANES: usize = 8;
 /// AESENCLAST omits MixColumns, as the last round does.
 #[target_feature(enable = "aes,sse2")]
 pub(super) fn encrypt_blocks(keys: &RoundKeys, blocks: &mut [[u8; 16]]) {
+    // Load the eleven round keys once for the whole call.
     let keys = keys.map(|key| load(&key));
 
     // Eight blocks at a time, round by round, so the eight AESENCs of a round overlap.
@@ -54,7 +55,7 @@ pub(super) fn encrypt_blocks(keys: &RoundKeys, blocks: &mut [[u8; 16]]) {
     reason = "the unaligned load accepts any address"
 )]
 fn load(bytes: &[u8; 16]) -> __m128i {
-    // SAFETY: the pointer covers exactly 16 readable bytes, and the unaligned load accepts any address.
+    // SAFETY: the pointer covers 16 readable bytes, and unaligned loads accept any address.
     unsafe { _mm_loadu_si128(bytes.as_ptr().cast::<__m128i>()) }
 }
 
@@ -66,6 +67,6 @@ fn load(bytes: &[u8; 16]) -> __m128i {
     reason = "the unaligned store accepts any address"
 )]
 fn store(bytes: &mut [u8; 16], value: __m128i) {
-    // SAFETY: the pointer covers exactly 16 writable bytes, and the unaligned store accepts any address.
+    // SAFETY: the pointer covers 16 writable bytes, and unaligned stores accept any address.
     unsafe { _mm_storeu_si128(bytes.as_mut_ptr().cast::<__m128i>(), value) }
 }

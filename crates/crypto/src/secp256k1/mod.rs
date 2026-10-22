@@ -232,7 +232,8 @@ mod tests {
 
     #[test]
     fn secret_key_range() {
-        // 0 and n are refused; 1 and n - 1 are the extremes accepted.
+        // 0 and n are refused.
+        // 1 and n - 1 are the extremes accepted.
         let n = hex::<32>("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
         assert_eq!(
             SecretKey::from_bytes(&[0; 32]).unwrap_err(),
@@ -319,7 +320,8 @@ mod tests {
 
     #[test]
     fn signature_encodings_are_validated() {
-        // r = 0 and s = n are refused; a recovery id of 4 is refused.
+        // r = 0 and s = n are refused.
+        // A recovery id of 4 is refused.
         let n = hex::<32>("fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
         let mut bytes = [1_u8; 64];
         bytes[..32].fill(0);
@@ -361,7 +363,8 @@ mod tests {
 
     #[test]
     fn recovery_refuses_impossible_nonce_points() {
-        // Recovery id 2 asks for x = r + n; with r near n that exceeds p, so no point exists.
+        // Recovery id 2 asks for x = r + n.
+        // With r near n that exceeds p, so no point exists.
         let mut bytes = [0xff_u8; 65];
         bytes[..32].copy_from_slice(&hex::<32>(
             "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140",
@@ -386,7 +389,11 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
-        fn sign_verify_round_trip(key in arb_secret(), hash in any::<[u8; 32]>(), flip in 0_usize..256) {
+        fn sign_verify_round_trip(
+            key in arb_secret(),
+            hash in any::<[u8; 32]>(),
+            flip in 0_usize..256,
+        ) {
             // Law: a fresh signature is low-s and verifies.
             let signature = key.sign(&hash);
             prop_assert!(signature.is_low_s());
@@ -395,7 +402,10 @@ mod tests {
             // Mutation: one flipped hash bit makes it fail.
             let mut other = hash;
             other[flip / 8] ^= 1 << (flip % 8);
-            prop_assert_eq!(key.public_key().verify(&other, &signature), Err(Secp256k1Error::VerificationFailed));
+            prop_assert_eq!(
+                key.public_key().verify(&other, &signature),
+                Err(Secp256k1Error::VerificationFailed)
+            );
         }
 
         #[test]

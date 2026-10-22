@@ -48,6 +48,7 @@ impl Mask {
     /// Holds when the two words are equal.
     #[inline]
     pub(crate) fn equal(a: u64, b: u64) -> Self {
+        // Equal words XOR to zero.
         Self::is_zero(a ^ b)
     }
 
@@ -116,6 +117,7 @@ impl Mask {
 ///
 /// Secret keys call this on drop.
 pub(crate) fn wipe<T: Copy + Default>(values: &mut [T]) {
+    // Volatile writes: the compiler must perform each one, even right before a free.
     for value in values.iter_mut() {
         // SAFETY: the pointer comes from a live mutable reference, so it is valid and aligned.
         unsafe {

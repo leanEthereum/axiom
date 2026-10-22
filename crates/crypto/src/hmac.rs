@@ -79,6 +79,7 @@ impl HmacSha256 {
     /// The tag of one message.
     #[must_use]
     pub fn mac(key: &[u8], message: &[u8]) -> [u8; Self::OUTPUT_LEN] {
+        // One-shot form of new, update, finalize.
         let mut mac = Self::new(key);
         mac.update(message);
         mac.finalize()
@@ -86,6 +87,7 @@ impl HmacSha256 {
 
     /// Feeds more message bytes.
     pub fn update(&mut self, data: &[u8]) {
+        // Message bytes feed the inner hash only.
         self.inner.update(data);
     }
 
@@ -103,6 +105,7 @@ impl HmacSha256 {
     /// Every byte is compared, so the time does not reveal where a forgery first differs.
     #[must_use]
     pub fn verify(self, expected: &[u8; Self::OUTPUT_LEN]) -> bool {
+        // Timing: every byte of both tags is compared.
         Mask::bytes_equal(&self.finalize(), expected).reveal()
     }
 }

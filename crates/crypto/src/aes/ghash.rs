@@ -1,4 +1,4 @@
-//! GHASH, the polynomial hash over GF(2^128) that authenticates GCM, per NIST SP 800-38D, section 6.4.
+//! GHASH, the polynomial hash that authenticates GCM, per NIST SP 800-38D, section 6.4.
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::is_x86_feature_detected;
@@ -74,6 +74,8 @@ impl Ghash {
     ///
     /// GCM pads the AAD and the ciphertext this way, per SP 800-38D, section 7.1.
     pub(super) fn update_padded(&mut self, data: &[u8]) {
+        // Whole blocks go straight in.
+        // A short tail is zero-padded to one more block.
         let (blocks, tail) = data.as_chunks::<BLOCK_LEN>();
         self.update_blocks(blocks);
         if !tail.is_empty() {
@@ -87,7 +89,8 @@ impl Ghash {
     pub(super) fn update_blocks(&mut self, blocks: &[[u8; BLOCK_LEN]]) {
         #[cfg(target_arch = "x86_64")]
         if self.hardware {
-            // SAFETY: the flag is set only when the CPU reports PCLMULQDQ and SSSE3, the features the function enables.
+            // SAFETY: the flag is set only when the CPU reports PCLMULQDQ and SSSE3.
+            // Those are the features the function enables.
             self.acc = unsafe { clmul::update(&self.powers, self.acc, blocks) };
             return;
         }
@@ -96,6 +99,7 @@ impl Ghash {
 
     /// Absorbs whole blocks one at a time, the reference for the hardware path.
     fn update_portable(h: u128, mut acc: u128, blocks: &[[u8; BLOCK_LEN]]) -> u128 {
+        // Horner's rule, one block at a time.
         for block in blocks {
             acc = Self::mul(acc ^ Self::to_natural(block), h);
         }
@@ -110,12 +114,14 @@ impl Ghash {
 
     /// A block in the natural bit order: bit i is the coefficient of x^i.
     pub(super) const fn to_natural(block: &[u8; BLOCK_LEN]) -> u128 {
-        // The first byte's top bit is x^0; as a big-endian integer it is bit 127, so reverse.
+        // The first byte's top bit is x^0.
+        // As a big-endian integer it is bit 127, so reverse.
         u128::from_be_bytes(*block).reverse_bits()
     }
 
     /// The product a * b in GF(2^128), in constant time.
     pub(super) fn mul(a: u128, b: u128) -> u128 {
+        // A 256-bit carry-less product, then reduction modulo the GCM polynomial.
         let (high, low) = clmul_128(a, b);
         reduce(high, low)
     }
@@ -135,6 +141,7 @@ impl Drop for Ghash {
 /// a b = a1 b1 x^128 + ((a0 + a1)(b0 + b1) + a0 b0 + a1 b1) x^64 + a0 b0
 /// ```
 fn clmul_128(a: u128, b: u128) -> (u128, u128) {
+    // Split both operands into 64-bit halves: three half products replace four.
     let (a0, a1) = (a as u64, (a >> 64) as u64);
     let (b0, b1) = (b as u64, (b >> 64) as u64);
     let low = clmul_64(a0, b0);
@@ -152,6 +159,7 @@ fn clmul_128(a: u128, b: u128) -> (u128, u128) {
 /// rev(a) rev(b) = rev_127(a b)   so   high(a b) = rev(low(rev(a) rev(b))) >> 1
 /// ```
 fn clmul_64(a: u64, b: u64) -> u128 {
+    // The low half directly, the high half through bit reversal.
     let low = clmul_64_low(a, b);
     let high = clmul_64_low(a.reverse_bits(), b.reverse_bits()).reverse_bits() >> 1;
     (u128::from(high) << 64) | u128::from(low)
@@ -163,7 +171,9 @@ fn clmul_64(a: u64, b: u64) -> u128 {
 ///
 /// Keep every fourth bit of each operand, leaving three-bit holes between them.
 /// An integer product then sums at most 15 terms per kept position below bit 60.
-/// The sum fits in four bits, so carries stay inside the holes.
+/// Such a sum fits in four bits, so its carries stay inside the holes.
+///
+/// Only position 60 can sum 16 terms, and that carry leaves the word.
 /// Masking afterwards keeps exactly the parity, which is the carry-less coefficient.
 ///
 /// ```text
@@ -171,8 +181,10 @@ fn clmul_64(a: u64, b: u64) -> u128 {
 /// z0 = x0 y0 ^ x1 y3 ^ x2 y2 ^ x3 y1   every term lands on positions 0 mod 4
 /// ```
 ///
-/// This is the constant-time multiplier of BearSSL; integer multiplication is constant time on 64-bit CPUs.
+/// This is the constant-time multiplier of BearSSL.
+/// It relies on integer multiplication taking constant time, as it does on 64-bit CPUs.
 const fn clmul_64_low(x: u64, y: u64) -> u64 {
+    // Masks selecting the bit positions 0, 1, 2 and 3 mod 4.
     const M0: u64 = 0x1111_1111_1111_1111;
     const M1: u64 = 0x2222_2222_2222_2222;
     const M2: u64 = 0x4444_4444_4444_4444;
@@ -194,8 +206,9 @@ const fn clmul_64_low(x: u64, y: u64) -> u64 {
 /// high x^128 = high (x^7 + x^2 + x + 1)
 /// ```
 ///
-/// The shifts push up to 7 bits past bit 127; those fold back once more.
+/// The shifts push up to 7 bits past bit 127, and those fold back once more.
 const fn reduce(high: u128, low: u128) -> u128 {
+    // Bits of high pushed past bit 127 by the shifts by 1, 2 and 7.
     let overflow = (high >> 127) ^ (high >> 126) ^ (high >> 121);
     low ^ high
         ^ (high << 1)
@@ -227,7 +240,9 @@ mod tests {
         (high, low)
     }
 
-    /// Multiplication in GCM's own convention, SP 800-38D, algorithm 1: right shifts with R = 0xe1 || 0^120.
+    /// Multiplication in GCM's own bit order, by algorithm 1 of SP 800-38D.
+    ///
+    /// It shifts right and folds with R = 0xe1 || 0^120.
     fn gcm_mul_reference(x: &[u8; 16], y: &[u8; 16]) -> [u8; 16] {
         let x = u128::from_be_bytes(*x);
         let mut v = u128::from_be_bytes(*y);
@@ -247,7 +262,8 @@ mod tests {
 
     #[test]
     fn sp_800_38d_ghash_example() {
-        // GCM test case 2 of McGrew and Viega: H = AES_0(0), one ciphertext block, then the lengths.
+        // GCM test case 2 of McGrew and Viega: one ciphertext block, then the lengths.
+        // The hash key is H = AES_0(0).
         let h = 0x66e9_4bd4_ef8a_2c3b_884c_fa59_ca34_2b2e_u128.to_be_bytes();
         let ciphertext = 0x0388_dace_60b6_a392_f328_c2b9_71b2_fe78_u128.to_be_bytes();
         let lengths = 0x0000_0000_0000_0000_0000_0000_0000_0080_u128.to_be_bytes();

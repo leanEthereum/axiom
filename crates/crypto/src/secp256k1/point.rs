@@ -36,6 +36,7 @@ impl AffinePoint {
 
     /// The point with the given coordinates, if it lies on the curve.
     pub(super) fn new(x: FieldElement, y: FieldElement) -> Option<Self> {
+        // Check y^2 = x^3 + 7.
         let on_curve = y.square().equals(Self::curve_rhs(x));
         on_curve.reveal().then_some(Self { x, y })
     }
@@ -47,7 +48,8 @@ impl AffinePoint {
         // y^2 = x^3 + 7 has a root exactly when x is the abscissa of a point.
         let y = Self::curve_rhs(x).sqrt()?;
 
-        // The two roots y and p - y have opposite parity; pick the requested one.
+        // The two roots y and p - y have opposite parity.
+        // Pick the requested one.
         let flip = Mask::from_bit(y.is_odd().bit() ^ u64::from(y_is_odd));
         Some(Self {
             x,
@@ -57,6 +59,7 @@ impl AffinePoint {
 
     /// The right-hand side x^3 + 7.
     fn curve_rhs(x: FieldElement) -> FieldElement {
+        // x^3 + 7, the right-hand side of the curve equation.
         x.square().mul(x).add(FieldElement::B)
     }
 
@@ -117,6 +120,7 @@ impl JacobianPoint {
 
     /// Holds at the point at infinity.
     pub(super) fn is_identity(&self) -> Mask {
+        // Z = 0 encodes the point at infinity.
         self.z.is_zero()
     }
 
@@ -131,7 +135,8 @@ impl JacobianPoint {
 
     /// The affine form, or nothing at infinity.
     ///
-    /// The inversion is constant time; only whether the point is at infinity is revealed.
+    /// The inversion runs in constant time.
+    /// Only whether the point is at infinity is revealed.
     pub(super) fn to_affine(self) -> Option<AffinePoint> {
         if self.is_identity().reveal() {
             return None;
@@ -206,7 +211,8 @@ impl JacobianPoint {
         let u2 = other.x.mul(z1z1);
         let s2 = other.y.mul(self.z).mul(z1z1);
 
-        // H and R are the x and y differences, scaled; H = 0 means equal x.
+        // H and R are the x and y differences, scaled.
+        // H = 0 means equal x.
         let h = u2.sub(self.x);
         let r = s2.sub(self.y);
         Self::finish_add(self.x, self.y, h, r, self.z.mul(h))
@@ -221,6 +227,7 @@ impl JacobianPoint {
     /// The result is meaningless when either input is the identity or the two are equal.
     #[must_use]
     pub(super) fn add_unchecked(&self, other: &Self) -> Self {
+        // Both points move to the common denominator Z1^2 Z2^2.
         let (h, r, u1, s1) = self.differences(other);
         Self::finish_add(u1, s1, h, r, self.z.mul(other.z).mul(h))
     }
@@ -234,6 +241,7 @@ impl JacobianPoint {
     #[cfg(test)]
     #[must_use]
     pub(super) fn add(&self, other: &Self) -> Self {
+        // Compute every candidate result, then choose by masks.
         let (h, r, _, _) = self.differences(other);
         let sum = self.add_unchecked(other);
         let doubled = self.double();
@@ -252,6 +260,7 @@ impl JacobianPoint {
     /// Used only on public points, such as during verification.
     #[must_use]
     pub(super) fn add_vartime(&self, other: &Self) -> Self {
+        // Identity inputs return the other point.
         if self.is_identity().reveal() {
             return *other;
         }
@@ -273,6 +282,8 @@ impl JacobianPoint {
     /// The sum with an affine point, for every input, branching on public structure.
     #[must_use]
     pub(super) fn add_affine_vartime(&self, other: &AffinePoint) -> Self {
+        // Z = 1 lifts the affine point.
+        // The general addition handles every case.
         self.add_vartime(&other.to_jacobian())
     }
 
@@ -286,6 +297,7 @@ impl JacobianPoint {
         &self,
         other: &Self,
     ) -> (FieldElement, FieldElement, FieldElement, FieldElement) {
+        // Scale both points to the common denominator Z1^2 Z2^2 (for x) and Z1^3 Z2^3 (for y).
         let z1z1 = self.z.square();
         let z2z2 = other.z.square();
         let u1 = self.x.mul(z2z2);
@@ -308,6 +320,7 @@ impl JacobianPoint {
         r: FieldElement,
         z3: FieldElement,
     ) -> Self {
+        // H^2 and H^3 recur in both coordinates.
         let hh = h.square();
         let hhh = hh.mul(h);
         let v = u1.mul(hh);
@@ -424,6 +437,7 @@ pub(super) mod tests {
 
     /// The point times a scalar by double-and-add, the textbook reference.
     pub(crate) fn mul_reference(point: &JacobianPoint, k: &Scalar) -> JacobianPoint {
+        // Scan k from the top bit: double, then add the point on a set bit.
         let mut acc = JacobianPoint::IDENTITY;
         for bit in (0..256).rev() {
             acc = acc.add_vartime(&acc);
@@ -436,11 +450,13 @@ pub(super) mod tests {
 
     /// A random point: a random multiple of the generator.
     pub(crate) fn arb_point() -> impl Strategy<Value = JacobianPoint> {
+        // k G for a random k covers the whole group, identity included.
         arb_scalar().prop_map(|k| AffinePoint::GENERATOR.to_jacobian().mul_vartime(&k))
     }
 
     /// Asserts two points are the same group element.
     fn assert_same(a: &JacobianPoint, b: &JacobianPoint) {
+        // Compare as group elements, whatever the Z scaling.
         assert!(a.equals(b).reveal(), "{a:?} != {b:?}");
     }
 

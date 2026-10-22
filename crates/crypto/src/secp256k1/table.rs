@@ -31,19 +31,21 @@ static TABLE: OnceLock<GeneratorTable> = OnceLock::new();
 /// No doublings remain: 64 mixed additions make one fixed-base multiplication.
 /// The table holds 64 * 15 points of 64 bytes, about 60 KiB.
 pub(super) struct GeneratorTable {
-    /// Row i holds j 16^i G at index j - 1; there are 64 rows.
+    /// Row i, one of 64, holds j 16^i G at index j - 1.
     rows: Vec<[AffinePoint; ENTRIES]>,
 }
 
 impl GeneratorTable {
     /// The shared table, computed once per process.
     pub(super) fn get() -> &'static Self {
+        // Built on the first call, then shared read-only.
         TABLE.get_or_init(Self::build)
     }
 
     /// Computes every entry, then converts all of them to affine with one inversion.
     fn build() -> Self {
-        // Phase 1: Jacobian multiples, row by row; the base of row i is 16^i G.
+        // Phase 1: Jacobian multiples, row by row.
+        // The base of row i is 16^i G.
         let mut jacobian = Vec::with_capacity(WINDOWS * ENTRIES);
         let mut base = AffinePoint::GENERATOR.to_jacobian();
         for _ in 0..WINDOWS {
@@ -155,7 +157,8 @@ mod tests {
 
     #[test]
     fn rows_hold_the_right_multiples() {
-        // Row 0 starts at G and row 1 at 16 G; entry 14 of row 0 is 15 G.
+        // Row 0 starts at G and row 1 at 16 G.
+        // Entry 14 of row 0 is 15 G.
         let table = GeneratorTable::get();
         let g = AffinePoint::GENERATOR.to_jacobian();
         assert_eq!(table.rows[0][0], AffinePoint::GENERATOR);
@@ -183,7 +186,9 @@ mod tests {
 
     #[test]
     fn edge_scalars() {
-        // 0 gives the identity; n - 1 gives -G; both through the masked comb.
+        // 0 gives the identity.
+        // n - 1 gives -G.
+        // Both run through the masked comb.
         let table = GeneratorTable::get();
         assert!(table.mul_ct(&Scalar::ZERO).is_identity().reveal());
         assert_eq!(
@@ -203,7 +208,11 @@ mod tests {
         }
 
         #[test]
-        fn double_multiplication_matches_two_references(a in arb_scalar(), b in arb_scalar(), c in arb_scalar()) {
+        fn double_multiplication_matches_two_references(
+            a in arb_scalar(),
+            b in arb_scalar(),
+            c in arb_scalar(),
+        ) {
             // a G + b Q with Q = c G, against the sum of two textbook products.
             let g = AffinePoint::GENERATOR.to_jacobian();
             let q = mul_reference(&g, &c);

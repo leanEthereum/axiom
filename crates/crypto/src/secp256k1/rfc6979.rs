@@ -33,13 +33,14 @@ impl NonceGenerator {
     ///
     /// Both inputs are 32-byte big-endian integers modulo n: int2octets and bits2octets of the RFC.
     pub(super) fn new(secret: &[u8; 32], message: &[u8; 32]) -> Self {
+        // Step b and c of RFC 6979, section 3.2: V = 0x01 * 32, K = 0x00 * 32.
         let mut generator = Self {
             key: [0; 32],
             value: [1; 32],
             started: false,
         };
 
-        // Steps d to g of RFC 6979, section 3.2: two rounds of reseeding with the separators 0 and 1.
+        // Steps d to g of RFC 6979, section 3.2: reseed twice, with separators 0 and 1.
         for separator in [0x00, 0x01] {
             let mut mac = HmacSha256::new(&generator.key);
             mac.update(&generator.value);
