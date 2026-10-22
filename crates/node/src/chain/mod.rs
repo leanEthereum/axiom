@@ -560,8 +560,10 @@ impl<P: Preset> Chain<P> {
 
         if head.finalized.epoch > previous.finalized.epoch {
             self.finalize(previous.finalized, head.finalized)?;
-            self.availability
-                .prune(head.finalized.epoch.start_slot::<P>());
+            // Waiting blocks and refused ones at or before finality can never matter again.
+            let finalized_slot = head.finalized.epoch.start_slot::<P>();
+            self.availability.prune(finalized_slot);
+            self.gossip.prune(finalized_slot);
             info!(epoch = %head.finalized.epoch, root = %head.finalized.root, "finalized");
             self.announce(ChainEvent::Finalized(head.finalized));
         }
