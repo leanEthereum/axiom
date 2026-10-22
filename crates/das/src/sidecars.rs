@@ -73,14 +73,14 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
                 KzgBlob::from_bytes(blob.as_ref()).map_err(|_| ColumnError::InvalidKzgProofs)?;
             cells.push(kzg.compute_cells(&blob));
         }
-        Self::verify(body, &cells, proofs, kzg)?;
+        self.verify(&cells, proofs, kzg)?;
 
         // The parts every sidecar shares.
         let header = SignedBeaconBlockHeader {
             message: self.block.message.header(),
             signature: self.block.signature,
         };
-        let inclusion_proof = Self::inclusion_proof(body)?;
+        let inclusion_proof = self.inclusion_proof()?;
 
         // Column i takes cell i and proof i of every blob.
         (0..columns)
@@ -109,11 +109,12 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
 
     /// Checks every cell proof in one batched pairing check.
     fn verify(
-        body: &BeaconBlockBody<P>,
+        self,
         cells: &[Box<[KzgCell; CELLS_PER_EXT_BLOB]>],
         proofs: &[KzgProof],
         kzg: &Kzg,
     ) -> Result<(), ColumnError> {
+        let body = &self.block.message.body;
         let mut commitments = Vec::with_capacity(proofs.len());
         let mut indices = Vec::with_capacity(proofs.len());
         let mut flat = Vec::with_capacity(proofs.len());
@@ -137,8 +138,9 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
 
     /// The branch from the commitment list up to the body root.
     fn inclusion_proof(
-        body: &BeaconBlockBody<P>,
+        self,
     ) -> Result<Vector<Bytes32, P::KzgCommitmentsInclusionProofDepth>, ColumnError> {
+        let body = &self.block.message.body;
         let index = BeaconBlockBody::<P>::field_index(BLOB_KZG_COMMITMENTS_FIELD);
         let (_, proof) = body
             .prove(index)
