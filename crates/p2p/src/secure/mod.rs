@@ -19,10 +19,9 @@
 //! A security protocol implements three small traits: an upgrade, a handshake, and the two ciphers.
 //! Two protocols ship.
 //!
-//! - A plaintext exchange, for tests and private networks: it authenticates nothing.
-//! - Noise XX, generic over its primitives: DH, AEAD, and the identity signature.
-//!
-//! Plugging real X25519, ChaCha20-Poly1305, and secp256k1 into Noise needs no change here.
+//! - Noise XX over X25519, ChaCha20-Poly1305, and SHA-256, with secp256k1 identities.
+//!   It is the default for every real connection.
+//! - A plaintext exchange, for tests only: it authenticates nothing.
 
 mod error;
 pub mod noise;

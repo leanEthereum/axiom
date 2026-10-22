@@ -24,28 +24,38 @@
 //!
 //! ```text
 //! signed message = "noise-libp2p-static-key:" || static DH public key
+//! signature      = DER(ECDSA-secp256k1(SHA-256(signed message)))
 //! ```
 //!
-//! # Extension point
+//! # Keys
 //!
-//! The DH and AEAD primitives sit behind one trait, the identity signature behind another.
-//! SHA-256 is used directly, since the protocol name pins it.
-//! Supplying X25519, ChaCha20-Poly1305, and secp256k1 makes this the production `/noise`.
+//! One X25519 static key serves every connection of a node, signed once by the identity.
+//! The libp2p spec allows this, and forbids storing it to disk; it lives only in memory.
+//! Every handshake draws a fresh ephemeral key from a forward-secure generator.
 //!
 //! See `libp2p/specs/noise/README.md` and the Noise Protocol Framework, revision 34.
 
 mod handshake;
+mod key_source;
 mod payload;
 mod symmetric;
 mod transport;
+#[cfg(test)]
+mod vectors;
+mod xx;
 
-use std::{fmt, sync::Arc};
+use std::{
+    fmt, io,
+    sync::{Mutex, PoisonError},
+};
 
+use axiom_crypto::x25519::SecretKey;
 pub use handshake::NoiseHandshake;
+use key_source::KeySource;
 pub use payload::{NoiseExtensions, NoiseHandshakePayload};
 
-use super::{Handshake, Role, SecureError, SecurityUpgrade};
-use crate::identity::{PeerId, PublicKey};
+use super::{Handshake, Role, SecurityUpgrade};
+use crate::identity::{Keypair, PeerId};
 
 /// The multistream-select name.
 pub const PROTOCOL: &str = "/noise";
@@ -68,105 +78,64 @@ pub const MAX_MESSAGE_LEN: usize = 65535;
 /// Longest plaintext one transport message carries: the message bound minus the tag.
 pub const MAX_PLAINTEXT_LEN: usize = MAX_MESSAGE_LEN - TAG_LEN;
 
-/// An X25519 key pair.
-///
-/// Implementations of the primitives should wipe the secret on drop.
-#[derive(Clone)]
-pub struct DhKeypair {
-    /// The secret scalar.
-    pub secret: [u8; 32],
-    /// The public point.
-    pub public: [u8; DH_LEN],
+/// The `/noise` security protocol for one local identity.
+pub struct NoiseConfig {
+    /// The static X25519 secret, shared by every handshake.
+    static_secret: SecretKey,
+    /// The handshake payload: identity key and signature over the static key.
+    payload: NoiseHandshakePayload,
+    /// Where ephemeral secrets come from.
+    keys: Mutex<KeySource>,
 }
 
-impl fmt::Debug for DhKeypair {
+impl fmt::Debug for NoiseConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Never print the secret.
-        f.debug_struct("DhKeypair")
-            .field("public", &self.public)
+        // The payload is public; the secrets are not.
+        f.debug_struct("NoiseConfig")
+            .field("payload", &self.payload)
             .finish_non_exhaustive()
     }
 }
 
-/// The Diffie-Hellman and AEAD primitives of the cipher suite.
-///
-/// For the production suite, these are X25519 and ChaCha20-Poly1305 from RFC 7748 and RFC 8439.
-pub trait NoiseCrypto: Send + Sync + fmt::Debug {
-    /// A fresh key pair from a cryptographically secure source.
-    fn generate_keypair(&self) -> DhKeypair;
-
-    /// The shared secret of a local secret and a remote public key.
-    ///
-    /// # Errors
-    ///
-    /// Fails on an all-zero output, which a low-order remote point produces.
-    fn dh(&self, secret: &[u8; 32], public: &[u8; DH_LEN]) -> Result<[u8; 32], SecureError>;
-
-    /// Appends the ciphertext and tag of a plaintext.
-    ///
-    /// The 96-bit ChaCha20-Poly1305 nonce is 4 zero bytes, then the counter as 8 bytes LE.
-    fn encrypt(&self, key: &[u8; 32], nonce: u64, ad: &[u8], plaintext: &[u8], out: &mut Vec<u8>);
-
-    /// Appends the plaintext of an authenticated ciphertext.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the tag does not authenticate the ciphertext and associated data.
-    fn decrypt(
-        &self,
-        key: &[u8; 32],
-        nonce: u64,
-        ad: &[u8],
-        ciphertext: &[u8],
-        out: &mut Vec<u8>,
-    ) -> Result<(), SecureError>;
-}
-
-/// The libp2p identity key scheme: signing and verifying.
-///
-/// For Ethereum consensus nodes, this is secp256k1 ECDSA over SHA-256, DER-encoded.
-pub trait NoiseIdentity: Send + Sync + fmt::Debug {
-    /// The local identity key.
-    fn public_key(&self) -> PublicKey;
-
-    /// Signs a message with the local identity key.
-    fn sign(&self, message: &[u8]) -> Vec<u8>;
-
-    /// Whether a signature by a remote identity key verifies.
-    fn verify(&self, key: &PublicKey, message: &[u8], signature: &[u8]) -> bool;
-}
-
-/// The `/noise` security protocol for one local identity.
-#[derive(Debug)]
-pub struct NoiseConfig {
-    /// The DH and AEAD primitives.
-    crypto: Arc<dyn NoiseCrypto>,
-    /// The identity scheme.
-    identity: Arc<dyn NoiseIdentity>,
-    /// The static DH key pair, shared by every handshake.
-    static_keypair: DhKeypair,
-    /// The handshake payload: identity key and signature over the static key.
-    payload: NoiseHandshakePayload,
-}
-
 impl NoiseConfig {
-    /// A configuration with a fresh static key, signed by the identity key.
+    /// A configuration with keys drawn from the operating system's entropy.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the entropy device cannot be read.
+    pub fn new(identity: &Keypair) -> io::Result<Self> {
+        Ok(Self::with_key_source(identity, KeySource::from_os()?))
+    }
+
+    /// A configuration whose every key derives from a seed.
+    ///
+    /// Equal seeds give equal transcripts.
+    /// Use it in tests and simulations only.
     #[must_use]
-    pub fn new(crypto: Arc<dyn NoiseCrypto>, identity: Arc<dyn NoiseIdentity>) -> Self {
-        let static_keypair = crypto.generate_keypair();
-        // Sign once: every handshake reuses the same binding.
+    pub fn from_seed(identity: &Keypair, seed: [u8; 32]) -> Self {
+        Self::with_key_source(identity, KeySource::from_seed(seed))
+    }
+
+    /// The payload this node sends: identity key, signature, no extensions.
+    #[must_use]
+    pub const fn payload(&self) -> &NoiseHandshakePayload {
+        &self.payload
+    }
+
+    /// Draws the static key and signs it once: every handshake reuses the binding.
+    fn with_key_source(identity: &Keypair, mut keys: KeySource) -> Self {
+        let static_secret = keys.next_secret();
         let mut message = STATIC_KEY_DOMAIN.to_vec();
-        message.extend_from_slice(&static_keypair.public);
+        message.extend_from_slice(static_secret.public_key().as_bytes());
         let payload = NoiseHandshakePayload {
-            identity_key: Some(identity.public_key()),
-            identity_sig: Some(identity.sign(&message)),
+            identity_key: Some(identity.public_key().clone()),
+            identity_sig: Some(identity.sign(&message).into_bytes()),
             extensions: None,
         };
         Self {
-            crypto,
-            identity,
-            static_keypair,
+            static_secret,
             payload,
+            keys: Mutex::new(keys),
         }
     }
 }
@@ -177,16 +146,18 @@ impl SecurityUpgrade for NoiseConfig {
     }
 
     fn handshake(&self, role: Role, expected: Option<PeerId>) -> Box<dyn Handshake> {
+        // A panic elsewhere cannot corrupt the generator: a draw is one plain overwrite.
+        let ephemeral = self
+            .keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .next_secret();
         Box::new(NoiseHandshake::new(
             role,
-            Arc::clone(&self.crypto),
-            Arc::clone(&self.identity),
-            self.static_keypair.clone(),
-            self.payload.clone(),
+            self.static_secret.clone(),
+            ephemeral,
+            &self.payload,
             expected,
         ))
     }
 }
-
-#[cfg(test)]
-pub(crate) mod mock;

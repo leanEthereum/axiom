@@ -20,9 +20,30 @@
 //!
 //! Every task waits on a single channel, so no task ever selects over several futures.
 //! The swarm task owns the router; its clock is the time since the swarm started.
+//!
+//! # Backpressure
+//!
+//! Every queue is bounded, and each bound has one policy.
+//!
+//! ```text
+//! socket ──▶ reader task ══▶ connection task ══▶ swarm task ──▶ event queue ──▶ node
+//!                        waits              waits          never waits
+//!
+//! ══▶  bounded channel; a full one makes the sender wait
+//! ```
+//!
+//! - The reader waits for its connection, so a slow connection stops reading the socket.
+//! - A connection grants yamux credit only once the swarm took the data.
+//!   A peer that outpaces the node therefore stalls at its yamux window, then at TCP.
+//! - The swarm never waits: it must keep serving every other peer.
+//!   - Gossip for a connection whose queue is full is dropped; gossipsub repairs the gap.
+//!   - Other input waits in a short per-connection backlog.
+//!     When that overflows, the connection is cut.
+//! - Events for the node are bounded per peer and in all; see the events module.
 
 mod connection;
 mod driver;
+mod events;
 mod upgrade;
 
 use std::{
@@ -35,6 +56,7 @@ use std::{
     time::Duration,
 };
 
+pub use events::{EventLimits, NetworkEvents};
 use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot},
@@ -50,21 +72,21 @@ use crate::{
         ValidationOutcome,
     },
     identify::IdentifyInfo,
-    identity::{PeerId, PublicKey},
+    identity::{Keypair, PeerId},
     multiaddr::{Multiaddr, MultiaddrError},
     multistream::NegotiationError,
-    secure::{SecureError, SecurityUpgrade},
+    secure::{SecureError, SecurityUpgrade, noise::NoiseConfig},
     yamux,
 };
 
 /// Everything the swarm needs to start.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
-    /// The local identity key, announced in handshakes and identify.
-    pub local_key: PublicKey,
+    /// The local secp256k1 identity, which names this node and signs its handshakes.
+    pub identity: Keypair,
     /// The TCP address to listen on; port zero picks a free port.
     pub listen_addr: Multiaddr,
-    /// The security protocol, plaintext or Noise.
+    /// The security protocol: Noise, or plaintext in tests.
     pub security: Arc<dyn SecurityUpgrade>,
     /// Gossipsub parameters.
     pub gossipsub: GossipsubConfig,
@@ -82,14 +104,30 @@ pub struct NetworkConfig {
     pub request_timeout: Duration,
     /// Seed of the router's peer selection.
     pub seed: u64,
+    /// Bounds on peer traffic waiting for the node.
+    pub event_limits: EventLimits,
+    /// Inputs one connection task holds before its senders wait or drop.
+    pub connection_queue: usize,
+    /// Inputs the swarm task holds before connections and the handle wait.
+    pub swarm_queue: usize,
 }
 
 impl NetworkConfig {
-    /// A configuration with mainnet parameters, listening on an ephemeral localhost port.
+    /// A configuration with mainnet parameters, Noise, and an ephemeral localhost port.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the operating system cannot supply entropy for the Noise keys.
+    pub fn new(identity: Keypair) -> Result<Self, NetworkError> {
+        let security = Arc::new(NoiseConfig::new(&identity)?);
+        Ok(Self::with_security(identity, security))
+    }
+
+    /// A configuration with mainnet parameters and a chosen security protocol.
     #[must_use]
-    pub fn new(local_key: PublicKey, security: Arc<dyn SecurityUpgrade>) -> Self {
+    pub fn with_security(identity: Keypair, security: Arc<dyn SecurityUpgrade>) -> Self {
         Self {
-            local_key,
+            identity,
             listen_addr: Multiaddr::from_tcp(([127, 0, 0, 1], 0).into()),
             security,
             gossipsub: GossipsubConfig::default(),
@@ -101,6 +139,10 @@ impl NetworkConfig {
             // RESP_TIMEOUT of the phase0 p2p-interface configuration: 10 seconds.
             request_timeout: Duration::from_secs(10),
             seed: 0,
+            event_limits: EventLimits::default(),
+            // Threshold: 64 reads of up to 64 KiB, so at most 4 MiB of plaintext per connection.
+            connection_queue: 64,
+            swarm_queue: 1024,
         }
     }
 }
@@ -339,7 +381,7 @@ enum Command {
 #[derive(Clone, Debug)]
 pub struct NetworkHandle {
     /// The swarm task's input.
-    commands: mpsc::UnboundedSender<driver::SwarmInput>,
+    commands: mpsc::Sender<driver::SwarmInput>,
     /// The local identity.
     local_peer: PeerId,
     /// The bound listen address.
@@ -362,18 +404,18 @@ impl NetworkHandle {
     }
 
     /// Dials a TCP address; a trailing peer layer is checked during the handshake.
-    pub fn dial(&self, address: Multiaddr) -> Result<(), NetworkError> {
-        self.send(Command::Dial(address))
+    pub async fn dial(&self, address: Multiaddr) -> Result<(), NetworkError> {
+        self.send(Command::Dial(address)).await
     }
 
     /// Joins a gossip topic.
-    pub fn subscribe(&self, topic: Topic) -> Result<(), NetworkError> {
-        self.send(Command::Subscribe(topic))
+    pub async fn subscribe(&self, topic: Topic) -> Result<(), NetworkError> {
+        self.send(Command::Subscribe(topic)).await
     }
 
     /// Leaves a gossip topic.
-    pub fn unsubscribe(&self, topic: Topic) -> Result<(), NetworkError> {
-        self.send(Command::Unsubscribe(topic))
+    pub async fn unsubscribe(&self, topic: Topic) -> Result<(), NetworkError> {
+        self.send(Command::Unsubscribe(topic)).await
     }
 
     /// Publishes an SSZ payload; the network compresses it.
@@ -387,21 +429,21 @@ impl NetworkHandle {
         ssz: Vec<u8>,
     ) -> Result<Result<MessageId, PublishError>, NetworkError> {
         let (reply, outcome) = oneshot::channel();
-        self.send(Command::Publish { topic, ssz, reply })?;
+        self.send(Command::Publish { topic, ssz, reply }).await?;
         outcome.await.map_err(|_| NetworkError::Shutdown)
     }
 
     /// Reports the verdict on a gossip message.
-    pub fn report_validation(
+    pub async fn report_validation(
         &self,
         id: MessageId,
         outcome: ValidationOutcome,
     ) -> Result<(), NetworkError> {
-        self.send(Command::Validate { id, outcome })
+        self.send(Command::Validate { id, outcome }).await
     }
 
     /// Sends a request; chunks and the outcome arrive as events tagged with the returned identifier.
-    pub fn send_request(
+    pub async fn send_request(
         &self,
         peer: PeerId,
         protocol: Protocol,
@@ -413,48 +455,36 @@ impl NetworkHandle {
             peer,
             protocol,
             payload,
-        })?;
+        })
+        .await?;
         Ok(id)
     }
 
     /// Answers an inbound request; the stream closes after the last chunk.
-    pub fn respond(
+    pub async fn respond(
         &self,
         id: InboundRequestId,
         chunks: Vec<ResponseChunk>,
     ) -> Result<(), NetworkError> {
-        self.send(Command::Respond { id, chunks })
+        self.send(Command::Respond { id, chunks }).await
     }
 
     /// Closes the connection to a peer.
-    pub fn disconnect(&self, peer: PeerId) -> Result<(), NetworkError> {
-        self.send(Command::Disconnect(peer))
+    pub async fn disconnect(&self, peer: PeerId) -> Result<(), NetworkError> {
+        self.send(Command::Disconnect(peer)).await
     }
 
     /// Stops the swarm and every connection.
-    pub fn shutdown(&self) -> Result<(), NetworkError> {
-        self.send(Command::Shutdown)
+    pub async fn shutdown(&self) -> Result<(), NetworkError> {
+        self.send(Command::Shutdown).await
     }
 
-    /// Hands a command to the swarm task.
-    fn send(&self, command: Command) -> Result<(), NetworkError> {
+    /// Hands a command to the swarm task, waiting while its queue is full.
+    async fn send(&self, command: Command) -> Result<(), NetworkError> {
         self.commands
             .send(driver::SwarmInput::Command(command))
+            .await
             .map_err(|_| NetworkError::Shutdown)
-    }
-}
-
-/// The stream of network events.
-#[derive(Debug)]
-pub struct NetworkEvents {
-    /// Events from the swarm task.
-    receiver: mpsc::UnboundedReceiver<NetworkEvent>,
-}
-
-impl NetworkEvents {
-    /// The next event, or nothing once the swarm has stopped.
-    pub async fn next(&mut self) -> Option<NetworkEvent> {
-        self.receiver.recv().await
     }
 }
 
@@ -468,16 +498,16 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
         .ok_or_else(|| NetworkError::UnsupportedAddress(config.listen_addr.clone()))?;
     let listener = TcpListener::bind(socket).await?;
     let listen_addr = Multiaddr::from_tcp(listener.local_addr()?);
-    let local_peer = PeerId::from_public_key(&config.local_key);
-    let (input_tx, input_rx) = mpsc::unbounded_channel();
-    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let local_peer = config.identity.peer_id();
+    let (input_tx, input_rx) = mpsc::channel(config.swarm_queue.max(1));
+    let queue = events::EventQueue::new(config.event_limits);
     driver::spawn_swarm(
         config,
         listener,
         listen_addr.clone(),
         input_tx.clone(),
         input_rx,
-        event_tx,
+        Arc::clone(&queue),
     );
     let handle = NetworkHandle {
         commands: input_tx,
@@ -485,5 +515,5 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
         listen_addr,
         next_request: Arc::new(AtomicU64::new(1)),
     };
-    Ok((handle, NetworkEvents { receiver: event_rx }))
+    Ok((handle, NetworkEvents::new(queue)))
 }

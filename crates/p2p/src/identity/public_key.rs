@@ -1,5 +1,9 @@
 //! Public keys in the libp2p protobuf envelope.
 
+use axiom_crypto::secp256k1::PublicKey as Secp256k1PublicKey;
+use sha2::{Digest, Sha256};
+
+use super::DerSignature;
 use crate::protobuf::{
     FieldReader, ProtoMessage, ProtobufError, encode_bytes_field, encode_varint_field,
 };
@@ -81,6 +85,32 @@ impl PublicKey {
             data: compressed.to_vec(),
         }
     }
+
+    /// Whether a signature by this key over a message verifies.
+    ///
+    /// Only secp256k1 is supported, the scheme of Ethereum consensus nodes.
+    /// Keys of other schemes verify nothing.
+    ///
+    /// # Algorithm
+    ///
+    /// ECDSA over the SHA-256 hash of the message, with a strict DER signature.
+    /// A high-s signature is normalized first, as go-libp2p accepts both forms.
+    /// See `libp2p/specs/peer-ids/peer-ids.md`, section on secp256k1.
+    #[must_use]
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        if self.key_type != KeyType::Secp256k1 {
+            return false;
+        }
+        // A malformed point or signature simply fails.
+        let Ok(key) = Secp256k1PublicKey::from_sec1_bytes(&self.data) else {
+            return false;
+        };
+        let Some(signature) = DerSignature::from_bytes(signature.to_vec()).to_signature() else {
+            return false;
+        };
+        let hash: [u8; 32] = Sha256::digest(message).into();
+        key.verify(&hash, &signature.normalize_s()).is_ok()
+    }
 }
 
 impl ProtoMessage for PublicKey {
@@ -144,6 +174,41 @@ mod tests {
         assert_eq!(key.key_type, KeyType::Ed25519);
         assert_eq!(key.data.len(), 32);
         assert_eq!(key.encode(), ed);
+    }
+
+    #[test]
+    fn python_cryptography_signature_verifies() {
+        // Fixture state: the peer-ids spec secp256k1 key signs the static-key binding over 00 01 .. 1f.
+        // The DER signature comes from the Python cryptography package, version 46.0.5.
+        let key = PublicKey::secp256k1(
+            hex("037777e994e452c21604f91de093ce415f5432f701dd8cd1a7a6fea0e630bfca99")
+                .try_into()
+                .unwrap(),
+        );
+        let mut message = b"noise-libp2p-static-key:".to_vec();
+        message.extend(0u8..32);
+        let signature = hex(concat!(
+            "3045022100abd4a5ba80aca8fd7b1b1e19a90db0489d5e5bc37fd30a34f18723034c74666c",
+            "02204b69907b0c3766efcf1cfbbd8ebb39eb8aebd9da17396326f4103aa8ccc503b6"
+        ));
+        assert!(key.verify(&message, &signature));
+
+        // Mutation: the first message byte changes from n to m.
+        message[0] = b'm';
+        assert!(!key.verify(&message, &signature));
+    }
+
+    #[test]
+    fn other_schemes_verify_nothing() {
+        // An ed25519 envelope is decoded but not verified by this node.
+        let key = PublicKey {
+            key_type: KeyType::Ed25519,
+            data: vec![1; 32],
+        };
+        assert!(!key.verify(
+            b"message",
+            &[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]
+        ));
     }
 
     #[test]

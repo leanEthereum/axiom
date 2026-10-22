@@ -4,7 +4,7 @@
 //!
 //! Each side sends its identifier and public key once, then bytes flow unchanged.
 //! Nothing is proven: a peer may claim any key it likes.
-//! It exists for tests and for networks secured by other means.
+//! It exists for tests only; real connections use Noise.
 //!
 //! ```text
 //! message Exchange {
