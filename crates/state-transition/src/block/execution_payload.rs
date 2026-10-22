@@ -2,8 +2,7 @@
 
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BeaconBlockBody, ExecutionPayloadHeader, KzgCommitment, NewPayloadRequest, Preset, Root,
-    VersionedHash, constants::VERSIONED_HASH_VERSION_KZG,
+    BeaconBlockBody, ExecutionPayloadHeader, KzgCommitment, NewPayloadRequest, Preset,
 };
 
 use super::BlockProcessor;
@@ -51,19 +50,9 @@ impl<P: Preset> BlockProcessor<'_, P> {
             });
         }
 
-        let versioned_hashes = body
-            .blob_kzg_commitments
-            .iter()
-            .map(Self::versioned_hash)
-            .collect::<Vec<_>>();
         let request = NewPayloadRequest {
             execution_payload: payload.clone(),
-            versioned_hashes: versioned_hashes.try_into().map_err(|_| {
-                BlockError::TooManyBlobs {
-                    count: body.blob_kzg_commitments.len(),
-                    limit,
-                }
-            })?,
+            versioned_hashes: body.blob_kzg_commitments.map(KzgCommitment::versioned_hash),
             parent_beacon_block_root: state.latest_block_header.parent_root,
             execution_requests: body.execution_requests.clone(),
         };
@@ -91,16 +80,5 @@ impl<P: Preset> BlockProcessor<'_, P> {
             excess_blob_gas: payload.excess_blob_gas,
         };
         Ok(())
-    }
-
-    /// The hash an execution transaction uses to reference a blob commitment.
-    ///
-    /// It is sha256 of the commitment, with the first byte replaced by the version.
-    /// See `kzg_commitment_to_versioned_hash` in the Deneb beacon chain spec.
-    #[must_use]
-    pub fn versioned_hash(commitment: &KzgCommitment) -> VersionedHash {
-        let mut hash = Root::sha256(&commitment.0).0;
-        hash[0] = VERSIONED_HASH_VERSION_KZG;
-        VersionedHash(hash)
     }
 }

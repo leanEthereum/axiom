@@ -87,6 +87,17 @@ impl<T, N: Length> List<T, N> {
     pub fn as_slice(&self) -> &[T] {
         &self.items
     }
+
+    /// A list of the same limit holding each element transformed.
+    ///
+    /// The length is unchanged, so the result always fits.
+    #[must_use]
+    pub fn map<U>(&self, transform: impl FnMut(&T) -> U) -> List<U, N> {
+        List {
+            items: self.items.iter().map(transform).collect(),
+            limit: PhantomData,
+        }
+    }
 }
 
 impl<T, N: Length> TryFrom<Vec<T>> for List<T, N> {
@@ -219,6 +230,16 @@ mod tests {
             })
         );
         assert_eq!(list.as_slice(), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn map_keeps_length_and_order() {
+        // Fixture state: three elements, each doubled into a list of the same limit.
+        let list = Small::try_from(vec![1, 2, 3]).unwrap();
+
+        let doubled: List<u64, Const<4>> = list.map(|item| item * 2);
+
+        assert_eq!(doubled.as_slice(), [2, 4, 6]);
     }
 
     #[test]

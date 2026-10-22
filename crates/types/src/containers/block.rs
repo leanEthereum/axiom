@@ -4,8 +4,8 @@ use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz};
 
 use crate::{
     Attestation, AttesterSlashing, BlsSignature, Bytes32, Deposit, Eth1Data, ExecutionPayload,
-    ExecutionRequests, KzgCommitment, Preset, ProposerSlashing, Root, SignedBlsToExecutionChange,
-    SignedVoluntaryExit, Slot, SyncAggregate, ValidatorIndex,
+    ExecutionRequests, KzgCommitment, NewPayloadRequest, Preset, ProposerSlashing, Root,
+    SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate, ValidatorIndex,
 };
 
 /// Commitments to a block's blobs.
@@ -150,6 +150,27 @@ impl<P: Preset> Container for BeaconBlock<P> {
             state_root: fields.field()?,
             body: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> BeaconBlock<P> {
+    /// The request the execution engine judges for this block's payload.
+    ///
+    /// Everything it holds comes from the block alone, so it can be sent before the transition runs.
+    /// See `process_execution_payload` in the Electra beacon chain spec.
+    #[must_use]
+    pub fn new_payload_request(&self) -> NewPayloadRequest<P> {
+        NewPayloadRequest {
+            execution_payload: self.body.execution_payload.clone(),
+            // The engine checks these against the blob transactions in the payload.
+            versioned_hashes: self
+                .body
+                .blob_kzg_commitments
+                .map(KzgCommitment::versioned_hash),
+            // The block header the transition writes names this same parent.
+            parent_beacon_block_root: self.parent_root,
+            execution_requests: self.body.execution_requests.clone(),
+        }
     }
 }
 

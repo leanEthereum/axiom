@@ -4,7 +4,7 @@ use std::fmt;
 
 use axiom_ssz::{DecodeError, Root, Ssz};
 
-use crate::Hex;
+use crate::{Hex, VersionedHash, constants::VERSIONED_HASH_VERSION_KZG};
 
 /// A KZG commitment to a blob polynomial, a compressed G1 point.
 ///
@@ -20,6 +20,18 @@ impl KzgCommitment {
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 48] {
         &self.0
+    }
+
+    /// The hash the execution layer knows this commitment by.
+    ///
+    /// It is sha256 of the commitment, with the first byte replaced by the version.
+    /// See `kzg_commitment_to_versioned_hash` in the Deneb beacon chain spec.
+    #[must_use]
+    pub fn versioned_hash(&self) -> VersionedHash {
+        // The version byte lets a later commitment scheme reuse the same hash slot.
+        let mut hash = Root::sha256(&self.0).0;
+        hash[0] = VERSIONED_HASH_VERSION_KZG;
+        VersionedHash(hash)
     }
 }
 
@@ -137,5 +149,26 @@ impl Ssz for KzgProof {
 
     fn hash_tree_root(&self) -> Root {
         self.0.hash_tree_root()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versioned_hash_replaces_the_first_byte_with_the_version() {
+        // Fixture state: the point at infinity, 0xc0 followed by 47 zero bytes.
+        let mut bytes = [0; 48];
+        bytes[0] = 0xc0;
+
+        // Expected: sha256 of those bytes, first byte overwritten by version 0x01.
+        //
+        //     sha256 = 0x0657f375...c444014 (computed independently with Python hashlib)
+        let expected = "010657f37554c781402a22917dee2f75def7ab966d7b770905398eba3c444014";
+        assert_eq!(
+            KzgCommitment(bytes).versioned_hash().to_string(),
+            format!("0x{expected}")
+        );
     }
 }
