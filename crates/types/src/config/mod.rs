@@ -13,7 +13,7 @@ pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
 pub use yaml::ConfigError;
 
-use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Root, Version};
+use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Preset, Root, Version};
 
 /// Every runtime parameter of a beacon chain network.
 ///
@@ -260,6 +260,30 @@ impl ChainConfig {
                 },
             ]),
         }
+    }
+
+    /// The configuration published alongside a preset.
+    #[must_use]
+    pub fn for_preset<P: Preset>() -> Self {
+        if P::NAME == "mainnet" {
+            Self::mainnet()
+        } else {
+            Self::minimal()
+        }
+    }
+
+    /// The same configuration with every fork through Fulu active from genesis.
+    ///
+    /// Spec test vectors are generated this way, whatever the published fork epochs say.
+    #[must_use]
+    pub const fn with_forks_at_genesis(mut self) -> Self {
+        self.altair_fork_epoch = Epoch::GENESIS;
+        self.bellatrix_fork_epoch = Epoch::GENESIS;
+        self.capella_fork_epoch = Epoch::GENESIS;
+        self.deneb_fork_epoch = Epoch::GENESIS;
+        self.electra_fork_epoch = Epoch::GENESIS;
+        self.fulu_fork_epoch = Epoch::GENESIS;
+        self
     }
 
     /// The minimal configuration, which every fork starts disabled in.

@@ -5,11 +5,10 @@ use std::marker::PhantomData;
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List};
 use axiom_state_transition::{Deltas, EpochProcessor, State};
 use axiom_types::{
-    BeaconState, Gwei, Preset,
+    BeaconState, ChainConfig, Gwei, Preset,
     constants::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX},
 };
 
-use super::config_of;
 use crate::{Case, Failure, Runner};
 
 /// The deltas container of the rewards test format.
@@ -61,7 +60,7 @@ impl<P: Preset> Runner for Rewards<P> {
     }
 
     fn run_case(&self, _handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
         let processor = EpochProcessor::new(&mut state, &config);
         let participation = processor.participation();
