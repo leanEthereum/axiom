@@ -14,7 +14,10 @@
 //! A stream leaves the map once both halves are done.
 //! Its id is never reused, so late frames for it are ignored.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    ops::Bound::{Excluded, Unbounded},
+};
 
 use super::{
     RecvBuffer, SendBuffer, Side, StreamId,
@@ -607,8 +610,7 @@ impl Streams {
         let order: Vec<StreamId> = match self.cursor {
             Some(cursor) => self
                 .ready
-                .range(cursor..)
-                .skip(1)
+                .range((Excluded(cursor), Unbounded))
                 .chain(self.ready.range(..=cursor))
                 .copied()
                 .collect(),
@@ -1053,6 +1055,31 @@ mod tests {
         assert_eq!(
             server.on_frame(&frame).map_err(|error| error.code),
             Err(TransportErrorCode::STREAM_STATE_ERROR)
+        );
+    }
+
+    #[test]
+    fn rotation_reaches_every_stream_after_the_last_one_drains() {
+        let (mut client, mut server) = pair();
+        let first = client.open().unwrap();
+        let second = client.open().unwrap();
+        client.send(first, b"a").unwrap();
+        // Stream 0 writes and drains; the rotation cursor stays on it.
+        pump(&mut client, &mut server).unwrap();
+        events(&mut server);
+
+        // Stream 4 becomes ready: the stream right after the drained cursor must still go out.
+        client.send(second, b"b").unwrap();
+        pump(&mut client, &mut server).unwrap();
+        assert_eq!(
+            events(&mut server),
+            [
+                Event::InboundStream(second),
+                Event::Data {
+                    stream: second,
+                    data: b"b".to_vec()
+                },
+            ]
         );
     }
 

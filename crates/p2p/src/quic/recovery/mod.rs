@@ -44,6 +44,8 @@ struct SpaceRecovery {
     last_ack_eliciting: Option<Duration>,
     /// Ack-eliciting packets awaiting acknowledgment.
     ack_eliciting_in_flight: usize,
+    /// The largest number sent, tracked or not.
+    largest_sent: Option<PacketNumber>,
 }
 
 impl SpaceRecovery {
@@ -132,6 +134,7 @@ impl Recovery {
     /// Tracks a sent packet.
     pub(crate) fn on_sent(&mut self, space: Space, packet: SentPacket) {
         let state = &mut self.spaces[space.index()];
+        state.largest_sent = state.largest_sent.max(Some(packet.number));
         if packet.in_flight {
             self.congestion.on_sent(packet.size);
         }
@@ -140,6 +143,12 @@ impl Recovery {
             state.ack_eliciting_in_flight += 1;
         }
         state.sent.insert(packet.number, packet);
+    }
+
+    /// Notes a packet that carries only acknowledgments, which is sent but not tracked.
+    pub(crate) fn on_sent_untracked(&mut self, space: Space, number: PacketNumber) {
+        let state = &mut self.spaces[space.index()];
+        state.largest_sent = state.largest_sent.max(Some(number));
     }
 
     /// Whether ack-eliciting packets await acknowledgment in any space.
@@ -169,11 +178,7 @@ impl Recovery {
     ) -> Result<AckOutcome, TransportError> {
         let largest = PacketNumber(ack.largest());
         let state = &mut self.spaces[space.index()];
-        let next_unsent = state
-            .sent
-            .last_key_value()
-            .map_or(PacketNumber(0), |(number, _)| number.next());
-        if largest >= next_unsent && state.largest_acked.is_none_or(|acked| largest > acked) {
+        if state.largest_sent.is_none_or(|sent| largest > sent) {
             return Err(TransportError::protocol(format!(
                 "acknowledgment of unsent packet {} in the {space:?} space",
                 largest.0

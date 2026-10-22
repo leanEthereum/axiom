@@ -1286,6 +1286,8 @@ impl Connection {
             sent_handshake |= space == Space::Handshake;
             if !sent.frames.is_empty() || sent.ack_eliciting || sent.in_flight {
                 self.recovery.on_sent(space, sent);
+            } else {
+                self.recovery.on_sent_untracked(space, sent.number);
             }
         }
         // A client discards Initial keys once it sends a Handshake packet, per RFC 9001, section 4.9.1.
@@ -1379,18 +1381,20 @@ impl Connection {
         let has_more = self.has_eliciting(space);
         let probing = self.spaces[space.index()].probes > 0;
 
-        // 1. The acknowledgment, when due or when it can ride along.
-        let received = &mut self.spaces[space.index()].received;
+        // 1. The acknowledgment, when due or when it can ride along with other frames.
+        let received = &self.spaces[space.index()].received;
         // Initial and Handshake acknowledgments go out at once, so their delay field is unscaled.
         let exponent = if space == Space::Data {
             ACK_DELAY_EXPONENT
         } else {
             0
         };
-        if (received.ack_due(now) || (has_more && received.can_piggyback()))
-            && let Some(ack) = received.take_ack(now, exponent)
+        let ack_due = received.ack_due(now);
+        let mut ack = Vec::new();
+        if (ack_due || received.can_piggyback())
+            && let Some(frame) = received.ack_frame(now, exponent)
         {
-            Frame::Ack(ack).encode(&mut plain.payload);
+            Frame::Ack(frame).encode(&mut ack);
         }
 
         // 2. Everything else, within the congestion window unless probing.
@@ -1399,19 +1403,24 @@ impl Connection {
         } else {
             usize::try_from(self.recovery.congestion.available()).unwrap_or(usize::MAX)
         };
-        let limit = max.min(
-            window
-                .saturating_sub(plain.overhead())
-                .max(plain.payload.len()),
-        );
-        if has_more && limit > plain.payload.len() + MIN_PAYLOAD {
-            ack_eliciting |= self.write_frames(space, &mut plain.payload, limit, &mut frames);
+        let limit = max
+            .saturating_sub(ack.len())
+            .min(window.saturating_sub(plain.overhead() + ack.len()));
+        let mut body = Vec::new();
+        if has_more && limit > MIN_PAYLOAD {
+            ack_eliciting |= self.write_frames(space, &mut body, limit, &mut frames);
         }
         if probing && !ack_eliciting {
-            Frame::Ping.encode(&mut plain.payload);
+            Frame::Ping.encode(&mut body);
             frames.push(SentFrame::Ping);
             ack_eliciting = true;
         }
+        // An acknowledgment that is not due rides only with other frames, so idle peers stay quiet.
+        if !ack.is_empty() && (ack_due || !body.is_empty()) {
+            plain.payload = ack;
+            self.spaces[space.index()].received.on_ack_sent();
+        }
+        plain.payload.extend_from_slice(&body);
         if plain.payload.is_empty() {
             return None;
         }

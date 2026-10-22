@@ -186,6 +186,8 @@ fn run(
         if done(client, server) {
             return true;
         }
+        // The condition may have written or consumed: send what that produced.
+        flush(network, &mut [client, server]);
         // The next moment anything happens: a delivery or a timer.
         let mut next = network.in_flight.keys().next().map(|(at, _)| *at);
         for node in [&*client, &*server] {
@@ -434,7 +436,18 @@ fn exchange(weather: Weather, seed: u64, streams: u64, len: usize, limit: Durati
                     .all(|stream| stream_bytes(client, *stream).1)
         },
     );
-    assert!(ok, "transfer did not complete by {:?}", network.now);
+    let closes: Vec<&Event> = client
+        .events
+        .iter()
+        .chain(&server.events)
+        .map(|(_, event)| event)
+        .filter(|event| matches!(event, Event::Closed(_)))
+        .collect();
+    assert!(
+        ok,
+        "transfer did not complete by {:?}: {closes:?}",
+        network.now
+    );
     for stream in &client_streams {
         assert_eq!(
             stream_bytes(&server, *stream),
@@ -501,7 +514,7 @@ fn flow_control_stalls_until_the_receiver_consumes() {
             stream_bytes(server, stream).0.len() == 50_000
         },
     );
-    assert!(ok);
+    assert!(ok, "received {}", stream_bytes(&server, stream).0.len());
 }
 
 #[test]
@@ -615,7 +628,14 @@ fn key_update_keeps_data_flowing() {
         Duration::from_secs(1),
         |_, server| stream_bytes(server, stream).0.len() == 6,
     );
-    // The first data was acknowledged, so the client may update its keys.
+    // Once the server acknowledges the first data and confirms the handshake, the client may update.
+    run(
+        &mut network,
+        &mut client,
+        &mut server,
+        Duration::from_millis(200),
+        |_, _| false,
+    );
     assert!(client.only().update_keys());
     client.only().send(stream, b" after").unwrap();
     client.only().close(stream).unwrap();

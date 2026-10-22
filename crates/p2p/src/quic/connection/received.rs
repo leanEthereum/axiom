@@ -98,20 +98,31 @@ impl ReceivedPackets {
         self.fresh
     }
 
-    /// Builds an acknowledgment and resets the policy.
+    /// The acknowledgment of what was received, without changing the policy.
     ///
     /// # Arguments
     ///
     /// - `exponent`: this side's ack_delay_exponent, which scales the delay field.
-    pub(crate) fn take_ack(&mut self, now: Duration, exponent: u32) -> Option<AckFrame> {
+    pub(crate) fn ack_frame(&self, now: Duration, exponent: u32) -> Option<AckFrame> {
         let (_, received_at) = self.largest?;
         let delay = now.saturating_sub(received_at);
         let delay = u64::try_from(delay.as_micros()).unwrap_or(u64::MAX) >> exponent;
-        let frame = AckFrame::from_ranges(&self.ranges, delay, MAX_RANGES)?;
+        AckFrame::from_ranges(&self.ranges, delay, MAX_RANGES)
+    }
+
+    /// Resets the policy once an acknowledgment went out.
+    pub(crate) const fn on_ack_sent(&mut self) {
         self.unacked_eliciting = 0;
         self.immediate = false;
         self.deadline = None;
         self.fresh = false;
+    }
+
+    /// Builds an acknowledgment and resets the policy, for tests.
+    #[cfg(test)]
+    fn take_ack(&mut self, now: Duration, exponent: u32) -> Option<AckFrame> {
+        let frame = self.ack_frame(now, exponent)?;
+        self.on_ack_sent();
         Some(frame)
     }
 }
