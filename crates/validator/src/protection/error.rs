@@ -130,6 +130,9 @@ pub enum ProtectionError {
         /// Root of the request or interchange.
         actual: Root,
     },
+    /// The directory holds no database yet, so it names no chain.
+    #[error("no slashing protection database here yet")]
+    Uninitialized,
     /// The interchange holds data slashable against itself or the database.
     #[error("interchange is slashable: {0}")]
     SlashableImport(#[source] Box<Refusal>),

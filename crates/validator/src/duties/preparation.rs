@@ -147,7 +147,8 @@ impl<P: Preset> Preparation<P> {
 
     /// Signs and publishes preferences for this client's coming Gloas proposals.
     ///
-    /// See `get_upcoming_proposal_slots` and `get_signed_proposer_preferences` in the Gloas validator spec.
+    /// See `get_upcoming_proposal_slots` in the Gloas validator spec.
+    /// See also `get_signed_proposer_preferences` there.
     async fn publish_preferences(&self, epoch: Epoch) {
         let current = self.context.timer.current_slot();
         let mut coming = Vec::new();

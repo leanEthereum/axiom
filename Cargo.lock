@@ -43,10 +43,13 @@ name = "axiom"
 version = "0.1.0"
 dependencies = [
  "axiom-discv5",
+ "axiom-http",
+ "axiom-json",
  "axiom-node",
  "axiom-p2p",
  "axiom-telemetry",
  "axiom-types",
+ "axiom-validator",
  "axiom-yaml",
  "thiserror",
  "tokio",
@@ -328,10 +331,12 @@ version = "0.1.0"
 dependencies = [
  "axiom-bls",
  "axiom-crypto",
+ "axiom-ef-tests",
  "axiom-http",
  "axiom-json",
  "axiom-node",
  "axiom-ssz",
+ "axiom-state-transition",
  "axiom-store",
  "axiom-types",
  "proptest",

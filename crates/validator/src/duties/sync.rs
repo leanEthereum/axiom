@@ -38,7 +38,7 @@ struct SubcommitteeAggregator {
 /// A slot's sync duties run in two steps:
 ///
 /// 1. At the sync message deadline, each member signs the head block's root once.
-/// 2. At the contribution deadline, each selected aggregator signs its subcommittee's best contribution.
+/// 2. At the contribution deadline, each selected aggregator signs its subcommittee's contribution.
 ///
 /// A member with several seats signs one message; the node counts it for every seat.
 /// See the Altair honest validator spec and `get_sync_message_due_ms`.

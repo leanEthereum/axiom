@@ -112,7 +112,7 @@ impl<P: Preset> DutyScheduler<P> {
             return;
         }
 
-        // A seat aggregates when its slot signature selects it, see `is_aggregator`.
+        // A seat aggregates when its slot signature selects it, see is_aggregator in the phase0 spec.
         let mut seats = Vec::with_capacity(duties.data.len());
         for duty in duties.data {
             let proof = self

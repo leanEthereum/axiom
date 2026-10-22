@@ -472,7 +472,7 @@ mod tests {
         // A fresh handle decrypts both keystores and finds the remote key.
         // Local keys come first, in file name order, which is public key order.
         let reopened = KeyDirectory::open(&path).unwrap();
-        let mut local = vec![one.pubkey(), two.pubkey()];
+        let mut local = [one.pubkey(), two.pubkey()];
         local.sort_by_key(ToString::to_string);
         let mut expected: Vec<(BlsPubkey, KeySource)> = local
             .iter()

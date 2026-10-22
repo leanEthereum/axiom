@@ -28,4 +28,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+axiom-ef-tests.workspace = true
+axiom-state-transition.workspace = true
 proptest.workspace = true

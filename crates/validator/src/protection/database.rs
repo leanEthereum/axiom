@@ -95,6 +95,23 @@ impl SlashingDatabase {
         )
     }
 
+    /// Opens an existing database, for the chain it was created for.
+    ///
+    /// Tools that export or inspect a database use it, as they may not know the chain.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory holds no database, a record is corrupt, or the store fails.
+    pub fn open_existing(directory: &Path) -> Result<Self, ProtectionError> {
+        let store = Store::open(directory, Options::default())?;
+        let meta = store.table(META)?;
+        let stored = store
+            .get(meta, GENESIS_VALIDATORS_ROOT)?
+            .ok_or(ProtectionError::Uninitialized)?;
+        let root = StoredRoot::decode(&stored, META)?.0.unwrap_or(Root::ZERO);
+        Self::over(store, root)
+    }
+
     /// A database in memory only, for tests and simulations.
     ///
     /// # Errors
@@ -519,6 +536,22 @@ mod tests {
                 .unwrap(),
             Safety::Repeat
         );
+    }
+
+    #[test]
+    fn an_existing_database_opens_for_its_own_chain() {
+        let directory = scratch("existing");
+
+        // Nothing there yet: no chain to open for.
+        assert!(matches!(
+            SlashingDatabase::open_existing(&directory.0),
+            Err(ProtectionError::Uninitialized)
+        ));
+
+        // Once created for a chain, it reopens bound to that chain.
+        drop(SlashingDatabase::open(&directory.0, CHAIN).unwrap());
+        let database = SlashingDatabase::open_existing(&directory.0).unwrap();
+        assert_eq!(database.genesis_validators_root(), CHAIN);
     }
 
     #[test]

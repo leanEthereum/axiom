@@ -16,7 +16,8 @@ pub enum DutyError {
     Sign(#[from] SignError),
     /// A produced block is not for the slot or proposer asked for.
     ///
-    /// A beacon node is not trusted to produce what was asked; this guards against a buggy or hostile one.
+    /// A beacon node is not trusted to produce what was asked.
+    /// A buggy or hostile node is caught here, before the block is signed.
     #[error(
         "produced block is for slot {slot} by {proposer}, asked slot {expected_slot} by {expected_proposer}"
     )]

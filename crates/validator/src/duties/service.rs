@@ -52,7 +52,8 @@ impl<P: Preset> ValidatorClient<P> {
 
     /// Runs duties until the shutdown future completes.
     ///
-    /// The slot loop runs in its own task, aborted at shutdown; duties already started finish on their own.
+    /// The slot loop runs in its own task, aborted at shutdown.
+    /// Duties already started finish on their own.
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
         let slots = task::spawn(self.slots());
         shutdown.await;

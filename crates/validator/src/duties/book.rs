@@ -84,7 +84,8 @@ impl DutyBook {
 
     /// The sync committee seats that sign at a slot.
     ///
-    /// The message of a slot is included in the next block, so the committee of the next slot's period signs.
+    /// The message of a slot is included in the next block.
+    /// So the committee of the next slot's period signs it.
     /// See `compute_sync_committee_period` and its use in the Altair validator spec.
     #[must_use]
     pub fn sync_at<P: Preset>(&self, slot: Slot) -> Vec<SyncDuty> {

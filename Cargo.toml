@@ -94,6 +94,7 @@ axiom-p2p = { path = "crates/p2p" }
 axiom-rlp = { path = "crates/rlp" }
 axiom-discv5 = { path = "crates/discv5" }
 axiom-validator = { path = "crates/validator" }
+axiom-ef-tests = { path = "testing/ef-tests" }
 
 # Error types: the derive writes the Display and Error impls each error enum needs.
 thiserror = "2"
