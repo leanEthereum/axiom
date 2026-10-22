@@ -1,6 +1,6 @@
 [package]
 name = "axiom-crypto"
-description = "Transport cryptography: Keccak, secp256k1, X25519, ChaCha20-Poly1305, AES-GCM, HMAC and HKDF"
+description = "Transport and keystore cryptography: Keccak, secp256k1, X25519, ChaCha20-Poly1305, AES-GCM, HMAC, HKDF, PBKDF2 and scrypt"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
