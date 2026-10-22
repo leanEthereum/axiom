@@ -1,4 +1,4 @@
-//! Transport and key-storage cryptography for the consensus client.
+//! Transport, TLS and key-storage cryptography for the consensus client.
 //!
 //! # Overview
 //!
@@ -7,6 +7,9 @@
 //! - Keccak-256 hashes public keys into node identities and addresses.
 //! - secp256k1 signs node records and agrees on discv5 session keys.
 //! - P-256 ECDSA signs and checks the certificates of the libp2p TLS handshake.
+//! - P-256 ECDH also agrees TLS keys in the secp256r1 group.
+//! - P-384 ECDSA and RSA check web PKI certificates and TLS signatures.
+//! - RSA also signs, with PKCS #1 v1.5 or PSS, for servers holding RSA keys.
 //! - X25519 and ChaCha20-Poly1305 run the libp2p Noise handshake.
 //! - AES-128-GCM seals discv5 messages, and AES-128-CTR masks their headers.
 //! - HMAC-SHA256 and HKDF-SHA256 derive every session key.
@@ -29,7 +32,9 @@ pub mod hkdf;
 pub mod hmac;
 pub mod keccak;
 pub mod p256;
+pub mod p384;
 pub mod pbkdf2;
+pub mod rsa;
 pub mod scrypt;
 pub mod secp256k1;
 pub mod x25519;

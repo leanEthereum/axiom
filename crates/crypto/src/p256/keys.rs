@@ -1,4 +1,4 @@
-//! Secret keys that sign and public keys that verify.
+//! Secret keys that sign and agree, public keys that verify, and the secrets they share.
 
 use std::{fmt, slice};
 
@@ -96,6 +96,21 @@ impl SecretKey {
                 continue;
             }
             return Signature { r, s };
+        }
+    }
+
+    /// The Diffie-Hellman shared secret with a peer's public key, in constant time.
+    ///
+    /// This is the ECDH primitive of SEC 1, section 3.3.1: the x-coordinate of d Q.
+    /// The peer's point passed full validation when decoded, which defeats invalid-curve attacks.
+    #[must_use]
+    pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
+        // Fixed 4-bit windows with full-scan table reads.
+        let point = peer.point.to_projective().mul_ct(&self.scalar);
+        // Invariant: Q has prime order n and 1 <= d < n, so d Q is never the identity.
+        let shared = point.to_affine().expect("d Q is finite for d in [1, n)");
+        SharedSecret {
+            x: shared.x.to_bytes(),
         }
     }
 }
@@ -243,5 +258,36 @@ impl fmt::Debug for PublicKey {
             write!(f, "{byte:02x}")?;
         }
         f.write_str(")")
+    }
+}
+
+/// The secret two parties share after a Diffie-Hellman exchange.
+///
+/// The bytes are cleared from memory when dropped.
+pub struct SharedSecret {
+    /// The big-endian x-coordinate of the point d_A d_B G.
+    x: [u8; 32],
+}
+
+impl SharedSecret {
+    /// The 32-byte big-endian x-coordinate of the shared point.
+    ///
+    /// TLS 1.3 uses exactly these bytes as the ECDHE secret, per RFC 8446, section 7.4.2.
+    #[must_use]
+    pub const fn x_coordinate(&self) -> [u8; 32] {
+        self.x
+    }
+}
+
+impl Drop for SharedSecret {
+    fn drop(&mut self) {
+        wipe(&mut self.x);
+    }
+}
+
+impl fmt::Debug for SharedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The shared point is secret: never print it.
+        f.debug_struct("SharedSecret").finish_non_exhaustive()
     }
 }

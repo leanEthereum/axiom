@@ -1,9 +1,11 @@
 //! This node's TLS identity: a certificate key and the certificate binding it to the host key.
 
-use axiom_crypto::p256::SecretKey;
-use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
-use super::{EcdsaSigValue, TlsError, certificate::CertificateBuilder};
+use axiom_crypto::p256::SecretKey;
+use axiom_tls::{CertifiedKey, SigningKey};
+
+use super::{CertificateError, TlsError, certificate::CertificateBuilder};
 use crate::identity::Keypair;
 
 /// This node's TLS identity: an ephemeral certificate key and its libp2p certificate.
@@ -11,10 +13,8 @@ use crate::identity::Keypair;
 /// One identity may serve many connections; the libp2p TLS spec allows reuse.
 #[derive(Debug)]
 pub struct TlsIdentity {
-    /// The P-256 certificate key; it clears itself when dropped.
-    key: SecretKey,
-    /// The DER certificate.
-    certificate: Vec<u8>,
+    /// The certificate and its P-256 key, which clears itself when dropped.
+    certified: Arc<CertifiedKey>,
 }
 
 impl TlsIdentity {
@@ -31,28 +31,36 @@ impl TlsIdentity {
     ///
     /// Fails when the seed is zero or not below the P-256 group order, with odds near 2^-32.
     pub fn generate(host: &Keypair, seed: [u8; 32]) -> Result<Self, TlsError> {
-        let key = SecretKey::from_bytes(&seed).map_err(|_| TlsError::InvalidSeed)?;
+        let invalid = || TlsError::Certificate(CertificateError::InvalidSeed);
+        let key = SecretKey::from_bytes(&seed).map_err(|_| invalid())?;
         let certificate = CertificateBuilder::new(&key).build(host);
-        Ok(Self { key, certificate })
+        // The builder wrote a certificate for this very key, so the pairing holds.
+        let certified = CertifiedKey::new(vec![certificate], SigningKey::EcdsaP256(key))
+            .map_err(|_| invalid())?;
+        Ok(Self {
+            certified: Arc::new(certified),
+        })
     }
 
     /// The DER certificate.
     #[must_use]
     pub fn certificate(&self) -> &[u8] {
-        &self.certificate
+        // Invariant: the chain holds exactly the one certificate written at construction.
+        &self.certified.chain()[0]
     }
 
-    /// Signs content with the certificate key: ECDSA over its SHA-256 hash, DER-encoded.
-    ///
-    /// The signing runs in constant time.
-    pub(crate) fn sign(&self, content: &[u8]) -> Vec<u8> {
-        let hash: [u8; 32] = Sha256::digest(content).into();
-        EcdsaSigValue::from(self.key.sign(&hash)).to_der()
+    /// The certificate and key, as the handshake signs with them.
+    pub(crate) fn certified(&self) -> Arc<CertifiedKey> {
+        Arc::clone(&self.certified)
     }
 
     /// An identity with a hand-made certificate, for tests of malformed peers.
     #[cfg(test)]
-    pub(crate) const fn with_certificate(key: SecretKey, certificate: Vec<u8>) -> Self {
-        Self { key, certificate }
+    pub(crate) fn with_certificate(key: SecretKey, certificate: Vec<u8>) -> Self {
+        let certified = CertifiedKey::new(vec![certificate], SigningKey::EcdsaP256(key))
+            .expect("the test certificate names the test key");
+        Self {
+            certified: Arc::new(certified),
+        }
     }
 }

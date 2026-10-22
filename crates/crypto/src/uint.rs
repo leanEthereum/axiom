@@ -1,8 +1,9 @@
 //! Fixed-width unsigned integers in little-endian 64-bit limbs.
 //!
-//! Field elements and scalars of every curve share the 256-bit form.
+//! Field elements and scalars of the 256-bit curves share the 256-bit form.
 //! It serves decoding, encoding, carry chains, and signed-digit recoding.
 //! The 320-bit form holds the running value of that recoding.
+//! The 384-bit form carries P-384 values through decoding, encoding, and carry chains.
 
 use std::array;
 
@@ -90,6 +91,56 @@ impl U256 {
             position += 1;
         }
         digits
+    }
+}
+
+/// An unsigned 384-bit integer, limb 0 least significant.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct U384(pub(crate) [u64; 6]);
+
+impl U384 {
+    /// Decodes 48 big-endian bytes.
+    pub(crate) fn from_be_bytes(bytes: &[u8; 48]) -> Self {
+        // Limb 0 is the least significant, so it comes from the last eight bytes.
+        let (words, _) = bytes.as_chunks::<8>();
+        Self(array::from_fn(|i| u64::from_be_bytes(words[5 - i])))
+    }
+
+    /// Encodes as 48 big-endian bytes.
+    pub(crate) fn to_be_bytes(self) -> [u8; 48] {
+        // Limb 5 is the most significant, so it goes first.
+        let mut out = [0_u8; 48];
+        let (words, _) = out.as_chunks_mut::<8>();
+        for (word, limb) in words.iter_mut().zip(self.0.iter().rev()) {
+            *word = limb.to_be_bytes();
+        }
+        out
+    }
+
+    /// The sum modulo 2^384 and its carry bit.
+    pub(crate) fn add_with_carry(self, rhs: Self) -> (Self, u64) {
+        // The same 128-bit carry chain as the 256-bit form, two limbs longer.
+        let mut out = [0_u64; 6];
+        let mut carry = 0_u128;
+        for ((out, a), b) in out.iter_mut().zip(self.0).zip(rhs.0) {
+            let t = u128::from(a) + u128::from(b) + carry;
+            *out = t as u64;
+            carry = t >> 64;
+        }
+        (Self(out), carry as u64)
+    }
+
+    /// The difference modulo 2^384 and its borrow bit.
+    pub(crate) fn sub_with_borrow(self, rhs: Self) -> (Self, u64) {
+        // A borrow leaves the top half of the 128-bit difference all ones.
+        let mut out = [0_u64; 6];
+        let mut borrow = 0_u128;
+        for ((out, a), b) in out.iter_mut().zip(self.0).zip(rhs.0) {
+            let t = u128::from(a).wrapping_sub(u128::from(b) + borrow);
+            *out = t as u64;
+            borrow = t >> 127;
+        }
+        (Self(out), borrow as u64)
     }
 }
 
@@ -184,6 +235,21 @@ mod tests {
         #[test]
         fn bytes_round_trip(bytes in any::<[u8; 32]>()) {
             prop_assert_eq!(U256::from_be_bytes(&bytes).to_be_bytes(), bytes);
+        }
+
+        #[test]
+        fn wide_bytes_round_trip(bytes in any::<[u8; 48]>()) {
+            prop_assert_eq!(U384::from_be_bytes(&bytes).to_be_bytes(), bytes);
+        }
+
+        #[test]
+        fn wide_add_and_sub_invert_each_other(a in any::<[u64; 6]>(), b in any::<[u64; 6]>()) {
+            // (a + b) - b = a modulo 2^384, and the carry and borrow agree.
+            let (x, y) = (U384(a), U384(b));
+            let (sum, carry) = x.add_with_carry(y);
+            let (back, borrow) = sum.sub_with_borrow(y);
+            prop_assert_eq!(back, x);
+            prop_assert_eq!(carry, borrow);
         }
 
         #[test]

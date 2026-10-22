@@ -1,9 +1,12 @@
 //! The SubjectPublicKeyInfo of a P-256 key, per RFC 5480, section 2.
 
 use axiom_crypto::p256::PublicKey;
+use axiom_tls::{
+    der::{DerWriter, Tag},
+    x509::{PublicKey as SubjectKey, X509Error, oid},
+};
 
-use super::{CertificateError, EC_PUBLIC_KEY_OID, PRIME256V1_OID};
-use crate::tls::der::{DerReader, DerWriter, Tag};
+use super::CertificateError;
 
 /// A P-256 public key in the X.509 SubjectPublicKeyInfo form.
 ///
@@ -27,26 +30,15 @@ impl SubjectPublicKeyInfo {
         &self.0
     }
 
-    /// Decodes one whole SubjectPublicKeyInfo.
-    ///
-    /// Only an EC key on the named curve P-256 is accepted, in either SEC 1 point form.
+    /// Decodes one whole SubjectPublicKeyInfo, accepting only an EC key on P-256.
     pub(crate) fn from_der(bytes: &[u8]) -> Result<Self, CertificateError> {
-        let mut outer = DerReader::new(bytes);
-        let mut info = outer.sequence()?;
-        outer.finish()?;
-
-        // RFC 5480, section 2.1.1: the parameters name the curve, and nothing else is allowed.
-        let mut algorithm = info.sequence()?;
-        let key_type = algorithm.object_identifier()?;
-        let curve = algorithm.object_identifier()?;
-        algorithm.finish()?;
-        if key_type != EC_PUBLIC_KEY_OID || curve != PRIME256V1_OID {
-            return Err(CertificateError::UnsupportedKeyAlgorithm);
+        match SubjectKey::from_spki(bytes) {
+            Ok(SubjectKey::P256(key)) => Ok(Self(key)),
+            Ok(_) | Err(X509Error::UnsupportedKeyAlgorithm) => {
+                Err(CertificateError::UnsupportedKeyAlgorithm)
+            }
+            Err(error) => Err(error.into()),
         }
-
-        let point = info.bit_string()?;
-        info.finish()?;
-        Ok(Self(PublicKey::from_sec1_bytes(point)?))
     }
 
     /// The DER encoding, with the point uncompressed as RFC 5480 recommends.
@@ -54,8 +46,8 @@ impl SubjectPublicKeyInfo {
         let mut writer = DerWriter::new();
         writer.sequence(|info| {
             info.sequence(|algorithm| {
-                algorithm.element(Tag::OBJECT_IDENTIFIER, EC_PUBLIC_KEY_OID);
-                algorithm.element(Tag::OBJECT_IDENTIFIER, PRIME256V1_OID);
+                algorithm.element(Tag::OBJECT_IDENTIFIER, oid::EC_PUBLIC_KEY);
+                algorithm.element(Tag::OBJECT_IDENTIFIER, oid::PRIME256V1);
             });
             info.bit_string(&self.0.to_uncompressed());
         });
@@ -65,7 +57,7 @@ impl SubjectPublicKeyInfo {
 
 #[cfg(test)]
 mod tests {
-    use axiom_crypto::p256::{P256Error, SecretKey};
+    use axiom_crypto::p256::SecretKey;
 
     use super::*;
     use crate::testing::hex;
@@ -102,7 +94,7 @@ mod tests {
         der[last] ^= 1;
         assert_eq!(
             SubjectPublicKeyInfo::from_der(&der),
-            Err(CertificateError::P256(P256Error::InvalidPublicKey))
+            Err(CertificateError::X509(X509Error::InvalidPublicKey))
         );
 
         // A fresh key survives the round trip.

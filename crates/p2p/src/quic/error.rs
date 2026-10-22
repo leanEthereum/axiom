@@ -169,7 +169,10 @@ impl From<DecodeError> for TransportError {
 
 impl From<TlsError> for TransportError {
     fn from(error: TlsError) -> Self {
-        Self::new(TransportErrorCode::crypto(error.alert()), error.to_string())
+        Self::new(
+            TransportErrorCode::crypto(error.alert().0),
+            error.to_string(),
+        )
     }
 }
 

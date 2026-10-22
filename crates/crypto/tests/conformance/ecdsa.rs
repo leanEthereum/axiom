@@ -3,7 +3,7 @@
 //! # Overview
 //!
 //! The crate verifies the 64-byte compact form r || s, which is the P1363 encoding.
-//! It has no DER decoder, so a strict DER reader here turns the ASN.1 files into compact form.
+//! It has no DER decoder, so the strict DER reader of this suite turns the ASN.1 files into compact form.
 //! Encoding defects in those files are therefore caught by this reader, not by the crate.
 //!
 //! # Low s
@@ -18,6 +18,7 @@ use axiom_json::Json;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    der::DerReader,
     vectors::hex,
     wycheproof::{Case, Outcome, Tally, VectorFile},
 };
@@ -36,68 +37,8 @@ impl Encoding {
     fn compact(self, signature: &[u8]) -> Option<[u8; 64]> {
         match self {
             Self::P1363 => signature.try_into().ok(),
-            Self::Der => DerReader { rest: signature }.signature(),
+            Self::Der => DerReader::ecdsa_signature(signature, 32)?.try_into().ok(),
         }
-    }
-}
-
-/// A strict reader of the DER signature encoding of SEC 1, appendix C.8.
-struct DerReader<'a> {
-    /// The bytes not yet read.
-    rest: &'a [u8],
-}
-
-impl<'a> DerReader<'a> {
-    /// Reads a whole SEQUENCE of r and s, refusing anything not in minimal DER.
-    fn signature(mut self) -> Option<[u8; 64]> {
-        // SEQUENCE tag 0x30, whose content must be every remaining byte.
-        let body = self.element(0x30)?;
-        if !self.rest.is_empty() {
-            return None;
-        }
-        let mut body = DerReader { rest: body };
-        let r = body.integer()?;
-        let s = body.integer()?;
-        if !body.rest.is_empty() {
-            return None;
-        }
-
-        // Left-pad each magnitude to 32 bytes.
-        let mut compact = [0_u8; 64];
-        compact[32 - r.len()..32].copy_from_slice(r);
-        compact[64 - s.len()..].copy_from_slice(s);
-        Some(compact)
-    }
-
-    /// Reads one element of the given tag and returns its content.
-    fn element(&mut self, tag: u8) -> Option<&'a [u8]> {
-        let (&found, rest) = self.rest.split_first()?;
-        let (&length, rest) = rest.split_first()?;
-        // Threshold: a secp256k1 signature body is at most 70 bytes.
-        // DER writes lengths below 128 in the short form, so a long form is never minimal here.
-        if found != tag || length >= 0x80 || rest.len() < usize::from(length) {
-            return None;
-        }
-        let (content, rest) = rest.split_at(usize::from(length));
-        self.rest = rest;
-        Some(content)
-    }
-
-    /// Reads a non-negative INTEGER in minimal form and returns its magnitude, at most 32 bytes.
-    fn integer(&mut self) -> Option<&'a [u8]> {
-        let content = self.element(0x02)?;
-        let (&first, tail) = content.split_first()?;
-        // A set top bit makes the integer negative.
-        if first & 0x80 != 0 {
-            return None;
-        }
-        // A leading zero is allowed only to clear the top bit of the next byte.
-        let magnitude = match tail.first() {
-            Some(&next) if first == 0 && next & 0x80 == 0 => return None,
-            Some(_) if first == 0 => tail,
-            _ => content,
-        };
-        (magnitude.len() <= 32).then_some(magnitude)
     }
 }
 

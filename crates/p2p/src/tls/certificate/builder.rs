@@ -1,19 +1,15 @@
 //! Writing and self-signing a libp2p certificate.
 
 use axiom_crypto::p256::SecretKey;
+use axiom_tls::{
+    EcdsaSigValue,
+    der::{DerWriter, Tag, Timestamp},
+    x509::oid,
+};
 use sha2::{Digest, Sha256};
 
-use super::{
-    ECDSA_WITH_SHA256_OID, LIBP2P_EXTENSION_OID, ORGANIZATION_NAME_OID, SignedKey,
-    SubjectPublicKeyInfo,
-};
-use crate::{
-    identity::Keypair,
-    tls::{
-        EcdsaSigValue,
-        der::{DerWriter, Tag, Timestamp},
-    },
-};
+use super::{LIBP2P_EXTENSION_OID, SignedKey, SubjectPublicKeyInfo};
+use crate::identity::Keypair;
 
 /// The version field value of an X.509 v3 certificate.
 const VERSION_3: &[u8] = &[2];
@@ -128,7 +124,7 @@ impl<'a> CertificateBuilder<'a> {
     /// Writes the ecdsa-with-SHA256 algorithm identifier, without parameters.
     fn algorithm(writer: &mut DerWriter) {
         writer.sequence(|algorithm| {
-            algorithm.element(Tag::OBJECT_IDENTIFIER, ECDSA_WITH_SHA256_OID);
+            algorithm.element(Tag::OBJECT_IDENTIFIER, oid::ECDSA_WITH_SHA256);
         });
     }
 
@@ -137,7 +133,7 @@ impl<'a> CertificateBuilder<'a> {
         writer.sequence(|name| {
             name.nested(Tag::SET, |set| {
                 set.sequence(|attribute| {
-                    attribute.element(Tag::OBJECT_IDENTIFIER, ORGANIZATION_NAME_OID);
+                    attribute.element(Tag::OBJECT_IDENTIFIER, oid::ORGANIZATION_NAME);
                     attribute.element(Tag::UTF8_STRING, ORGANIZATION);
                 });
             });

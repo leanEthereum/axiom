@@ -967,10 +967,14 @@ impl Connection {
                     level: Level::Application,
                     secrets,
                 } => self.one_rtt = Some(OneRttKeys::new(&secrets)),
+                // Initial keys come from the connection id; the rest belong to TCP records.
                 TlsOutput::Keys {
                     level: Level::Initial,
                     ..
-                } => {}
+                }
+                | TlsOutput::ChangeCipherSpec
+                | TlsOutput::Tls12Keys(_)
+                | TlsOutput::PeerKeyUpdate { .. } => {}
             }
         }
         if self.peer_params.is_none()

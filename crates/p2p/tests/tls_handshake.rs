@@ -8,7 +8,8 @@ use std::sync::Arc;
 use axiom_p2p::{
     Keypair, PeerId,
     tls::{
-        CertificateError, CipherSuite, Level, Secrets, TlsError, TlsIdentity, TlsOutput, TlsSession,
+        Alert, CertificateError, CipherSuite, Level, ProtocolError, Secrets, TlsError, TlsIdentity,
+        TlsOutput, TlsSession,
     },
 };
 use proptest::prelude::*;
@@ -65,6 +66,8 @@ impl Side {
                     self.trace.push((true, level));
                     self.keys.push((level, secrets));
                 }
+                // QUIC never asks for record-layer actions.
+                other => panic!("unexpected output {other:?}"),
             }
         }
         flights
@@ -267,13 +270,13 @@ fn wrong_expected_peer_is_refused() {
     let error = client.unwrap_err();
     assert_eq!(
         error,
-        TlsError::PeerIdMismatch {
+        TlsError::Certificate(CertificateError::PeerIdMismatch {
             expected: host(3).peer_id(),
             actual: host(2).peer_id()
-        }
+        })
     );
     // bad_certificate.
-    assert_eq!(error.alert(), 42);
+    assert_eq!(error.alert(), Alert(42));
     assert!(pump.client.session.is_handshaking());
 }
 
@@ -297,9 +300,12 @@ fn missing_alpn_is_refused() {
         &[],
     );
     let error = server.unwrap_err();
-    assert_eq!(error, TlsError::NoApplicationProtocol);
+    assert_eq!(
+        error,
+        TlsError::Protocol(ProtocolError::NoApplicationProtocol)
+    );
     // no_application_protocol: QUIC closes with 0x100 + 120 = 0x178.
-    assert_eq!(error.alert(), 120);
+    assert_eq!(error.alert(), Alert(120));
 }
 
 #[test]
@@ -319,9 +325,12 @@ fn other_application_protocol_is_refused() {
         &[],
     );
     let error = client.unwrap_err();
-    assert_eq!(error, TlsError::UnofferedApplicationProtocol);
+    assert_eq!(
+        error,
+        TlsError::Protocol(ProtocolError::UnofferedApplicationProtocol)
+    );
     // illegal_parameter.
-    assert_eq!(error.alert(), 47);
+    assert_eq!(error.alert(), Alert(47));
 }
 
 #[test]
@@ -338,9 +347,9 @@ fn tampered_finished_is_refused() {
         &[],
     );
     let error = client.unwrap_err();
-    assert_eq!(error, TlsError::InvalidFinished);
+    assert_eq!(error, TlsError::Protocol(ProtocolError::InvalidFinished));
     // decrypt_error.
-    assert_eq!(error.alert(), 51);
+    assert_eq!(error.alert(), Alert(51));
 }
 
 #[test]
@@ -356,7 +365,10 @@ fn tampered_certificate_verify_is_refused() {
         },
         &[],
     );
-    assert_eq!(client, Err(TlsError::InvalidCertificateVerify));
+    assert_eq!(
+        client,
+        Err(TlsError::Protocol(ProtocolError::InvalidCertificateVerify))
+    );
 }
 
 #[test]
@@ -373,7 +385,7 @@ fn expired_certificate_is_refused() {
         })
     );
     // certificate_expired.
-    assert_eq!(error.alert(), 45);
+    assert_eq!(error.alert(), Alert(45));
 }
 
 #[test]
@@ -388,13 +400,13 @@ fn bytes_at_the_wrong_level_are_refused() {
         .unwrap_err();
     assert_eq!(
         error,
-        TlsError::WrongLevel {
+        TlsError::Protocol(ProtocolError::WrongLevel {
             expected: Level::Initial,
             found: Level::Handshake
-        }
+        })
     );
     // unexpected_message; the failure then sticks, even for correct input.
-    assert_eq!(error.alert(), 10);
+    assert_eq!(error.alert(), Alert(10));
     assert_eq!(
         pump.server.session.read_handshake(Level::Initial, &hello),
         Err(error)
@@ -417,19 +429,19 @@ fn post_handshake_messages() {
     assert!(!client.is_handshaking());
     assert_eq!(client.poll_output(), None);
 
-    // A KeyUpdate is refused: QUIC forbids it, per RFC 9001, section 6.
+    // A KeyUpdate is refused: QUIC forbids it, per RFC 9001, section 6, though TCP accepts it.
     let key_update = [0x18, 0x00, 0x00, 0x01, 0x00];
     let error = client
         .read_handshake(Level::Application, &key_update)
         .unwrap_err();
     assert_eq!(
         error,
-        TlsError::UnexpectedMessage {
+        TlsError::Protocol(ProtocolError::UnexpectedMessage {
             found: 24,
-            state: "connected, where only tickets may arrive"
-        }
+            state: "connected, where only tickets and key updates may arrive"
+        })
     );
-    assert_eq!(error.alert(), 10);
+    assert_eq!(error.alert(), Alert(10));
 
     // A post-handshake CertificateRequest is refused by a fresh connection too.
     let mut pump = Pump::new(&CipherSuite::ALL);
@@ -439,10 +451,10 @@ fn post_handshake_messages() {
         pump.client
             .session
             .read_handshake(Level::Application, &request),
-        Err(TlsError::UnexpectedMessage {
+        Err(TlsError::Protocol(ProtocolError::UnexpectedMessage {
             found: 13,
-            state: "connected, where only tickets may arrive"
-        })
+            state: "connected, where only tickets and key updates may arrive"
+        }))
     );
 }
 

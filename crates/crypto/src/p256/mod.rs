@@ -1,4 +1,4 @@
-//! ECDSA over NIST P-256, the curve of TLS certificate keys.
+//! ECDSA and ECDH over NIST P-256, the curve of TLS certificate keys and key shares.
 //!
 //! # Overview
 //!
@@ -9,6 +9,7 @@
 //! - Signatures follow FIPS 186-4, section 6.4, with RFC 6979 nonces.
 //! - Signatures keep the computed s: certificates and TLS never ask for low s.
 //! - Public keys travel in the SEC 1 compressed or uncompressed encodings.
+//! - Key agreement returns the x-coordinate of d Q, per SEC 1, section 3.3.1.
 //!
 //! Field elements live in Montgomery form, and points in projective coordinates.
 //! Point formulas are the complete ones of Renes, Costello and Batina, EUROCRYPT 2016.
@@ -17,6 +18,7 @@
 //!
 //! Every operation on a secret key runs in constant time.
 //! Fixed-base multiplication reads its table by full scan, and inversions use fixed exponents.
+//! Variable-base multiplication uses fixed windows and reads its table by full scan too.
 //! The complete formulas have no exceptional inputs, so no secret ever selects a branch.
 //!
 //! Verification touches only public data and takes faster variable-time paths.
@@ -31,7 +33,7 @@ mod signature;
 mod table;
 
 pub use error::P256Error;
-pub use keys::{PublicKey, SecretKey};
+pub use keys::{PublicKey, SecretKey, SharedSecret};
 pub use signature::Signature;
 
 #[cfg(test)]
@@ -238,6 +240,26 @@ mod tests {
         let key = SecretKey::from_bytes(&[7; 32]).unwrap();
         assert_eq!(format!("{key:?}"), "SecretKey { .. }");
         assert!(format!("{:?}", key.public_key()).starts_with("PublicKey(0"));
+        let shared = key.diffie_hellman(&key.public_key());
+        assert_eq!(format!("{shared:?}"), "SharedSecret { .. }");
+    }
+
+    #[test]
+    fn diffie_hellman_known_answer() {
+        // Wycheproof ecdh_secp256r1_ecpoint_test.json, tcId 1: a normal exchange.
+        let key = SecretKey::from_bytes(&hex(
+            "0612465c89a023ab17855b0a6bcebfd3febb53aef84138647b5352e02c10c346",
+        ))
+        .unwrap();
+        let mut peer = [0x04_u8; 65];
+        peer[1..].copy_from_slice(&hex::<64>(
+            "62d5bd3372af75fe85a040715d0f502428e07046868b0bfdfa61d731afe44f26ac333a93a9e70a81cd5a95b5bf8d13990eb741c8c38872b4a07d275a014e30cf",
+        ));
+        let peer = PublicKey::from_uncompressed(&peer).unwrap();
+        assert_eq!(
+            key.diffie_hellman(&peer).x_coordinate(),
+            hex("53020d908b0219328b658b525f26780e3ae12bcd952bb25a93bc0895e1714285")
+        );
     }
 
     proptest! {
@@ -263,6 +285,20 @@ mod tests {
                 public.verify(&other, &signature),
                 Err(P256Error::VerificationFailed)
             );
+        }
+
+        #[test]
+        fn diffie_hellman_agrees(a in arb_secret(), b in arb_secret()) {
+            // Law: a (b G) = b (a G), so both sides derive the same x-coordinate.
+            let ab = a.diffie_hellman(&b.public_key()).x_coordinate();
+            let ba = b.diffie_hellman(&a.public_key()).x_coordinate();
+            prop_assert_eq!(ab, ba);
+
+            // a (a G) is the x-coordinate of the public key of a^2, by the fixed-base comb.
+            let scalar = scalar::Scalar::from_bytes(&a.to_bytes()).unwrap();
+            let square = SecretKey::from_bytes(&scalar.mul(scalar).to_bytes()).unwrap();
+            let expected: [u8; 32] = square.public_key().to_uncompressed()[1..33].try_into().unwrap();
+            prop_assert_eq!(a.diffie_hellman(&a.public_key()).x_coordinate(), expected);
         }
 
         #[test]
