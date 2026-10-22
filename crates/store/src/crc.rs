@@ -84,9 +84,17 @@ impl Crc32c {
         Self { state: !0 }
     }
 
-    /// Feeds more bytes into the checksum.
+    /// Feeds more bytes into the checksum, on the fastest path the CPU offers.
     pub(crate) fn update(&mut self, bytes: &[u8]) {
-        self.state = update(self.state, bytes);
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("sse4.2") {
+            // SAFETY: the runtime check above proves the CPU executes SSE4.2 instructions.
+            unsafe {
+                self.update_sse42(bytes);
+            }
+            return;
+        }
+        self.update_scalar(bytes);
     }
 
     /// Returns the checksum of every byte fed so far.
@@ -101,66 +109,57 @@ impl Crc32c {
         crc.update(bytes);
         crc.finish()
     }
-}
 
-/// Advances a raw register over bytes, on the fastest path the CPU offers.
-fn update(state: u32, bytes: &[u8]) -> u32 {
+    /// Advances the register with slicing-by-8 tables.
+    ///
+    /// This is the reference every specialized path must equal.
+    fn update_scalar(&mut self, bytes: &[u8]) {
+        let mut state = self.state;
+        let (words, tail) = bytes.as_chunks::<8>();
+        for word in words {
+            // Fold the register into the low four bytes, then look up all eight bytes at once.
+            //
+            //     byte 0 has the most zero bytes still to pass through, so it uses table 7.
+            //     byte 7 is the last one in, so it uses table 0.
+            let w = u64::from_le_bytes(*word) ^ u64::from(state);
+            state = TABLES[7][(w & 0xff) as usize]
+                ^ TABLES[6][((w >> 8) & 0xff) as usize]
+                ^ TABLES[5][((w >> 16) & 0xff) as usize]
+                ^ TABLES[4][((w >> 24) & 0xff) as usize]
+                ^ TABLES[3][((w >> 32) & 0xff) as usize]
+                ^ TABLES[2][((w >> 40) & 0xff) as usize]
+                ^ TABLES[1][((w >> 48) & 0xff) as usize]
+                ^ TABLES[0][(w >> 56) as usize];
+        }
+        for &byte in tail {
+            // Fewer than eight bytes remain: fall back to one table lookup per byte.
+            state = (state >> 8) ^ TABLES[0][((state ^ u32::from(byte)) & 0xff) as usize];
+        }
+        self.state = state;
+    }
+
+    /// Advances the register with the SSE4.2 CRC32 instruction.
+    ///
+    /// The instruction computes exactly the reflected Castagnoli CRC, register in and register out.
+    ///
+    /// # Performance
+    ///
+    /// One 8-byte instruction has a latency of three cycles, so one stream runs near 8 GB/s.
     #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("sse4.2") {
-        // SAFETY: the runtime check above proves the CPU executes SSE4.2 instructions.
-        return unsafe { update_sse42(state, bytes) };
+    #[target_feature(enable = "sse4.2")]
+    fn update_sse42(&mut self, bytes: &[u8]) {
+        let (words, tail) = bytes.as_chunks::<8>();
+        let mut wide = u64::from(self.state);
+        for word in words {
+            // The 64-bit form zero-extends its 32-bit result, so the register stays in the low half.
+            wide = _mm_crc32_u64(wide, u64::from_le_bytes(*word));
+        }
+        let mut state = wide as u32;
+        for &byte in tail {
+            state = _mm_crc32_u8(state, byte);
+        }
+        self.state = state;
     }
-    update_scalar(state, bytes)
-}
-
-/// Advances a raw register with slicing-by-8 tables.
-///
-/// This is the reference every specialized path must equal.
-fn update_scalar(mut state: u32, bytes: &[u8]) -> u32 {
-    let (words, tail) = bytes.as_chunks::<8>();
-    for word in words {
-        // Fold the register into the low four bytes, then look up all eight bytes at once.
-        //
-        //     byte 0 has the most zero bytes still to pass through, so it uses table 7.
-        //     byte 7 is the last one in, so it uses table 0.
-        let w = u64::from_le_bytes(*word) ^ u64::from(state);
-        state = TABLES[7][(w & 0xff) as usize]
-            ^ TABLES[6][((w >> 8) & 0xff) as usize]
-            ^ TABLES[5][((w >> 16) & 0xff) as usize]
-            ^ TABLES[4][((w >> 24) & 0xff) as usize]
-            ^ TABLES[3][((w >> 32) & 0xff) as usize]
-            ^ TABLES[2][((w >> 40) & 0xff) as usize]
-            ^ TABLES[1][((w >> 48) & 0xff) as usize]
-            ^ TABLES[0][(w >> 56) as usize];
-    }
-    for &byte in tail {
-        // Fewer than eight bytes remain: fall back to one table lookup per byte.
-        state = (state >> 8) ^ TABLES[0][((state ^ u32::from(byte)) & 0xff) as usize];
-    }
-    state
-}
-
-/// Advances a raw register with the SSE4.2 CRC32 instruction.
-///
-/// The instruction computes exactly the reflected Castagnoli CRC, register in and register out.
-///
-/// # Performance
-///
-/// One 8-byte instruction has a latency of three cycles, so one stream runs near 8 GB/s.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.2")]
-fn update_sse42(state: u32, bytes: &[u8]) -> u32 {
-    let (words, tail) = bytes.as_chunks::<8>();
-    let mut wide = u64::from(state);
-    for word in words {
-        // The 64-bit form zero-extends its 32-bit result, so the register stays in the low half.
-        wide = _mm_crc32_u64(wide, u64::from_le_bytes(*word));
-    }
-    let mut state = wide as u32;
-    for &byte in tail {
-        state = _mm_crc32_u8(state, byte);
-    }
-    state
 }
 
 #[cfg(test)]
@@ -198,7 +197,11 @@ mod tests {
         #[test]
         fn dispatch_equals_scalar_reference(bytes in proptest::collection::vec(any::<u8>(), 0..300), seed: u32) {
             // The hardware path, when present, must agree with the tables on any register.
-            prop_assert_eq!(update(seed, &bytes), update_scalar(seed, &bytes));
+            let mut dispatched = Crc32c { state: seed };
+            let mut scalar = dispatched;
+            dispatched.update(&bytes);
+            scalar.update_scalar(&bytes);
+            prop_assert_eq!(dispatched.state, scalar.state);
         }
 
         #[test]
