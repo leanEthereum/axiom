@@ -270,12 +270,15 @@ mod tests {
         let response = Response::new(StatusCode::OK).with_header("x", "a\r\nset-cookie: b");
         assert!(matches!(
             response.encode(false),
-            Err(HttpError::InvalidHeader)
+            Err(HttpError::InvalidHeader { name }) if name == "x"
         ));
 
         // A target with a space would split the request line.
         let request = Request::new(Method::Get, "/a b");
-        assert!(matches!(request.encode("h"), Err(HttpError::Protocol(_))));
+        assert!(matches!(
+            request.encode("h"),
+            Err(HttpError::Protocol(ProtocolError::InvalidTarget))
+        ));
     }
 
     /// Any supported method.

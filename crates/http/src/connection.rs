@@ -92,7 +92,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 let length = usize::try_from(length)
                     .ok()
                     .filter(|&length| length <= max)
-                    .ok_or(ProtocolError::BodyTooLarge)?;
+                    .ok_or(ProtocolError::BodyTooLarge {
+                        size: length,
+                        limit: max,
+                    })?;
                 // The length is known, so one reservation covers the whole read.
                 while self.buf.len() < length {
                     if self.fill(length - self.buf.len()).await? == 0 {
@@ -121,7 +124,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
             BodyLength::UntilClose => loop {
                 // The body is everything until end of stream, within the bound.
                 if self.buf.len() > max {
-                    return Err(ProtocolError::BodyTooLarge.into());
+                    return Err(ProtocolError::BodyTooLarge {
+                        size: self.buf.len() as u64,
+                        limit: max,
+                    }
+                    .into());
                 }
                 if self.fill(READ_CHUNK).await? == 0 {
                     return Ok(mem::take(&mut self.buf));

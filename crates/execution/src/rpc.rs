@@ -49,13 +49,23 @@ impl Call {
     /// Fails on a broken envelope, or with the engine's error object.
     pub(crate) fn result(&self, response: Json) -> Result<Json, EngineError> {
         let Json::Object(mut envelope) = response else {
-            return Err(EnvelopeError::NotAnObject.into());
+            return Err(EnvelopeError::NotAnObject {
+                found: response.kind(),
+            }
+            .into());
         };
         if envelope.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
             return Err(EnvelopeError::WrongVersion.into());
         }
-        if envelope.get("id").and_then(Json::as_u64) != Some(self.id) {
-            return Err(EnvelopeError::IdMismatch.into());
+        let Some(id) = envelope.get("id").and_then(Json::as_u64) else {
+            return Err(EnvelopeError::MissingId { expected: self.id }.into());
+        };
+        if id != self.id {
+            return Err(EnvelopeError::IdMismatch {
+                expected: self.id,
+                found: id,
+            }
+            .into());
         }
 
         // Exactly one of result and error, per JSON-RPC 2.0 section 5.
@@ -63,7 +73,8 @@ impl Call {
         match (envelope.remove("result"), envelope.remove("error")) {
             (Some(result), None) => Ok(result),
             (None, Some(error)) => Err(RpcError::from_json(&error)?.into()),
-            _ => Err(EnvelopeError::ResultOrError.into()),
+            (None, None) => Err(EnvelopeError::ResultOrError { present: 0 }.into()),
+            (Some(_), Some(_)) => Err(EnvelopeError::ResultOrError { present: 2 }.into()),
         }
     }
 }
@@ -194,16 +205,26 @@ mod tests {
     fn envelope_rejections() {
         // Each broken envelope maps to one error.
         let cases = [
-            ("[]", EnvelopeError::NotAnObject),
+            ("[]", EnvelopeError::NotAnObject { found: "array" }),
             (r#"{"id":3,"result":1}"#, EnvelopeError::WrongVersion),
             (
                 r#"{"jsonrpc":"2.0","id":4,"result":1}"#,
-                EnvelopeError::IdMismatch,
+                EnvelopeError::IdMismatch {
+                    expected: 3,
+                    found: 4,
+                },
             ),
-            (r#"{"jsonrpc":"2.0","id":3}"#, EnvelopeError::ResultOrError),
+            (
+                r#"{"jsonrpc":"2.0","id":"3","result":1}"#,
+                EnvelopeError::MissingId { expected: 3 },
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3}"#,
+                EnvelopeError::ResultOrError { present: 0 },
+            ),
             (
                 r#"{"jsonrpc":"2.0","id":3,"result":1,"error":{"code":1,"message":"x"}}"#,
-                EnvelopeError::ResultOrError,
+                EnvelopeError::ResultOrError { present: 2 },
             ),
             (
                 r#"{"jsonrpc":"2.0","id":3,"error":{"message":"x"}}"#,
@@ -217,5 +238,15 @@ mod tests {
                 other => panic!("{text}: {other:?}"),
             }
         }
+
+        // The log line names both ids.
+        let error = EnvelopeError::IdMismatch {
+            expected: 3,
+            found: 4,
+        };
+        assert_eq!(
+            error.to_string(),
+            "response id 4 does not echo request id 3"
+        );
     }
 }

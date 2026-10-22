@@ -122,10 +122,13 @@ fn table_names_and_count_are_bounded() {
     let store = Store::in_memory();
 
     // Names must be 1 to 64 bytes.
-    assert!(matches!(store.table(""), Err(Error::InvalidTableName)));
+    assert!(matches!(
+        store.table(""),
+        Err(Error::InvalidTableName { length: 0 })
+    ));
     assert!(matches!(
         store.table(&"x".repeat(65)),
-        Err(Error::InvalidTableName)
+        Err(Error::InvalidTableName { length: 65 })
     ));
     store.table(&"x".repeat(64)).unwrap();
 
@@ -588,21 +591,26 @@ fn manual_sync_policy_flushes_on_request() {
 #[test]
 fn invalid_options_are_rejected() {
     let dir = TempDir::new("options");
+    // A 63-byte segment is one byte short of the 64-byte minimum.
     let tiny = Options {
         segment_size: 63,
         ..Options::default()
     };
-    assert!(matches!(
-        Store::open(dir.path(), tiny),
-        Err(Error::InvalidOptions(_))
-    ));
+    let error = Store::open(dir.path(), tiny).unwrap_err();
+    assert!(matches!(error, Error::SegmentSizeTooSmall { size: 63 }));
+    assert_eq!(
+        error.to_string(),
+        "segment size of 63 bytes is below the minimum of 64 bytes"
+    );
+
+    // A threshold of 101 percent is past the whole segment.
     let over = Options {
         compaction_threshold: 101,
         ..Options::default()
     };
     assert!(matches!(
         Store::open(dir.path(), over),
-        Err(Error::InvalidOptions(_))
+        Err(Error::CompactionThresholdTooHigh { threshold: 101 })
     ));
 }
 

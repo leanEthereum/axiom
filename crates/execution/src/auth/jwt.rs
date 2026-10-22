@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use axiom_json::{Data, Json, Object};
+use axiom_json::{Data, HexError, Json, Object};
 use thiserror::Error;
 
 use super::{base64url::Base64Url, hmac::HmacSha256};
@@ -58,7 +58,7 @@ impl JwtSecret {
         };
         <[u8; 32]>::from_data(&prefixed)
             .map(Self)
-            .map_err(|_| JwtError::InvalidSecret)
+            .map_err(JwtError::InvalidSecret)
     }
 
     /// Issues a token stamped with a time in seconds since the epoch.
@@ -91,7 +91,7 @@ impl JwtSecret {
         match header.get("alg").and_then(Json::as_str) {
             Some("HS256") => {}
             Some(other) => return Err(JwtError::UnsupportedAlgorithm(other.to_owned())),
-            None => return Err(JwtError::Malformed),
+            None => return Err(token.header.malformed()),
         }
 
         // Recompute the MAC over the first two segments as sent, then compare in constant time.
@@ -144,30 +144,47 @@ impl<'a> Token<'a> {
             segments.next(),
             segments.next(),
         ) else {
-            return Err(JwtError::Malformed);
+            return Err(JwtError::SegmentCount {
+                found: token.split('.').count(),
+            });
         };
         Ok(Self {
             signing_input: &token[..token.len() - signature.len() - 1],
-            header: Segment(header),
-            claims: Segment(claims),
-            signature: Segment(signature),
+            header: Segment::new("header", header),
+            claims: Segment::new("claims", claims),
+            signature: Segment::new("signature", signature),
         })
     }
 }
 
 /// One base64url segment of a token.
 #[derive(Clone, Copy, Debug)]
-struct Segment<'a>(&'a str);
+struct Segment<'a> {
+    /// The segment's role, named in errors.
+    name: &'static str,
+    /// The encoded text.
+    text: &'a str,
+}
 
-impl Segment<'_> {
+impl<'a> Segment<'a> {
+    /// A segment with its role.
+    const fn new(name: &'static str, text: &'a str) -> Self {
+        Self { name, text }
+    }
+
     /// The bytes the segment encodes.
     fn bytes(self) -> Result<Vec<u8>, JwtError> {
-        Base64Url::decode(self.0).ok_or(JwtError::Malformed)
+        Base64Url::decode(self.text).ok_or_else(|| self.malformed())
     }
 
     /// The JSON value the segment encodes.
     fn json(self) -> Result<Json, JwtError> {
-        Json::parse(self.bytes()?).map_err(|_| JwtError::Malformed)
+        Json::parse(self.bytes()?).map_err(|_| self.malformed())
+    }
+
+    /// The error naming this segment as malformed.
+    const fn malformed(self) -> JwtError {
+        JwtError::Malformed { segment: self.name }
     }
 }
 
@@ -183,12 +200,24 @@ pub struct Claims {
 #[non_exhaustive]
 pub enum JwtError {
     /// The secret is not 32 bytes of hex.
-    #[error("JWT secret is not 32 bytes of hex")]
-    InvalidSecret,
+    ///
+    /// The hex error never echoes a digit, so the key stays out of logs.
+    #[error("JWT secret is not 32 bytes of hex: {0}")]
+    InvalidSecret(#[source] HexError),
 
-    /// The token is not three base64url segments of JSON.
-    #[error("malformed JWT")]
-    Malformed,
+    /// The token does not split into exactly three dot-separated segments.
+    #[error("JWT has {found} dot-separated segments, expected 3")]
+    SegmentCount {
+        /// The number of segments found.
+        found: usize,
+    },
+
+    /// A segment is not base64url, not JSON, or lacks a required member.
+    #[error("JWT {segment} segment is malformed")]
+    Malformed {
+        /// The segment's role: header, claims, or signature.
+        segment: &'static str,
+    },
 
     /// The header names an algorithm other than HS256.
     #[error("unsupported JWT algorithm {0:?}")]
@@ -203,7 +232,7 @@ pub enum JwtError {
     MissingIssuedAt,
 
     /// The issued-at is too far from the verifier's clock.
-    #[error("JWT issued at {issued_at} is stale at {now}")]
+    #[error("JWT issued at {issued_at} is more than {MAX_CLOCK_SKEW} seconds from {now}")]
     Stale {
         /// The token's issued-at.
         issued_at: u64,
@@ -248,7 +277,23 @@ mod tests {
                 now: 1061
             })
         );
-        assert!(secret().verify(&token, 939).is_err());
+        assert_eq!(
+            secret().verify(&token, 939),
+            Err(JwtError::Stale {
+                issued_at: 1000,
+                now: 939
+            })
+        );
+
+        // The log line carries both times and the allowed skew.
+        assert_eq!(
+            JwtError::Stale {
+                issued_at: 1000,
+                now: 939
+            }
+            .to_string(),
+            "JWT issued at 1000 is more than 60 seconds from 939"
+        );
     }
 
     #[test]
@@ -286,7 +331,37 @@ mod tests {
         );
 
         // Two segments only.
-        assert_eq!(secret().verify("a.b", 1000), Err(JwtError::Malformed));
+        assert_eq!(
+            secret().verify("a.b", 1000),
+            Err(JwtError::SegmentCount { found: 2 })
+        );
+    }
+
+    #[test]
+    fn malformed_segments_are_named() {
+        let token = secret().token(1000);
+        let parts: Vec<&str> = token.split('.').collect();
+
+        // "!" is outside the base64url alphabet, so the header fails to decode.
+        assert_eq!(
+            secret().verify(&format!("!.{}.{}", parts[1], parts[2]), 1000),
+            Err(JwtError::Malformed { segment: "header" })
+        );
+
+        // A header of {"typ":"JWT"} decodes but names no algorithm.
+        let no_alg = Base64Url(br#"{"typ":"JWT"}"#);
+        assert_eq!(
+            secret().verify(&format!("{no_alg}.{}.{}", parts[1], parts[2]), 1000),
+            Err(JwtError::Malformed { segment: "header" })
+        );
+
+        // A good header and claims, then a signature of "!".
+        assert_eq!(
+            secret().verify(&format!("{}.{}.!", parts[0], parts[1]), 1000),
+            Err(JwtError::Malformed {
+                segment: "signature"
+            })
+        );
     }
 
     #[test]
@@ -299,7 +374,10 @@ mod tests {
         assert!(JwtSecret::from_hex(&"cd".repeat(32)).is_ok());
         assert_eq!(
             JwtSecret::from_hex(&"cd".repeat(31)),
-            Err(JwtError::InvalidSecret)
+            Err(JwtError::InvalidSecret(HexError::WrongLength {
+                expected: 32,
+                actual: 31
+            }))
         );
 
         // Debug output never shows key material.

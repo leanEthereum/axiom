@@ -27,14 +27,18 @@ impl Buckets {
     ///
     /// An empty list is valid and leaves only the infinite bucket.
     pub fn new(bounds: &[f64]) -> Result<Self, BucketsError> {
-        for (index, bound) in bounds.iter().enumerate() {
+        for (index, &bound) in bounds.iter().enumerate() {
             // Infinity and NaN cannot bound a finite bucket.
             if !bound.is_finite() {
-                return Err(BucketsError::NotFinite(index));
+                return Err(BucketsError::NotFinite { index, bound });
             }
             // Each bound must exceed its predecessor, or a bucket would be empty by construction.
-            if index > 0 && bounds[index - 1] >= *bound {
-                return Err(BucketsError::NotIncreasing(index));
+            if index > 0 && bounds[index - 1] >= bound {
+                return Err(BucketsError::NotIncreasing {
+                    index,
+                    bound,
+                    previous: bounds[index - 1],
+                });
             }
         }
         Ok(Self {
@@ -51,7 +55,11 @@ impl Buckets {
         // A series below or at zero, or one that does not grow, has no increasing bounds.
         let valid = start.is_finite() && start > 0.0 && factor.is_finite() && factor > 1.0;
         if !valid || count == 0 {
-            return Err(BucketsError::InvalidSeries);
+            return Err(BucketsError::InvalidSeries {
+                start,
+                factor,
+                count,
+            });
         }
         // Each bound is the previous one times the factor.
         let bounds: Vec<f64> = (0..count)
@@ -87,22 +95,36 @@ mod tests {
 
     #[test]
     fn validation() {
-        // Bound 1 is NaN.
+        // Bound 1 is NaN, which equals nothing, so the log line is compared instead.
+        let error = Buckets::new(&[1.0, f64::NAN]).unwrap_err();
         assert_eq!(
-            Buckets::new(&[1.0, f64::NAN]),
-            Err(BucketsError::NotFinite(1))
+            error.to_string(),
+            "bucket bound NaN at index 1 is not finite"
         );
 
         // Bound 0 is the implicit last bucket written out.
         assert_eq!(
             Buckets::new(&[f64::INFINITY]),
-            Err(BucketsError::NotFinite(0))
+            Err(BucketsError::NotFinite {
+                index: 0,
+                bound: f64::INFINITY
+            })
         );
 
         // Bound 2 repeats bound 1.
         assert_eq!(
             Buckets::new(&[1.0, 2.0, 2.0]),
-            Err(BucketsError::NotIncreasing(2))
+            Err(BucketsError::NotIncreasing {
+                index: 2,
+                bound: 2.0,
+                previous: 2.0
+            })
+        );
+
+        // Bound 1 falls below bound 0.
+        assert_eq!(
+            Buckets::new(&[0.5, 0.25]).unwrap_err().to_string(),
+            "bucket bound 0.25 at index 1 does not exceed the previous bound 0.5"
         );
 
         // No bounds at all leaves one infinite bucket.
@@ -118,21 +140,36 @@ mod tests {
         // A zero start, a flat factor, and no buckets are all refused.
         assert_eq!(
             Buckets::exponential(0.0, 2.0, 4),
-            Err(BucketsError::InvalidSeries)
+            Err(BucketsError::InvalidSeries {
+                start: 0.0,
+                factor: 2.0,
+                count: 4
+            })
         );
         assert_eq!(
             Buckets::exponential(1.0, 1.0, 4),
-            Err(BucketsError::InvalidSeries)
+            Err(BucketsError::InvalidSeries {
+                start: 1.0,
+                factor: 1.0,
+                count: 4
+            })
         );
         assert_eq!(
             Buckets::exponential(1.0, 2.0, 0),
-            Err(BucketsError::InvalidSeries)
+            Err(BucketsError::InvalidSeries {
+                start: 1.0,
+                factor: 2.0,
+                count: 0
+            })
         );
 
         // 1e300 times 10 overflows at bound 9.
         assert_eq!(
             Buckets::exponential(1e300, 10.0, 12),
-            Err(BucketsError::NotFinite(9))
+            Err(BucketsError::NotFinite {
+                index: 9,
+                bound: f64::INFINITY
+            })
         );
     }
 }

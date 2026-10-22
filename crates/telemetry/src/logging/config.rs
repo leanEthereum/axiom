@@ -77,10 +77,13 @@ impl LogConfig {
         W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
     {
         // Phase 1: parse the directives into a per-target level table.
-        let targets: Targets = self
-            .filter
-            .parse()
-            .map_err(|error: ParseError| LogError::InvalidFilter(error.to_string()))?;
+        let targets: Targets =
+            self.filter
+                .parse()
+                .map_err(|error: ParseError| LogError::InvalidFilter {
+                    filter: self.filter.clone(),
+                    reason: error.to_string(),
+                })?;
 
         // Phase 2: one formatting layer, shaped by the chosen layout.
         let layer = FmtLayer::default().with_writer(writer).with_ansi(ansi);
@@ -115,9 +118,15 @@ mod tests {
             filter: "axiom=loud".to_owned(),
             format: LogFormat::Compact,
         };
-        assert!(matches!(
-            config.subscriber(io::sink),
-            Err(LogError::InvalidFilter(_))
-        ));
+        // The error carries the directives as written and the parser's reason.
+        assert_eq!(
+            config.subscriber(io::sink).err(),
+            Some(LogError::InvalidFilter {
+                filter: "axiom=loud".to_owned(),
+                reason: "error parsing level filter: expected one of \"off\", \"error\", \
+                         \"warn\", \"info\", \"debug\", \"trace\", or a number 0-5"
+                    .to_owned(),
+            })
+        );
     }
 }

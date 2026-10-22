@@ -56,12 +56,14 @@ impl Options {
     /// Checks every bound documented on the fields.
     pub(crate) const fn validate(&self) -> Result<(), Error> {
         if self.segment_size < Self::MIN_SEGMENT_SIZE {
-            return Err(Error::InvalidOptions("segment size is below 64 bytes"));
+            return Err(Error::SegmentSizeTooSmall {
+                size: self.segment_size,
+            });
         }
         if self.compaction_threshold > 100 {
-            return Err(Error::InvalidOptions(
-                "compaction threshold exceeds 100 percent",
-            ));
+            return Err(Error::CompactionThresholdTooHigh {
+                threshold: self.compaction_threshold,
+            });
         }
         Ok(())
     }

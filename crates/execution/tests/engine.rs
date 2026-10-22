@@ -8,7 +8,7 @@ use std::{
 use axiom_execution::{
     CAPABILITIES, EngineClient, EngineError, ForkchoiceState, JsonCodec, JwtSecret,
     PayloadAttributes, PayloadId, PayloadStatus, PayloadStatusKind, RpcError, SyncStatus,
-    WireErrorKind,
+    WireError, WireErrorKind,
     mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
@@ -346,10 +346,16 @@ fn get_blobs_all_or_nothing() {
             )),
         );
         let error = client.get_blobs::<Minimal>(&hashes).await.unwrap_err();
-        assert!(matches!(
+        let EngineError::Wire(error) = error else {
+            panic!("expected a wire error, got {error}");
+        };
+        assert_eq!(
             error,
-            EngineError::Wire(ref wire) if wire.kind() == &WireErrorKind::LengthMismatch { expected: 1, actual: 2 }
-        ));
+            WireError::new(WireErrorKind::LengthMismatch {
+                expected: 1,
+                actual: 2
+            })
+        );
         engine.stop().await;
     });
 }
@@ -406,23 +412,23 @@ fn engine_errors_surface_typed() {
             .new_payload(&new_payload_request())
             .await
             .unwrap_err();
-        assert!(matches!(
+        let EngineError::Rpc(error) = error else {
+            panic!("expected an engine error object, got {error}");
+        };
+        assert_eq!(
             error,
-            EngineError::Rpc(RpcError {
-                code: RpcError::UNSUPPORTED_FORK,
-                ..
-            })
-        ));
+            RpcError::new(RpcError::UNSUPPORTED_FORK, "Unsupported fork")
+        );
 
         // A method without a scripted reply is "method not found".
         let error = client.chain_id().await.unwrap_err();
-        assert!(matches!(
+        let EngineError::Rpc(error) = error else {
+            panic!("expected an engine error object, got {error}");
+        };
+        assert_eq!(
             error,
-            EngineError::Rpc(RpcError {
-                code: RpcError::METHOD_NOT_FOUND,
-                ..
-            })
-        ));
+            RpcError::new(RpcError::METHOD_NOT_FOUND, "Method not found")
+        );
 
         // An unknown status string is a wire error located at the status member.
         engine.reply(

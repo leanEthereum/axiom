@@ -154,7 +154,7 @@ impl ChunkedDecoder {
                     } else {
                         self.trailer += self.line.len();
                         if self.trailer > MAX_TRAILER {
-                            return Err(ProtocolError::HeadTooLarge);
+                            return Err(ProtocolError::HeadTooLarge { limit: MAX_TRAILER });
                         }
                     }
                     self.line.clear();
@@ -223,7 +223,10 @@ impl ChunkedDecoder {
         // Refuse a chunk that would push the body past its bound before copying any of it.
         let budget = (self.max_body - self.decoded) as u64;
         if value > budget {
-            return Err(ProtocolError::BodyTooLarge);
+            return Err(ProtocolError::BodyTooLarge {
+                size: (self.decoded as u64).saturating_add(value),
+                limit: self.max_body,
+            });
         }
         self.decoded += value as usize;
         Ok(State::Data(value))
@@ -285,14 +288,23 @@ mod tests {
     #[test]
     fn bound_applies_before_copying() {
         // A 0x10 = 16 byte chunk against a 15-byte bound fails on the size line alone.
-        assert_eq!(decode(b"10\r\n", 15), Err(ProtocolError::BodyTooLarge));
+        assert_eq!(
+            decode(b"10\r\n", 15),
+            Err(ProtocolError::BodyTooLarge {
+                size: 16,
+                limit: 15
+            })
+        );
 
-        // Two chunks of 8 against the same bound: the second one breaks it.
+        // Two chunks of 8 against the same bound: the second one brings the body to 16.
         let mut decoder = ChunkedDecoder::new(15);
         let input = b"8\r\n12345678\r\n8\r\n";
         assert_eq!(
             decoder.decode(input, &mut Vec::new()),
-            Err(ProtocolError::BodyTooLarge)
+            Err(ProtocolError::BodyTooLarge {
+                size: 16,
+                limit: 15
+            })
         );
     }
 
@@ -354,11 +366,15 @@ mod tests {
         #[test]
         fn chunked_bound_is_exact(body in proptest::collection::vec(any::<u8>(), 1..500)) {
             // A bound one byte short of the body rejects it.
+            // Every chunk before the last fits, so the last one reports the whole body size.
             let stream = chunked(&body, &[7]);
             let mut decoder = ChunkedDecoder::new(body.len() - 1);
             prop_assert_eq!(
                 decoder.decode(&stream, &mut Vec::new()),
-                Err(ProtocolError::BodyTooLarge)
+                Err(ProtocolError::BodyTooLarge {
+                    size: body.len() as u64,
+                    limit: body.len() - 1
+                })
             );
         }
     }
