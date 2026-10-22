@@ -75,3 +75,43 @@ impl SlotClock {
         basis_points * self.slot_duration_ms / BASIS_POINTS
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn times_map_to_slots_and_back() {
+        // Fixture state: genesis at 1_000_000 ms, 12-second slots.
+        let clock = SlotClock::new(1_000_000, 12_000);
+
+        // Slot 3 starts 36 seconds after genesis.
+        assert_eq!(clock.slot_start_ms(Slot(3)), 1_036_000);
+
+        // 5 seconds into slot 3 is still slot 3, 5_000 ms in.
+        assert_eq!(clock.slot_at(1_041_000), Slot(3));
+        assert_eq!(clock.time_into_slot_ms(1_041_000), 5_000);
+
+        // A time before genesis falls in the genesis slot.
+        assert_eq!(clock.slot_at(0), Slot::GENESIS);
+
+        // A third of a slot, 3333 basis points, is 3_999 ms after truncation.
+        assert_eq!(clock.component_ms(3333), 3_999);
+    }
+
+    proptest! {
+        #[test]
+        fn a_slot_start_falls_in_its_slot(
+            genesis in 0_u64..1 << 40,
+            duration in 1_u64..100_000,
+            slot in 0_u64..1 << 20,
+        ) {
+            let clock = SlotClock::new(genesis, duration);
+            let start = clock.slot_start_ms(Slot(slot));
+            prop_assert_eq!(clock.slot_at(start), Slot(slot));
+            prop_assert_eq!(clock.time_into_slot_ms(start), 0);
+        }
+    }
+}
