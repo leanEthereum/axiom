@@ -77,11 +77,12 @@ impl fmt::Debug for Blob {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axiom_yaml::Yaml;
+    use proptest::prelude::*;
 
     use super::*;
-    use crate::test_vectors::cases;
+    use crate::{BYTES_PER_FIELD_ELEMENT, test_vectors::cases};
 
     #[test]
     fn challenge_matches_vectors() {
@@ -126,5 +127,29 @@ mod tests {
         let blob = Blob::from_bytes(&bytes).unwrap();
         assert_eq!(blob.evaluations()[4095], Scalar::from_u64(4095));
         assert_eq!(blob.to_bytes(), bytes);
+    }
+
+    /// A blob from a seed: every element takes 32 pseudorandom bytes with the top two bits cleared.
+    ///
+    /// Clearing them keeps each integer below 2^254 < r, so every element is canonical.
+    pub(crate) fn blob_from_seed(seed: u64) -> Blob {
+        // Xorshift64 is enough to fill a blob with varied, reproducible bytes.
+        let mut state = seed | 1;
+        let mut bytes = vec![0_u8; BYTES_PER_BLOB];
+        for chunk in bytes.as_chunks_mut::<8>().0 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *chunk = state.to_be_bytes();
+        }
+        for element in bytes.as_chunks_mut::<BYTES_PER_FIELD_ELEMENT>().0 {
+            element[0] &= 0x3f;
+        }
+        Blob::from_bytes(&bytes).expect("every element is below 2^254")
+    }
+
+    /// Random blobs, drawn through their seeds.
+    pub(crate) fn arb_blob() -> impl Strategy<Value = Blob> {
+        any::<u64>().prop_map(blob_from_seed)
     }
 }

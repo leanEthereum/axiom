@@ -154,9 +154,14 @@ impl<'a> CellBatch<'a> {
 #[cfg(test)]
 mod tests {
     use axiom_yaml::Yaml;
+    use proptest::{collection::vec, prelude::*, sample::Index};
 
     use super::*;
-    use crate::test_vectors::{cases, points};
+    use crate::{
+        Blob, Kzg,
+        blob::tests::blob_from_seed,
+        test_vectors::{cases, points},
+    };
 
     #[test]
     fn challenge_matches_vectors() {
@@ -229,5 +234,47 @@ mod tests {
                 actual: 4
             }
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4))]
+
+        #[test]
+        fn cell_batch_equals_individual_checks(
+            seeds in vec(any::<u64>(), 1..3),
+            rows in vec((0..CELLS_PER_EXT_BLOB as u64, any::<Index>(), any::<bool>()), 1..6),
+        ) {
+            let kzg = Kzg::mainnet();
+            let blobs: Vec<Blob> = seeds.into_iter().map(blob_from_seed).collect();
+            let commitments: Vec<Bytes48> = blobs.iter().map(|blob| kzg.blob_to_kzg_commitment(blob)).collect();
+            let extended: Vec<_> = blobs.iter().map(|blob| kzg.compute_cells_and_kzg_proofs(blob)).collect();
+
+            // Fixture state: each row picks a blob and a cell, and maybe swaps in a wrong proof.
+            // Rows may repeat a commitment, which exercises deduplication.
+            let mut row_commitments = Vec::new();
+            let mut indices = Vec::new();
+            let mut cells = Vec::new();
+            let mut proofs = Vec::new();
+            for (cell, blob, corrupt) in rows {
+                let blob = blob.index(blobs.len());
+                let position = cell as usize;
+                row_commitments.push(commitments[blob]);
+                indices.push(CellIndex::new(cell).unwrap());
+                cells.push(extended[blob].0[position].clone());
+                let proof = if corrupt { extended[blob].1[(position + 1) % CELLS_PER_EXT_BLOB] } else { extended[blob].1[position] };
+                proofs.push(proof);
+            }
+
+            // The batch accepts exactly when every single-cell batch accepts.
+            let individual = (0..indices.len()).all(|row| {
+                kzg.verify_cell_kzg_proof_batch(
+                    &row_commitments[row..=row],
+                    &indices[row..=row],
+                    &cells[row..=row],
+                    &proofs[row..=row],
+                ) == Ok(true)
+            });
+            prop_assert_eq!(kzg.verify_cell_kzg_proof_batch(&row_commitments, &indices, &cells, &proofs), Ok(individual));
+        }
     }
 }

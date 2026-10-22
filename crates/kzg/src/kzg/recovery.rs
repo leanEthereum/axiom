@@ -159,8 +159,13 @@ impl CellRecovery {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{prelude::*, sample::subsequence};
+
     use super::*;
-    use crate::{Kzg, bit_reversal::BitReversal, fft::tests::horner};
+    use crate::{
+        Kzg, bit_reversal::BitReversal, blob::tests::arb_blob, cell::tests::all_indices,
+        fft::tests::horner,
+    };
 
     /// Cell indices from integers known to be in range.
     fn indices(values: impl IntoIterator<Item = u64>) -> Vec<CellIndex> {
@@ -233,5 +238,23 @@ mod tests {
             assert!(horner(&vanishing, &point).is_zero());
         }
         assert!(!horner(&vanishing, &w[BitReversal::new(7).index(1)]).is_zero());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4))]
+
+        #[test]
+        fn recovery_from_any_half(blob in arb_blob(), kept in subsequence(all_indices(), 64..=128)) {
+            let kzg = Kzg::mainnet();
+            let (cells, proofs) = kzg.compute_cells_and_kzg_proofs(&blob);
+
+            // Fixture state: a random ascending subset of at least 64 of the 128 cells.
+            let available: Vec<Cell> = kept.iter().map(|index| cells[index.get() as usize].clone()).collect();
+
+            // Recovery returns every cell and every proof of the original.
+            let (recovered_cells, recovered_proofs) = kzg.recover_cells_and_kzg_proofs(&kept, &available).unwrap();
+            prop_assert_eq!(recovered_cells, cells);
+            prop_assert_eq!(recovered_proofs, proofs);
+        }
     }
 }
