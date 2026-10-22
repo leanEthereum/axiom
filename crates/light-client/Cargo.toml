@@ -17,3 +17,4 @@ workspace = true
 axiom-bls.workspace = true
 axiom-ssz.workspace = true
 axiom-types.workspace = true
+thiserror.workspace = true

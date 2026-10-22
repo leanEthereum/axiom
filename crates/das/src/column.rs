@@ -1,10 +1,9 @@
 //! Validity of a data column sidecar: its structure, inclusion proof, and cell proofs.
 
-use std::{error::Error, fmt};
-
 use axiom_kzg::{Bytes48, Cell, CellIndex, Kzg};
 use axiom_ssz::{Container, GeneralizedIndex, MerkleProof, Root, Ssz};
 use axiom_types::{BeaconBlockBody, ChainConfig, DataColumnSidecar, Preset};
+use thiserror::Error;
 
 /// Index of the commitment list among the fields of a block body.
 ///
@@ -12,13 +11,16 @@ use axiom_types::{BeaconBlockBody, ChainConfig, DataColumnSidecar, Preset};
 const BLOB_KZG_COMMITMENTS_FIELD: usize = 11;
 
 /// A data column sidecar that breaks a structural rule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum ColumnError {
     /// The column index is past the last column.
+    #[error("column index {0} is out of range")]
     IndexOutOfRange(u64),
     /// The sidecar carries no blob.
+    #[error("sidecar carries no blob")]
     NoBlobs,
     /// The sidecar carries more blobs than the schedule allows.
+    #[error("{count} blobs exceed the limit of {limit}")]
     TooManyBlobs {
         /// Commitments in the sidecar.
         count: usize,
@@ -26,29 +28,15 @@ pub enum ColumnError {
         limit: u64,
     },
     /// The cells, commitments, and proofs differ in number.
+    #[error("cells, commitments, and proofs differ in number")]
     LengthMismatch,
     /// The commitments are not proven to belong to the block.
+    #[error("commitments are not in the block")]
     InvalidInclusionProof,
     /// A cell does not open its commitment at the column's points.
+    #[error("cell proofs do not verify")]
     InvalidKzgProofs,
 }
-
-impl fmt::Display for ColumnError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IndexOutOfRange(index) => write!(f, "column index {index} is out of range"),
-            Self::NoBlobs => f.write_str("sidecar carries no blob"),
-            Self::TooManyBlobs { count, limit } => {
-                write!(f, "{count} blobs exceed the limit of {limit}")
-            }
-            Self::LengthMismatch => f.write_str("cells, commitments, and proofs differ in number"),
-            Self::InvalidInclusionProof => f.write_str("commitments are not in the block"),
-            Self::InvalidKzgProofs => f.write_str("cell proofs do not verify"),
-        }
-    }
-}
-
-impl Error for ColumnError {}
 
 /// Checks on a data column sidecar, from its shape to its cell proofs.
 #[derive(Clone, Copy, Debug)]

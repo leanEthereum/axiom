@@ -1,11 +1,14 @@
 //! Reasons a text fails to parse.
 
-use std::{error::Error, fmt};
+use std::fmt;
+
+use thiserror::Error;
 
 /// A text that is not a document of the supported YAML subset.
 ///
 /// The parser stops at the first problem, so one input yields one error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("line {line}, column {column}: {kind}")]
 pub struct ParseError {
     /// Line of the problem, counted from 1.
     pub(crate) line: usize,
@@ -35,98 +38,73 @@ impl ParseError {
     }
 }
 
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "line {}, column {}: {}",
-            self.line, self.column, self.kind
-        )
-    }
-}
-
-impl Error for ParseError {}
-
 /// The rule a text broke.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// A tab appears in the indentation of a line.
     ///
     /// YAML measures structure in spaces only.
+    #[error("tab character in indentation")]
     TabIndentation,
 
     /// A line is indented in a way no enclosing block accepts.
+    #[error("line does not fit the indentation of any enclosing block")]
     InvalidIndentation,
 
     /// A line inside a block mapping does not start with a key and a colon.
+    #[error("expected a mapping key followed by a colon")]
     ExpectedKey,
 
     /// A key appears where only a value may stand, as in a value holding a colon.
+    #[error("mapping value not allowed here")]
     UnexpectedMappingValue,
 
     /// A sequence entry indicator starts on the line of a key or of a value.
+    #[error("sequence entry not allowed here")]
     UnexpectedBlockEntry,
 
     /// A mapping holds the same key twice.
+    #[error("duplicate mapping key {0:?}")]
     DuplicateKey(String),
 
     /// A quoted scalar has no closing quote.
+    #[error("quoted scalar has no closing quote")]
     UnterminatedQuote,
 
     /// A flow collection has no closing bracket or brace.
+    #[error("flow collection has no closing bracket")]
     UnterminatedFlow,
 
     /// A backslash escape is not one that YAML defines.
+    #[error("invalid escape sequence \\{0}")]
     InvalidEscape(char),
 
     /// A unicode escape names a value that is not a character.
+    #[error("escape \\u{{{0:x}}} is not a unicode scalar value")]
     InvalidCodePoint(u32),
 
     /// A character that cannot start or continue the construct at hand.
+    #[error("unexpected character {0:?}")]
     UnexpectedChar(char),
 
     /// Content follows a complete value on its line.
+    #[error("unexpected content after a value")]
     TrailingContent,
 
     /// A document marker sits inside a quoted scalar or a flow collection.
+    #[error("document marker inside a quoted scalar or flow collection")]
     UnexpectedDocumentMarker,
 
     /// Collections nest deeper than the parser allows.
     ///
     /// The bound keeps recursion, and so stack use, finite on hostile input.
+    #[error("collections nest too deeply")]
     TooDeep,
 
     /// A valid YAML construct outside the supported subset.
+    #[error("{0} are not supported")]
     Unsupported(Unsupported),
-}
-
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TabIndentation => f.write_str("tab character in indentation"),
-            Self::InvalidIndentation => {
-                f.write_str("line does not fit the indentation of any enclosing block")
-            }
-            Self::ExpectedKey => f.write_str("expected a mapping key followed by a colon"),
-            Self::UnexpectedMappingValue => f.write_str("mapping value not allowed here"),
-            Self::UnexpectedBlockEntry => f.write_str("sequence entry not allowed here"),
-            Self::DuplicateKey(key) => write!(f, "duplicate mapping key {key:?}"),
-            Self::UnterminatedQuote => f.write_str("quoted scalar has no closing quote"),
-            Self::UnterminatedFlow => f.write_str("flow collection has no closing bracket"),
-            Self::InvalidEscape(c) => write!(f, "invalid escape sequence \\{c}"),
-            Self::InvalidCodePoint(value) => {
-                write!(f, "escape \\u{{{value:x}}} is not a unicode scalar value")
-            }
-            Self::UnexpectedChar(c) => write!(f, "unexpected character {c:?}"),
-            Self::TrailingContent => f.write_str("unexpected content after a value"),
-            Self::UnexpectedDocumentMarker => {
-                f.write_str("document marker inside a quoted scalar or flow collection")
-            }
-            Self::TooDeep => f.write_str("collections nest too deeply"),
-            Self::Unsupported(feature) => write!(f, "{feature} are not supported"),
-        }
-    }
 }
 
 /// A YAML feature this parser rejects rather than risks misreading.

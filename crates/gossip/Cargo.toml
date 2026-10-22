@@ -21,3 +21,4 @@ axiom-kzg.workspace = true
 axiom-ssz.workspace = true
 axiom-state-transition.workspace = true
 axiom-types.workspace = true
+thiserror.workspace = true
