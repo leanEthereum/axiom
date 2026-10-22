@@ -72,7 +72,10 @@ impl Rollover {
             state
                 .historical_summaries
                 .push(summary)
-                .map_err(|_| StateError::ListFull)?;
+                .map_err(|source| StateError::Capacity {
+                    list: "historical summaries",
+                    source,
+                })?;
         }
         Ok(())
     }
@@ -90,7 +93,12 @@ impl Rollover {
         let fresh = vec![ParticipationFlags::default(); state.validators.len()];
         state.previous_epoch_participation = mem::replace(
             &mut state.current_epoch_participation,
-            fresh.try_into().map_err(|_| StateError::ListFull)?,
+            fresh
+                .try_into()
+                .map_err(|source| StateError::Capacity {
+                    list: "current epoch participation",
+                    source,
+                })?,
         );
         Ok(())
     }

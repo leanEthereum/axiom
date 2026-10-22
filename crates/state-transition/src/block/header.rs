@@ -22,7 +22,10 @@ impl<P: Preset> Operation<P> for BeaconBlockHeader {
             });
         }
         if self.slot <= state.latest_block_header.slot {
-            return Err(BlockError::NotNewerThanParent);
+            return Err(BlockError::NotNewerThanParent {
+                block: self.slot,
+                latest: state.latest_block_header.slot,
+            });
         }
         let expected = state.beacon_proposer_index();
         if self.proposer_index != expected {
@@ -48,7 +51,10 @@ impl<P: Preset> Operation<P> for BeaconBlockHeader {
         let proposer = state
             .validators
             .get(self.proposer_index.as_usize())
-            .ok_or(StateError::UnknownValidator(self.proposer_index))?;
+            .ok_or(StateError::UnknownValidator {
+                index: self.proposer_index,
+                registry_size: state.validators.len(),
+            })?;
         if proposer.slashed {
             return Err(BlockError::ProposerSlashed(self.proposer_index));
         }

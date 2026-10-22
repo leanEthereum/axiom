@@ -68,7 +68,10 @@ impl SignatureBatch {
             return Ok(());
         }
         let signature =
-            Signature::from_bytes(&signature.0).map_err(|_| BlockError::MalformedSignature)?;
+            Signature::from_bytes(&signature.0).map_err(|source| BlockError::MalformedSignature {
+                root: message,
+                source,
+            })?;
         self.sets.push(SignatureSet {
             signature,
             public_key,
@@ -86,7 +89,9 @@ impl SignatureBatch {
         if SignatureSet::verify_batch(&self.sets) {
             Ok(())
         } else {
-            Err(BlockError::InvalidSignature)
+            Err(BlockError::InvalidSignature {
+                signatures: self.sets.len(),
+            })
         }
     }
 }

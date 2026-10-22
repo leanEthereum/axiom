@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use axiom_ssz::Ssz;
+use axiom_ssz::{DecodeError, Ssz};
 use axiom_state_transition::{
     BlockError, BlockProcessor, KnownVerdict, Operation, PayloadExecution, State, Verification,
 };
@@ -12,9 +12,27 @@ use axiom_types::{
     SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
 };
 use axiom_yaml::Yaml;
+use thiserror::Error;
 
 use super::BEACON_STATE_FIELDS;
 use crate::{Case, Failure, Runner};
+
+/// Why an operation vector's input was not applied.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+enum Rejection {
+    /// The input file does not decode, which the vectors count as an invalid operation.
+    #[error("input {stem} does not decode: {source}")]
+    Undecodable {
+        /// Stem of the input file, such as the attestation.
+        stem: &'static str,
+        /// Why the bytes do not decode.
+        #[source]
+        source: DecodeError,
+    },
+    /// The operation breaks a rule of block processing.
+    #[error(transparent)]
+    Block(#[from] BlockError),
+}
 
 /// Applies the case's operation, and compares with the post-state or expects rejection.
 #[derive(Debug, Default)]
@@ -22,18 +40,19 @@ pub struct Operations<P>(PhantomData<P>);
 
 impl<P: Preset> Operations<P> {
     /// Decodes an operation input, treating undecodable input as an invalid operation.
-    fn input<T: Ssz>(case: &Case, stem: &str) -> Result<Result<T, BlockError>, Failure> {
+    fn input<T: Ssz>(case: &Case, stem: &'static str) -> Result<Result<T, Rejection>, Failure> {
         let bytes = case.ssz_bytes(stem)?;
-        Ok(T::decode(&bytes).map_err(|_| BlockError::MalformedSignature))
+        Ok(T::decode(&bytes).map_err(|source| Rejection::Undecodable { stem, source }))
     }
 
     /// Runs an operation through the trait every block operation implements.
     fn operation<O: Operation<P> + Ssz>(
         case: &Case,
-        stem: &str,
+        stem: &'static str,
         processor: &mut BlockProcessor<'_, P>,
-    ) -> Result<Result<(), BlockError>, Failure> {
-        Ok(Self::input::<O>(case, stem)?.and_then(|operation| processor.apply(&operation)))
+    ) -> Result<Result<(), Rejection>, Failure> {
+        Ok(Self::input::<O>(case, stem)?
+            .and_then(|operation| Ok(processor.apply(&operation)?)))
     }
 }
 
@@ -89,11 +108,11 @@ impl<P: Preset> Runner for Operations<P> {
                     &mut processor,
                 )?,
                 "block_header" => Self::input::<BeaconBlock<P>>(case, "block")?
-                    .and_then(|block| processor.apply(&block.header())),
+                    .and_then(|block| Ok(processor.apply(&block.header())?)),
                 "sync_aggregate" => Self::input::<SyncAggregate<P>>(case, "sync_aggregate")?
-                    .and_then(|aggregate| processor.apply(&aggregate)),
+                    .and_then(|aggregate| Ok(processor.apply(&aggregate)?)),
                 "withdrawals" => Self::input::<ExecutionPayload<P>>(case, "execution_payload")?
-                    .and_then(|payload| processor.apply(payload.withdrawals.as_slice())),
+                    .and_then(|payload| Ok(processor.apply(payload.withdrawals.as_slice())?)),
                 "execution_payload" => {
                     let valid = case
                         .yaml("execution.yaml")?
@@ -101,12 +120,12 @@ impl<P: Preset> Runner for Operations<P> {
                         .and_then(Yaml::as_bool)
                         .ok_or_else(|| Failure::new("execution.yaml has no verdict"))?;
                     Self::input::<BeaconBlockBody<P>>(case, "body")?.and_then(|body| {
-                        processor.apply(&PayloadExecution::new(&body, &KnownVerdict(valid)))
+                        Ok(processor.apply(&PayloadExecution::new(&body, &KnownVerdict(valid)))?)
                     })
                 }
                 other => return Err(Failure(format!("unsupported operation {other}"))),
             };
-            applied.and_then(|()| processor.finish())
+            applied.and_then(|()| Ok(processor.finish()?))
         };
 
         match (outcome, expected) {

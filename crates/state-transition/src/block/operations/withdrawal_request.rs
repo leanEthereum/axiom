@@ -57,7 +57,9 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
             validator.effective_balance >= P::MIN_ACTIVATION_BALANCE;
         let floor = P::MIN_ACTIVATION_BALANCE
             .checked_add(pending)
-            .ok_or(StateError::Overflow)?;
+            .ok_or(StateError::Overflow {
+                quantity: "withdrawal floor",
+            })?;
         let has_excess_balance = balance > floor;
         if validator.has_compounding_withdrawal_credential()
             && has_sufficient_effective_balance
@@ -76,7 +78,10 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
                     amount: to_withdraw,
                     withdrawable_epoch,
                 })
-                .map_err(|_| StateError::ListFull)?;
+                .map_err(|source| StateError::Capacity {
+                    list: "pending partial withdrawals",
+                    source,
+                })?;
         }
         Ok(())
     }

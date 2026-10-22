@@ -21,7 +21,10 @@ impl<P: Preset> Operation<P> for DepositRequest {
         state
             .pending_deposits
             .push(deposit)
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "pending deposits",
+                source,
+            })?;
         Ok(())
     }
 }

@@ -455,7 +455,7 @@ impl<P: Preset> BatchWorker<P> {
             {
                 Ok(Ok(_)) | Err(_) => {}
                 // A first block without a parent means the node sits on another branch.
-                Ok(Err(ChainError::ForkChoice(ForkChoiceError::UnknownParent(_))))
+                Ok(Err(ChainError::ForkChoice(ForkChoiceError::UnknownParent { .. })))
                     if position == 0 =>
                 {
                     return Verdict::UnknownParent;

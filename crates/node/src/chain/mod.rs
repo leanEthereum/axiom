@@ -436,10 +436,10 @@ impl<P: Preset> Chain<P> {
         matches!(
             error,
             ChainError::ForkChoice(
-                ForkChoiceError::InvalidBlock(_)
-                    | ForkChoiceError::DataUnavailable
-                    | ForkChoiceError::NotDescendantOfFinalized
-                    | ForkChoiceError::BeforeFinalized(_)
+                ForkChoiceError::InvalidBlock { .. }
+                    | ForkChoiceError::DataUnavailable(_)
+                    | ForkChoiceError::NotDescendantOfFinalized { .. }
+                    | ForkChoiceError::BeforeFinalized { .. }
             )
         )
     }

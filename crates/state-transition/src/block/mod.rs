@@ -110,7 +110,7 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
     pub fn process_operations(&mut self, body: &BeaconBlockBody<P>) -> Result<(), BlockError> {
         // Fulu retired deposits from the deposit contract; they arrive as requests instead.
         if !body.deposits.is_empty() {
-            return Err(BlockError::DepositsNotAllowed);
+            return Err(BlockError::DepositsNotAllowed(body.deposits.len()));
         }
         self.apply_all(&body.proposer_slashings)?;
         self.apply_all(&body.attester_slashings)?;
@@ -171,14 +171,27 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         attestation: &IndexedAttestation<P>,
     ) -> Result<(), BlockError> {
         let indices = &attestation.attesting_indices;
-        let strictly_increasing = indices.windows(2).all(|pair| pair[0] < pair[1]);
-        if indices.is_empty() || !strictly_increasing {
-            return Err(BlockError::InvalidAttestingIndices);
+        if indices.is_empty() {
+            return Err(BlockError::EmptyAttestingIndices);
+        }
+        if let Some(position) = indices.windows(2).position(|pair| pair[0] >= pair[1]) {
+            // The pair at a window's position ends one place later.
+            return Err(BlockError::UnsortedAttestingIndices {
+                position: position + 1,
+                index: indices[position + 1],
+            });
         }
         // Every index must name a validator, signatures checked or not.
-        let registry_size = self.state.beacon.validators.len() as u64;
-        if let Some(unknown) = indices.iter().find(|index| index.0 >= registry_size) {
-            return Err(StateError::UnknownValidator(*unknown).into());
+        let registry_size = self.state.beacon.validators.len();
+        if let Some(unknown) = indices
+            .iter()
+            .find(|index| index.as_usize() >= registry_size)
+        {
+            return Err(StateError::UnknownValidator {
+                index: *unknown,
+                registry_size,
+            }
+            .into());
         }
 
         if !self.signatures.is_enabled() {
@@ -188,7 +201,7 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
             .iter()
             .map(|index| self.state.public_key(*index))
             .collect::<Result<Vec<_>, _>>()?;
-        let key = PublicKey::aggregate(&keys).map_err(|_| BlockError::InvalidSignature)?;
+        let key = PublicKey::aggregate(&keys).map_err(BlockError::InvalidAggregateKey)?;
         let domain = self
             .state
             .beacon

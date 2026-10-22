@@ -33,7 +33,9 @@ impl CorrelationPenalty {
             .slashings
             .iter()
             .try_fold(Gwei::ZERO, |sum, amount| sum.checked_add(*amount))
-            .ok_or(StateError::Overflow)?;
+            .ok_or(StateError::Overflow {
+                quantity: "slashed total",
+            })?;
         let adjusted = Gwei(
             slashed_sum
                 .0

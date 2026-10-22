@@ -77,7 +77,7 @@ impl<'a, P: Preset> WeightedSampler<'a, P> {
                 let slot_seed = Bytes32(Root::sha256(&preimage).0);
                 WeightedSampler::new(state, &candidates, slot_seed)
                     .next()
-                    .ok_or_else(|| StateError::NoActiveValidators(state.current_epoch()))
+                    .ok_or(StateError::NoActiveValidators(epoch))
             })
             .collect()
     }

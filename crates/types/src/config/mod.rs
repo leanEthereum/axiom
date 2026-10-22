@@ -549,4 +549,37 @@ mod tests {
             21
         );
     }
+
+    #[test]
+    fn a_malformed_value_names_its_key_and_shape() {
+        // A slot length of "fast" is not an integer.
+        let yaml = Yaml::parse("SLOT_DURATION_MS: fast\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::InvalidValue {
+                key: "SLOT_DURATION_MS".to_owned(),
+                expected: "an integer",
+            })
+        );
+
+        // A fork version of two bytes is not the four bytes a version holds.
+        let yaml = Yaml::parse("FULU_FORK_VERSION: '0x0605'\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::InvalidValue {
+                key: "FULU_FORK_VERSION".to_owned(),
+                expected: "4 hex bytes",
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_preset_base_is_named() {
+        // Only mainnet and minimal exist as preset bases.
+        let yaml = Yaml::parse("PRESET_BASE: gnosis\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::UnknownPresetBase("gnosis".to_owned()))
+        );
+    }
 }

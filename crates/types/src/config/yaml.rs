@@ -13,8 +13,13 @@ pub enum ConfigError {
     #[error("configuration is not a mapping")]
     NotAMapping,
     /// A value does not have its field's type.
-    #[error("configuration value {0} is invalid")]
-    InvalidValue(String),
+    #[error("configuration value {key} is not {expected}")]
+    InvalidValue {
+        /// The key whose value is malformed, such as `SECONDS_PER_SLOT`.
+        key: String,
+        /// The shape the key's field requires, such as an integer.
+        expected: &'static str,
+    },
     /// The preset base is neither mainnet nor minimal.
     #[error("preset base {0} is unknown")]
     UnknownPresetBase(String),
@@ -52,7 +57,10 @@ impl<'a> ConfigEntry<'a> {
         let number = || {
             value
                 .as_u64()
-                .ok_or_else(|| ConfigError::InvalidValue(key.to_owned()))
+                .ok_or_else(|| ConfigError::InvalidValue {
+                    key: key.to_owned(),
+                    expected: "an integer",
+                })
         };
         match key {
             "MIN_GENESIS_ACTIVE_VALIDATOR_COUNT" => {
@@ -134,9 +142,16 @@ impl<'a> ConfigEntry<'a> {
     /// Sets a field holding an amount, an epoch, a version, or a structured value.
     fn set_typed(self, config: &mut ChainConfig) -> Result<(), ConfigError> {
         let Self { key, value } = self;
-        let invalid = || ConfigError::InvalidValue(key.to_owned());
-        let number = || value.as_u64().ok_or_else(invalid);
-        let bytes4 = || value.as_hex_array::<4>().ok_or_else(invalid);
+        let invalid = |expected| ConfigError::InvalidValue {
+            key: key.to_owned(),
+            expected,
+        };
+        let number = || value.as_u64().ok_or_else(|| invalid("an integer"));
+        let bytes4 = || {
+            value
+                .as_hex_array::<4>()
+                .ok_or_else(|| invalid("4 hex bytes"))
+        };
         match key {
             "EJECTION_BALANCE" => config.ejection_balance = Gwei(number()?),
             "MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA" => {
@@ -167,18 +182,20 @@ impl<'a> ConfigEntry<'a> {
             "MESSAGE_DOMAIN_VALID_SNAPPY" => config.message_domain_valid_snappy = bytes4()?,
             "DEPOSIT_CONTRACT_ADDRESS" => {
                 config.deposit_contract_address =
-                    ExecutionAddress(value.as_hex_array::<20>().ok_or_else(invalid)?);
+                    ExecutionAddress(value
+                        .as_hex_array::<20>()
+                        .ok_or_else(|| invalid("20 hex bytes"))?);
             }
             "CONFIG_NAME" => {
                 value
                     .as_str()
-                    .ok_or_else(invalid)?
+                    .ok_or_else(|| invalid("a string"))?
                     .clone_into(&mut config.config_name);
             }
             "BLOB_SCHEDULE" => {
                 let entries = value
                     .as_sequence()
-                    .ok_or_else(invalid)?
+                    .ok_or_else(|| invalid("a sequence"))?
                     .iter()
                     .map(|entry| {
                         Some(BlobParameters {
@@ -187,7 +204,7 @@ impl<'a> ConfigEntry<'a> {
                         })
                     })
                     .collect::<Option<Vec<_>>>()
-                    .ok_or_else(invalid)?;
+                    .ok_or_else(|| invalid("a list of epochs and blob limits"))?;
                 config.blob_schedule = BlobSchedule::new(entries);
             }
             _ => {}

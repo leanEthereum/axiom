@@ -52,7 +52,10 @@ impl ExpectedWithdrawals {
             let validator = state
                 .validators
                 .get(index.as_usize())
-                .ok_or(StateError::UnknownValidator(index))?;
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size: state.validators.len(),
+                })?;
             let balance = plan.balance_after(index)?;
             if validator.is_eligible_for_partial_withdrawals::<P>(balance) {
                 let amount = (balance - P::MIN_ACTIVATION_BALANCE).min(pending.amount);
@@ -72,7 +75,10 @@ impl ExpectedWithdrawals {
             let validator = state
                 .validators
                 .get(index.as_usize())
-                .ok_or(StateError::UnknownValidator(index))?;
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size: state.validators.len(),
+                })?;
             let balance = plan.balance_after(index)?;
             let address = validator.withdrawal_address();
             if validator.is_fully_withdrawable(balance, epoch) {
@@ -133,10 +139,15 @@ impl<'a, P: Preset> WithdrawalPlan<'a, P> {
             .state
             .balances
             .get(index.as_usize())
-            .ok_or(StateError::UnknownValidator(index))?;
+            .ok_or(StateError::UnknownValidator {
+                index,
+                registry_size: self.state.balances.len(),
+            })?;
         balance
             .checked_sub(self.withdrawn.get(&index).copied().unwrap_or_default())
-            .ok_or(StateError::Overflow)
+            .ok_or(StateError::Overflow {
+                quantity: "balance after withdrawals",
+            })
     }
 }
 
@@ -148,8 +159,17 @@ impl<P: Preset> Operation<P> for [Withdrawal] {
     /// See `process_withdrawals` in the Electra beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError> {
         let expected = ExpectedWithdrawals::compute(&processor.state.beacon)?;
-        if self != expected.withdrawals.as_slice() {
-            return Err(BlockError::WithdrawalsMismatch);
+        let expected_withdrawals = expected.withdrawals.as_slice();
+        if self != expected_withdrawals {
+            return Err(BlockError::WithdrawalsMismatch {
+                expected: expected_withdrawals.len(),
+                actual: self.len(),
+                first_difference: self
+                    .iter()
+                    .zip(expected_withdrawals)
+                    .take_while(|(actual, expected)| actual == expected)
+                    .count(),
+            });
         }
 
         for withdrawal in &expected.withdrawals {

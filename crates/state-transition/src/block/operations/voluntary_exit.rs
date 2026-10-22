@@ -18,26 +18,33 @@ impl<P: Preset> Operation<P> for SignedVoluntaryExit {
         let validator = state
             .validators
             .get(exit.validator_index.as_usize())
-            .ok_or(StateError::UnknownValidator(exit.validator_index))?;
+            .ok_or(StateError::UnknownValidator {
+                index: exit.validator_index,
+                registry_size: state.validators.len(),
+            })?;
+        let invalid = |reason| BlockError::InvalidVoluntaryExit {
+            validator: exit.validator_index,
+            reason,
+        };
 
         if !validator.is_active_at(epoch) {
-            return Err(BlockError::InvalidVoluntaryExit("validator is not active"));
+            return Err(invalid("validator is not active"));
         }
         if validator.exit_epoch != Epoch::FAR_FUTURE {
-            return Err(BlockError::InvalidVoluntaryExit("exit already initiated"));
+            return Err(invalid("exit already initiated"));
         }
         if epoch < exit.epoch {
-            return Err(BlockError::InvalidVoluntaryExit("exit is not valid yet"));
+            return Err(invalid("exit is not valid yet"));
         }
         let seasoned = validator
             .activation_epoch
             .checked_add(processor.config.shard_committee_period)
             .is_some_and(|eligible| epoch >= eligible);
         if !seasoned {
-            return Err(BlockError::InvalidVoluntaryExit("validator is too recent"));
+            return Err(invalid("validator is too recent"));
         }
         if state.pending_balance_to_withdraw(exit.validator_index).0 != 0 {
-            return Err(BlockError::InvalidVoluntaryExit("withdrawals are pending"));
+            return Err(invalid("withdrawals are pending"));
         }
 
         let domain = Domain::compute(

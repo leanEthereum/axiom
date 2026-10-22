@@ -62,15 +62,29 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
     ) -> Result<Vec<DataColumnSidecar<P>>, ColumnError> {
         let body = &self.block.message.body;
         let columns = P::NUMBER_OF_COLUMNS as usize;
-        if blobs.len() != body.blob_kzg_commitments.len() || proofs.len() != blobs.len() * columns {
-            return Err(ColumnError::LengthMismatch);
+        let commitments = body.blob_kzg_commitments.len();
+        if blobs.len() != commitments {
+            return Err(ColumnError::BlobCountMismatch {
+                blobs: blobs.len(),
+                commitments,
+            });
+        }
+        if proofs.len() != blobs.len() * columns {
+            return Err(ColumnError::ProofCountMismatch {
+                proofs: proofs.len(),
+                expected: blobs.len() * columns,
+            });
         }
 
         // Extend every blob to its cells.
         let mut cells = Vec::with_capacity(blobs.len());
-        for blob in blobs {
-            let blob =
-                KzgBlob::from_bytes(blob.as_ref()).map_err(|_| ColumnError::InvalidKzgProofs)?;
+        for (position, blob) in blobs.iter().enumerate() {
+            let blob = KzgBlob::from_bytes(blob.as_ref()).map_err(|source| {
+                ColumnError::MalformedBlob {
+                    blob: position,
+                    source,
+                }
+            })?;
             cells.push(kzg.compute_cells(&blob));
         }
         self.verify(&cells, proofs, kzg)?;
@@ -85,21 +99,26 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
         // Column i takes cell i and proof i of every blob.
         (0..columns)
             .map(|index| {
+                let column_index = ColumnIndex(index as u64);
                 let column = cells
                     .iter()
                     .map(|blob_cells| Cell::<P>::try_from(blob_cells[index].to_bytes().as_slice()))
                     .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| ColumnError::LengthMismatch)?;
+                    .map_err(ColumnError::CellSize)?;
                 let column_proofs: Vec<KzgProof> = (0..blobs.len())
                     .map(|blob| proofs[blob * columns + index])
                     .collect();
+                let mismatch = ColumnError::LengthMismatch {
+                    column: column_index,
+                    cells: column.len(),
+                    commitments,
+                    proofs: column_proofs.len(),
+                };
                 Ok(DataColumnSidecar {
-                    index: ColumnIndex(index as u64),
-                    column: column.try_into().map_err(|_| ColumnError::LengthMismatch)?,
+                    index: column_index,
+                    column: column.try_into().map_err(|_| mismatch)?,
                     kzg_commitments: body.blob_kzg_commitments.clone(),
-                    kzg_proofs: column_proofs
-                        .try_into()
-                        .map_err(|_| ColumnError::LengthMismatch)?,
+                    kzg_proofs: column_proofs.try_into().map_err(|_| mismatch)?,
                     signed_block_header: header.clone(),
                     kzg_commitments_inclusion_proof: inclusion_proof.clone(),
                 })
@@ -122,17 +141,21 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
             let commitment = Bytes48::from(body.blob_kzg_commitments[blob].0);
             for (index, cell) in blob_cells.iter().enumerate() {
                 commitments.push(commitment);
-                indices.push(
-                    CellIndex::new(index as u64)
-                        .map_err(|_| ColumnError::IndexOutOfRange(index as u64))?,
-                );
+                indices.push(CellIndex::new(index as u64).map_err(|_| {
+                    ColumnError::IndexOutOfRange {
+                        index: ColumnIndex(index as u64),
+                        columns: P::NUMBER_OF_COLUMNS,
+                    }
+                })?);
                 flat.push(cell.clone());
             }
         }
         let proofs: Vec<Bytes48> = proofs.iter().map(|proof| Bytes48::from(proof.0)).collect();
         match kzg.verify_cell_kzg_proof_batch(&commitments, &indices, &flat, &proofs) {
             Ok(true) => Ok(()),
-            Ok(false) | Err(_) => Err(ColumnError::InvalidKzgProofs),
+            Ok(false) | Err(_) => Err(ColumnError::InvalidBlobProofs(
+                self.block.message.hash_tree_root(),
+            )),
         }
     }
 
@@ -141,17 +164,16 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
         self,
     ) -> Result<Vector<Bytes32, P::KzgCommitmentsInclusionProofDepth>, ColumnError> {
         let body = &self.block.message.body;
+        let unavailable = || ColumnError::NoInclusionProof(self.block.message.hash_tree_root());
         let index = BeaconBlockBody::<P>::field_index(BLOB_KZG_COMMITMENTS_FIELD);
-        let (_, proof) = body
-            .prove(index)
-            .ok_or(ColumnError::InvalidInclusionProof)?;
+        let (_, proof) = body.prove(index).ok_or_else(unavailable)?;
         proof
             .branch
             .into_iter()
             .map(|node| Bytes32(node.0))
             .collect::<Vec<_>>()
             .try_into()
-            .map_err(|_| ColumnError::InvalidInclusionProof)
+            .map_err(|_| unavailable())
     }
 }
 
@@ -217,19 +239,96 @@ mod tests {
         let kzg = Kzg::mainnet();
         let (block, blobs, mut proofs) = fixture(kzg);
 
-        // Mutation: drop the last proof, leaving 127 for one blob.
+        // Mutation: drop the last proof, leaving 127 for one blob of 128 cells.
         let last = proofs.pop().unwrap();
         assert_eq!(
             BlockColumns::new(&block).sidecars(&blobs, &proofs, kzg),
-            Err(ColumnError::LengthMismatch)
+            Err(ColumnError::ProofCountMismatch {
+                proofs: 127,
+                expected: 128,
+            })
+        );
+
+        // Mutation: offer no blob for the one commitment.
+        proofs.push(last);
+        assert_eq!(
+            BlockColumns::new(&block).sidecars(&[], &proofs, kzg),
+            Err(ColumnError::BlobCountMismatch {
+                blobs: 0,
+                commitments: 1,
+            })
         );
 
         // Mutation: swap two proofs, so cells 0 and 1 carry each other's opening.
-        proofs.push(last);
         proofs.swap(0, 1);
         assert_eq!(
             BlockColumns::new(&block).sidecars(&blobs, &proofs, kzg),
-            Err(ColumnError::InvalidKzgProofs)
+            Err(ColumnError::InvalidBlobProofs(block.message.hash_tree_root()))
+        );
+    }
+
+    #[test]
+    fn a_broken_sidecar_names_its_column_and_block() {
+        let kzg = Kzg::mainnet();
+        let (block, blobs, proofs) = fixture(kzg);
+        let sidecars = BlockColumns::new(&block)
+            .sidecars(&blobs, &proofs, kzg)
+            .unwrap();
+        let block_root = block.message.hash_tree_root();
+        let config = ChainConfig::minimal();
+
+        // Mutation: column 5 claims index 128, one past the last column.
+        let mut sidecar = sidecars[5].clone();
+        sidecar.index = ColumnIndex(128);
+        assert_eq!(
+            ColumnSidecar(&sidecar).verify_structure(&config),
+            Err(ColumnError::IndexOutOfRange {
+                index: ColumnIndex(128),
+                columns: 128,
+            })
+        );
+
+        // Mutation: column 5 drops its only commitment.
+        let mut sidecar = sidecars[5].clone();
+        sidecar.kzg_commitments = Default::default();
+        assert_eq!(
+            ColumnSidecar(&sidecar).verify_structure(&config),
+            Err(ColumnError::NoBlobs(ColumnIndex(5)))
+        );
+
+        // Mutation: column 5 drops its only proof, leaving 1 cell and 1 commitment.
+        let mut sidecar = sidecars[5].clone();
+        sidecar.kzg_proofs = Default::default();
+        assert_eq!(
+            ColumnSidecar(&sidecar).verify_structure(&config),
+            Err(ColumnError::LengthMismatch {
+                column: ColumnIndex(5),
+                cells: 1,
+                commitments: 1,
+                proofs: 0,
+            })
+        );
+
+        // Mutation: the first branch node of column 5 is zeroed, so the branch misses the body root.
+        let mut sidecar = sidecars[5].clone();
+        sidecar.kzg_commitments_inclusion_proof[0] = Bytes32::default();
+        assert_eq!(
+            ColumnSidecar(&sidecar).verify_inclusion_proof(),
+            Err(ColumnError::InvalidInclusionProof {
+                column: ColumnIndex(5),
+                block_root,
+            })
+        );
+
+        // Mutation: column 5 carries the proof of column 6.
+        let mut sidecar = sidecars[5].clone();
+        sidecar.kzg_proofs = sidecars[6].kzg_proofs.clone();
+        assert_eq!(
+            ColumnSidecar(&sidecar).verify_kzg_proofs(kzg),
+            Err(ColumnError::InvalidKzgProofs {
+                column: ColumnIndex(5),
+                block_root,
+            })
         );
     }
 }

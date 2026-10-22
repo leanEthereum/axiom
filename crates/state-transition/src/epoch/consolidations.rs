@@ -34,11 +34,13 @@ impl ConsolidationQueue {
         let queue = state.beacon.pending_consolidations.clone();
 
         for consolidation in &queue {
-            let source = state
-                .beacon
-                .validators
+            let validators = &state.beacon.validators;
+            let source = validators
                 .get(consolidation.source_index.as_usize())
-                .ok_or(StateError::UnknownValidator(consolidation.source_index))?;
+                .ok_or(StateError::UnknownValidator {
+                    index: consolidation.source_index,
+                    registry_size: validators.len(),
+                })?;
             if source.slashed {
                 next_pending += 1;
                 continue;

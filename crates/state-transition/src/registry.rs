@@ -65,12 +65,13 @@ impl<'a, P: Preset> Registry<'a, P> {
     ///
     /// Fails when the validator does not exist.
     pub(crate) fn initiate_exit(&mut self, index: ValidatorIndex) -> Result<(), StateError> {
-        let validator = self
-            .state
-            .beacon
-            .validators
+        let validators = &self.state.beacon.validators;
+        let validator = validators
             .get(index.as_usize())
-            .ok_or(StateError::UnknownValidator(index))?;
+            .ok_or(StateError::UnknownValidator {
+                index,
+                registry_size: validators.len(),
+            })?;
         if validator.exit_epoch != Epoch::FAR_FUTURE {
             return Ok(());
         }
@@ -117,7 +118,9 @@ impl<'a, P: Preset> Registry<'a, P> {
         let slot = (epoch % P::EPOCHS_PER_SLASHINGS_VECTOR) as usize;
         beacon.slashings[slot] = beacon.slashings[slot]
             .checked_add(effective_balance)
-            .ok_or(StateError::Overflow)?;
+            .ok_or(StateError::Overflow {
+                quantity: "slashed balance of the epoch",
+            })?;
         self.state.decrease_balance(
             slashed,
             effective_balance / P::MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
@@ -173,7 +176,9 @@ impl<'a, P: Preset> Registry<'a, P> {
     pub(crate) fn withdrawable_epoch(&self, exit_epoch: Epoch) -> Result<Epoch, StateError> {
         exit_epoch
             .checked_add(self.config.min_validator_withdrawability_delay)
-            .ok_or(StateError::Overflow)
+            .ok_or(StateError::Overflow {
+                quantity: "withdrawable epoch",
+            })
     }
 
     /// Switches a validator to compounding credentials, and queues its excess balance.
@@ -239,7 +244,10 @@ impl<'a, P: Preset> Registry<'a, P> {
             beacon
                 .pending_deposits
                 .push(deposit)
-                .map_err(|_| StateError::ListFull)?;
+                .map_err(|source| StateError::Capacity {
+                    list: "pending deposits",
+                    source,
+                })?;
         }
         Ok(())
     }
@@ -279,23 +287,38 @@ impl<'a, P: Preset> Registry<'a, P> {
         beacon
             .validators
             .push(validator)
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "validators",
+                source,
+            })?;
         beacon
             .balances
             .push(deposit.amount)
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "balances",
+                source,
+            })?;
         beacon
             .previous_epoch_participation
             .push(ParticipationFlags::default())
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "previous epoch participation",
+                source,
+            })?;
         beacon
             .current_epoch_participation
             .push(ParticipationFlags::default())
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "current epoch participation",
+                source,
+            })?;
         beacon
             .inactivity_scores
             .push(0)
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "inactivity scores",
+                source,
+            })?;
         self.state.pubkeys.sync(&self.state.beacon.validators);
         Ok(())
     }
