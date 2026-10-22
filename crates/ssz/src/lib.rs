@@ -12,6 +12,7 @@
 
 mod basic;
 mod collections;
+mod compatible_union;
 mod container;
 mod error;
 mod length;
@@ -25,6 +26,7 @@ pub use collections::{
     BitList, BitVector, ByteList, ByteVector, CapacityError, List, ProgressiveBitList,
     ProgressiveList, Vector,
 };
+pub use compatible_union::{CompatibleUnion, OptionVisitor, UnionOptions};
 pub use container::{Container, FieldDecoder, FieldVisitor, Merkleization};
 pub use error::DecodeError;
 pub use length::{Const, Length};

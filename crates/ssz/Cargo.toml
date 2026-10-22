@@ -18,6 +18,4 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-axiom-snappy.workspace = true
-axiom-yaml.workspace = true
 proptest.workspace = true

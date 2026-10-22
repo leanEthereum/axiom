@@ -1,15 +1,22 @@
 //! The generic SSZ vectors of the consensus specs, one test per handler.
 //!
 //! They ship only in the general suite of an older release, pinned in the Makefile.
-//! Each test pins its case counts, so a shrinking vector set cannot pass silently.
+//! Each test pins its case count, so a shrinking vector set cannot pass silently.
+//! No case is skipped: every valid and every invalid case runs.
 
 use std::{env, fs};
 
 use axiom_ef_tests::{Report, SszGeneric, Suite, Vectors};
 
 /// Runs one handler and returns its tally, or nothing when the vectors are absent.
+///
+/// # Panics
+///
+/// Panics when a case fails or is skipped.
 fn run(handler: &str) -> Option<Report> {
-    Suite::run_general(&SszGeneric, "phase0", handler)
+    let report = Suite::run_general(&SszGeneric, "phase0", handler)?;
+    assert_eq!(report.skipped.len(), 0, "skipped: {:?}", report.skipped);
+    Some(report)
 }
 
 #[test]
@@ -58,7 +65,6 @@ fn boolean() {
 
     // Two valid bytes, 0 and 1, and four invalid ones.
     assert_eq!(report.passed, 6);
-    assert_eq!(report.skipped.len(), 0);
 }
 
 #[test]
@@ -69,7 +75,6 @@ fn uints() {
 
     // Six widths: eight valid and three invalid cases each.
     assert_eq!(report.passed, 66);
-    assert_eq!(report.skipped.len(), 0);
 }
 
 #[test]
@@ -78,11 +83,9 @@ fn basic_vector() {
         return;
     };
 
-    // 200 valid and 950 invalid cases run.
-    assert_eq!(report.passed, 1150);
-
-    // One zero-length vector per element type, seven in all, cannot be written as a type.
-    assert_eq!(report.skipped.len(), 7);
+    // 200 valid and 957 invalid cases.
+    // Seven invalid cases declare a zero-length vector, one per element type.
+    assert_eq!(report.passed, 1157);
 }
 
 #[test]
@@ -93,7 +96,6 @@ fn bitlist() {
 
     // 450 valid and 44 invalid cases.
     assert_eq!(report.passed, 494);
-    assert_eq!(report.skipped.len(), 0);
 }
 
 #[test]
@@ -102,11 +104,8 @@ fn bitvector() {
         return;
     };
 
-    // 54 valid and 30 invalid cases run.
-    assert_eq!(report.passed, 84);
-
-    // The zero-length bitvector cannot be written as a type.
-    assert_eq!(report.skipped.len(), 1);
+    // 54 valid and 31 invalid cases, one of them declaring a zero-length bitvector.
+    assert_eq!(report.passed, 85);
 }
 
 #[test]
@@ -115,11 +114,9 @@ fn containers() {
         return;
     };
 
-    // Six test containers give 303 valid and 104 invalid cases.
-    assert_eq!(report.passed, 407);
-
-    // Two progressive containers give 160 valid and 134 invalid cases, not run.
-    assert_eq!(report.skipped.len(), 294);
+    // Eight test containers, two of them holding progressive fields.
+    // They give 463 valid and 238 invalid cases.
+    assert_eq!(report.passed, 701);
 }
 
 #[test]
@@ -128,9 +125,8 @@ fn basic_progressive_list() {
         return;
     };
 
-    // Progressive lists are not part of Fulu: 320 valid and 567 invalid cases, not run.
-    assert_eq!(report.passed, 0);
-    assert_eq!(report.skipped.len(), 887);
+    // Seven element types give 320 valid and 567 invalid cases.
+    assert_eq!(report.passed, 887);
 }
 
 #[test]
@@ -139,9 +135,8 @@ fn compatible_unions() {
         return;
     };
 
-    // Compatible unions are not part of Fulu: 210 valid and 311 invalid cases, not run.
-    assert_eq!(report.passed, 0);
-    assert_eq!(report.skipped.len(), 521);
+    // Three unions of progressive containers give 210 valid and 311 invalid cases.
+    assert_eq!(report.passed, 521);
 }
 
 #[test]
@@ -150,9 +145,8 @@ fn progressive_bitlist() {
         return;
     };
 
-    // Progressive bitlists are not part of Fulu: 700 valid and 3 invalid cases, not run.
-    assert_eq!(report.passed, 0);
-    assert_eq!(report.skipped.len(), 703);
+    // 700 valid and 3 invalid cases.
+    assert_eq!(report.passed, 703);
 }
 
 #[test]
@@ -161,7 +155,6 @@ fn progressive_containers() {
         return;
     };
 
-    // Progressive containers are not part of Fulu: 261 valid and 264 invalid cases, not run.
-    assert_eq!(report.passed, 0);
-    assert_eq!(report.skipped.len(), 525);
+    // Four progressive containers give 261 valid and 264 invalid cases.
+    assert_eq!(report.passed, 525);
 }

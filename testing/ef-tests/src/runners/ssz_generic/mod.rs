@@ -7,27 +7,28 @@
 //! Invalid cases must fail to decode.
 //!
 //! The format lives in the consensus specs' `tests/formats/ssz_generic/README.md`.
+//! Progressive types come from EIP-7916 and EIP-7495, compatible unions from EIP-8016.
 
+mod compatible_unions;
 mod containers;
+mod progressive_containers;
 
-use axiom_ssz::{BitList, BitVector, Const, Root, Ssz, U256, Vector};
+use axiom_ssz::{
+    BitList, BitVector, CompatibleUnion, Const, ProgressiveBitList, ProgressiveList, Root, Ssz,
+    U256, Vector,
+};
 use axiom_yaml::Yaml;
+use compatible_unions::{CompatibleUnionA, CompatibleUnionABCA, CompatibleUnionBC};
 use containers::{
-    BitsStruct, ComplexTestStruct, FixedTestStruct, SingleFieldTestStruct, SmallTestStruct,
-    VarTestStruct,
+    BitsStruct, ComplexTestStruct, FixedTestStruct, ProgressiveBitsStruct, ProgressiveTestStruct,
+    SingleFieldTestStruct, SmallTestStruct, VarTestStruct,
+};
+use progressive_containers::{
+    ProgressiveComplexTestStruct, ProgressiveSingleFieldContainerTestStruct,
+    ProgressiveSingleListContainerTestStruct, ProgressiveVarTestStruct,
 };
 
 use crate::{Case, Failure, Runner};
-
-/// Why the progressive types are not run.
-///
-/// They come from EIP-7495 and EIP-7916, which no fork up to Fulu uses.
-const PROGRESSIVE: &str = "progressive types and compatible unions are not part of Fulu";
-
-/// Why the zero-length vector types are not run.
-///
-/// The spec forbids them, and Axiom rejects them at compile time.
-const ZERO_LENGTH: &str = "a zero-length vector type does not compile";
 
 /// Runs every generic SSZ case.
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,9 +123,21 @@ impl SszGeneric {
         Ok(())
     }
 
+    /// Checks a case declaring a zero-length type, which the spec forbids.
+    ///
+    /// Such a type does not compile here, so only invalid cases may declare one.
+    /// The generator writes their bytes against the one-element type, so they run against it.
+    fn zero_length<T: Ssz>(case: &Case) -> Result<(), Failure> {
+        match Expectation::of(case)? {
+            Expectation::Invalid => Self::check::<T>(case),
+            Expectation::Valid => Err(Failure::new("a zero-length type has no valid value")),
+        }
+    }
+
     /// Checks a case against a vector of some length.
     fn vector<T: Ssz>(length: usize, case: &Case) -> Result<(), Failure> {
         match length {
+            0 => Self::zero_length::<Vector<T, Const<1>>>(case),
             1 => Self::check::<Vector<T, Const<1>>>(case),
             2 => Self::check::<Vector<T, Const<2>>>(case),
             3 => Self::check::<Vector<T, Const<3>>>(case),
@@ -183,6 +196,7 @@ impl SszGeneric {
     /// Checks a case named after a bitvector's length.
     fn bitvector(case: &Case) -> Result<(), Failure> {
         match CaseName::of(case).number(1)? {
+            0 => Self::zero_length::<BitVector<Const<1>>>(case),
             1 => Self::check::<BitVector<Const<1>>>(case),
             2 => Self::check::<BitVector<Const<2>>>(case),
             3 => Self::check::<BitVector<Const<3>>>(case),
@@ -227,7 +241,50 @@ impl SszGeneric {
             "VarTestStruct" => Self::check::<VarTestStruct>(case),
             "ComplexTestStruct" => Self::check::<ComplexTestStruct>(case),
             "BitsStruct" => Self::check::<BitsStruct>(case),
+            "ProgressiveTestStruct" => Self::check::<ProgressiveTestStruct>(case),
+            "ProgressiveBitsStruct" => Self::check::<ProgressiveBitsStruct>(case),
             other => Err(Failure(format!("unsupported container {other}"))),
+        }
+    }
+
+    /// Checks a case named after a progressive list's element type.
+    fn progressive_list(case: &Case) -> Result<(), Failure> {
+        match CaseName::of(case).text(1)? {
+            "bool" => Self::check::<ProgressiveList<bool>>(case),
+            "uint8" => Self::check::<ProgressiveList<u8>>(case),
+            "uint16" => Self::check::<ProgressiveList<u16>>(case),
+            "uint32" => Self::check::<ProgressiveList<u32>>(case),
+            "uint64" => Self::check::<ProgressiveList<u64>>(case),
+            "uint128" => Self::check::<ProgressiveList<u128>>(case),
+            "uint256" => Self::check::<ProgressiveList<U256>>(case),
+            other => Err(Failure(format!("unsupported element type {other}"))),
+        }
+    }
+
+    /// Checks a case named after its progressive test container.
+    fn progressive_container(case: &Case) -> Result<(), Failure> {
+        match CaseName::of(case).text(0)? {
+            "ProgressiveSingleFieldContainerTestStruct" => {
+                Self::check::<ProgressiveSingleFieldContainerTestStruct>(case)
+            }
+            "ProgressiveSingleListContainerTestStruct" => {
+                Self::check::<ProgressiveSingleListContainerTestStruct>(case)
+            }
+            "ProgressiveVarTestStruct" => Self::check::<ProgressiveVarTestStruct>(case),
+            "ProgressiveComplexTestStruct" => Self::check::<ProgressiveComplexTestStruct>(case),
+            other => Err(Failure(format!(
+                "unsupported progressive container {other}"
+            ))),
+        }
+    }
+
+    /// Checks a case named after its compatible union.
+    fn compatible_union(case: &Case) -> Result<(), Failure> {
+        match CaseName::of(case).text(0)? {
+            "CompatibleUnionA" => Self::check::<CompatibleUnion<CompatibleUnionA>>(case),
+            "CompatibleUnionBC" => Self::check::<CompatibleUnion<CompatibleUnionBC>>(case),
+            "CompatibleUnionABCA" => Self::check::<CompatibleUnion<CompatibleUnionABCA>>(case),
+            other => Err(Failure(format!("unsupported compatible union {other}"))),
         }
     }
 }
@@ -245,34 +302,11 @@ impl Runner for SszGeneric {
             "boolean" => Self::check::<bool>(case),
             "containers" => Self::container(case),
             "uints" => Self::uint(case),
+            "basic_progressive_list" => Self::progressive_list(case),
+            "progressive_bitlist" => Self::check::<ProgressiveBitList>(case),
+            "progressive_containers" => Self::progressive_container(case),
+            "compatible_unions" => Self::compatible_union(case),
             other => Err(Failure(format!("unsupported handler {other}"))),
-        }
-    }
-
-    fn skip_handler(&self, handler: &str) -> Option<&'static str> {
-        matches!(
-            handler,
-            "basic_progressive_list"
-                | "compatible_unions"
-                | "progressive_bitlist"
-                | "progressive_containers"
-        )
-        .then_some(PROGRESSIVE)
-    }
-
-    fn skip_case(&self, handler: &str, case: &Case) -> Option<&'static str> {
-        let name = CaseName::of(case);
-        match handler {
-            "containers"
-                if name
-                    .text(0)
-                    .is_ok_and(|kind| kind.starts_with("Progressive")) =>
-            {
-                Some(PROGRESSIVE)
-            }
-            "basic_vector" if name.number(2) == Ok(0) => Some(ZERO_LENGTH),
-            "bitvector" if name.number(1) == Ok(0) => Some(ZERO_LENGTH),
-            _ => None,
         }
     }
 }

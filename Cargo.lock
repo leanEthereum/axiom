@@ -275,8 +275,6 @@ dependencies = [
 name = "axiom-ssz"
 version = "0.1.0"
 dependencies = [
- "axiom-snappy",
- "axiom-yaml",
  "proptest",
  "sha2",
  "thiserror",
