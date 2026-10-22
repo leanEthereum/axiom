@@ -184,7 +184,7 @@ impl Routes {
                 "/eth/v2/beacon/blocks",
                 |chain, request| async move {
                     let proposal =
-                        SignedProposal::<Minimal>::decode(&request.body, fork_of(&request))
+                        SignedProposal::<Minimal>::decode(&request.body, fork_of(&request), false)
                             .expect("the client publishes a valid proposal");
                     let outcome = lock(&chain).publish(&proposal);
                     outcome.map_or_else(

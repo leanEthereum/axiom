@@ -678,7 +678,9 @@ impl TestChain {
 
     /// Applies a published block, or holds a Gloas block until its envelope comes.
     pub(crate) fn publish(&mut self, proposal: &SignedProposal<Minimal>) -> Result<(), String> {
-        let block = proposal.block();
+        let block = proposal
+            .block()
+            .ok_or("the test node builds no blinded blocks")?;
         if block.fork_name() == ForkName::Gloas {
             self.pending = Some(block);
             return Ok(());

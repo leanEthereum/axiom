@@ -129,11 +129,12 @@ impl<'a> ValidatorEndpoints<'a> {
     /// A block for a slot before Gloas, with the proposer's randao reveal.
     ///
     /// A builder boost factor of zero asks for a locally built payload.
+    /// A block on a builder's payload comes back blinded.
     /// See `produceBlockV3` in the beacon API.
     ///
     /// # Errors
     ///
-    /// Fails when the node cannot produce, answers a blinded block, or answers malformed data.
+    /// Fails when the node cannot produce, or answers malformed data.
     pub async fn produce_block<P: Preset>(
         self,
         slot: Slot,
@@ -151,15 +152,12 @@ impl<'a> ValidatorEndpoints<'a> {
             graffiti.0.to_data(),
         );
         let response = self.client.get_ssz(&target).await?;
-        if response
+        let blinded = response
             .headers
             .get(BLINDED)
-            .is_some_and(|blinded| blinded.eq_ignore_ascii_case("true"))
-        {
-            return Err(BeaconError::Blinded);
-        }
+            .is_some_and(|blinded| blinded.eq_ignore_ascii_case("true"));
         let fork = BeaconClient::fork_of(&response)?;
-        Ok(ProducedBlock::decode(&response.body, fork)?)
+        Ok(ProducedBlock::decode(&response.body, fork, blinded)?)
     }
 
     /// A Gloas block for a slot, whose self-built payload the node keeps for the envelope.
@@ -194,7 +192,7 @@ impl<'a> ValidatorEndpoints<'a> {
             .with_body(JSON, config.to_string().into_bytes());
         let response = self.client.send(request).await?;
         let fork = BeaconClient::fork_of(&response)?;
-        Ok(ProducedBlock::decode(&response.body, fork)?)
+        Ok(ProducedBlock::decode(&response.body, fork, false)?)
     }
 
     /// The payload envelope the node built beside a Gloas block, for the proposer to sign.

@@ -4,6 +4,7 @@ use axiom_beacon_json::ApiJsonError;
 use axiom_http::{HttpError, StatusCode};
 use axiom_json::ParseError;
 use axiom_ssz::DecodeError;
+use axiom_types::combined::BlindedBlockError;
 use thiserror::Error;
 
 /// A beacon node request that did not produce its answer.
@@ -43,9 +44,9 @@ pub enum BeaconError {
     /// The node has nothing to answer, such as no block yet for a payload vote.
     #[error("beacon node has no content for this request")]
     NoContent,
-    /// The node produced a blinded block, which this client cannot sign.
-    #[error("beacon node produced a blinded block, which this client does not sign")]
-    Blinded,
+    /// The answer is not the block of its fork, blinded or full.
+    #[error("beacon node answered an invalid block: {0}")]
+    Block(#[from] BlindedBlockError),
     /// A duty names a committee seat outside its committee.
     #[error("committee seat {seat} is outside a committee of {length}")]
     Seat {

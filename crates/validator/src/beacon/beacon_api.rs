@@ -85,7 +85,7 @@ impl<'a> BeaconEndpoints<'a> {
     /// Publishes a signed block, with its blobs where its fork carries them.
     ///
     /// The node must check it as gossip would before broadcasting.
-    /// See `publishBlockV2` in the beacon API.
+    /// See `publishBlockV2` and `publishBlindedBlockV2` in the beacon API.
     ///
     /// # Errors
     ///
@@ -94,10 +94,13 @@ impl<'a> BeaconEndpoints<'a> {
         self,
         proposal: &SignedProposal<P>,
     ) -> Result<(), BeaconError> {
-        let request = Request::new(
-            Method::Post,
-            "/eth/v2/beacon/blocks?broadcast_validation=gossip",
-        );
+        // A blinded block goes to its own route, where the builder reveals the payload.
+        let target = if proposal.is_blinded() {
+            "/eth/v2/beacon/blinded_blocks?broadcast_validation=gossip"
+        } else {
+            "/eth/v2/beacon/blocks?broadcast_validation=gossip"
+        };
+        let request = Request::new(Method::Post, target);
         self.client
             .post_ssz(request, proposal.encode(), proposal.fork())
             .await?;
