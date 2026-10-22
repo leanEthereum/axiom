@@ -21,6 +21,7 @@ use super::{
     query::Body,
     reply::{ApiError, ApiResult, Reply, Routes},
 };
+use crate::Chain;
 
 /// Routes under `/eth/v1/validator/duties` and `/eth/v2/validator/duties`.
 #[derive(Clone, Copy, Debug)]
@@ -51,10 +52,11 @@ impl DutyRoutes {
     /// See `getProposerDuties` in the beacon API.
     async fn proposers<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let epoch = Self::epoch(&request)?;
+        let now = context.publisher.now_ms();
         context
             .query(move |chain| {
                 let head = chain.head();
-                let roster = Roster::new(chain.head_state()?, chain.config(), head.root);
+                let roster = Roster::at_time(chain, now)?;
                 let dependent_root = roster.root_before(epoch.start_slot::<P>());
                 let data = roster.proposers(epoch)?;
                 Ok(Self::reply(Some(dependent_root), head.optimistic, data))
@@ -69,10 +71,11 @@ impl DutyRoutes {
     /// See `getProposerDutiesV2` in the beacon API.
     async fn proposers_v2<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let epoch = Self::epoch(&request)?;
+        let now = context.publisher.now_ms();
         context
             .query(move |chain| {
                 let head = chain.head();
-                let roster = Roster::new(chain.head_state()?, chain.config(), head.root);
+                let roster = Roster::at_time(chain, now)?;
                 let dependent_root = roster.root_before_previous(epoch);
                 let data = roster.proposers(epoch)?;
                 Ok(Self::reply(Some(dependent_root), head.optimistic, data))
@@ -86,10 +89,11 @@ impl DutyRoutes {
     async fn attesters<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let epoch = Self::epoch(&request)?;
         let validators = Self::indices(&request)?;
+        let now = context.publisher.now_ms();
         context
             .query(move |chain| {
                 let head = chain.head();
-                let roster = Roster::new(chain.head_state()?, chain.config(), head.root);
+                let roster = Roster::at_time(chain, now)?;
                 let dependent_root = roster.root_before_previous(epoch);
                 let data = roster.attesters(epoch, &validators)?;
                 Ok(Self::reply(Some(dependent_root), head.optimistic, data))
@@ -104,11 +108,11 @@ impl DutyRoutes {
     async fn sync<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let epoch = Self::epoch(&request)?;
         let validators = Self::indices(&request)?;
+        let now = context.publisher.now_ms();
         context
             .query(move |chain| {
                 let head = chain.head();
-                let data = Roster::new(chain.head_state()?, chain.config(), head.root)
-                    .sync(epoch, &validators)?;
+                let data = Roster::at_time(chain, now)?.sync(epoch, &validators)?;
                 Ok(Self::reply(None, head.optimistic, data))
             })
             .await
@@ -120,10 +124,11 @@ impl DutyRoutes {
     async fn ptc<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let epoch = Self::epoch(&request)?;
         let validators = Self::indices(&request)?;
+        let now = context.publisher.now_ms();
         context
             .query(move |chain| {
                 let head = chain.head();
-                let roster = Roster::new(chain.head_state()?, chain.config(), head.root);
+                let roster = Roster::at_time(chain, now)?;
                 let dependent_root = roster.root_before_previous(epoch);
                 let data = roster.ptc(epoch, &validators)?;
                 Ok(Self::reply(Some(dependent_root), head.optimistic, data))
@@ -187,6 +192,24 @@ impl<'a, P: Preset> Roster<'a, P> {
             config,
             head_root,
         }
+    }
+
+    /// Duties read from the head's state, advanced to the wall clock's epoch.
+    ///
+    /// Timing: at an epoch's first slot the head is often still in the epoch before.
+    /// The API serves duties up to the epoch after the clock's, so the state catches up first.
+    /// The empty slots it crosses keep the head as their latest block, so dependent roots hold.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head's state is missing or cannot advance.
+    pub(crate) fn at_time(chain: &'a Chain<P>, now_ms: u64) -> Result<Self, ApiError> {
+        let mut roster = Self::new(chain.head_state()?, chain.config(), chain.head().root);
+        let epoch = chain.store().slot_clock().slot_at(now_ms).epoch::<P>();
+        if epoch > roster.state.beacon().current_epoch() {
+            roster.state = roster.at_slot(epoch.start_slot::<P>())?;
+        }
+        Ok(roster)
     }
 
     /// The proposers of every slot of an epoch, the current or the next.
@@ -476,6 +499,36 @@ mod tests {
                 Json::parse(r#"{"code":400,"message":"the head's fork has no sync committee"}"#)
                     .unwrap()
             )
+        );
+    }
+
+    #[test]
+    fn duties_follow_the_clock_when_the_head_lags_behind() {
+        // Fixture state: the clock at slot 8, the first of epoch 1, with only the genesis block.
+        // The head's state is still in epoch 0, yet the client may ask for epoch 2.
+        let api = TestApi::phase0(64);
+        api.at_slot(Slot(8));
+        let (genesis, data) = api.run(|chain| {
+            let head = chain.head();
+            let asked = BTreeSet::from([ValidatorIndex(3)]);
+            let mut state = chain.head_state().unwrap().clone();
+            state.process_slots(chain.config(), Slot(8)).unwrap();
+            let data = Roster::new(&state, chain.config(), head.root)
+                .attesters(Epoch(2), &asked)
+                .unwrap();
+            (head.root, data)
+        });
+        // Validator 3 holds one seat, and every empty slot keeps genesis as the dependent root.
+        assert_eq!(data.len(), 1);
+        let expected = Duties {
+            dependent_root: Some(genesis),
+            execution_optimistic: false,
+            data,
+        }
+        .to_json();
+        assert_eq!(
+            api.post("/eth/v1/validator/duties/attester/2", r#"["3"]"#),
+            (StatusCode::OK, expected)
         );
     }
 

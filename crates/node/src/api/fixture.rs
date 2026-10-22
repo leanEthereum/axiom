@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axiom_bls::SecretKey;
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::Json;
+use axiom_ssz::Ssz;
 use axiom_types::{
     BlsPubkey, ChainConfig, Epoch, ExecutionAddress, ForkName, Gwei, Minimal, ParticipationFlags,
     Slot, combined, gloas, phase0, phase0::Validator,
@@ -73,8 +74,14 @@ impl TestApi {
 
     /// An API over a phase0 genesis of given validators and balances.
     pub(crate) fn phase0_with(registry: impl IntoIterator<Item = (Validator, Gwei)>) -> Self {
+        // Invariant: the header commits to the empty body, as the genesis block's does.
+        // Otherwise the roots the state records would differ from the anchor's.
         let mut state = phase0::BeaconState::<Minimal> {
             genesis_time: GENESIS_TIME,
+            latest_block_header: phase0::BeaconBlockHeader {
+                body_root: phase0::BeaconBlockBody::<Minimal>::default().hash_tree_root(),
+                ..phase0::BeaconBlockHeader::default()
+            },
             ..phase0::BeaconState::default()
         };
         for (record, balance) in registry {

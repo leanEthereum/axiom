@@ -37,6 +37,34 @@ use super::{
 };
 use crate::Chain;
 
+/// What an accepted submission does on the network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spread {
+    /// The submission is news, so it goes out on its topic.
+    Broadcast,
+    /// The node already holds everything the submission carries, so peers would drop it.
+    Known,
+}
+
+impl Spread {
+    /// The fate of an aggregate, or a sync contribution, after its gossip rules.
+    ///
+    /// Aggregators of one committee often hold the same votes, and each submits them.
+    /// Gossip ignores a repeat whose votes are already seen, so the first one alone spreads.
+    /// The repeat is still valid, so the client is told it was accepted.
+    /// Only a rejection, such as a bad signature, is refused.
+    fn of_aggregate(verdict: Result<(), GossipError>) -> Result<Self, ApiError> {
+        match verdict {
+            Ok(()) => Ok(Self::Broadcast),
+            Err(error @ GossipError::Ignore { .. }) => {
+                debug!(%error, "aggregate adds nothing the node has not seen");
+                Ok(Self::Known)
+            }
+            Err(error @ GossipError::Reject { .. }) => Err(PoolRoutes::refusal(error)),
+        }
+    }
+}
+
 /// Routes under `/eth/v1/beacon/pool`, `/eth/v2/beacon/pool`, and the signed aggregate routes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PoolRoutes;
@@ -234,24 +262,26 @@ impl PoolRoutes {
             let bytes = signed.encode();
             let outcome = context
                 .query(move |chain| {
-                    chain
-                        .validate_gossip(|validator| {
-                            validator.aggregate_and_proof::<F>(&signed, now)
-                        })
-                        .map_err(Self::refusal)?;
+                    let verdict = chain.validate_gossip(|validator| {
+                        validator.aggregate_and_proof::<F>(&signed, now)
+                    });
+                    if Spread::of_aggregate(verdict)? == Spread::Known {
+                        return Ok(Spread::Known);
+                    }
                     if let Err(error) = chain.on_vote(&signed.aggregate().committee_vote()) {
                         debug!(%error, "aggregate pooled but not counted yet");
                     }
-                    Ok(())
+                    Ok(Spread::Broadcast)
                 })
                 .await;
             match outcome {
-                Ok(()) => {
+                Ok(Spread::Broadcast) => {
                     context
                         .publisher
                         .gossip(GossipKind::BeaconAggregateAndProof, epoch, bytes)
                         .await;
                 }
+                Ok(Spread::Known) => {}
                 Err(error) => failures.push((position, error.to_string())),
             }
         }
@@ -294,7 +324,7 @@ impl PoolRoutes {
                     .validate_gossip(|validator| validator.proposer_slashing(&slashing))
                     .map_err(Self::refusal)?;
                 chain.on_proposer_slashing(slashing)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -337,7 +367,7 @@ impl PoolRoutes {
                 };
                 verdict.map_err(Self::refusal)?;
                 chain.on_voluntary_exit(exit)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -355,7 +385,7 @@ impl PoolRoutes {
                     .validate_gossip(|validator| validator.bls_to_execution_change(&change, now))
                     .map_err(Self::refusal)?;
                 chain.on_credential_change(change)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -406,11 +436,13 @@ impl PoolRoutes {
             contributions,
             GossipKind::SyncCommitteeContributionAndProof,
             |chain, signed, now| {
-                chain
-                    .validate_gossip(|validator| validator.sync_contribution(&signed, now))
-                    .map_err(Self::refusal)?;
+                let verdict =
+                    chain.validate_gossip(|validator| validator.sync_contribution(&signed, now));
+                if Spread::of_aggregate(verdict)? == Spread::Known {
+                    return Ok(Spread::Known);
+                }
                 chain.on_contribution(&signed.message.contribution)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -433,7 +465,7 @@ impl PoolRoutes {
                     })
                     .map_err(Self::refusal)?;
                 chain.on_payload_attestation(&message)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -555,7 +587,7 @@ impl PoolRoutes {
         context: &ApiContext<P>,
         items: Vec<T>,
         kind: GossipKind,
-        rule: impl Fn(&mut Chain<P>, T, u64) -> Result<(), ApiError> + Clone + Send + 'static,
+        rule: impl Fn(&mut Chain<P>, T, u64) -> Result<Spread, ApiError> + Clone + Send + 'static,
     ) -> ApiResult
     where
         P: Preset,
@@ -570,12 +602,12 @@ impl PoolRoutes {
         Reply::submission(failures)
     }
 
-    /// Submits one operation, broadcasting it when the rule accepts it.
+    /// Submits one operation, broadcasting it when the rule accepts it as news.
     async fn offer<P, T>(
         context: &ApiContext<P>,
         item: T,
         kind: GossipKind,
-        rule: impl FnOnce(&mut Chain<P>, T, u64) -> Result<(), ApiError> + Send + 'static,
+        rule: impl FnOnce(&mut Chain<P>, T, u64) -> Result<Spread, ApiError> + Send + 'static,
     ) -> ApiResult
     where
         P: Preset,
@@ -583,13 +615,12 @@ impl PoolRoutes {
     {
         let now = context.publisher.now_ms();
         let bytes = item.encode();
-        let epoch = context
-            .query(move |chain| {
-                rule(chain, item, now)?;
-                Ok(chain.store().current_epoch())
-            })
+        let (spread, epoch) = context
+            .query(move |chain| Ok((rule(chain, item, now)?, chain.store().current_epoch())))
             .await?;
-        context.publisher.gossip(kind, epoch, bytes).await;
+        if spread == Spread::Broadcast {
+            context.publisher.gossip(kind, epoch, bytes).await;
+        }
         Ok(Response::new(StatusCode::OK))
     }
 
@@ -764,6 +795,23 @@ mod tests {
             .as_ref()
             .map(ApiJsonError::to_string)
             .unwrap()
+    }
+
+    #[test]
+    fn a_repeated_aggregate_is_accepted_but_not_spread() {
+        // A fresh aggregate goes out on its topic.
+        assert_eq!(Spread::of_aggregate(Ok(())), Ok(Spread::Broadcast));
+
+        // A second aggregator's copy of seen votes is valid news to no one.
+        let seen = GossipError::ignore("already seen aggregate for this data");
+        assert_eq!(Spread::of_aggregate(Err(seen)), Ok(Spread::Known));
+
+        // A bad signature is refused, with the gossip rule's words.
+        let forged = GossipError::reject("invalid aggregate signature");
+        assert_eq!(
+            Spread::of_aggregate(Err(forged)),
+            Err(PoolRoutes::refusal(forged))
+        );
     }
 
     #[test]

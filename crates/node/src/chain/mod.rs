@@ -366,7 +366,10 @@ impl<P: Preset> Chain<P> {
         self.database.canonical_root(slot)
     }
 
-    /// Advances the fork choice clock.
+    /// Advances the fork choice clock, never moving it back.
+    ///
+    /// The ticker and a publication may read the clock in either order before reaching the chain.
+    /// A late arrival with the earlier time leaves the clock where it is.
     ///
     /// # Errors
     ///
@@ -374,7 +377,7 @@ impl<P: Preset> Chain<P> {
     pub fn on_tick(&mut self, time_ms: u64) -> Result<(), ChainError> {
         let epoch = self.store.current_epoch();
         let slot = self.store.current_slot();
-        self.store.on_tick(time_ms);
+        self.store.on_tick(time_ms.max(self.store.time_ms()));
         if self.store.current_slot() != slot {
             // Votes and signatures too old for any coming block leave the pool.
             self.pool.on_slot(self.store.current_slot());

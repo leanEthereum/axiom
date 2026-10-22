@@ -42,6 +42,7 @@ use axiom_types::{
     deneb::{self, Blob},
     electra,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
+    gloas,
 };
 use tokio::{
     runtime::Builder,
@@ -405,6 +406,38 @@ impl TestNode {
             panic!("an Altair chain serves Altair updates");
         };
         (update.attested_header.beacon.slot, update.signature_slot)
+    }
+
+    /// Checks the node serves a block's envelope back by its root, as SSZ and as versioned JSON.
+    async fn serves_envelope(
+        &self,
+        tip: &str,
+        envelope: &gloas::SignedExecutionPayloadEnvelope<Minimal>,
+    ) {
+        let path = format!("/eth/v1/beacon/execution_payload_envelopes/{tip}");
+        let request =
+            Request::new(Method::Get, &path).with_header("accept", "application/octet-stream");
+        let response = self.client.send(&request).await.expect("node answers");
+        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
+        assert_eq!(response.body, envelope.encode());
+        let reply = self.json(&path).await.expect("the node holds the envelope");
+        assert_eq!(reply.get("version").and_then(Json::as_str), Some("gloas"));
+        assert_eq!(
+            reply.get("finalized").and_then(Json::as_bool),
+            Some(false),
+            "the tip is not finalized"
+        );
+        let slot = reply
+            .get("data")
+            .and_then(|data| data.get("message"))
+            .and_then(|message| message.get("payload"))
+            .and_then(|payload| payload.get("slot_number"))
+            .and_then(Json::as_str);
+        assert_eq!(
+            slot,
+            Some(envelope.message.payload.slot_number.to_string().as_str())
+        );
     }
 
     /// The head block's root, as the header route reports it.
@@ -954,27 +987,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             .last()
             .and_then(Proposal::envelope)
             .expect("the Gloas tip has an envelope");
-        let path = format!("/eth/v1/beacon/execution_payload_envelopes/{tip}");
-        let request =
-            Request::new(Method::Get, &path).with_header("accept", "application/octet-stream");
-        let response = a.client.send(&request).await.expect("node answers");
-        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
-        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
-        assert_eq!(response.body, envelope.encode());
-        let reply = a.json(&path).await.expect("A holds the envelope");
-        assert_eq!(reply.get("version").and_then(Json::as_str), Some("gloas"));
-        assert_eq!(
-            reply.get("finalized").and_then(Json::as_bool),
-            Some(false),
-            "the tip is not finalized"
-        );
-        let slot = reply
-            .get("data")
-            .and_then(|data| data.get("message"))
-            .and_then(|message| message.get("payload"))
-            .and_then(|payload| payload.get("slot_number"))
-            .and_then(Json::as_str);
-        assert_eq!(slot, Some(EVERY_FORK_SLOTS.to_string().as_str()));
+        a.serves_envelope(&tip, envelope).await;
 
         // Before importing the merge block of slot 16, B asked its engine for the terminal block.
         // The terminal block at 1000 led to its parent at 999, and nothing else was looked up.
