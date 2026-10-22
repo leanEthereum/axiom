@@ -323,6 +323,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-validator"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-crypto",
+ "axiom-http",
+ "axiom-json",
+ "axiom-ssz",
+ "axiom-store",
+ "axiom-types",
+ "criterion",
+ "proptest",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "axiom-yaml"
 version = "0.1.0"
 dependencies = [
