@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use axiom_fork_choice::{DataAvailability, ExecutionStatus, PayloadStatus, Store};
 use axiom_ssz::Ssz;
 use axiom_state_transition::{State, Verification};
+use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, BlsSignature,
     ChainConfig, Checkpoint, Hash32, Preset, Root, SignedBeaconBlock, Slot,
@@ -49,6 +50,10 @@ pub struct Chain<P: Preset> {
     head: Head,
     /// Subscribers to head, reorg, and finality changes.
     events: broadcast::Sender<ChainEvent>,
+    /// Gauges, counters, and timings the node exports.
+    metrics: NodeMetrics,
+    /// Database bytes written as of the last metrics update.
+    bytes_written: u64,
 }
 
 impl<P: Preset> Chain<P> {
@@ -151,7 +156,18 @@ impl<P: Preset> Chain<P> {
             database,
             head,
             events: broadcast::channel(EVENT_BACKLOG).0,
+            metrics: NodeMetrics::detached(),
+            bytes_written: 0,
         })
+    }
+
+    /// Records into the node's exported metrics instead of a private set.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
+        self.metrics = metrics;
+        // Publish the anchor's head at once rather than at the first change.
+        self.record_head(self.head, true);
+        self
     }
 
     /// A receiver of every future chain event.
@@ -232,6 +248,9 @@ impl<P: Preset> Chain<P> {
     /// Fails when the head cannot be recomputed.
     pub fn on_tick(&mut self, time_ms: u64) -> Result<(), ChainError> {
         self.store.on_tick(time_ms);
+        self.metrics
+            .clock_slot
+            .set_count(self.store.current_slot().0);
         // A new slot clears the proposer boost, which can move the head.
         self.update_head()
     }
@@ -252,8 +271,16 @@ impl<P: Preset> Chain<P> {
         payload: PayloadStatus,
     ) -> Result<Root, ChainError> {
         let root = block.message.hash_tree_root();
-        self.store
-            .import_block(block, availability, Verification::Verify, payload)?;
+        let timer = self.metrics.block_import_seconds.start_timer();
+        if let Err(error) =
+            self.store
+                .import_block(block, availability, Verification::Verify, payload)
+        {
+            // Refused blocks fail early, so timing them would skew the import latency.
+            timer.discard();
+            return Err(error.into());
+        }
+        drop(timer);
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
         info!(slot = %block.message.slot, %root, "imported block");
@@ -318,17 +345,21 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice has no state for its justified checkpoint or head.
     pub fn update_head(&mut self) -> Result<(), ChainError> {
         let previous = self.head;
+        let timer = self.metrics.fork_choice_seconds.start_timer();
         let head = Self::read_head(&mut self.store)?;
+        drop(timer);
         if head == previous {
             return Ok(());
         }
         self.head = head;
+        self.record_head(head, head.slot.epoch::<P>() != previous.slot.epoch::<P>());
 
         // A head off the previous head's chain is a reorg.
         if head.root != previous.root && !self.store.blocks().is_ancestor(head.root, previous.root)
         {
             let depth = self.reorg_depth(previous, head);
             warn!(from = %previous.root, to = %head.root, depth, "chain reorganized");
+            self.metrics.reorgs.inc();
             self.announce(ChainEvent::Reorg {
                 from: previous.root,
                 to: head.root,
@@ -427,6 +458,42 @@ impl<P: Preset> Chain<P> {
                 finalized: payload_hash(&finalized.root),
             },
         })
+    }
+
+    /// Publishes the head's numbers to the metrics.
+    ///
+    /// Counting active validators walks the whole registry, so it runs only on a new epoch.
+    fn record_head(&mut self, head: Head, new_epoch: bool) {
+        let metrics = &self.metrics;
+        metrics.head_slot.set_count(head.slot.0);
+        metrics.finalized_epoch.set_count(head.finalized.epoch.0);
+        metrics
+            .current_justified_epoch
+            .set_count(head.justified.epoch.0);
+        if let Some(state) = self.store.block_state(&head.root) {
+            let beacon = state.beacon();
+            metrics
+                .previous_justified_epoch
+                .set_count(beacon.previous_justified_checkpoint.epoch.0);
+            metrics
+                .processed_deposits
+                .set_count(beacon.eth1_deposit_index);
+            if new_epoch {
+                let epoch = beacon.current_epoch();
+                let active = beacon
+                    .validators
+                    .iter()
+                    .filter(|validator| validator.is_active_at(epoch))
+                    .count();
+                metrics.current_active_validators.set_count(active as u64);
+            }
+        }
+        // The store counts bytes since it opened; the counter takes the increase.
+        let written = self.database.bytes_written();
+        metrics
+            .store_bytes_written
+            .inc_by(written.saturating_sub(self.bytes_written));
+        self.bytes_written = written;
     }
 
     /// Sends an event to every subscriber.

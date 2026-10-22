@@ -152,6 +152,12 @@ impl<P: Preset> ChainDatabase<P> {
         Ok(self.store.write(&batch)?)
     }
 
+    /// Bytes written to the store since it opened.
+    #[must_use]
+    pub fn bytes_written(&self) -> u64 {
+        self.store.metrics().bytes_written()
+    }
+
     /// Reads and decodes one record.
     fn read<T: Ssz>(
         &self,

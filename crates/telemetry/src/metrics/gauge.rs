@@ -27,6 +27,14 @@ impl Gauge {
         self.value.store(value, Ordering::Relaxed);
     }
 
+    /// Replaces the value with a count, saturating at the largest signed value.
+    ///
+    /// Slots, epochs, and validator counts are unsigned and never come near the bound.
+    pub fn set_count(&self, count: u64) {
+        // Saturate rather than wrap, so an absurd input never reads as negative.
+        self.set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
     /// Adds one.
     pub fn inc(&self) {
         // Peers and tasks come and go one at a time.

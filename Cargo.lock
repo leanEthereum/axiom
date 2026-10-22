@@ -145,6 +145,7 @@ dependencies = [
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-store",
+ "axiom-telemetry",
  "axiom-types",
  "proptest",
  "tokio",

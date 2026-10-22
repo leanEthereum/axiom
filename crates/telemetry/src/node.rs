@@ -48,9 +48,6 @@ pub struct NodeMetrics {
     /// Seconds to import a block, from receipt to fork choice.
     pub block_import_seconds: Histogram,
 
-    /// Seconds to run the state transition for one block.
-    pub state_transition_seconds: Histogram,
-
     /// Seconds to recompute the head.
     pub fork_choice_seconds: Histogram,
 
@@ -113,11 +110,6 @@ impl NodeMetrics {
                 "Time to import a block.",
                 slow.clone(),
             )?,
-            state_transition_seconds: registry.histogram(
-                "beacon_state_transition_seconds",
-                "Time to run the state transition for a block.",
-                slow.clone(),
-            )?,
             fork_choice_seconds: registry.histogram(
                 "beacon_fork_choice_seconds",
                 "Time to recompute the head.",
@@ -137,6 +129,16 @@ impl NodeMetrics {
             store_bytes_written: registry
                 .counter("store_bytes_written_total", "Bytes written to the store.")?,
         })
+    }
+
+    /// Metrics in a registry of their own, which nothing exports.
+    ///
+    /// Components that record metrics use this when the node does not export them, as in tests.
+    #[must_use]
+    pub fn detached() -> Self {
+        // Invariant: a fresh registry holds no names, and the set's own names are distinct.
+        // Registration can only fail on a taken name, so it cannot fail here.
+        Self::register(&Registry::new()).expect("a fresh registry takes every node metric")
     }
 }
 
@@ -169,5 +171,17 @@ mod tests {
 
         // The head slot line appears with its value.
         assert!(registry.render().contains("\nbeacon_head_slot 96\n"));
+    }
+
+    #[test]
+    fn detached_metrics_record_without_a_shared_registry() {
+        // Two detached sets never clash, and each keeps its own values.
+        let first = NodeMetrics::detached();
+        let second = NodeMetrics::detached();
+
+        first.reorgs.inc();
+
+        assert_eq!(first.reorgs.get(), 1);
+        assert_eq!(second.reorgs.get(), 0);
     }
 }

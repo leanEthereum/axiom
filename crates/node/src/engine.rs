@@ -4,6 +4,7 @@ use axiom_execution::{
     EngineClient, ForkchoiceState, PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
 };
 use axiom_fork_choice::PayloadStatus;
+use axiom_telemetry::NodeMetrics;
 use axiom_types::{BeaconBlock, Preset};
 use tracing::{debug, warn};
 
@@ -29,21 +30,34 @@ use crate::ExecutionHead;
 pub struct ExecutionLayer {
     /// The engine, when one is configured.
     engine: Option<EngineClient>,
+    /// Request timings, by engine method.
+    metrics: NodeMetrics,
 }
 
 impl ExecutionLayer {
     /// A layer over an engine.
     #[must_use]
-    pub const fn new(engine: EngineClient) -> Self {
+    pub fn new(engine: EngineClient) -> Self {
         Self {
             engine: Some(engine),
+            metrics: NodeMetrics::detached(),
         }
     }
 
     /// A layer with no engine, which judges nothing.
     #[must_use]
-    pub const fn disconnected() -> Self {
-        Self { engine: None }
+    pub fn disconnected() -> Self {
+        Self {
+            engine: None,
+            metrics: NodeMetrics::detached(),
+        }
+    }
+
+    /// Records request timings into the node's exported metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Asks the engine to judge a block's payload.
@@ -51,7 +65,14 @@ impl ExecutionLayer {
         let Some(engine) = &self.engine else {
             return PayloadStatus::NotValidated;
         };
-        match engine.new_payload(&block.new_payload_request()).await {
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["new_payload"])
+            .start_timer();
+        let answer = engine.new_payload(&block.new_payload_request()).await;
+        drop(timer);
+        match answer {
             Ok(status) => Self::to_verdict(&status),
             Err(error) => {
                 // Treat an engine failure like a syncing engine: import, but stay optimistic.
@@ -73,7 +94,14 @@ impl ExecutionLayer {
             safe_block_hash: head.safe,
             finalized_block_hash: head.finalized,
         };
-        match engine.forkchoice_updated::<P>(&state, None).await {
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["forkchoice_updated"])
+            .start_timer();
+        let answer = engine.forkchoice_updated::<P>(&state, None).await;
+        drop(timer);
+        match answer {
             Ok(updated) => {
                 debug!(status = %updated.payload_status.status, "engine followed the head");
                 Some(Self::to_verdict(&updated.payload_status))
