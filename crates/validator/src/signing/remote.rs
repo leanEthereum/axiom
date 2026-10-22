@@ -173,10 +173,12 @@ impl RemoteBody {
                     ),
                 ]),
             ),
+            SigningRequest::ExecutionPayloadEnvelope(envelope) => (
+                "execution_payload_envelope",
+                Json::from([("version", version), ("data", envelope.to_json())]),
+            ),
             // The API carries no credential change.
-            // An envelope needs a JSON payload codec, which this client lacks.
-            SigningRequest::BlsToExecutionChange(_)
-            | SigningRequest::ExecutionPayloadEnvelope(_) => {
+            SigningRequest::BlsToExecutionChange(_) => {
                 return Err(RemoteError::Unsupported { kind, fork });
             }
         };
@@ -254,7 +256,7 @@ mod tests {
     use axiom_bls::SecretKey;
     use axiom_http::{ClientConfig, Endpoint, Response, Router, Server, ServerConfig};
     use axiom_types::{
-        ChainConfig, CommitteeIndex, Minimal, Slot,
+        BuilderIndex, ChainConfig, CommitteeIndex, Minimal, Slot, gloas,
         phase0::{AttestationData, BeaconBlockHeader, Checkpoint},
     };
     use tokio::{runtime::Builder, sync::oneshot, task};
@@ -376,5 +378,38 @@ mod tests {
                 fork: ForkName::Phase0
             })
         ));
+    }
+
+    #[test]
+    fn an_envelope_travels_whole_with_its_fork() {
+        // Fixture state: Gloas from genesis, an envelope for slot 3 by builder 7.
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Gloas);
+        let context = SigningContext::new(Arc::new(config), Root([3; 32]));
+        let mut envelope = gloas::ExecutionPayloadEnvelope::<Minimal>::default();
+        envelope.payload.slot_number = 3;
+        envelope.builder_index = BuilderIndex(7);
+        let request = SigningRequest::<Minimal>::ExecutionPayloadEnvelope(&envelope);
+
+        // The body names the fork, and the signer can rebuild the root from the whole envelope.
+        let body = RemoteBody::new(&request, Root([9; 32]), &context).unwrap();
+        let expected = Json::from([
+            ("type", Json::from("EXECUTION_PAYLOAD_ENVELOPE")),
+            (
+                "fork_info",
+                Json::from([
+                    ("fork", context.fork(Epoch(0)).to_json()),
+                    ("genesis_validators_root", Root([3; 32]).to_json()),
+                ]),
+            ),
+            ("signingRoot", Root([9; 32]).to_json()),
+            (
+                "execution_payload_envelope",
+                Json::from([
+                    ("version", Json::from("GLOAS")),
+                    ("data", envelope.to_json()),
+                ]),
+            ),
+        ]);
+        assert_eq!(body, RemoteBody(expected));
     }
 }
