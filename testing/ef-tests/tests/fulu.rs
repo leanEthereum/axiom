@@ -158,3 +158,13 @@ fn fast_confirmation_minimal() {
         "fulu",
     );
 }
+
+#[test]
+fn sync_minimal() {
+    Suite::run(&StoreReplay::<Minimal>::sync(), "minimal", "fulu");
+}
+
+#[test]
+fn sync_mainnet() {
+    Suite::run(&StoreReplay::<Mainnet>::sync(), "mainnet", "fulu");
+}

@@ -3,14 +3,13 @@
 use std::collections::HashSet;
 
 use axiom_ssz::Ssz;
-use axiom_state_transition::{
-    BlockProcessor, EpochProcessor, EpochStep, ExecutionEngine, StateError, Verification,
-};
+use axiom_state_transition::{BlockProcessor, EpochProcessor, EpochStep, StateError, Verification};
 use axiom_types::{
-    Attestation, AttesterSlashing, Epoch, IndexedAttestation, Preset, Root, SignedBeaconBlock, Slot,
+    Attestation, AttesterSlashing, Epoch, Hash32, IndexedAttestation, Preset, Root,
+    SignedBeaconBlock, Slot,
 };
 
-use crate::{BlockNode, ForkChoiceError, LatestMessage, Store};
+use crate::{BlockNode, ExecutionStatus, ForkChoiceError, LatestMessage, PayloadStatus, Store};
 
 /// Whether a block's blobs were shown to be available.
 ///
@@ -40,7 +39,7 @@ impl<P: Preset> Store<P> {
         signed_block: &SignedBeaconBlock<P>,
         availability: DataAvailability,
         verification: Verification,
-        engine: &impl ExecutionEngine<P>,
+        payload: PayloadStatus,
     ) -> Result<(), ForkChoiceError> {
         let block = &signed_block.message;
         let root = block.hash_tree_root();
@@ -73,8 +72,12 @@ impl<P: Preset> Store<P> {
         }
 
         let mut state = parent_state.clone();
+        // An invalid verdict condemns optimistic ancestors too, even though this block is refused.
+        if let PayloadStatus::Invalid { latest_valid_hash } = payload {
+            self.invalidate_after(block.parent_root, latest_valid_hash);
+        }
         state
-            .state_transition(&self.config, signed_block, verification, engine)
+            .state_transition(&self.config, signed_block, verification, &payload)
             .map_err(ForkChoiceError::InvalidBlock)?;
 
         // The head before this block decides whether it may take the proposer boost.
@@ -89,9 +92,17 @@ impl<P: Preset> Store<P> {
                 parent_root: block.parent_root,
                 proposer_index: block.proposer_index,
                 execution_block_hash: block.body.execution_payload.block_hash,
+                status: if payload == PayloadStatus::Valid {
+                    ExecutionStatus::Valid
+                } else {
+                    ExecutionStatus::Optimistic
+                },
             },
         );
         self.block_states.insert(root, state);
+        if payload == PayloadStatus::Valid {
+            self.blocks.mark_valid(root);
+        }
         self.record_block_timeliness(root, block.slot);
         self.update_proposer_boost_root(head, root);
         self.update_checkpoints(justified, finalized);
@@ -144,6 +155,35 @@ impl<P: Preset> Store<P> {
             },
         );
         Ok(())
+    }
+
+    /// Invalidates the optimistic blocks an invalid payload condemns.
+    ///
+    /// The engine names the latest valid ancestor of the invalid payload.
+    /// Every block after it on the invalid payload's chain is invalid too.
+    ///
+    /// | latest valid hash | first invalid block                                    |
+    /// |-------------------|--------------------------------------------------------|
+    /// | a known hash      | the child of that block on the chain                    |
+    /// | unknown or absent | the block whose payload was judged, not yet in the store |
+    ///
+    /// See "How to apply latestValidHash" in the Bellatrix optimistic sync spec.
+    pub fn invalidate_after(&mut self, parent: Root, latest_valid_hash: Option<Hash32>) {
+        let Some(latest_valid_hash) = latest_valid_hash else {
+            return;
+        };
+        let mut child: Option<Root> = None;
+        let mut current = parent;
+        while let Some(node) = self.blocks.get(&current) {
+            if node.execution_block_hash == latest_valid_hash {
+                if let Some(first_invalid) = child {
+                    self.blocks.mark_invalid(first_invalid);
+                }
+                return;
+            }
+            child = Some(current);
+            current = node.parent_root;
+        }
     }
 
     /// Records the validators an attester slashing proves to have equivocated.

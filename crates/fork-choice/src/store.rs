@@ -8,7 +8,7 @@ use axiom_types::{
     BeaconBlock, BeaconState, ChainConfig, Checkpoint, Epoch, Gwei, Preset, Root, Slot,
 };
 
-use crate::{BlockNode, BlockTree, ForkChoiceError, Votes};
+use crate::{BlockNode, BlockTree, ExecutionStatus, ForkChoiceError, Votes};
 
 /// Basis points in a whole, the unit slot deadlines are expressed in.
 pub(crate) const BASIS_POINTS: u64 = 10_000;
@@ -106,6 +106,7 @@ impl<P: Preset> Store<P> {
                     parent_root: anchor_block.parent_root,
                     proposer_index: anchor_block.proposer_index,
                     execution_block_hash: anchor_block.body.execution_payload.block_hash,
+                    status: ExecutionStatus::Valid,
                 },
             ),
             block_states: HashMap::from([(anchor_root, state.clone())]),

@@ -17,13 +17,15 @@ mod error;
 mod fast_confirmation;
 mod handlers;
 mod head;
+mod payload;
 mod proposer_head;
 mod store;
 mod votes;
 
-pub use block_tree::{BlockNode, BlockTree};
+pub use block_tree::{BlockNode, BlockTree, ExecutionStatus};
 pub use error::ForkChoiceError;
 pub use fast_confirmation::FastConfirmation;
 pub use handlers::DataAvailability;
+pub use payload::PayloadStatus;
 pub use store::Store;
 pub use votes::{LatestMessage, Votes};

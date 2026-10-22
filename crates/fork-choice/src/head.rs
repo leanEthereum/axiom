@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use axiom_types::{BeaconState, Checkpoint, Epoch, Gwei, Preset, Root};
 
-use crate::{ForkChoiceError, Store};
+use crate::{ExecutionStatus, ForkChoiceError, Store};
 
 impl<P: Preset> Store<P> {
     /// The head of the chain.
@@ -126,7 +126,11 @@ impl<P: Preset> Store<P> {
         }
 
         // Phase 2: subtree sums, children before parents.
+        // An invalid block passes no weight up, so votes for it support no valid ancestor.
         for (root, node) in self.blocks.iter().rev() {
+            if node.status == ExecutionStatus::Invalid {
+                continue;
+            }
             let own = weights.get(root).copied().unwrap_or_default();
             if own != Gwei::ZERO && self.blocks.contains(&node.parent_root) {
                 *weights.entry(node.parent_root).or_default() += own;
@@ -154,6 +158,14 @@ impl<P: Preset> Store<P> {
 
         let mut viable = HashSet::new();
         for root in order.into_iter().rev() {
+            // An invalid payload removes the block and its subtree from consideration.
+            if self
+                .blocks
+                .get(&root)
+                .is_some_and(|node| node.status == ExecutionStatus::Invalid)
+            {
+                continue;
+            }
             let children = self.blocks.children(&root);
             let is_viable = if children.is_empty() {
                 self.is_viable_leaf(root)

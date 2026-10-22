@@ -4,6 +4,20 @@ use std::collections::HashMap;
 
 use axiom_types::{Hash32, Root, Slot, ValidatorIndex};
 
+/// What the execution engine said about a block's payload.
+///
+/// See the Bellatrix optimistic sync spec.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionStatus {
+    /// The engine validated the payload.
+    #[default]
+    Valid,
+    /// The engine has not validated the payload yet; the block was imported optimistically.
+    Optimistic,
+    /// The engine found the payload, or one of its ancestors, invalid.
+    Invalid,
+}
+
 /// What the fork choice keeps of a block.
 ///
 /// Only the fields the rules read: its place in the tree, its slot, and its proposer.
@@ -17,6 +31,8 @@ pub struct BlockNode {
     pub proposer_index: ValidatorIndex,
     /// Hash of the block's execution payload, which the engine knows the block by.
     pub execution_block_hash: Hash32,
+    /// Validity of the payload, as far as the engine has told.
+    pub status: ExecutionStatus,
 }
 
 /// Every block the store accepted, indexed by root, with their children.
@@ -65,6 +81,32 @@ impl BlockTree {
     #[must_use]
     pub fn contains(&self, root: &Root) -> bool {
         self.nodes.contains_key(root)
+    }
+
+    /// Marks a block and its ancestors valid, since a valid payload implies a valid chain.
+    pub fn mark_valid(&mut self, root: Root) {
+        let mut current = Some(root);
+        while let Some(root) = current {
+            let Some(node) = self.nodes.get_mut(&root) else {
+                break;
+            };
+            if node.status != ExecutionStatus::Optimistic {
+                break;
+            }
+            node.status = ExecutionStatus::Valid;
+            current = Some(node.parent_root);
+        }
+    }
+
+    /// Marks a block and every descendant invalid, since they all build on an invalid payload.
+    pub fn mark_invalid(&mut self, root: Root) {
+        let mut stack = vec![root];
+        while let Some(root) = stack.pop() {
+            if let Some(node) = self.nodes.get_mut(&root) {
+                node.status = ExecutionStatus::Invalid;
+                stack.extend_from_slice(self.children.get(&root).map_or(&[], Vec::as_slice));
+            }
+        }
     }
 
     /// Children of a block, in insertion order.
@@ -120,6 +162,7 @@ mod tests {
             parent_root: root(parent),
             proposer_index: ValidatorIndex(0),
             execution_block_hash: Hash32::ZERO,
+            status: ExecutionStatus::Valid,
         }
     }
 
@@ -140,6 +183,28 @@ mod tests {
     fn ancestor_at_a_skipped_slot_is_the_latest_block_before_it() {
         // Slot 2 is empty on the c branch, so its ancestor there is b at slot 1.
         assert_eq!(fixture().ancestor(root(3), Slot(2)), Some(root(2)));
+    }
+
+    #[test]
+    fn invalidity_spreads_down_and_validity_up() {
+        // Fixture state: b and its descendants c and d are optimistic.
+        let mut tree = fixture();
+        for tag in 2..=4 {
+            tree.nodes.get_mut(&root(tag)).unwrap().status = ExecutionStatus::Optimistic;
+        }
+
+        // A valid c vouches for b, but not for its sibling d.
+        tree.mark_valid(root(3));
+        assert_eq!(tree.get(&root(2)).unwrap().status, ExecutionStatus::Valid);
+        assert_eq!(
+            tree.get(&root(4)).unwrap().status,
+            ExecutionStatus::Optimistic
+        );
+
+        // An invalid b condemns both children.
+        tree.mark_invalid(root(2));
+        assert_eq!(tree.get(&root(3)).unwrap().status, ExecutionStatus::Invalid);
+        assert_eq!(tree.get(&root(4)).unwrap().status, ExecutionStatus::Invalid);
     }
 
     #[test]

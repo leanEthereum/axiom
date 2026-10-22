@@ -1,13 +1,13 @@
 //! Fork choice vectors: a store driven through ticks, blocks, and votes, with checks between.
 
-use std::{fmt::Debug, marker::PhantomData};
+use std::{collections::HashMap, fmt::Debug, marker::PhantomData};
 
 use axiom_das::ColumnSidecar;
-use axiom_fork_choice::{DataAvailability, FastConfirmation, Store};
-use axiom_state_transition::{KnownVerdict, Verification};
+use axiom_fork_choice::{DataAvailability, FastConfirmation, PayloadStatus, Store};
+use axiom_state_transition::Verification;
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar, Epoch,
-    Preset, Root, SignedBeaconBlock, Slot,
+    Hash32, Preset, Root, SignedBeaconBlock, Slot,
 };
 use axiom_yaml::Yaml;
 
@@ -42,6 +42,15 @@ impl<P: Preset> StoreReplay<P> {
     pub const fn fork_choice() -> Self {
         Self {
             runner: "fork_choice",
+            preset: PhantomData,
+        }
+    }
+
+    /// The optimistic sync runner.
+    #[must_use]
+    pub const fn sync() -> Self {
+        Self {
+            runner: "sync",
             preset: PhantomData,
         }
     }
@@ -118,6 +127,7 @@ impl<P: Preset> StoreReplay<P> {
         case: &Case,
         step: &Yaml,
         verification: Verification,
+        payload_statuses: &HashMap<Hash32, PayloadStatus>,
     ) -> Result<Result<(), String>, Failure> {
         let name = step
             .get("block")
@@ -148,7 +158,15 @@ impl<P: Preset> StoreReplay<P> {
         };
 
         let outcome = store
-            .on_block(&block, availability, verification, &KnownVerdict(true))
+            .on_block(
+                &block,
+                availability,
+                verification,
+                payload_statuses
+                    .get(&block.message.body.execution_payload.block_hash)
+                    .copied()
+                    .unwrap_or(PayloadStatus::Valid),
+            )
             .map_err(|error| error.to_string());
         if outcome.is_ok() {
             // Votes and slashings inside the block feed the fork choice too.
@@ -234,6 +252,23 @@ impl<P: Preset> StoreReplay<P> {
         Ok(())
     }
 
+    /// The mocked engine verdict of a payload step.
+    fn payload_status(status: &Yaml) -> Result<PayloadStatus, Failure> {
+        let latest_valid_hash = status
+            .get("latest_valid_hash")
+            .and_then(Yaml::as_hex_array::<32>)
+            .map(Hash32);
+        match status.get("status").and_then(Yaml::as_str) {
+            Some("VALID") => Ok(PayloadStatus::Valid),
+            Some("SYNCING" | "ACCEPTED") => Ok(PayloadStatus::NotValidated),
+            Some("INVALID") => Ok(PayloadStatus::Invalid { latest_valid_hash }),
+            Some("INVALID_BLOCK_HASH") => Ok(PayloadStatus::Invalid {
+                latest_valid_hash: None,
+            }),
+            other => Err(Failure(format!("unknown payload status {other:?}"))),
+        }
+    }
+
     /// Fails unless two values are equal.
     fn expect_eq<T: PartialEq + Debug>(
         what: &str,
@@ -299,6 +334,7 @@ impl<P: Preset> Runner for StoreReplay<P> {
         let mut store = Store::new(config_of::<P>(), anchor_state, &anchor_block)
             .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
         let mut confirmation = FastConfirmation::new(&store);
+        let mut payload_statuses = HashMap::new();
 
         let steps = case.yaml("steps.yaml")?;
         let steps = steps
@@ -310,7 +346,8 @@ impl<P: Preset> Runner for StoreReplay<P> {
                 store.on_tick(Self::scalar(tick)?.saturating_mul(1000));
                 true
             } else if step.get("block").is_some() {
-                let outcome = Self::block_step(&mut store, case, step, verification)?;
+                let outcome =
+                    Self::block_step(&mut store, case, step, verification, &payload_statuses)?;
                 if let Err(error) = &outcome
                     && expected_valid
                 {
@@ -325,6 +362,16 @@ impl<P: Preset> Runner for StoreReplay<P> {
             } else if let Some(name) = step.get("attester_slashing").and_then(Yaml::as_str) {
                 let slashing = case.ssz::<AttesterSlashing<P>>(name)?;
                 store.on_attester_slashing(&slashing, verification).is_ok()
+            } else if let Some(hash) = step.get("block_hash") {
+                let hash = hash
+                    .as_hex_array::<32>()
+                    .map(Hash32)
+                    .ok_or_else(|| Failure::new("block_hash is not hex"))?;
+                let status = step
+                    .get("payload_status")
+                    .ok_or_else(|| Failure::new("payload step without status"))?;
+                payload_statuses.insert(hash, Self::payload_status(status)?);
+                true
             } else if let Some(checks) = step.get("checks") {
                 Self::fast_confirmation_checks(&mut store, &mut confirmation, checks)
                     .and_then(|()| Self::checks(&mut store, checks))
