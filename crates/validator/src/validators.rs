@@ -267,6 +267,10 @@ impl ValidatorStore {
     ) -> Result<BlsSignature, SignError> {
         let signer = self.enabled_signer(pubkey)?;
         let cleared = self.guard.clear(pubkey, request)?;
+        // Invariant: a key removed before this point never signs.
+        // Removal then exports the key's history, which holds every record cleared before it.
+        // A record cleared after the export belongs to a message this check now refuses.
+        self.enabled_signer(pubkey)?;
         signer.sign(&cleared, self.guard.context()).await
     }
 
@@ -309,11 +313,15 @@ impl ValidatorStore {
         // Phase 3: sign each cleared vote with its own key.
         let mut cleared = cleared.into_iter();
         let mut signatures = Vec::with_capacity(votes.len());
-        for signer in signers {
+        for (signer, (pubkey, _)) in signers.into_iter().zip(votes) {
             let signature = match signer {
                 Err(error) => Err(error),
                 Ok(signer) => match cleared.next() {
-                    Some(Ok(cleared)) => signer.sign(&cleared, self.guard.context()).await,
+                    // Invariant: a key removed while its vote was cleared never signs it.
+                    Some(Ok(cleared)) => match self.enabled_signer(pubkey) {
+                        Ok(_) => signer.sign(&cleared, self.guard.context()).await,
+                        Err(error) => Err(error),
+                    },
                     Some(Err(refusal)) => Err(refusal.into()),
                     // Invariant: one clearing per allowed vote, in order.
                     None => Err(SignError::Unavailable("vote not cleared".to_owned())),
