@@ -24,6 +24,8 @@ mod filter;
 mod handler;
 mod lookup;
 mod request;
+#[cfg(test)]
+mod tests;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -106,9 +108,10 @@ impl Service {
             return Err(ServiceError::KeyMismatch);
         }
         let mut rng = Csprng::from_seed(seed);
+        let local_id = local_enr.node_id();
         let handler = Handler::new(
             key,
-            local_enr.clone(),
+            local_enr,
             HandlerConfig {
                 request_timeout: config.request_timeout,
                 handshake_timeout: config.handshake_timeout,
@@ -116,7 +119,7 @@ impl Service {
             },
         );
         Ok(Self {
-            table: RoutingTable::new(local_enr.node_id(), config.table),
+            table: RoutingTable::new(local_id, config.table),
             next_request: rng.next_u64(),
             next_ping: config.ping_interval,
             next_refresh: config.refresh_interval,
@@ -478,11 +481,11 @@ impl Service {
                         .filter(|enr| distances.contains(&node.log_distance(&enr.node_id()))),
                 );
                 state.responses += 1;
-                if state.responses >= total.clamp(1, MAX_NODES_MESSAGES) {
-                    if let Some(state) = self.requests.remove(&key) {
-                        self.handler.complete(node, request_id);
-                        self.finish_find_node(now, node, state);
-                    }
+                if state.responses >= total.clamp(1, MAX_NODES_MESSAGES)
+                    && let Some(state) = self.requests.remove(&key)
+                {
+                    self.handler.complete(node, request_id);
+                    self.finish_find_node(now, node, state);
                 }
             }
             (
@@ -511,21 +514,17 @@ impl Service {
 
     /// Delivers the records a FINDNODE gathered.
     fn finish_find_node(&mut self, now: Duration, node: NodeId, state: RequestState) {
-        // The peer answered, so it is live; its records join the table.
+        // The peer answered, so it is live; its records, bar the local one, join the table.
         self.table.record_success(&node);
         let local = self.handler.local_id();
-        let enrs: Vec<Enr> = state
-            .enrs
-            .into_iter()
-            .filter(|enr| enr.node_id() != local)
-            .collect();
-        for enr in &enrs {
+        let enrs = state.enrs;
+        for enr in enrs.iter().filter(|enr| enr.node_id() != local) {
             self.discover(now, enr.clone());
         }
         match state.purpose {
             Purpose::Lookup(id) => {
                 if let Some(lookup) = self.lookups.get_mut(&id) {
-                    for enr in enrs {
+                    for enr in enrs.into_iter().filter(|enr| enr.node_id() != local) {
                         lookup.add(enr);
                     }
                     lookup.on_response(&node);
@@ -623,7 +622,7 @@ impl Service {
     fn discover(&mut self, now: Duration, enr: Enr) -> InsertOutcome {
         let outcome = self.table.insert(enr.clone(), now);
         match &outcome {
-            InsertOutcome::Inserted => self.emit(Event::Discovered(enr)),
+            InsertOutcome::Inserted => self.emit(Event::Discovered(Box::new(enr))),
             InsertOutcome::Pending { check } => {
                 let check = (**check).clone();
                 self.send_ping(now, &check, Purpose::Liveness);
@@ -704,7 +703,7 @@ impl Service {
     }
 
     /// A request id not used before by this service.
-    fn fresh_request_id(&mut self) -> RequestId {
+    const fn fresh_request_id(&mut self) -> RequestId {
         // A counter from a random start: unique locally, unpredictable to peers.
         let id = RequestId::from_u64(self.next_request);
         self.next_request = self.next_request.wrapping_add(1);

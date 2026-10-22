@@ -9,7 +9,7 @@ use crate::{enr::Enr, message::RequestId, node_id::NodeId};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// A node joined the routing table.
-    Discovered(Enr),
+    Discovered(Box<Enr>),
 
     /// A peer answered an application PING.
     Pong {

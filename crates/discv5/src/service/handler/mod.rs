@@ -83,7 +83,7 @@ pub(crate) struct Handler {
 
 impl Handler {
     /// A handler for a local identity.
-    pub(crate) fn new(key: SecretKey, local_enr: Enr, config: HandlerConfig) -> Self {
+    pub(crate) const fn new(key: SecretKey, local_enr: Enr, config: HandlerConfig) -> Self {
         Self {
             key,
             local_enr,
@@ -241,7 +241,7 @@ impl Handler {
         };
         match packet.header.auth.clone() {
             AuthData::Message { src_id } => {
-                self.on_message(now, from, src_id, &packet, &known, rng, out)
+                self.on_message(now, from, (src_id, &packet), &known, rng, out)
             }
             AuthData::WhoAreYou { enr_seq, .. } => {
                 self.on_whoareyou(now, from, &packet, enr_seq, rng, out);
@@ -269,8 +269,7 @@ impl Handler {
         &mut self,
         now: Duration,
         from: SocketAddr,
-        src_id: NodeId,
-        packet: &Packet,
+        (src_id, packet): (NodeId, &Packet),
         known: &impl Fn(&NodeId) -> Option<Enr>,
         rng: &mut Csprng,
         out: &mut Vec<Datagram>,

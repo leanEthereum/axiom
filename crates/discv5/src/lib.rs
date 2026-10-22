@@ -2,6 +2,7 @@
 
 mod base64;
 mod distance;
+pub mod driver;
 pub mod enr;
 pub mod message;
 mod node_id;
