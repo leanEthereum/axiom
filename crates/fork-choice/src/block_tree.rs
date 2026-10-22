@@ -174,6 +174,35 @@ impl BlockTree {
             .is_some_and(|node| self.ancestor(descendant, node.slot) == Some(ancestor))
     }
 
+    /// Slot of a block, or genesis for a block outside the tree.
+    #[must_use]
+    pub fn slot_of(&self, root: &Root) -> Slot {
+        self.nodes.get(root).map_or(Slot::GENESIS, |node| node.slot)
+    }
+
+    /// The chain from just after one block up to and including a descendant, oldest first.
+    ///
+    /// Returns nothing when the first is not a strict ancestor of the second.
+    /// See `get_ancestor_roots` in the phase0 fast confirmation spec.
+    #[must_use]
+    pub fn chain_after(&self, ancestor: Root, descendant: Root) -> Vec<Root> {
+        let ancestor_slot = self.slot_of(&ancestor);
+        let mut roots = Vec::new();
+        let mut current = descendant;
+        while let Some(node) = self.nodes.get(&current) {
+            if node.slot <= ancestor_slot {
+                break;
+            }
+            roots.push(current);
+            current = node.parent_root;
+            if current == ancestor {
+                roots.reverse();
+                return roots;
+            }
+        }
+        Vec::new()
+    }
+
     /// The block whose randomness fixed an epoch's proposer shuffling, on a block's chain.
     ///
     /// See `get_shuffling_dependent_root` in the phase0 fork choice spec.
