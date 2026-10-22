@@ -36,7 +36,7 @@ pub enum ForkChoiceError {
     DataUnavailable,
     /// A block fails the state transition.
     #[error("invalid block: {0}")]
-    InvalidBlock(TransitionError),
+    InvalidBlock(#[source] TransitionError),
     /// An attestation targets neither the current nor the previous epoch.
     #[error("attestation target epoch {0} is not current or previous")]
     AttestationEpochOutOfRange(Epoch),
@@ -60,7 +60,7 @@ pub enum ForkChoiceError {
     AttestationFromFuture(Slot),
     /// An attestation or slashing does not verify against its state.
     #[error("invalid attestation: {0}")]
-    InvalidAttestation(BlockError),
+    InvalidAttestation(#[source] BlockError),
     /// An attester slashing's votes are not slashable.
     #[error("attester slashing votes are not slashable")]
     NotSlashable,
@@ -72,11 +72,5 @@ pub enum ForkChoiceError {
     HeadStillBoosted,
     /// A state invariant broke.
     #[error("state invariant broke: {0}")]
-    State(StateError),
-}
-
-impl From<StateError> for ForkChoiceError {
-    fn from(error: StateError) -> Self {
-        Self::State(error)
-    }
+    State(#[from] StateError),
 }
