@@ -1,7 +1,7 @@
 //! The validators a state expects to sign gossip, and the checks of their signatures.
 
 use axiom_types::{
-    BlsPubkey, BlsSignature, Preset, ValidatorIndex,
+    BlsPubkey, BlsSignature, ChainConfig, Domain, DomainType, Epoch, Preset, ValidatorIndex,
     accessors::CoreState,
     altair::{SignedContributionAndProof, SyncAggregatorSelectionData},
     combined::BeaconState,
@@ -19,16 +19,26 @@ use crate::{
 };
 
 /// A state read as the source of signers: keys, sync committees, and signing domains.
+///
+/// Domains come from the fork schedule, so a message of a fork the state has not reached checks.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Signers<'a, P: Preset> {
     /// The state, usually the head's.
     state: &'a BeaconState<P>,
+    /// The fork schedule that fixes each epoch's signing version.
+    config: &'a ChainConfig,
 }
 
 impl<'a, P: Preset> Signers<'a, P> {
-    /// The signers a state knows.
-    pub(crate) const fn of(state: &'a BeaconState<P>) -> Self {
-        Self { state }
+    /// The signers a state knows, under a fork schedule.
+    pub(crate) const fn of(state: &'a BeaconState<P>, config: &'a ChainConfig) -> Self {
+        Self { state, config }
+    }
+
+    /// Signature domain of a message type at an epoch.
+    fn domain(self, domain_type: DomainType, epoch: Epoch) -> Domain {
+        self.config
+            .domain(domain_type, epoch, self.state.genesis_validators_root())
     }
 
     /// Checks an attestation aggregator's slot signature and its signature over the message.
@@ -53,7 +63,7 @@ impl<'a, P: Preset> Signers<'a, P> {
                     .with(aggregator_detail)
             })?;
         // The selection proof signs the slot, and its hash decides who aggregates.
-        let selection_domain = state.domain(DOMAIN_SELECTION_PROOF, data.target.epoch);
+        let selection_domain = self.domain(DOMAIN_SELECTION_PROOF, data.target.epoch);
         if !SigningClaim::new(&data.slot, selection_domain, signed.selection_proof())
             .is_signed_by(&aggregator.pubkey)
         {
@@ -62,7 +72,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             );
         }
         // The outer signature binds the aggregate to the aggregator.
-        let aggregate_domain = state.domain(DOMAIN_AGGREGATE_AND_PROOF, data.target.epoch);
+        let aggregate_domain = self.domain(DOMAIN_AGGREGATE_AND_PROOF, data.target.epoch);
         if !SigningClaim::new(signed.message(), aggregate_domain, signed.signature())
             .is_signed_by(&aggregator.pubkey)
         {
@@ -90,9 +100,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             slot: contribution.slot,
             subcommittee_index: contribution.subcommittee_index,
         };
-        let selection_domain = self
-            .state
-            .domain(DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, epoch);
+        let selection_domain = self.domain(DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, epoch);
         if !SigningClaim::new(&selection, selection_domain, &message.selection_proof)
             .is_signed_by(pubkey)
         {
@@ -101,7 +109,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             );
         }
         // The outer signature binds the contribution to the aggregator.
-        let contribution_domain = self.state.domain(DOMAIN_CONTRIBUTION_AND_PROOF, epoch);
+        let contribution_domain = self.domain(DOMAIN_CONTRIBUTION_AND_PROOF, epoch);
         if !SigningClaim::new(message, contribution_domain, &signed.signature).is_signed_by(pubkey)
         {
             return Err(GossipError::reject("invalid aggregator signature").with(aggregator_detail));
@@ -156,7 +164,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             .iter()
             .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
-        let domain = state.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
+        let domain = self.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
         SigningClaim::new(data, domain, signature).is_signed_by_all(&keys)
     }
 
@@ -171,7 +179,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             .iter()
             .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
-        let domain = state.domain(DOMAIN_BEACON_ATTESTER, vote.data.target.epoch);
+        let domain = self.domain(DOMAIN_BEACON_ATTESTER, vote.data.target.epoch);
         SigningClaim::new(vote.data, domain, vote.signature).is_signed_by_all(&keys)
     }
 }

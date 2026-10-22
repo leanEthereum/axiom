@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axiom_light_client::{
     BootstrapData, Header, Layout, UpdateData, UpdateQuality,
-    combined::{Format, LightClientBootstrap, LightClientHeader},
+    combined::{LightClientBootstrap, LightClientHeader},
 };
 use axiom_ssz::{GeneralizedIndex, Root};
 use axiom_state_transition::State;
@@ -213,7 +213,7 @@ impl<P: Preset> Collector<P> {
                 cached.finalized_slot = finalized.slot;
             }
             finalized_header = if finalized.slot == Slot::GENESIS {
-                empty_header(format, &self.config)?
+                LightClientHeader::empty(format)
             } else {
                 history
                     .block(&finalized.root)?
@@ -226,7 +226,7 @@ impl<P: Preset> Collector<P> {
         }
         // Without a finalized block the update proves nothing, so both stay empty.
         if finality_branch.is_empty() {
-            finalized_header = empty_header(format, &self.config)?;
+            finalized_header = LightClientHeader::empty(format);
         }
         Ok(UpdateData {
             attested_header,
@@ -422,16 +422,6 @@ impl<P: Preset> Collector<P> {
         .map(Some)
         .map_err(|error| Failure(error.to_string()))
     }
-}
-
-/// The empty header of a format.
-fn empty_header<P: Preset>(
-    format: Format,
-    config: &ChainConfig,
-) -> Result<LightClientHeader<P>, Failure> {
-    LightClientHeader::default()
-        .upgrade_to(format, config)
-        .map_err(|error| Failure(error.to_string()))
 }
 
 /// First slot of a sync committee period.

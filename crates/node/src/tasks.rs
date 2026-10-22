@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use axiom_types::{Preset, SlotClock};
+use axiom_types::{ChainConfig, Preset, SlotClock};
 use tokio::{
     sync::broadcast::{self, error::RecvError},
     time,
@@ -67,6 +67,8 @@ pub(crate) struct EngineFollower<P: Preset> {
     events: broadcast::Receiver<ChainEvent>,
     /// The engine.
     execution: Arc<ExecutionLayer>,
+    /// The fork schedule, which picks the engine method version of each head.
+    config: ChainConfig,
 }
 
 impl<P: Preset> EngineFollower<P> {
@@ -75,11 +77,13 @@ impl<P: Preset> EngineFollower<P> {
         chain: ChainHandle<P>,
         events: broadcast::Receiver<ChainEvent>,
         execution: Arc<ExecutionLayer>,
+        config: ChainConfig,
     ) -> Self {
         Self {
             chain,
             events,
             execution,
+            config,
         }
     }
 
@@ -88,7 +92,11 @@ impl<P: Preset> EngineFollower<P> {
         loop {
             match self.events.recv().await {
                 Ok(ChainEvent::Head(head)) => {
-                    let Some(verdict) = self.execution.update_forkchoice::<P>(head.execution).await
+                    let fork = self.config.fork_at(head.slot.epoch::<P>());
+                    let Some(verdict) = self
+                        .execution
+                        .update_forkchoice::<P>(fork, head.execution)
+                        .await
                     else {
                         continue;
                     };

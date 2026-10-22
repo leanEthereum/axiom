@@ -3,8 +3,12 @@
 use axiom_ssz::{DecodeError, Root, Ssz};
 
 use crate::{
-    ChainConfig, ForkName, Hash32, KzgCommitment, Preset, Slot, ValidatorIndex, altair, bellatrix,
-    capella, deneb, electra, fulu, gloas, phase0,
+    ChainConfig, ForkName, Hash32, KzgCommitment, Preset, Slot, ValidatorIndex,
+    accessors::CoreState,
+    altair, bellatrix, capella,
+    combined::BeaconState,
+    deneb, electra, fulu, gloas, phase0,
+    phase0::BeaconBlockHeader,
     vote::{CommitteeVote, ConflictingVotes},
 };
 
@@ -113,6 +117,20 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.state_root,
             Self::Electra(block) | Self::Fulu(block) => block.state_root,
             Self::Gloas(block) => block.state_root,
+        }
+    }
+
+    /// The block's header, which stands in for it in signatures and sidecars.
+    #[must_use]
+    pub fn header(&self) -> BeaconBlockHeader {
+        match self {
+            Self::Phase0(block) => block.header(),
+            Self::Altair(block) => block.header(),
+            Self::Bellatrix(block) => block.header(),
+            Self::Capella(block) => block.header(),
+            Self::Deneb(block) => block.header(),
+            Self::Electra(block) | Self::Fulu(block) => block.header(),
+            Self::Gloas(block) => block.header(),
         }
     }
 
@@ -299,6 +317,76 @@ impl<P: Preset> BeaconBlock<P> {
         }
     }
 
+    /// The block a genesis state implies, in the state's fork.
+    ///
+    /// It has the state's latest header, an empty body, and the state's root.
+    /// See `get_forkchoice_store` in the phase0 fork choice spec.
+    #[must_use]
+    pub fn genesis(state: &BeaconState<P>) -> Self {
+        let header = state.latest_block_header();
+        let (slot, proposer_index, parent_root) =
+            (header.slot, header.proposer_index, header.parent_root);
+        let state_root = state.hash_tree_root();
+        match state.fork_name() {
+            ForkName::Phase0 => Self::Phase0(phase0::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: phase0::BeaconBlockBody::default(),
+            }),
+            ForkName::Altair => Self::Altair(altair::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: altair::BeaconBlockBody::default(),
+            }),
+            ForkName::Bellatrix => Self::Bellatrix(bellatrix::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: bellatrix::BeaconBlockBody::default(),
+            }),
+            ForkName::Capella => Self::Capella(capella::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: capella::BeaconBlockBody::default(),
+            }),
+            ForkName::Deneb => Self::Deneb(deneb::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: deneb::BeaconBlockBody::default(),
+            }),
+            ForkName::Electra => Self::Electra(electra::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: electra::BeaconBlockBody::default(),
+            }),
+            ForkName::Fulu => Self::Fulu(fulu::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: fulu::BeaconBlockBody::default(),
+            }),
+            ForkName::Gloas => Self::Gloas(gloas::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: gloas::BeaconBlockBody::default(),
+            }),
+        }
+    }
+
     /// The block's SSZ encoding, which does not record the fork.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -348,6 +436,24 @@ impl<P: Preset> BeaconBlock<P> {
 mod tests {
     use super::*;
     use crate::{Epoch, Minimal};
+
+    #[test]
+    fn a_genesis_block_commits_to_its_state_and_header() {
+        // Fixture state: a Deneb genesis state whose header has an empty Deneb body.
+        let mut deneb = deneb::BeaconState::<Minimal>::default();
+        deneb.latest_block_header.body_root =
+            deneb::BeaconBlockBody::<Minimal>::default().hash_tree_root();
+        let state = BeaconState::from(deneb);
+
+        let block = BeaconBlock::genesis(&state);
+
+        // The block is Deneb's, names the state, and hashes like the header with that root.
+        let mut header = state.latest_block_header().clone();
+        header.state_root = state.hash_tree_root();
+        assert_eq!(block.fork_name(), ForkName::Deneb);
+        assert_eq!(block.state_root(), state.hash_tree_root());
+        assert_eq!(block.hash_tree_root(), header.hash_tree_root());
+    }
 
     #[test]
     fn fulu_block_keeps_its_fork_beside_the_electra_shape() {

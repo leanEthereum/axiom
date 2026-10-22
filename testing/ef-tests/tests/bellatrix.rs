@@ -5,8 +5,8 @@
 //! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
-    StoreReplay, Suite, Transition,
+    Blocks, ChainReplay, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards,
+    SszStatic, StoreReplay, Suite, Transition,
     forks::{Altair, Bellatrix},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -55,6 +55,26 @@ const CONTAINERS: [&str; 42] = [
     "SyncCommitteeMessage",
     "Validator",
     "VoluntaryExit",
+];
+
+/// Fork choice cases per handler, replayed by the store and by the node's chain.
+const FORK_CHOICE_MINIMAL: &[(&str, usize)] = &[
+    ("ex_ante", 3),
+    ("get_head", 11),
+    ("get_proposer_head", 3),
+    ("on_block", 23),
+    ("on_merge_block", 4),
+    ("reorg", 8),
+    ("withholding", 2),
+];
+
+/// Fork choice cases per handler on the mainnet preset.
+const FORK_CHOICE_MAINNET: &[(&str, usize)] = &[
+    ("ex_ante", 5),
+    ("get_head", 7),
+    ("get_proposer_head", 3),
+    ("on_block", 6),
+    ("on_merge_block", 4),
 ];
 
 #[test]
@@ -290,29 +310,25 @@ fn light_client_mainnet() {
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Bellatrix>::fork_choice();
-    let expected = [
-        ("ex_ante", 3),
-        ("get_head", 11),
-        ("get_proposer_head", 3),
-        ("on_block", 23),
-        ("on_merge_block", 4),
-        ("reorg", 8),
-        ("withholding", 2),
-    ];
-    Suite::check(&runner, "minimal", "bellatrix", &expected);
+    Suite::check(&runner, "minimal", "bellatrix", FORK_CHOICE_MINIMAL);
+}
+
+#[test]
+fn chain_replay_minimal() {
+    let runner = ChainReplay::<Minimal, Bellatrix>::new();
+    Suite::check(&runner, "minimal", "bellatrix", FORK_CHOICE_MINIMAL);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Bellatrix>::fork_choice();
-    let expected = [
-        ("ex_ante", 5),
-        ("get_head", 7),
-        ("get_proposer_head", 3),
-        ("on_block", 6),
-        ("on_merge_block", 4),
-    ];
-    Suite::check(&runner, "mainnet", "bellatrix", &expected);
+    Suite::check(&runner, "mainnet", "bellatrix", FORK_CHOICE_MAINNET);
+}
+
+#[test]
+fn chain_replay_mainnet() {
+    let runner = ChainReplay::<Mainnet, Bellatrix>::new();
+    Suite::check(&runner, "mainnet", "bellatrix", FORK_CHOICE_MAINNET);
 }
 
 #[test]

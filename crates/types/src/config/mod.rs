@@ -5,19 +5,22 @@
 //!
 //! Values come from `configs/{mainnet,minimal}.yaml` in the consensus specs.
 
+mod blob_data;
 mod blob_schedule;
 mod fork_name;
 mod yaml;
 
 use axiom_ssz::U256;
 use axiom_yaml::Yaml;
+pub use blob_data::BlobData;
 pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
 use yaml::ConfigEntry;
 pub use yaml::ConfigError;
 
 use crate::{
-    Epoch, ExecutionAddress, ForkDigest, Gwei, Hash32, Preset, Root, Version, phase0::ForkData,
+    Domain, DomainType, Epoch, ExecutionAddress, ForkDigest, Gwei, Hash32, Preset, Root, Version,
+    phase0::ForkData,
 };
 
 /// The minimal configuration's terminal total difficulty, 2^256 - 2^10.
@@ -486,12 +489,49 @@ impl ChainConfig {
         }
     }
 
+    /// Point in the slot, in basis points, by which a fork's sync messages are due.
+    ///
+    /// Gloas moves it earlier, to leave room for the payload reveal.
+    /// See `get_sync_message_due_ms` in the Altair and Gloas fork choice specs.
+    #[must_use]
+    pub const fn sync_message_due_bps(&self, fork: ForkName) -> u64 {
+        match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu => self.sync_message_due_bps,
+            ForkName::Gloas => self.sync_message_due_bps_gloas,
+        }
+    }
+
     /// Version of the fork active at an epoch.
     ///
     /// See `compute_fork_version` in the Fulu fork spec.
     #[must_use]
     pub fn fork_version_at(&self, epoch: Epoch) -> Version {
         self.fork_version(self.fork_at(epoch))
+    }
+
+    /// Signature domain of a message type at an epoch, under the fork the schedule puts there.
+    ///
+    /// A state reads the version from its own fork record, which lags until it crosses a fork.
+    /// A message of a new fork's first slots then needs the schedule's version instead.
+    /// See `compute_domain` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn domain(
+        &self,
+        domain_type: DomainType,
+        epoch: Epoch,
+        genesis_validators_root: Root,
+    ) -> Domain {
+        Domain::compute(
+            domain_type,
+            self.fork_version_at(epoch),
+            genesis_validators_root,
+        )
     }
 
     /// The digest that separates the gossip topics and peers of a fork.
@@ -542,6 +582,21 @@ impl ChainConfig {
             .unwrap_or(Epoch::FAR_FUTURE)
     }
 
+    /// Epochs for which peers must serve blob data of a form.
+    ///
+    /// Older data may be gone, so a node imports older blocks without sampling it.
+    /// See the Deneb and Fulu p2p specs.
+    #[must_use]
+    pub const fn blob_retention_epochs(&self, data: BlobData) -> u64 {
+        match data {
+            BlobData::None => u64::MAX,
+            BlobData::BlobSidecars => self.min_epochs_for_blob_sidecars_requests,
+            BlobData::BlockColumns | BlobData::PayloadColumns => {
+                self.min_epochs_for_data_column_sidecars_requests
+            }
+        }
+    }
+
     /// Blob limit and the epoch it started at, for an epoch.
     ///
     /// Before the first schedule entry, the Electra limit applies.
@@ -558,6 +613,24 @@ impl ChainConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_domain_follows_the_schedule_not_a_lagging_state() {
+        // Fixture state: Altair from epoch 1.
+        // So epoch 0 signs with the genesis version and epoch 1 with Altair's.
+        let config = ChainConfig::minimal().with_fork_epoch(ForkName::Altair, Epoch(1));
+        let root = Root([9; 32]);
+        let domain_type = DomainType([0, 0, 0, 0]);
+
+        assert_eq!(
+            config.domain(domain_type, Epoch(0), root),
+            Domain::compute(domain_type, config.genesis_fork_version, root)
+        );
+        assert_eq!(
+            config.domain(domain_type, Epoch(1), root),
+            Domain::compute(domain_type, config.altair_fork_version, root)
+        );
+    }
 
     #[test]
     fn the_next_fork_counts_blob_steps_after_fulu() {

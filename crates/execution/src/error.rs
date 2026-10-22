@@ -5,9 +5,10 @@ use std::fmt::Write;
 use axiom_http::{HttpError, StatusCode};
 use axiom_json::{HexError, Json, ParseError};
 use axiom_ssz::DecodeError;
+use axiom_types::ForkName;
 use thiserror::Error;
 
-use crate::RpcError;
+use crate::{ForkchoiceVersion, RpcError};
 
 /// A call to the execution engine that did not produce a typed result.
 #[derive(Debug, Error)]
@@ -38,6 +39,40 @@ pub enum EngineError {
     /// The result does not map onto the expected structure.
     #[error("engine result is malformed: {0}")]
     Wire(#[from] WireError),
+
+    /// The fork calls no method of the family, as before the merge or before blobs.
+    #[error("the {fork} fork calls no {family} method")]
+    NoMethod {
+        /// The fork asked for.
+        fork: ForkName,
+        /// The method family, such as engine_getBlobs.
+        family: &'static str,
+    },
+
+    /// The build attributes are of another version than the fork's fork choice method.
+    #[error("the {fork} fork calls {expected}, but the attributes are for {actual}")]
+    AttributesVersion {
+        /// The fork asked for.
+        fork: ForkName,
+        /// The method the fork calls.
+        expected: ForkchoiceVersion,
+        /// The method the attributes belong to.
+        actual: ForkchoiceVersion,
+    },
+}
+
+/// A payload that cannot become a request for the engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum NewPayloadError {
+    /// The bid commits to more blobs than a block can hold.
+    #[error("bid commits to {count} blobs, above the limit {limit}")]
+    TooManyBlobs {
+        /// The number of commitments in the bid.
+        count: usize,
+        /// The most commitments a block can hold.
+        limit: usize,
+    },
 }
 
 /// A response that breaks the JSON-RPC 2.0 envelope.

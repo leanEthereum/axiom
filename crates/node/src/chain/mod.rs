@@ -11,33 +11,43 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) use availability::Sidecar;
 pub use availability::Submission;
-use availability::{AvailabilityBuffer, ReadyBlock};
+use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
 use axiom_fork_choice::{DataAvailability, ExecutionStatus, ForkChoiceError, PayloadStatus, Store};
-use axiom_gossip::{ChainView, GossipValidator};
-use axiom_ssz::Ssz;
+use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
+use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
 use axiom_state_transition::{EpochCommittees, State, Verification};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root, Slot,
-    accessors::CoreState,
+    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root,
+    Slot,
+    accessors::{CoreState, ForkState},
+    bellatrix::PowBlock,
     combined,
-    fulu::{
-        AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
-        Checkpoint, CommitteeBits, DataColumnSidecar, SignedBeaconBlock, SingleAttestation,
-    },
+    deneb::BlobSidecar,
+    gloas::{self, PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
+    phase0::Checkpoint,
+    vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
 pub use database::ChainDatabase;
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
 pub use head::{ChainEvent, ExecutionHead, Head};
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ChainError;
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
+
+/// Sync committee periods of light client data kept behind finality.
+///
+/// A bootstrap embeds a whole sync committee, and one is kept per finalized epoch.
+/// Two periods keep a day or more of bootstraps and updates on mainnet in a few megabytes.
+/// The full node spec asks for more, back to the oldest block served; this node keeps less.
+const LIGHT_CLIENT_PERIODS_KEPT: u64 = 2;
 
 /// The node's view of the beacon chain.
 ///
@@ -49,6 +59,9 @@ const EVENT_BACKLOG: usize = 256;
 /// 1. A block enters the fork choice store.
 /// 2. The store picks the head, which emits head, reorg, and finalized events.
 /// 3. On finality, the database stores the anchor state and the canonical index, and drops orphans.
+///
+/// Blocks of every fork enter through the combined enums.
+/// From Gloas on, a block's payload arrives apart, in an envelope that enters on its own.
 ///
 /// Every method is synchronous and runs on one thread.
 /// Other services reach it through a handle.
@@ -66,12 +79,14 @@ pub struct Chain<P: Preset> {
     metrics: NodeMetrics,
     /// Database bytes written as of the last metrics update.
     bytes_written: u64,
-    /// Blocks waiting for their custody columns.
+    /// Blocks and envelopes waiting for their blob data.
     availability: AvailabilityBuffer<P>,
     /// What gossip validation remembers.
     gossip: GossipMemory,
     /// Committees of one epoch as the head state shuffles them, reused until the head moves.
     committees: Option<(Epoch, Root, Arc<EpochCommittees>)>,
+    /// Light client data derived from the canonical chain.
+    light_client: LightClientServer<P>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -85,23 +100,14 @@ impl<P: Preset> Chain<P> {
     /// Fails when the anchor cannot be recorded.
     pub fn from_genesis(
         config: ChainConfig,
-        genesis: BeaconState<P>,
+        genesis: combined::BeaconState<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
-        // The genesis header already names the body; only its state root is left blank.
-        let header = &genesis.latest_block_header;
-        let block = BeaconBlock {
-            slot: header.slot,
-            proposer_index: header.proposer_index,
-            parent_root: header.parent_root,
-            state_root: genesis.hash_tree_root(),
-            body: BeaconBlockBody::default(),
-        };
         // Genesis has no proposer, so its block carries no signature.
-        let block = SignedBeaconBlock {
-            message: block,
-            signature: BlsSignature::default(),
-        };
+        let block = combined::SignedBeaconBlock::from_parts(
+            combined::BeaconBlock::genesis(&genesis),
+            BlsSignature::default(),
+        );
         Self::from_anchor(config, genesis, &block, database)
     }
 
@@ -114,19 +120,20 @@ impl<P: Preset> Chain<P> {
     /// Fails when the block does not commit to the state, or the anchor cannot be recorded.
     pub fn from_anchor(
         config: ChainConfig,
-        state: BeaconState<P>,
-        signed: &SignedBeaconBlock<P>,
+        state: combined::BeaconState<P>,
+        signed: &combined::SignedBeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
-        let root = signed.message.hash_tree_root();
+        let root = signed.block_root();
         let checkpoint = Checkpoint {
             epoch: state.current_epoch(),
             root,
         };
-        let slot = signed.message.slot;
+        let slot = signed.slot();
         // The anchor is trusted, so its signature is kept as given and never checked.
-        let chain = Self::with_anchor(config, state, &signed.message, database)?;
+        let mut chain = Self::with_anchor(config, state, &signed.message(), database)?;
         chain.database.put_block(root, signed)?;
+        chain.offer_bootstrap(root, signed);
         let anchor_state = chain
             .store
             .block_state(&root)
@@ -152,20 +159,19 @@ impl<P: Preset> Chain<P> {
         let block = database
             .block(checkpoint.root)?
             .ok_or(ChainError::Missing("finalized block"))?;
-        Self::with_anchor(config, state, &block.message, database)
+        Self::with_anchor(config, state, &block.message(), database)
     }
 
     /// Builds the store over an anchor and selects the first head.
     fn with_anchor(
         config: ChainConfig,
-        state: BeaconState<P>,
-        block: &BeaconBlock<P>,
+        state: combined::BeaconState<P>,
+        anchor: &combined::BeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
-        let anchor = combined::BeaconBlock::Fulu(block.clone());
-        let mut store = Store::new(config, State::new(state), &anchor)?;
+        let mut store = Store::new(config, State::new(state), anchor)?;
         let head = Self::read_head(&mut store)?;
-        info!(slot = %head.slot, root = %head.root, "chain anchored");
+        info!(slot = %head.slot, root = %head.root, fork = %anchor.fork_name(), "chain anchored");
         Ok(Self {
             store,
             database,
@@ -177,6 +183,7 @@ impl<P: Preset> Chain<P> {
             availability: AvailabilityBuffer::new((0..P::NUMBER_OF_COLUMNS).map(ColumnIndex)),
             gossip: GossipMemory::default(),
             committees: None,
+            light_client: LightClientServer::new(),
         })
     }
 
@@ -222,6 +229,17 @@ impl<P: Preset> Chain<P> {
         self.store.config()
     }
 
+    /// The light client data the chain serves.
+    #[must_use]
+    pub const fn light_client(&self) -> &LightClientServer<P> {
+        &self.light_client
+    }
+
+    /// The light client data the chain serves, for recording what gossip forwarded.
+    pub const fn light_client_mut(&mut self) -> &mut LightClientServer<P> {
+        &mut self.light_client
+    }
+
     /// The database, for queries.
     #[must_use]
     pub const fn database(&self) -> &ChainDatabase<P> {
@@ -239,8 +257,28 @@ impl<P: Preset> Chain<P> {
     /// # Errors
     ///
     /// Fails when the database is unreadable.
-    pub fn block(&self, root: Root) -> Result<Option<SignedBeaconBlock<P>>, ChainError> {
+    pub fn block(&self, root: Root) -> Result<Option<combined::SignedBeaconBlock<P>>, ChainError> {
         self.database.block(root)
+    }
+
+    /// The bid a Gloas block committed to, while the fork choice holds the block's state.
+    #[must_use]
+    pub fn payload_bid(&self, root: &Root) -> Option<gloas::ExecutionPayloadBid> {
+        let state = self.store.block_state(root)?;
+        gloas::BeaconState::<P>::from_any(state.beacon())
+            .map(|gloas| gloas.latest_execution_payload_bid.clone())
+    }
+
+    /// Slot of a block, from the fork choice when it holds the block, else from the database.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn block_slot(&self, root: Root) -> Result<Option<Slot>, ChainError> {
+        if let Some(node) = self.store.blocks().get(&root) {
+            return Ok(Some(node.slot));
+        }
+        Ok(self.database.block(root)?.map(|block| block.slot()))
     }
 
     /// The root that binds signatures and topics to this chain's genesis validator set.
@@ -315,17 +353,15 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice refuses the block or it cannot be stored.
     pub fn import_block(
         &mut self,
-        block: &SignedBeaconBlock<P>,
+        block: &combined::SignedBeaconBlock<P>,
         availability: DataAvailability,
         payload: PayloadStatus,
     ) -> Result<Root, ChainError> {
-        let root = block.message.hash_tree_root();
+        let root = block.block_root();
         let timer = self.metrics.block_import_seconds.start_timer();
-        // The store reads blocks of every fork through the combined enum.
-        let any_block = combined::SignedBeaconBlock::Fulu(block.clone());
         if let Err(error) =
             self.store
-                .import_block(&any_block, availability, Verification::Verify, payload)
+                .import_block(block, availability, Verification::Verify, payload)
         {
             // Refused blocks fail early, so timing them would skew the import latency.
             timer.discard();
@@ -334,46 +370,121 @@ impl<P: Preset> Chain<P> {
         drop(timer);
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
-        info!(slot = %block.message.slot, %root, "imported block");
+        info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
+        self.update_head()?;
+        // Only canonical blocks feed light clients; a block that is not the head may never be.
+        if self.head.root == root {
+            self.offer_update(root, block);
+        }
+        Ok(root)
+    }
+
+    /// Imports a payload envelope whose verdict and data availability are known.
+    ///
+    /// The block's full variant then joins the tree, and children may build on it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork choice refuses the envelope or it cannot be stored.
+    pub fn import_envelope(
+        &mut self,
+        envelope: &SignedExecutionPayloadEnvelope<P>,
+        availability: DataAvailability,
+        payload: PayloadStatus,
+    ) -> Result<Root, ChainError> {
+        let root = envelope.message.beacon_block_root;
+        self.store.on_execution_payload_envelope(
+            envelope,
+            availability,
+            Verification::Verify,
+            payload,
+        )?;
+        self.database.put_envelope(envelope)?;
+        info!(%root, "imported payload envelope");
         self.update_head()?;
         Ok(root)
     }
 
     /// Hands over a block that passed gossip or sync checks, with its payload verdict.
     ///
-    /// The block imports now if its data is complete, or later when the last column arrives.
+    /// The block imports now if its data is complete, or later when the last sidecar arrives.
     ///
     /// # Errors
     ///
     /// Fails when the block is imported now and the fork choice refuses it.
     pub fn submit_block(
         &mut self,
-        block: Arc<SignedBeaconBlock<P>>,
+        block: Arc<combined::SignedBeaconBlock<P>>,
         payload: PayloadStatus,
     ) -> Result<Submission, ChainError> {
-        let root = block.message.hash_tree_root();
+        let root = block.block_root();
         if self.store.blocks().contains(&root) {
             return Ok(Submission::Imported(root));
         }
-        // Peers serve columns only for recent epochs, so older blocks are not sampled.
-        // See the note on the retention window in the Fulu fork choice spec.
-        let window = self.config().min_epochs_for_data_column_sidecars_requests;
-        let epoch = block.message.slot.epoch::<P>();
-        let ready = ReadyBlock { block, payload };
-        if epoch.0.saturating_add(window) < self.store.current_epoch().0 {
-            return self
-                .import_ready(root, &ready)
-                .map(|()| Submission::Imported(root));
-        }
-        match self.availability.offer_block(root, ready) {
+        let data = block.fork_name().blob_data();
+        let commitments = block.message().blob_kzg_commitments().len() as u64;
+        let needed = match data {
+            BlobData::BlobSidecars if commitments > 0 => Needed::Blobs(commitments),
+            BlobData::BlockColumns if commitments > 0 => Needed::Custody,
+            // Gloas blocks commit through their bid; the envelope waits instead.
+            BlobData::None
+            | BlobData::BlobSidecars
+            | BlobData::BlockColumns
+            | BlobData::PayloadColumns => Needed::Nothing,
+        };
+        let needed = self.within_retention(block.slot(), data, needed);
+        let item = Pending::Block(ReadyBlock { block, payload });
+        match self.availability.offer(root, item, needed) {
             Some(ready) => self
-                .import_ready(root, &ready)
+                .import_ready(root, ready)
                 .map(|()| Submission::Imported(root)),
             None => Ok(Submission::Waiting(root)),
         }
     }
 
-    /// Hands over a verified custody column, which may complete a waiting block.
+    /// Hands over a payload envelope that passed gossip or sync checks, with its verdict.
+    ///
+    /// The envelope imports now if its block's blob data is complete, or later.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the envelope's block is unknown, or the envelope is imported now and refused.
+    pub fn submit_envelope(
+        &mut self,
+        envelope: Arc<SignedExecutionPayloadEnvelope<P>>,
+        payload: PayloadStatus,
+    ) -> Result<Submission, ChainError> {
+        let root = envelope.message.beacon_block_root;
+        let state = self
+            .store
+            .block_state(&root)
+            .ok_or(ForkChoiceError::UnknownBlock(root))?;
+        let slot = state.beacon().slot();
+        // Only a Gloas block's state holds a bid; any other block has no envelope at all.
+        let commitments = gloas::BeaconState::<P>::from_any(state.beacon())
+            .map(|gloas| {
+                gloas
+                    .latest_execution_payload_bid
+                    .blob_kzg_commitments
+                    .len()
+            })
+            .ok_or(ForkChoiceError::NoPayloadCommittee(root))?;
+        let needed = if commitments > 0 {
+            Needed::Custody
+        } else {
+            Needed::Nothing
+        };
+        let needed = self.within_retention(slot, BlobData::PayloadColumns, needed);
+        let item = Pending::Envelope(ReadyEnvelope { envelope, payload });
+        match self.availability.offer(root, item, needed) {
+            Some(ready) => self
+                .import_ready(root, ready)
+                .map(|()| Submission::Imported(root)),
+            None => Ok(Submission::Waiting(root)),
+        }
+    }
+
+    /// Hands over a verified custody column, which may complete a waiting block or envelope.
     ///
     /// # Returns
     ///
@@ -381,14 +492,32 @@ impl<P: Preset> Chain<P> {
     ///
     /// # Errors
     ///
-    /// Fails when a released block is refused by the fork choice.
+    /// Fails when a released item is refused by the fork choice.
     pub fn submit_column(
         &mut self,
-        column: Arc<DataColumnSidecar<P>>,
+        column: Arc<combined::DataColumnSidecar<P>>,
     ) -> Result<Option<Root>, ChainError> {
-        let root = column.signed_block_header.message.hash_tree_root();
-        match self.availability.offer_column(root, column) {
-            Some(ready) => self.import_ready(root, &ready).map(|()| Some(root)),
+        self.submit_sidecar(Sidecar::Column(column))
+    }
+
+    /// Hands over a verified blob sidecar, which may complete a waiting block.
+    ///
+    /// # Returns
+    ///
+    /// The root of the block the blob released and imported, if any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a released block is refused by the fork choice.
+    pub fn submit_blob(&mut self, blob: Arc<BlobSidecar<P>>) -> Result<Option<Root>, ChainError> {
+        self.submit_sidecar(Sidecar::Blob(blob))
+    }
+
+    /// Hands over a verified sidecar of either kind.
+    fn submit_sidecar(&mut self, sidecar: Sidecar<P>) -> Result<Option<Root>, ChainError> {
+        let root = sidecar.block_root();
+        match self.availability.offer_sidecar(sidecar) {
+            Some(ready) => self.import_ready(root, ready).map(|()| Some(root)),
             None => Ok(None),
         }
     }
@@ -415,16 +544,36 @@ impl<P: Preset> Chain<P> {
         check(&mut validator)
     }
 
-    /// Imports a block whose data is available, then stores its columns.
-    fn import_ready(&mut self, root: Root, ready: &ReadyBlock<P>) -> Result<(), ChainError> {
-        let columns = self.availability.take_columns(&root);
-        match self.import_block(&ready.block, DataAvailability::Available, ready.payload) {
-            Ok(_) => {
+    /// The data requirement, waived for blocks older than peers must serve their data for.
+    ///
+    /// See the notes on the retention window in the Deneb and Fulu fork choice specs.
+    const fn within_retention(&self, slot: Slot, data: BlobData, needed: Needed) -> Needed {
+        let window = self.config().blob_retention_epochs(data);
+        if slot.epoch::<P>().0.saturating_add(window) < self.store.current_epoch().0 {
+            Needed::Nothing
+        } else {
+            needed
+        }
+    }
+
+    /// Imports a block or envelope whose data is available, then stores its sidecars.
+    fn import_ready(&mut self, root: Root, ready: Pending<P>) -> Result<(), ChainError> {
+        let sidecars = self.availability.take_sidecars(&root);
+        let imported = match &ready {
+            Pending::Block(ready) => {
+                self.import_block(&ready.block, DataAvailability::Available, ready.payload)
+            }
+            Pending::Envelope(ready) => {
+                self.import_envelope(&ready.envelope, DataAvailability::Available, ready.payload)
+            }
+        };
+        match (imported, ready) {
+            (Ok(_), _) => {
                 // An earlier refusal, for want of a parent or of time, no longer holds.
                 self.gossip.forget(&root);
-                self.database.put_columns(root, &columns)
+                self.database.put_sidecars(root, &sidecars)
             }
-            Err(error) => {
+            (Err(error), Pending::Block(ready)) => {
                 // Only a block that can never import condemns its descendants on gossip.
                 // A missing parent or an early arrival may still resolve.
                 if Self::is_permanent(&error) {
@@ -433,6 +582,53 @@ impl<P: Preset> Chain<P> {
                 }
                 Err(error)
             }
+            (Err(error), Pending::Envelope(_)) => Err(error),
+        }
+    }
+
+    /// Derives the light client update a new head signs for its parent, and keeps it if better.
+    ///
+    /// Updates are routine to fail: phase0 has no committee, and few signers prove nothing.
+    /// So a failure is logged and never stops the import.
+    /// See `create_light_client_update` in the Altair light client full node spec.
+    fn offer_update(&mut self, root: Root, block: &combined::SignedBeaconBlock<P>) {
+        let parent_root = block.parent_root();
+        let (Some(signature_state), Some(attested_state)) = (
+            self.store.block_state(&root),
+            self.store.block_state(&parent_root),
+        ) else {
+            return;
+        };
+        let created = self.database.block(parent_root).and_then(|parent| {
+            let parent = parent.ok_or(ChainError::MissingState(parent_root))?;
+            let finalized_root = attested_state.beacon().finalized_checkpoint().root;
+            let finalized_block = self.database.block(finalized_root)?;
+            let signature = PostState::new(signature_state.beacon(), block)?;
+            let attested = PostState::new(attested_state.beacon(), &parent)?;
+            let update = LightClientUpdate::create(
+                self.store.config(),
+                &signature,
+                &attested,
+                finalized_block.as_ref(),
+            )?;
+            Ok(self.light_client.offer_update(update)?)
+        });
+        if let Err(error) = created {
+            debug!(%root, %error, "no light client update from the block");
+        }
+    }
+
+    /// Keeps the bootstrap of a block whose post-state the fork choice holds.
+    ///
+    /// See `create_light_client_bootstrap` in the Altair light client full node spec.
+    fn offer_bootstrap(&mut self, root: Root, block: &combined::SignedBeaconBlock<P>) {
+        let Some(state) = self.store.block_state(&root) else {
+            return;
+        };
+        let offered = PostState::new(state.beacon(), block)
+            .and_then(|post| self.light_client.offer_bootstrap(&post));
+        if let Err(error) = offered {
+            debug!(%root, %error, "no light client bootstrap for the block");
         }
     }
 
@@ -463,57 +659,59 @@ impl<P: Preset> Chain<P> {
     /// # Errors
     ///
     /// Fails when the fork choice refuses the vote.
-    pub fn on_attestation(&mut self, attestation: &Attestation<P>) -> Result<(), ChainError> {
+    pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
         self.store
-            .on_attestation(&attestation.committee_vote(), false, Verification::Verify)?;
+            .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
     }
 
     /// Counts one validator's vote, received alone on an attestation subnet.
     ///
-    /// The vote becomes an attestation with one committee and one participant, as aggregates carry them.
+    /// The vote becomes an aggregate with one committee and one participant.
+    ///
+    /// # Arguments
+    ///
+    /// - `claim`: what the vote says about its head's payload, as its fork reads the data index.
     ///
     /// # Errors
     ///
     /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
-    pub fn on_single_attestation(&mut self, single: &SingleAttestation) -> Result<(), ChainError> {
+    pub fn on_subnet_vote<V: SubnetVote>(
+        &mut self,
+        vote: &V,
+        claim: PayloadClaim,
+    ) -> Result<(), ChainError> {
+        let data = vote.data();
+        let committee_index = vote.committee_index();
         let invalid = |reason| ChainError::InvalidVote {
-            validator: single.attester_index,
-            slot: single.data.slot,
-            committee: single.committee_index,
+            slot: data.slot,
+            committee: committee_index,
             reason,
         };
-        let committees = self.committees_at(single.data.target.epoch)?;
+        let committees = self.committees_at(data.target.epoch)?;
         let committee = committees
-            .committee(single.data.slot, single.committee_index)
+            .committee(data.slot, committee_index)
             .ok_or_else(|| invalid("no such committee at the slot"))?;
-        let position = committee
-            .iter()
-            .position(|validator| *validator == single.attester_index)
-            .ok_or_else(|| invalid("attester not in the committee"))?;
+        let attester = vote
+            .attester(committee)
+            .map_err(|_| invalid("attester not in the committee"))?;
 
-        // One committee bit, and one participant bit at the attester's place in that committee.
+        // One participant bit at the attester's place in its committee.
         //
-        //     committee 2 of the slot: [v9, v4, v7]   attester v4   ->   aggregation bits 010
-        let mut aggregation_bits = AggregationBits::<P>::with_len(committee.len())
-            .map_err(|_| invalid("committee larger than the bitfield bound"))?;
-        aggregation_bits.set(position, true);
-        let mut committee_bits = CommitteeBits::<P>::default();
-        let index = single.committee_index.as_usize();
-        if single.committee_index.0 >= P::MAX_COMMITTEES_PER_SLOT {
-            return Err(invalid("committee index past the slot's committees"));
-        }
-        committee_bits.set(index, true);
-        let attestation = Attestation::<P> {
-            aggregation_bits,
-            data: single.data.clone(),
-            signature: single.signature,
-            committee_bits,
+        //     committee 2 of the slot: [v9, v4, v7]   attester v4   ->   bits 010
+        let bits = committee.iter().map(|member| *member == attester).collect();
+        let aggregate = CommitteeVote {
+            data: data.clone(),
+            signature: *vote.signature(),
+            committees: vec![committee_index],
+            bits,
+            payload: claim,
         };
         // The signature is checked again against the committee the store resolves.
-        // A committee read from a fork with another shuffling then fails instead of crediting the wrong validator.
+        // A committee from a branch with another shuffling then fails the check.
+        // It never credits the wrong validator.
         self.store
-            .on_attestation(&attestation.committee_vote(), false, Verification::Verify)?;
+            .on_attestation(&aggregate, false, Verification::Verify)?;
         Ok(())
     }
 
@@ -541,13 +739,31 @@ impl<P: Preset> Chain<P> {
     /// # Errors
     ///
     /// Fails when the slashing does not prove an equivocation.
-    pub fn on_attester_slashing(
+    pub fn on_attester_slashing(&mut self, votes: &ConflictingVotes) -> Result<(), ChainError> {
+        self.store
+            .on_attester_slashing(votes, Verification::Verify)?;
+        Ok(())
+    }
+
+    /// Counts a payload timeliness committee member's vote on its slot's payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork choice refuses the vote.
+    pub fn on_payload_attestation(
         &mut self,
-        slashing: &AttesterSlashing<P>,
+        message: &PayloadAttestationMessage,
     ) -> Result<(), ChainError> {
         self.store
-            .on_attester_slashing(&slashing.conflicting_votes(), Verification::Verify)?;
+            .on_payload_attestation_message(message, false, Verification::Verify)?;
         Ok(())
+    }
+
+    /// Records a proof-of-work block the execution layer reported, for the merge transition check.
+    ///
+    /// See `get_pow_block` in the Bellatrix fork choice spec.
+    pub fn on_pow_block(&mut self, block: PowBlock) {
+        self.store.on_pow_block(block);
     }
 
     /// Applies the engine's later verdict on a block imported optimistically.
@@ -615,7 +831,7 @@ impl<P: Preset> Chain<P> {
         self.announce(ChainEvent::Head(head));
 
         if finalized {
-            // Waiting blocks and refused ones at or before finality can never matter again.
+            // Waiting items and refused blocks at or before finality can never matter again.
             let finalized_slot = head.finalized.epoch.start_slot::<P>();
             self.availability.prune(finalized_slot);
             self.gossip.prune(finalized_slot);
@@ -660,6 +876,14 @@ impl<P: Preset> Chain<P> {
         self.database
             .finalize(previous, finalized, state, &chain, &orphans)?;
 
+        // A finalized checkpoint block is what light clients bootstrap from.
+        if let Some(block) = self.database.block(finalized.root)? {
+            self.offer_bootstrap(finalized.root, &block);
+        }
+        let kept = LIGHT_CLIENT_PERIODS_KEPT * P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
+        let earliest = Epoch(finalized.epoch.0.saturating_sub(kept));
+        self.light_client.prune(earliest.start_slot::<P>());
+
         // Only now that the disk agrees, drop the excluded blocks from memory.
         self.store.prune();
         Ok(())
@@ -693,7 +917,7 @@ impl<P: Preset> Chain<P> {
         let justified = store.justified_checkpoint();
         let finalized = store.finalized_checkpoint();
 
-        // A block's post-state caches the header of its own payload.
+        // A block's post-state caches the hash of the latest payload the chain accepted.
         let payload_hash = |root: &Root| -> Hash32 {
             store
                 .block_state(root)

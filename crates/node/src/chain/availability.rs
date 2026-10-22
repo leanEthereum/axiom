@@ -1,4 +1,4 @@
-//! Blocks waiting for their blob data, and the columns that release them.
+//! Blocks and payload envelopes waiting for their blob data, and the sidecars that release them.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -6,17 +6,18 @@ use std::{
 };
 
 use axiom_fork_choice::PayloadStatus;
+use axiom_ssz::Ssz;
 use axiom_types::{
-    ColumnIndex, Preset, Root, Slot,
-    fulu::{DataColumnSidecar, SignedBeaconBlock},
+    ColumnIndex, Preset, Root, Slot, combined, deneb::BlobSidecar,
+    gloas::SignedExecutionPayloadEnvelope,
 };
 
-/// What became of a block handed to the chain.
+/// What became of a block or envelope handed to the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Submission {
-    /// The block was imported.
+    /// It was imported.
     Imported(Root),
-    /// The block waits for custody columns.
+    /// It waits for blob data.
     Waiting(Root),
 }
 
@@ -34,35 +35,109 @@ impl Submission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReadyBlock<P: Preset> {
     /// The block.
-    pub block: Arc<SignedBeaconBlock<P>>,
+    pub block: Arc<combined::SignedBeaconBlock<P>>,
     /// The engine's verdict.
     pub payload: PayloadStatus,
 }
 
-/// Holds blocks until the columns this node samples have all arrived.
+/// A payload envelope ready for import, with the engine's verdict on its payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadyEnvelope<P: Preset> {
+    /// The envelope.
+    pub envelope: Arc<SignedExecutionPayloadEnvelope<P>>,
+    /// The engine's verdict.
+    pub payload: PayloadStatus,
+}
+
+/// What can wait for blob data.
+///
+/// Before Gloas a block waits; from Gloas on the payload envelope does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Pending<P: Preset> {
+    /// A block whose body commits to blobs.
+    Block(ReadyBlock<P>),
+    /// An envelope whose block's bid commits to blobs.
+    Envelope(ReadyEnvelope<P>),
+}
+
+impl<P: Preset> Pending<P> {
+    /// Slot of the block the item belongs to.
+    fn slot(&self) -> Slot {
+        match self {
+            Self::Block(ready) => ready.block.slot(),
+            Self::Envelope(ready) => Slot(ready.envelope.message.payload.slot_number),
+        }
+    }
+}
+
+/// One verified piece of blob data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sidecar<P: Preset> {
+    /// A whole blob, Deneb and Electra.
+    Blob(Arc<BlobSidecar<P>>),
+    /// A column of the extended matrix, from Fulu on.
+    Column(Arc<combined::DataColumnSidecar<P>>),
+}
+
+impl<P: Preset> Sidecar<P> {
+    /// Root of the block the sidecar belongs to.
+    pub(crate) fn block_root(&self) -> Root {
+        match self {
+            Self::Blob(blob) => blob.signed_block_header.message.hash_tree_root(),
+            Self::Column(column) => column.block_root(),
+        }
+    }
+
+    /// The blob index or column index.
+    fn index(&self) -> u64 {
+        match self {
+            Self::Blob(blob) => blob.index.0,
+            Self::Column(column) => column.index().0,
+        }
+    }
+
+    /// Slot of the block the sidecar belongs to.
+    fn slot(&self) -> Slot {
+        match self {
+            Self::Blob(blob) => blob.signed_block_header.message.slot,
+            Self::Column(column) => column.slot(),
+        }
+    }
+}
+
+/// The sidecars an item needs before its data counts as available.
+///
+/// See `is_data_available` in the Deneb, Fulu, and Gloas fork choice specs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Needed {
+    /// No blob is committed to, or the data is past the retention window.
+    Nothing,
+    /// Every blob sidecar from index zero up to the count.
+    Blobs(u64),
+    /// Every column this node samples.
+    Custody,
+}
+
+/// Holds blocks and envelopes until their blob data has arrived.
 ///
 /// # Overview
 ///
-/// A block with blobs is available once every custody column of the node verified.
-/// Blocks and columns arrive in any order, so whichever comes last releases the block.
+/// Items and sidecars arrive in any order, so whichever comes last releases the item.
+/// Take custody columns {3, 40}, with column 3 already verified:
 ///
-/// Take custody columns {3, 40, 77, 101}, with columns 3 and 40 already verified:
+/// 1. Block B arrives, needs custody, and waits with {3}.
+/// 2. Column 40 arrives, the set is complete, and B is released for import.
 ///
-/// 1. Block B arrives, and waits with {3, 40}.
-/// 2. Column 77 arrives, and B waits with {3, 40, 77}.
-/// 3. Column 101 arrives, the set is complete, and B is released for import.
-///
-/// A block without blobs needs no column and passes straight through.
-/// Only verified columns may be offered: the buffer trusts what it receives.
-/// See `is_data_available` in the Fulu fork choice spec.
+/// Before Fulu, a block needs each of its blobs instead of the custody columns.
+/// Only verified sidecars may be offered: the buffer trusts what it receives.
 #[derive(Debug)]
 pub(crate) struct AvailabilityBuffer<P: Preset> {
     /// Columns this node samples for every block.
     custody: BTreeSet<ColumnIndex>,
-    /// Blocks waiting for columns, by root.
-    blocks: HashMap<Root, ReadyBlock<P>>,
-    /// Verified columns, by block root and column index.
-    columns: HashMap<Root, BTreeMap<ColumnIndex, Arc<DataColumnSidecar<P>>>>,
+    /// Items waiting for sidecars, by block root.
+    pending: HashMap<Root, (Pending<P>, Needed)>,
+    /// Verified sidecars, by block root and index.
+    sidecars: HashMap<Root, BTreeMap<u64, Sidecar<P>>>,
 }
 
 impl<P: Preset> AvailabilityBuffer<P> {
@@ -70,8 +145,8 @@ impl<P: Preset> AvailabilityBuffer<P> {
     pub(crate) fn new(custody: impl IntoIterator<Item = ColumnIndex>) -> Self {
         Self {
             custody: custody.into_iter().collect(),
-            blocks: HashMap::new(),
-            columns: HashMap::new(),
+            pending: HashMap::new(),
+            sidecars: HashMap::new(),
         }
     }
 
@@ -81,170 +156,181 @@ impl<P: Preset> AvailabilityBuffer<P> {
         &self.custody
     }
 
-    /// Offers a block, which comes back at once if its data is already complete.
-    pub(crate) fn offer_block(
+    /// Offers an item, which comes back at once if its data is already complete.
+    pub(crate) fn offer(
         &mut self,
         root: Root,
-        ready: ReadyBlock<P>,
-    ) -> Option<ReadyBlock<P>> {
-        // No blob means no column to wait for.
-        if ready.block.message.body.blob_kzg_commitments.is_empty() || self.is_complete(&root) {
-            return Some(ready);
+        item: Pending<P>,
+        needed: Needed,
+    ) -> Option<Pending<P>> {
+        if self.is_complete(&root, needed) {
+            return Some(item);
         }
-        self.blocks.insert(root, ready);
+        self.pending.insert(root, (item, needed));
         None
     }
 
-    /// Offers a verified column, which may release the block it belongs to.
+    /// Offers a verified sidecar, which may release the item it belongs to.
     ///
     /// Columns outside the custody set are not kept: the node neither samples nor serves them.
-    pub(crate) fn offer_column(
-        &mut self,
-        root: Root,
-        column: Arc<DataColumnSidecar<P>>,
-    ) -> Option<ReadyBlock<P>> {
-        if !self.custody.contains(&column.index) {
+    pub(crate) fn offer_sidecar(&mut self, sidecar: Sidecar<P>) -> Option<Pending<P>> {
+        if let Sidecar::Column(column) = &sidecar
+            && !self.custody.contains(&column.index())
+        {
             return None;
         }
-        self.columns
+        let root = sidecar.block_root();
+        self.sidecars
             .entry(root)
             .or_default()
-            .insert(column.index, column);
-        if self.blocks.contains_key(&root) && self.is_complete(&root) {
-            return self.blocks.remove(&root);
+            .insert(sidecar.index(), sidecar);
+        let needed = self.pending.get(&root).map(|(_, needed)| *needed)?;
+        if self.is_complete(&root, needed) {
+            return self.pending.remove(&root).map(|(item, _)| item);
         }
         None
     }
 
-    /// Removes and returns the columns held for a block, once it is imported.
-    pub(crate) fn take_columns(&mut self, root: &Root) -> Vec<Arc<DataColumnSidecar<P>>> {
-        self.columns
+    /// Removes and returns the sidecars held for a block, once its data is imported.
+    pub(crate) fn take_sidecars(&mut self, root: &Root) -> Vec<Sidecar<P>> {
+        self.sidecars
             .remove(root)
-            .map(|columns| columns.into_values().collect())
+            .map(|sidecars| sidecars.into_values().collect())
             .unwrap_or_default()
     }
 
-    /// Forgets blocks and columns at or before a slot, which finality made irrelevant.
+    /// Forgets items and sidecars at or before a slot, which finality made irrelevant.
     pub(crate) fn prune(&mut self, finalized: Slot) {
-        self.blocks
-            .retain(|_, ready| ready.block.message.slot > finalized);
-        self.columns.retain(|_, columns| {
-            columns
+        self.pending.retain(|_, (item, _)| item.slot() > finalized);
+        self.sidecars.retain(|_, sidecars| {
+            sidecars
                 .values()
                 .next()
-                .is_some_and(|column| column.signed_block_header.message.slot > finalized)
+                .is_some_and(|sidecar| sidecar.slot() > finalized)
         });
     }
 
-    /// Whether every custody column of a block is held.
-    fn is_complete(&self, root: &Root) -> bool {
-        self.columns
-            .get(root)
-            .is_some_and(|columns| self.custody.iter().all(|index| columns.contains_key(index)))
+    /// Whether every sidecar an item needs is held.
+    fn is_complete(&self, root: &Root, needed: Needed) -> bool {
+        let held = self.sidecars.get(root);
+        match needed {
+            Needed::Nothing => true,
+            Needed::Blobs(count) => {
+                held.is_some_and(|held| (0..count).all(|index| held.contains_key(&index)))
+            }
+            Needed::Custody => held.is_some_and(|held| {
+                self.custody
+                    .iter()
+                    .all(|column| held.contains_key(&column.0))
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use axiom_types::{KzgCommitment, Minimal};
+    use axiom_types::{BlobIndex, Minimal, fulu};
 
     use super::*;
 
     type Buffer = AvailabilityBuffer<Minimal>;
 
-    /// A block at a slot carrying one blob commitment, or none.
-    fn block(slot: u64, blobs: bool) -> ReadyBlock<Minimal> {
-        let mut block = SignedBeaconBlock::<Minimal>::default();
+    /// A Fulu block at a slot.
+    fn block(slot: u64) -> Pending<Minimal> {
+        let mut block = fulu::SignedBeaconBlock::<Minimal>::default();
         block.message.slot = Slot(slot);
-        if blobs {
-            block
-                .message
-                .body
-                .blob_kzg_commitments
-                .push(KzgCommitment::ZERO)
-                .unwrap();
-        }
-        ReadyBlock {
-            block: Arc::new(block),
+        Pending::Block(ReadyBlock {
+            block: Arc::new(combined::SignedBeaconBlock::Fulu(block)),
             payload: PayloadStatus::Valid,
-        }
+        })
     }
 
-    /// A column of a block at a slot.
-    fn column(index: u64, slot: u64) -> Arc<DataColumnSidecar<Minimal>> {
-        let mut column = DataColumnSidecar::<Minimal> {
+    /// A Fulu column of the block at a slot.
+    fn column(index: u64, slot: u64) -> Sidecar<Minimal> {
+        let mut column = fulu::DataColumnSidecar::<Minimal> {
             index: ColumnIndex(index),
-            ..DataColumnSidecar::default()
+            ..Default::default()
         };
         column.signed_block_header.message.slot = Slot(slot);
-        Arc::new(column)
+        Sidecar::Column(Arc::new(combined::DataColumnSidecar::Fulu(column)))
+    }
+
+    /// A blob sidecar at an index of the block at a slot.
+    fn blob(index: u64, slot: u64) -> Sidecar<Minimal> {
+        let mut blob = BlobSidecar::<Minimal> {
+            index: BlobIndex(index),
+            ..Default::default()
+        };
+        blob.signed_block_header.message.slot = Slot(slot);
+        Sidecar::Blob(Arc::new(blob))
     }
 
     #[test]
-    fn a_block_without_blobs_passes_straight_through() {
+    fn an_item_needing_nothing_passes_straight_through() {
         let mut buffer = Buffer::new([ColumnIndex(3)]);
 
         assert_eq!(
-            buffer.offer_block(Root::ZERO, block(1, false)),
-            Some(block(1, false))
+            buffer.offer(Root::ZERO, block(1), Needed::Nothing),
+            Some(block(1))
         );
-        assert!(buffer.blocks.is_empty());
+        assert!(buffer.pending.is_empty());
     }
 
     #[test]
     fn the_last_custody_column_releases_a_waiting_block() {
-        // Fixture state: custody {3, 40}; the block arrives first, then both columns.
+        // Fixture state: custody {3, 40}; the block arrives first, then the columns.
         let mut buffer = Buffer::new([ColumnIndex(3), ColumnIndex(40)]);
-        let root = Root([1; 32]);
+        let root = column(3, 1).block_root();
 
-        assert_eq!(buffer.offer_block(root, block(1, true)), None);
+        assert_eq!(buffer.offer(root, block(1), Needed::Custody), None);
         // A column outside custody is not kept and releases nothing.
-        assert_eq!(buffer.offer_column(root, column(7, 1)), None);
-        assert_eq!(buffer.offer_column(root, column(3, 1)), None);
-        let released = buffer.offer_column(root, column(40, 1));
+        assert_eq!(buffer.offer_sidecar(column(7, 1)), None);
+        assert_eq!(buffer.offer_sidecar(column(3, 1)), None);
+        let released = buffer.offer_sidecar(column(40, 1));
 
-        assert_eq!(released, Some(block(1, true)));
+        assert_eq!(released, Some(block(1)));
         let indices: Vec<u64> = buffer
-            .take_columns(&root)
+            .take_sidecars(&root)
             .iter()
-            .map(|column| column.index.0)
+            .map(Sidecar::index)
             .collect();
         assert_eq!(indices, [3, 40]);
     }
 
     #[test]
-    fn columns_first_then_the_block_is_ready_at_once() {
-        let mut buffer = Buffer::new([ColumnIndex(3)]);
-        let root = Root([2; 32]);
+    fn every_blob_up_to_the_count_releases_a_block() {
+        // Fixture state: a Deneb-style block committing to two blobs, which arrive first.
+        let mut buffer = Buffer::new([]);
+        let root = blob(0, 5).block_root();
+        assert_eq!(buffer.offer_sidecar(blob(1, 5)), None);
 
-        assert_eq!(buffer.offer_column(root, column(3, 5)), None);
-
-        assert_eq!(
-            buffer.offer_block(root, block(5, true)),
-            Some(block(5, true))
-        );
+        // Blob 0 is still missing, so the block waits.
+        assert_eq!(buffer.offer(root, block(5), Needed::Blobs(2)), None);
+        assert_eq!(buffer.offer_sidecar(blob(0, 5)), Some(block(5)));
     }
 
     #[test]
     fn finality_prunes_what_waits_at_or_before_it() {
         // Fixture state: blocks waiting at slots 7, 8, and 9, finality at slot 8.
         //
-        //     slot 7  before finality   dropped
-        //     slot 8  the finalized slot dropped: nothing there can still become canonical
-        //     slot 9  after finality    kept
+        //     slot 7  before finality     dropped
+        //     slot 8  the finalized slot  dropped
+        //     slot 9  after finality      kept
         let mut buffer = Buffer::new([ColumnIndex(3)]);
         for slot in [7_u8, 8, 9] {
-            buffer.offer_block(Root([slot; 32]), block(u64::from(slot), true));
-            buffer.offer_column(Root([slot + 100; 32]), column(3, u64::from(slot)));
+            buffer.offer(Root([slot; 32]), block(u64::from(slot)), Needed::Custody);
+            buffer.offer_sidecar(blob(0, u64::from(slot)));
         }
 
         buffer.prune(Slot(8));
 
-        let mut waiting: Vec<Root> = buffer.blocks.keys().copied().collect();
-        waiting.sort();
+        let waiting: Vec<Root> = buffer.pending.keys().copied().collect();
         assert_eq!(waiting, [Root([9; 32])]);
-        let mut columns: Vec<Root> = buffer.columns.keys().copied().collect();
-        columns.sort();
-        assert_eq!(columns, [Root([109; 32])]);
+        let slots: Vec<Slot> = buffer
+            .sidecars
+            .values()
+            .flat_map(|held| held.values().map(Sidecar::slot))
+            .collect();
+        assert_eq!(slots, [Slot(9)]);
     }
 }

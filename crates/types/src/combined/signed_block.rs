@@ -3,8 +3,8 @@
 use axiom_ssz::{BYTES_PER_LENGTH_OFFSET, DecodeError, Root, Ssz};
 
 use crate::{
-    BlsSignature, ChainConfig, ForkName, Preset, Slot, altair, bellatrix, capella,
-    combined::BeaconBlock, deneb, electra, fulu, gloas, phase0,
+    BlsSignature, ChainConfig, ForkName, Preset, Slot, altair, altair::SyncAggregate, bellatrix,
+    capella, combined::BeaconBlock, deneb, electra, fulu, gloas, phase0,
 };
 
 /// Bytes before the block in a signed block's encoding: the block's offset and the signature.
@@ -37,6 +37,37 @@ pub enum SignedBeaconBlock<P: Preset> {
 }
 
 impl<P: Preset> SignedBeaconBlock<P> {
+    /// A block and its proposer's signature, in the block's fork.
+    #[must_use]
+    pub fn from_parts(message: BeaconBlock<P>, signature: BlsSignature) -> Self {
+        match message {
+            BeaconBlock::Phase0(message) => {
+                Self::Phase0(phase0::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Altair(message) => {
+                Self::Altair(altair::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Bellatrix(message) => {
+                Self::Bellatrix(bellatrix::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Capella(message) => {
+                Self::Capella(capella::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Deneb(message) => {
+                Self::Deneb(deneb::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Electra(message) => {
+                Self::Electra(electra::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Fulu(message) => {
+                Self::Fulu(fulu::SignedBeaconBlock { message, signature })
+            }
+            BeaconBlock::Gloas(message) => {
+                Self::Gloas(gloas::SignedBeaconBlock { message, signature })
+            }
+        }
+    }
+
     /// The fork the block belongs to.
     #[must_use]
     pub const fn fork_name(&self) -> ForkName {
@@ -120,6 +151,20 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Electra(signed) => BeaconBlock::Electra(signed.message.clone()),
             Self::Fulu(signed) => BeaconBlock::Fulu(signed.message.clone()),
             Self::Gloas(signed) => BeaconBlock::Gloas(signed.message.clone()),
+        }
+    }
+
+    /// The sync committee signature the block carries, from Altair on.
+    #[must_use]
+    pub const fn sync_aggregate(&self) -> Option<&SyncAggregate<P>> {
+        match self {
+            Self::Phase0(_) => None,
+            Self::Altair(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Bellatrix(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Capella(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Deneb(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Electra(signed) | Self::Fulu(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Gloas(signed) => Some(&signed.message.body.sync_aggregate),
         }
     }
 

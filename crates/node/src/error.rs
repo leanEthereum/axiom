@@ -5,11 +5,12 @@ use std::{io, net::SocketAddr, path::PathBuf};
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
+use axiom_light_client::LightClientError;
 use axiom_p2p::swarm::NetworkError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
-use axiom_types::{CommitteeIndex, Root, Slot, ValidatorIndex};
+use axiom_types::{CommitteeIndex, Root, Slot};
 use thiserror::Error;
 
 /// Why the chain refused an input or could not persist it.
@@ -37,12 +38,8 @@ pub enum ChainError {
     #[error("no state for block {0}")]
     MissingState(Root),
     /// A vote does not match the committees it names.
-    #[error(
-        "invalid vote of validator {validator} at slot {slot} in committee {committee}: {reason}"
-    )]
+    #[error("invalid vote at slot {slot} in committee {committee}: {reason}")]
     InvalidVote {
-        /// The validator that cast the vote.
-        validator: ValidatorIndex,
         /// The slot the vote is for.
         slot: Slot,
         /// The committee the vote names.
@@ -50,6 +47,9 @@ pub enum ChainError {
         /// The rule the vote breaks.
         reason: &'static str,
     },
+    /// Light client data could not be derived from a block.
+    #[error("light client data: {0}")]
+    LightClient(#[from] LightClientError),
     /// The chain thread stopped before answering.
     #[error("chain service stopped")]
     Stopped,

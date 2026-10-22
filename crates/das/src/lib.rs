@@ -18,8 +18,10 @@
 
 mod column;
 mod custody;
+mod payload_column;
 mod sidecars;
 
 pub use column::{ColumnError, ColumnSidecar};
 pub use custody::{CustodyError, CustodyGroup, NodeId};
+pub use payload_column::PayloadColumnSidecar;
 pub use sidecars::BlockColumns;

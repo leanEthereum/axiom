@@ -1,7 +1,9 @@
-//! Request bodies of the req/resp methods that fetch blocks and columns.
+//! Request bodies of the req/resp methods that fetch blocks, their data, and light client data.
 
 use axiom_ssz::{Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz};
-use axiom_types::{ColumnIndex, Preset, Root, Slot, fulu::DataColumnsByRootIdentifier};
+use axiom_types::{
+    ColumnIndex, Preset, Root, Slot, deneb::BlobIdentifier, fulu::DataColumnsByRootIdentifier,
+};
 
 /// Most blocks one request may ask for: MAX_REQUEST_BLOCKS_DENEB.
 ///
@@ -14,6 +16,76 @@ pub(crate) type BlocksByRootRequest = List<Root, MaxRequestBlocks>;
 
 /// Blocks and the columns wanted of each, for columns by root.
 pub(crate) type ColumnsByRootRequest<P> = List<DataColumnsByRootIdentifier<P>, MaxRequestBlocks>;
+
+/// Most blob sidecars one request may ask for: MAX_REQUEST_BLOB_SIDECARS_ELECTRA.
+///
+/// Deneb's bound is lower; the larger one decodes requests of both forks.
+pub(crate) type MaxRequestBlobSidecars = Const<1152>;
+
+/// Blobs by block root and index, for blobs by root.
+pub(crate) type BlobsByRootRequest = List<BlobIdentifier, MaxRequestBlobSidecars>;
+
+/// Most payload envelopes one request may ask for: MAX_REQUEST_PAYLOADS.
+///
+/// See the Gloas p2p spec.
+pub(crate) type MaxRequestPayloads = Const<128>;
+
+/// Block roots whose envelopes are wanted, for envelopes by root.
+pub(crate) type EnvelopesByRootRequest = List<Root, MaxRequestPayloads>;
+
+/// Items of every block in a slot range, for blobs and envelopes by range.
+///
+/// See `BlobSidecarsByRange v1` in the Deneb p2p spec and its Gloas envelope twin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SlotRangeRequest {
+    /// First slot of the range.
+    pub start_slot: Slot,
+    /// Slots in the range.
+    pub count: u64,
+}
+
+impl Container for SlotRangeRequest {
+    const FIELDS: &'static [Option<usize>] = &[Slot::FIXED_SIZE, u64::FIXED_SIZE];
+
+    fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
+        visitor.field(&self.start_slot);
+        visitor.field(&self.count);
+    }
+
+    fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            start_slot: fields.field()?,
+            count: fields.field()?,
+        })
+    }
+}
+
+/// Light client updates of a range of sync committee periods.
+///
+/// See `LightClientUpdatesByRange` in the Altair light client p2p spec.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct UpdatesByRangeRequest {
+    /// First period of the range.
+    pub start_period: u64,
+    /// Periods in the range.
+    pub count: u64,
+}
+
+impl Container for UpdatesByRangeRequest {
+    const FIELDS: &'static [Option<usize>] = &[u64::FIXED_SIZE, u64::FIXED_SIZE];
+
+    fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
+        visitor.field(&self.start_period);
+        visitor.field(&self.count);
+    }
+
+    fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            start_period: fields.field()?,
+            count: fields.field()?,
+        })
+    }
+}
 
 /// Blocks in a slot range.
 ///

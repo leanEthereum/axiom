@@ -13,6 +13,7 @@
 //! Decoding is strict about types and lengths and lenient about extra members.
 //! An unknown member is ignored, so a newer engine that adds fields still interoperates.
 
+mod attributes;
 mod blobs;
 mod forkchoice;
 mod get_payload;
@@ -23,12 +24,22 @@ mod requests;
 mod status;
 mod syncing;
 
+pub use attributes::{
+    PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
+    PayloadAttributesV4,
+};
 use axiom_json::Json;
-pub use blobs::{BlobAndProof, Blobs, BlobsBundle, CellProofs};
-pub use forkchoice::{ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadId};
-pub use get_payload::GetPayloadResponse;
+pub use blobs::{
+    BlobAndProofV1, BlobAndProofV2, BlobProofs, Blobs, BlobsBundleV1, BlobsBundleV2, CellProofs,
+    GetBlobsResponse,
+};
+pub use forkchoice::{ForkchoiceState, ForkchoiceUpdated, PayloadId};
+pub use get_payload::{
+    GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3, GetPayloadResponseV4,
+    GetPayloadResponseV5, GetPayloadResponseV6,
+};
 pub(crate) use reader::{Fields, Items, Reader};
-pub use requests::RequestsList;
+pub use requests::{RequestsList, TypedRequests};
 pub use status::{PayloadStatus, PayloadStatusKind};
 pub use syncing::SyncStatus;
 

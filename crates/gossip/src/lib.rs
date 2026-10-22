@@ -26,7 +26,7 @@ mod validator;
 mod view;
 mod vote;
 
-pub use blob_sidecar::BlobSubnets;
+pub use blob_sidecar::{BlobSubnets, CheckedBlob};
 pub use detail::Detail;
 pub use error::GossipError;
 pub use fork::{GossipFork, VoteIndex, VoteWindow};

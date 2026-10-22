@@ -4,9 +4,10 @@ use axiom_kzg::{Blob as KzgBlob, Bytes48, CELLS_PER_EXT_BLOB, Cell as KzgCell, C
 use axiom_ssz::{Container, Ssz, Vector};
 use axiom_types::{
     Bytes32, ColumnIndex, KzgProof, Preset,
-    fulu::{
-        BeaconBlockBody, Blob, Cell, DataColumnSidecar, SignedBeaconBlock, SignedBeaconBlockHeader,
-    },
+    deneb::Blob,
+    electra::{BeaconBlockBody, SignedBeaconBlock},
+    fulu::{Cell, DataColumnSidecar},
+    phase0::SignedBeaconBlockHeader,
 };
 
 use crate::ColumnError;
@@ -29,7 +30,8 @@ const BLOB_KZG_COMMITMENTS_FIELD: usize = 11;
 ///     column     0         1         ...   127
 /// ```
 ///
-/// Each column travels as one sidecar, with the block header and a proof that the commitments are in it.
+/// Each column travels as one sidecar, with the block header.
+/// A proof shows the header's body holds the commitments.
 /// See `get_data_column_sidecars_from_block` in the Fulu validator spec.
 #[derive(Clone, Copy, Debug)]
 pub struct BlockColumns<'a, P: Preset> {
@@ -312,7 +314,8 @@ mod tests {
             })
         );
 
-        // Mutation: the first branch node of column 5 is zeroed, so the branch misses the body root.
+        // Mutation: the first branch node of column 5 is zeroed.
+        // The branch then misses the body root.
         let mut sidecar = sidecars[5].clone();
         sidecar.kzg_commitments_inclusion_proof[0] = Bytes32::default();
         assert_eq!(

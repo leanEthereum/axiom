@@ -42,6 +42,14 @@ pub enum GossipKind {
     BlobSidecar(u64),
     /// Data column sidecars on one of 128 subnets, Fulu.
     DataColumnSidecar(u64),
+    /// Signed execution payload envelopes, Gloas.
+    ExecutionPayload,
+    /// Payload timeliness committee votes, Gloas.
+    PayloadAttestationMessage,
+    /// Builders' signed bids for a slot's payload, Gloas.
+    ExecutionPayloadBid,
+    /// Proposers' signed preferences for their coming slots, Gloas.
+    ProposerPreferences,
 }
 
 impl fmt::Display for GossipKind {
@@ -62,6 +70,10 @@ impl fmt::Display for GossipKind {
             Self::LightClientOptimisticUpdate => f.write_str("light_client_optimistic_update"),
             Self::BlobSidecar(subnet) => write!(f, "blob_sidecar_{subnet}"),
             Self::DataColumnSidecar(subnet) => write!(f, "data_column_sidecar_{subnet}"),
+            Self::ExecutionPayload => f.write_str("execution_payload"),
+            Self::PayloadAttestationMessage => f.write_str("payload_attestation_message"),
+            Self::ExecutionPayloadBid => f.write_str("execution_payload_bid"),
+            Self::ProposerPreferences => f.write_str("proposer_preferences"),
         }
     }
 }
@@ -83,6 +95,10 @@ impl FromStr for GossipKind {
             "bls_to_execution_change" => Some(Self::BlsToExecutionChange),
             "light_client_finality_update" => Some(Self::LightClientFinalityUpdate),
             "light_client_optimistic_update" => Some(Self::LightClientOptimisticUpdate),
+            "execution_payload" => Some(Self::ExecutionPayload),
+            "payload_attestation_message" => Some(Self::PayloadAttestationMessage),
+            "execution_payload_bid" => Some(Self::ExecutionPayloadBid),
+            "proposer_preferences" => Some(Self::ProposerPreferences),
             _ => None,
         };
         if let Some(kind) = fixed {
@@ -233,6 +249,28 @@ mod tests {
                 .kind,
             GossipKind::BeaconAttestation(63)
         );
+    }
+
+    #[test]
+    fn gloas_topics_round_trip() {
+        let digest = ForkDigest([0x01, 0x02, 0x03, 0x04]);
+        for (kind, name) in [
+            (GossipKind::ExecutionPayload, "execution_payload"),
+            (
+                GossipKind::PayloadAttestationMessage,
+                "payload_attestation_message",
+            ),
+            (GossipKind::ExecutionPayloadBid, "execution_payload_bid"),
+            (GossipKind::ProposerPreferences, "proposer_preferences"),
+        ] {
+            let text = format!("/eth2/01020304/{name}/ssz_snappy");
+            let topic = GossipTopic {
+                fork_digest: digest,
+                kind,
+            };
+            assert_eq!(topic.to_string(), text);
+            assert_eq!(text.parse::<GossipTopic>(), Ok(topic));
+        }
     }
 
     #[test]

@@ -227,6 +227,7 @@ dependencies = [
  "axiom-http",
  "axiom-json",
  "axiom-kzg",
+ "axiom-light-client",
  "axiom-p2p",
  "axiom-ssz",
  "axiom-state-transition",

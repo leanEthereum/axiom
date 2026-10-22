@@ -1,6 +1,6 @@
 //! What the rest of the node needs to know about the canonical chain.
 
-use axiom_types::{Hash32, Root, Slot, fulu::Checkpoint};
+use axiom_types::{Hash32, Root, Slot, phase0::Checkpoint};
 
 /// The canonical head and the checkpoints behind it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

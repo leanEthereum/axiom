@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use axiom_http::Request;
 use axiom_json::Data;
-use axiom_types::{Preset, Root, Slot, fulu::SignedBeaconBlock};
+use axiom_types::{Preset, Root, Slot, combined::SignedBeaconBlock};
 
 use super::ApiError;
 use crate::{Chain, ChainError};
@@ -169,7 +169,7 @@ impl StateId {
                 for (root, _) in chain.store().blocks().iter() {
                     if chain
                         .block(*root)?
-                        .is_some_and(|block| block.message.state_root == state_root)
+                        .is_some_and(|block| block.message().state_root() == state_root)
                     {
                         return Ok(Some(*root));
                     }

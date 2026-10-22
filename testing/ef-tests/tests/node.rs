@@ -1,4 +1,5 @@
-//! Whole nodes, started from a spec genesis state and driven through the beacon API and the network.
+//! Whole nodes, started from a spec genesis state.
+//! The tests drive them through the beacon API and the network.
 
 use std::{
     env, fs,
@@ -10,7 +11,10 @@ use std::{
 };
 
 use axiom_discv5::Enr;
-use axiom_ef_tests::{Case, Vectors};
+use axiom_ef_tests::{
+    Case, Vectors,
+    chain_builder::{ChainBuilder, PYSPEC_GENESIS, Proposal},
+};
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_node::{
@@ -20,7 +24,9 @@ use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{
-    ChainConfig, ForkName, Minimal,
+    ChainConfig, Epoch, ForkName, Minimal,
+    accessors::CoreState,
+    combined,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
 };
 use tokio::{
@@ -144,16 +150,26 @@ impl TestNode {
             network,
             ..NodeConfig::default()
         };
-        Self::start_with(fixture, config, address).await
+        Self::start_with(fixture.now_ms, fulu(), config, address).await
     }
 
     /// Starts a node with a full configuration whose API listens on an address.
-    async fn start_with(fixture: &Fixture, config: NodeConfig, address: SocketAddr) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// - `now_ms`: the time the node's clock stands at.
+    /// - `chain_config`: the fork schedule the node follows.
+    async fn start_with(
+        now_ms: u64,
+        chain_config: ChainConfig,
+        config: NodeConfig,
+        address: SocketAddr,
+    ) -> Self {
         let (stop, stopped) = oneshot::channel::<()>();
         let task = task::spawn(Node::<Minimal>::run(
-            ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu),
+            chain_config,
             config,
-            Arc::new(ManualClock::at(fixture.now_ms)),
+            Arc::new(ManualClock::at(now_ms)),
             async move {
                 let _stopped = stopped.await;
             },
@@ -175,6 +191,53 @@ impl TestNode {
             time::sleep(Duration::from_millis(10)).await;
         }
         Self { client, stop, task }
+    }
+
+    /// Publishes a block of any fork over the API, in the format the fork's route takes.
+    ///
+    /// A Fulu block travels in its block contents; every other fork's block travels alone.
+    async fn publish_any(&self, block: &combined::SignedBeaconBlock<Minimal>) -> Response {
+        let body = match block {
+            combined::SignedBeaconBlock::Fulu(signed) => SignedBlockContents {
+                signed_block: signed.clone(),
+                ..SignedBlockContents::default()
+            }
+            .encode(),
+            other => other.encode(),
+        };
+        let request = Request::new(Method::Post, "/eth/v2/beacon/blocks")
+            .with_header("eth-consensus-version", block.fork_name().to_string())
+            .with_body("application/octet-stream", body);
+        self.client.send(&request).await.expect("node answers")
+    }
+
+    /// Publishes each block, then its envelope if it has one, checking every answer.
+    async fn publish_chain(&self, proposals: &[Proposal<Minimal>]) {
+        for (slot, proposal) in (1..).zip(proposals) {
+            let response = self.publish_any(proposal.block()).await;
+            assert_eq!(
+                response.status,
+                StatusCode::OK,
+                "slot {slot}: {}",
+                body_text(&response)
+            );
+            if let Some(response) = self.publish_envelope(proposal).await {
+                let message = body_text(&response);
+                assert_eq!(
+                    response.status,
+                    StatusCode::OK,
+                    "envelope {slot}: {message}"
+                );
+            }
+        }
+    }
+
+    /// Publishes a Gloas payload envelope over the API.
+    async fn publish_envelope(&self, proposal: &Proposal<Minimal>) -> Option<Response> {
+        let envelope = proposal.envelope()?;
+        let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelope")
+            .with_body("application/octet-stream", envelope.encode());
+        Some(self.client.send(&request).await.expect("node answers"))
     }
 
     /// Publishes a block over the API.
@@ -217,6 +280,11 @@ impl TestNode {
     }
 }
 
+/// The Fulu chain the fork choice cases run on: every fork up to Fulu at genesis.
+fn fulu() -> ChainConfig {
+    ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu)
+}
+
 /// A free local TCP port, released for the node to bind.
 fn free_address() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0")
@@ -234,8 +302,13 @@ fn free_udp_port() -> u16 {
 
 /// Waits until a node reports a head, or gives up after about ten seconds.
 async fn wait_for_head(node: &TestNode, expected: &str) -> Option<String> {
+    wait_for_head_within(node, expected, 500).await
+}
+
+/// Waits until a node reports a head, polling every 20 milliseconds a number of times.
+async fn wait_for_head_within(node: &TestNode, expected: &str, attempts: u32) -> Option<String> {
     let mut head = None;
-    for _ in 0..500 {
+    for _ in 0..attempts {
         head = node.head_root().await;
         if head.as_deref() == Some(expected) {
             break;
@@ -428,12 +501,7 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
         .unwrap();
     let mut state = State::new(genesis);
     state
-        .state_transition(
-            &ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu),
-            &anchor,
-            Verification::Verify,
-            &KnownVerdict(true),
-        )
+        .state_transition(&fulu(), &anchor, Verification::Verify, &KnownVerdict(true))
         .unwrap();
     let state_path = fixture.directory.join("checkpoint_state.ssz");
     let block_path = fixture.directory.join("checkpoint_block.ssz");
@@ -451,7 +519,7 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
             http_address: Some(address),
             ..NodeConfig::default()
         };
-        let node = TestNode::start_with(&fixture, config, address).await;
+        let node = TestNode::start_with(fixture.now_ms, fulu(), config, address).await;
 
         // A child of the mid-epoch anchor imports and becomes the head.
         let response = node.publish(&fixture.contents(BLOCKS[1])).await;
@@ -519,4 +587,128 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
         b.stop().await;
         a.stop().await;
     });
+}
+
+/// The fork schedule of the multi-fork chain: Altair at epoch 1, then one fork per epoch.
+///
+/// Gloas starts at epoch 7, the last fork, so the chain ends with payloads in envelopes.
+fn every_fork() -> ChainConfig {
+    let mut config = ChainConfig::minimal();
+    for (epoch, fork) in (1..).zip(ForkName::ALL.into_iter().skip(1)) {
+        config = config.with_fork_epoch(fork, Epoch(epoch));
+    }
+    config
+}
+
+/// Slots of the multi-fork chain: every slot of the eight forks' epochs, and one more Gloas epoch.
+const EVERY_FORK_SLOTS: u64 = 9 * 8;
+
+#[test]
+fn a_node_syncs_from_genesis_through_every_fork() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis, 64 validators with the test keys.
+    // Forks follow each other an epoch apart, phase0 at 0 through Gloas at 7.
+    let config = every_fork();
+    let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
+    let genesis_bytes = genesis_case
+        .ssz_bytes("state")
+        .expect("case has a genesis state");
+    let genesis = combined::BeaconState::<Minimal>::decode_at(&genesis_bytes, &config)
+        .expect("genesis decodes as phase0");
+    let genesis_time = genesis.genesis_time();
+    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
+
+    // Every slot from 1 to 72 gets a block; Gloas blocks also get their envelope.
+    let proposals: Vec<Proposal<Minimal>> = (0..EVERY_FORK_SLOTS)
+        .map(|_| builder.propose().expect("each block extends the chain"))
+        .collect();
+    let forks: Vec<ForkName> = proposals.iter().map(|p| p.block().fork_name()).collect();
+    assert_eq!(forks.first(), Some(&ForkName::Phase0));
+    assert_eq!(forks.last(), Some(&ForkName::Gloas));
+    let tip = proposals.last().expect("72 blocks").block().block_root();
+    let tip = format!("{tip}");
+
+    let directory = env::temp_dir().join(format!("axiom-every-fork-{}", process::id()));
+    fs::create_dir_all(&directory).expect("temporary directory is writable");
+    let genesis_path = directory.join("genesis.ssz");
+    fs::write(&genesis_path, &genesis_bytes).expect("temporary directory is writable");
+    // The clock stands at slot 73, so every block is in the past.
+    let now_ms = (genesis_time + 6 * (EVERY_FORK_SLOTS + 1)) * 1000;
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let settings = |listen_address, boot_nodes| NetworkSettings {
+            listen_address,
+            boot_nodes,
+            custody_group_count: 4,
+            discovery: None,
+        };
+        let node_config = |network| NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            network: Some(network),
+            ..NodeConfig::default()
+        };
+
+        // Node A takes every block and envelope over its API, fork after fork.
+        let a_address = free_address();
+        let a_api = free_address();
+        let a = TestNode::start_with(
+            now_ms,
+            config.clone(),
+            NodeConfig {
+                http_address: Some(a_api),
+                ..node_config(settings(a_address, Vec::new()))
+            },
+            a_api,
+        )
+        .await;
+        a.publish_chain(&proposals).await;
+        assert_eq!(a.head_root().await.as_deref(), Some(tip.as_str()));
+
+        // Node B knows only genesis, and range-syncs every fork from A.
+        // A Gloas block builds on its parent's payload, so B must import each envelope in turn.
+        let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port())
+            .parse()
+            .unwrap();
+        let b_api = free_address();
+        let b = TestNode::start_with(
+            now_ms,
+            config.clone(),
+            NodeConfig {
+                http_address: Some(b_api),
+                ..node_config(settings(free_address(), vec![boot]))
+            },
+            b_api,
+        )
+        .await;
+        // Sync verifies every signature of 72 blocks, so it gets a minute rather than seconds.
+        let head = wait_for_head_within(&b, &tip, 3000).await;
+        assert_eq!(
+            head.as_deref(),
+            Some(tip.as_str()),
+            "node B never reached the Gloas tip"
+        );
+
+        // B serves each fork's blocks back by slot, the first slot of each fork included.
+        for fork in ForkName::ALL {
+            let slot = config.fork_epoch(fork).start_slot::<Minimal>().0.max(1);
+            let expected = format!("{}", proposals[(slot - 1) as usize].block().block_root());
+            let root = b
+                .json(&format!("/eth/v1/beacon/blocks/{slot}/root"))
+                .await
+                .expect("B holds the block");
+            let root = root.get("data").and_then(|data| data.get("root"));
+            assert_eq!(
+                root.and_then(Json::as_str),
+                Some(expected.as_str()),
+                "{fork}"
+            );
+        }
+
+        b.stop().await;
+        a.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
 }

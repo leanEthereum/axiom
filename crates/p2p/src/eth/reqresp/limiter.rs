@@ -107,6 +107,14 @@ impl RateLimiter {
             // MAX_REQUEST_DATA_COLUMN_SIDECARS = 128 blocks * 128 columns.
             (Protocol::DataColumnSidecarsByRangeV1, quota(16_384, 10)),
             (Protocol::DataColumnSidecarsByRootV1, quota(16_384, 10)),
+            // MAX_REQUEST_LIGHT_CLIENT_UPDATES = 128 updates.
+            (Protocol::LightClientUpdatesByRangeV1, quota(128, 10)),
+            (Protocol::LightClientBootstrapV1, quota(1, 10)),
+            (Protocol::LightClientFinalityUpdateV1, quota(2, 10)),
+            (Protocol::LightClientOptimisticUpdateV1, quota(2, 10)),
+            // MAX_REQUEST_PAYLOADS = 128 envelopes.
+            (Protocol::ExecutionPayloadEnvelopesByRangeV1, quota(128, 10)),
+            (Protocol::ExecutionPayloadEnvelopesByRootV1, quota(128, 10)),
         ] {
             limiter.set_quota(protocol, quota);
         }

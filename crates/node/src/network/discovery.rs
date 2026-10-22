@@ -59,7 +59,7 @@ pub(crate) struct LocalRecord {
 ///
 /// # Overview
 ///
-/// The node's record carries its IP, TCP and UDP ports, eth2 fork id, attnets, custody group count, and next fork digest.
+/// The node's record names its addresses, its fork, and its subnets and custody.
 ///
 /// 1. With few peers, the service looks up a random target, keeping only records on this fork.
 /// 2. It dials each found record's TCP endpoint once.

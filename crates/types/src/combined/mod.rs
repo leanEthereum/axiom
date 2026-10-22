@@ -10,9 +10,11 @@
 //! Below it, code matches on the variant and works on one concrete fork type.
 
 mod block;
+mod data_column;
 mod signed_block;
 mod state;
 
 pub use block::{BeaconBlock, ExecutionHashes};
+pub use data_column::DataColumnSidecar;
 pub use signed_block::SignedBeaconBlock;
 pub use state::BeaconState;

@@ -1,9 +1,13 @@
-//! Gossip messages: decoded, validated on the chain thread, reported, then used.
+//! Gossip messages: decoded in their topic's fork, validated on the chain thread, then used.
 
 use std::{sync::Arc, time::Duration};
 
-use axiom_gossip::{GossipError, GossipValidator};
+use axiom_gossip::{
+    Aggregate, BlobSubnets, GossipError, GossipFork, GossipValidator, SignedAggregate,
+    SlashingEvidence, SubnetVote,
+};
 use axiom_kzg::Kzg;
+use axiom_light_client::combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate};
 use axiom_p2p::{
     eth::{GossipKind, GossipTopic},
     gossipsub::{MessageId, Topic, ValidationOutcome},
@@ -12,48 +16,57 @@ use axiom_p2p::{
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    Preset, SubnetId,
-    fulu::{
-        AttesterSlashing, BeaconState, DataColumnSidecar, ProposerSlashing,
-        SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
-        SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
+    BlobData, ForkName, Preset, SubnetId,
+    altair::{self, SignedContributionAndProof, SyncCommitteeMessage},
+    bellatrix, capella,
+    capella::SignedBlsToExecutionChange,
+    combined, deneb,
+    deneb::BlobSidecar,
+    electra, fulu,
+    gloas::{
+        self, PayloadAttestationMessage, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
+        SignedProposerPreferences,
     },
+    phase0::{self, ProposerSlashing, SignedVoluntaryExit},
 };
 use tokio::time;
 use tracing::{debug, warn};
 
-use crate::{Chain, ChainHandle, Clock, ExecutionLayer};
+use super::forks::ForkDigests;
+use crate::{Chain, ChainError, ChainHandle, Clock, ExecutionLayer};
+
+/// Work on the chain that an accepted message leaves, run after it was forwarded.
+type ChainJob<P> = Box<dyn FnOnce(&mut Chain<P>) -> Result<(), ChainError> + Send>;
 
 /// A message that passed validation and still has work to do once forwarded.
-#[derive(Debug)]
 enum Accepted<P: Preset> {
     /// A block, to be judged by the engine and imported.
-    Block(Arc<SignedBeaconBlock<P>>),
-    /// An aggregate, whose votes feed the fork choice.
-    Aggregate(Box<SignedAggregateAndProof<P>>),
-    /// One validator's vote, which feeds the fork choice too.
-    Single(Box<SingleAttestation>),
-    /// Equivocation evidence, which removes weight from the fork choice.
-    AttesterSlashing(Box<AttesterSlashing<P>>),
-    /// A custody column, which may complete a waiting block.
-    Column(Arc<DataColumnSidecar<P>>),
+    Block(Arc<combined::SignedBeaconBlock<P>>),
+    /// A payload envelope, to be judged by the engine and imported.
+    Envelope(Arc<SignedExecutionPayloadEnvelope<P>>),
+    /// Anything else the chain consumes: votes, slashings, sidecars.
+    Job(ChainJob<P>),
 }
+
+/// The verdict on a message and what remains to do with it.
+type Checked<P> = (ValidationOutcome, Option<Accepted<P>>);
 
 /// Handles every gossip message the network delivers.
 ///
 /// # Overview
 ///
-/// 1. Decode the bytes into a message.
+/// 1. Read the fork from the topic's digest, and decode the message as that fork's container.
 /// 2. Run the gossip rules on the chain thread, giving accept, ignore, or reject.
 /// 3. Report the verdict to gossipsub first, so the message propagates without delay.
-/// 4. Then act on it: import a block, count votes, or store a column.
+/// 4. Then act on it: import a block or an envelope, count votes, or store a sidecar.
 ///
+/// The fork is chosen once, from the digest; below that, every step is typed by the fork.
 /// A message that does not decode is rejected: no honest peer sends one.
 #[derive(Debug)]
 pub(crate) struct GossipHandler<P: Preset> {
     /// The chain thread.
     chain: ChainHandle<P>,
-    /// The engine, for judging block payloads.
+    /// The engine, for judging payloads.
     execution: Arc<ExecutionLayer>,
     /// The wall clock the timing rules read.
     clock: Arc<dyn Clock>,
@@ -61,6 +74,8 @@ pub(crate) struct GossipHandler<P: Preset> {
     network: NetworkHandle,
     /// Message counts by topic and outcome.
     metrics: NodeMetrics,
+    /// The fork each topic digest names.
+    forks: Arc<ForkDigests>,
 }
 
 impl<P: Preset> Clone for GossipHandler<P> {
@@ -71,6 +86,7 @@ impl<P: Preset> Clone for GossipHandler<P> {
             clock: Arc::clone(&self.clock),
             network: self.network.clone(),
             metrics: self.metrics.clone(),
+            forks: Arc::clone(&self.forks),
         }
     }
 }
@@ -83,6 +99,7 @@ impl<P: Preset> GossipHandler<P> {
         clock: Arc<dyn Clock>,
         network: NetworkHandle,
         metrics: NodeMetrics,
+        forks: Arc<ForkDigests>,
     ) -> Self {
         Self {
             chain,
@@ -90,6 +107,7 @@ impl<P: Preset> GossipHandler<P> {
             clock,
             network,
             metrics,
+            forks,
         }
     }
 
@@ -101,86 +119,210 @@ impl<P: Preset> GossipHandler<P> {
             return;
         };
         let name = Self::topic_name(topic.kind);
-        let (outcome, accepted) = self.validate(topic.kind, &data).await;
+        let Some(fork) = self.forks.fork_of(topic.fork_digest) else {
+            // A digest outside this chain's schedule: another network, not a fault of this peer.
+            self.report(id, name, ValidationOutcome::Ignore).await;
+            return;
+        };
+        let (outcome, accepted) = self.validate(fork, topic.kind, data).await;
         self.report(id, name, outcome).await;
         if let Some(accepted) = accepted {
             self.apply(accepted).await;
         }
     }
 
-    /// Decodes and validates a message, returning the verdict and what remains to do.
-    async fn validate(
-        &self,
-        kind: GossipKind,
-        data: &[u8],
-    ) -> (ValidationOutcome, Option<Accepted<P>>) {
-        let now = self.clock.now_ms();
-        match kind {
-            GossipKind::BeaconBlock
-            | GossipKind::BeaconAggregateAndProof
-            | GossipKind::BeaconAttestation(_)
-            | GossipKind::AttesterSlashing
-            | GossipKind::DataColumnSidecar(_) => self.validate_chain_input(kind, data, now).await,
-            _ => (self.validate_operation(kind, data, now).await, None),
+    /// Validates a message as the given fork's container, dispatching once on the fork.
+    async fn validate(&self, fork: ForkName, kind: GossipKind, data: Vec<u8>) -> Checked<P> {
+        match fork {
+            ForkName::Phase0 => self.validate_in::<phase0::BeaconState<P>>(kind, data).await,
+            ForkName::Altair => self.validate_in::<altair::BeaconState<P>>(kind, data).await,
+            ForkName::Bellatrix => {
+                self.validate_in::<bellatrix::BeaconState<P>>(kind, data)
+                    .await
+            }
+            ForkName::Capella => {
+                self.validate_in::<capella::BeaconState<P>>(kind, data)
+                    .await
+            }
+            ForkName::Deneb => self.validate_in::<deneb::BeaconState<P>>(kind, data).await,
+            ForkName::Electra => {
+                self.validate_in::<electra::BeaconState<P>>(kind, data)
+                    .await
+            }
+            ForkName::Fulu => self.validate_in::<fulu::BeaconState<P>>(kind, data).await,
+            ForkName::Gloas => self.validate_in::<gloas::BeaconState<P>>(kind, data).await,
         }
     }
 
-    /// Validates a message the chain consumes: blocks, votes, slashing evidence, columns.
-    async fn validate_chain_input(
-        &self,
-        kind: GossipKind,
-        data: &[u8],
-        now: u64,
-    ) -> (ValidationOutcome, Option<Accepted<P>>) {
+    /// Validates a message on a topic of one fork.
+    async fn validate_in<F>(&self, kind: GossipKind, data: Vec<u8>) -> Checked<P>
+    where
+        F: GossipFork<Preset = P>,
+        F::SignedBeaconBlock: Send + 'static,
+        F::SignedAggregateAndProof: Send + 'static,
+        F::SubnetAttestation: Send + 'static,
+        F::AttesterSlashing: Send + 'static,
+    {
+        let now = self.clock.now_ms();
         match kind {
             GossipKind::BeaconBlock => {
                 self.check(
                     data,
-                    move |validator, block: &SignedBeaconBlock<P>| {
-                        validator.beacon_block::<BeaconState<P>>(block, now)
+                    move |validator, block: &F::SignedBeaconBlock| {
+                        validator.beacon_block::<F>(block, now)
                     },
-                    |block| Some(Accepted::Block(Arc::new(block))),
+                    |block| Some(Accepted::Block(Arc::new(F::into_any_block(block)))),
                 )
                 .await
             }
             GossipKind::BeaconAggregateAndProof => {
                 self.check(
                     data,
-                    move |validator, aggregate: &SignedAggregateAndProof<P>| {
-                        validator.aggregate_and_proof::<BeaconState<P>>(aggregate, now)
+                    move |validator, aggregate: &F::SignedAggregateAndProof| {
+                        validator.aggregate_and_proof::<F>(aggregate, now)
                     },
-                    |aggregate| Some(Accepted::Aggregate(Box::new(aggregate))),
+                    |aggregate| {
+                        let vote = aggregate.aggregate().committee_vote();
+                        Some(Self::job(move |chain| chain.on_vote(&vote)))
+                    },
                 )
                 .await
             }
             GossipKind::BeaconAttestation(subnet) => {
                 self.check(
                     data,
-                    move |validator, attestation: &SingleAttestation| {
-                        validator.beacon_attestation::<BeaconState<P>>(
-                            attestation,
-                            now,
-                            SubnetId(subnet),
-                        )
+                    move |validator, vote: &F::SubnetAttestation| {
+                        validator.beacon_attestation::<F>(vote, now, SubnetId(subnet))
                     },
-                    |attestation| Some(Accepted::Single(Box::new(attestation))),
+                    |vote| {
+                        let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
+                        Some(Self::job(move |chain| chain.on_subnet_vote(&vote, claim)))
+                    },
                 )
                 .await
             }
             GossipKind::AttesterSlashing => {
                 self.check(
                     data,
-                    |validator, slashing: &AttesterSlashing<P>| {
+                    |validator, slashing: &F::AttesterSlashing| {
                         validator.attester_slashing(slashing)
                     },
-                    |slashing| Some(Accepted::AttesterSlashing(Box::new(slashing))),
+                    |slashing| {
+                        let votes = slashing.conflicting_votes();
+                        Some(Self::job(move |chain| chain.on_attester_slashing(&votes)))
+                    },
                 )
                 .await
             }
-            GossipKind::DataColumnSidecar(subnet) => {
+            GossipKind::VoluntaryExit => {
                 self.check(
                     data,
-                    move |validator, sidecar: &DataColumnSidecar<P>| {
+                    move |validator, exit: &SignedVoluntaryExit| {
+                        validator.voluntary_exit::<F>(exit, now)
+                    },
+                    |_| None,
+                )
+                .await
+            }
+            GossipKind::LightClientFinalityUpdate | GossipKind::LightClientOptimisticUpdate => (
+                self.forward_light_client(F::FORK, kind, data, now).await,
+                None,
+            ),
+            GossipKind::BlobSidecar(subnet) => self.validate_blob(F::FORK, subnet, data, now).await,
+            GossipKind::DataColumnSidecar(subnet) => {
+                self.validate_column(F::FORK.blob_data(), subnet, data, now)
+                    .await
+            }
+            _ => self.validate_operation(kind, data, now).await,
+        }
+    }
+
+    /// Checks a light client update against the one this node derived, and its timing.
+    ///
+    /// A full node forwards only the update it computed itself, once its block had time to spread.
+    /// See the light client topics of the Altair light client networking spec.
+    async fn forward_light_client(
+        &self,
+        fork: ForkName,
+        kind: GossipKind,
+        data: Vec<u8>,
+        now: u64,
+    ) -> ValidationOutcome {
+        let checked = self
+            .chain
+            .run(move |chain| {
+                let config = chain.config().clone();
+                let clock = chain.store().slot_clock();
+                let server = chain.light_client_mut();
+                let forwarded = if kind == GossipKind::LightClientFinalityUpdate {
+                    let Ok(update) = LightClientFinalityUpdate::decode(&data, fork) else {
+                        return ValidationOutcome::Reject;
+                    };
+                    server.forward_finality_update(&update, &config, clock, now)
+                } else {
+                    let Ok(update) = LightClientOptimisticUpdate::decode(&data, fork) else {
+                        return ValidationOutcome::Reject;
+                    };
+                    server.forward_optimistic_update(&update, &config, clock, now)
+                };
+                match forwarded {
+                    Ok(()) => ValidationOutcome::Accept,
+                    Err(reason) => {
+                        debug!(%reason, "light client update ignored");
+                        ValidationOutcome::Ignore
+                    }
+                }
+            })
+            .await;
+        // The chain is shutting down; drop the message without blaming the peer.
+        checked.unwrap_or(ValidationOutcome::Ignore)
+    }
+
+    /// Validates a blob sidecar, under the limits of a fork whose blobs travel as sidecars.
+    async fn validate_blob(
+        &self,
+        fork: ForkName,
+        subnet: u64,
+        data: Vec<u8>,
+        now: u64,
+    ) -> Checked<P> {
+        self.check(
+            data,
+            move |validator, sidecar: &BlobSidecar<P>| {
+                // Forks without blob sidecars have no such topic; a message there is noise.
+                let limits = BlobSubnets::of(fork, validator.config())
+                    .ok_or_else(|| GossipError::ignore("fork has no blob sidecars"))?;
+                validator.blob_sidecar(sidecar, now, SubnetId(subnet), limits, Kzg::mainnet())
+            },
+            |sidecar| {
+                let sidecar = Arc::new(sidecar);
+                Some(Self::job(move |chain| {
+                    chain.submit_blob(sidecar).map(|_| ())
+                }))
+            },
+        )
+        .await
+    }
+
+    /// Validates a data column sidecar in the column format of its fork.
+    async fn validate_column(
+        &self,
+        blob_data: BlobData,
+        subnet: u64,
+        data: Vec<u8>,
+        now: u64,
+    ) -> Checked<P> {
+        let submit = |column: combined::DataColumnSidecar<P>| {
+            let column = Arc::new(column);
+            Some(Self::job(move |chain| {
+                chain.submit_column(column).map(|_| ())
+            }))
+        };
+        match blob_data {
+            BlobData::BlockColumns => {
+                self.check(
+                    data,
+                    move |validator, sidecar: &fulu::DataColumnSidecar<P>| {
                         validator.data_column_sidecar(
                             sidecar,
                             now,
@@ -188,34 +330,36 @@ impl<P: Preset> GossipHandler<P> {
                             Kzg::mainnet(),
                         )
                     },
-                    |sidecar| Some(Accepted::Column(Arc::new(sidecar))),
+                    |sidecar| submit(sidecar.into()),
                 )
                 .await
             }
-            _ => (ValidationOutcome::Ignore, None),
+            BlobData::PayloadColumns => {
+                self.check(
+                    data,
+                    move |validator, sidecar: &gloas::DataColumnSidecar<P>| {
+                        validator.gloas_data_column_sidecar(
+                            sidecar,
+                            now,
+                            SubnetId(subnet),
+                            Kzg::mainnet(),
+                        )
+                    },
+                    |sidecar| submit(sidecar.into()),
+                )
+                .await
+            }
+            // Forks before Fulu have no column topics; a message there is noise.
+            BlobData::None | BlobData::BlobSidecars => (ValidationOutcome::Ignore, None),
         }
     }
 
-    /// Validates a message the node only forwards: exits, slashings, sync messages, changes.
+    /// Validates a message whose container no fork changed since it appeared.
     ///
-    /// Without block production, the node keeps no operation pool, so nothing follows acceptance.
-    async fn validate_operation(
-        &self,
-        kind: GossipKind,
-        data: &[u8],
-        now: u64,
-    ) -> ValidationOutcome {
-        let (outcome, _) = match kind {
-            GossipKind::VoluntaryExit => {
-                self.check(
-                    data,
-                    move |validator, exit: &SignedVoluntaryExit| {
-                        validator.voluntary_exit::<BeaconState<P>>(exit, now)
-                    },
-                    |_| None,
-                )
-                .await
-            }
+    /// Without block production, the node keeps no operation pool.
+    /// So the operations, bids, and preferences these topics carry are only forwarded.
+    async fn validate_operation(&self, kind: GossipKind, data: Vec<u8>, now: u64) -> Checked<P> {
+        match kind {
             GossipKind::ProposerSlashing => {
                 self.check(
                     data,
@@ -254,11 +398,60 @@ impl<P: Preset> GossipHandler<P> {
                 )
                 .await
             }
-            // Topics of earlier forks or of light clients, which this node never joins.
-            // Chain inputs never reach here: they have their own validation.
+            GossipKind::ExecutionPayload => {
+                self.check(
+                    data,
+                    |validator, envelope: &SignedExecutionPayloadEnvelope<P>| {
+                        validator.execution_payload_envelope(envelope)
+                    },
+                    |envelope| Some(Accepted::Envelope(Arc::new(envelope))),
+                )
+                .await
+            }
+            GossipKind::PayloadAttestationMessage => {
+                self.check(
+                    data,
+                    move |validator, message: &PayloadAttestationMessage| {
+                        validator.payload_attestation_message(message, now)
+                    },
+                    |message| {
+                        Some(Self::job(move |chain| {
+                            chain.on_payload_attestation(&message)
+                        }))
+                    },
+                )
+                .await
+            }
+            GossipKind::ExecutionPayloadBid => {
+                self.check(
+                    data,
+                    move |validator, bid: &SignedExecutionPayloadBid| {
+                        validator.execution_payload_bid(bid, now)
+                    },
+                    |_| None,
+                )
+                .await
+            }
+            GossipKind::ProposerPreferences => {
+                self.check(
+                    data,
+                    move |validator, preferences: &SignedProposerPreferences| {
+                        validator.proposer_preferences(preferences, now)
+                    },
+                    |_| None,
+                )
+                .await
+            }
+            // Every other topic has its own validation above.
             _ => (ValidationOutcome::Ignore, None),
-        };
-        outcome
+        }
+    }
+
+    /// Wraps work on the chain as what an accepted message leaves to do.
+    fn job(
+        job: impl FnOnce(&mut Chain<P>) -> Result<(), ChainError> + Send + 'static,
+    ) -> Accepted<P> {
+        Accepted::Job(Box::new(job))
     }
 
     /// Decodes a message and runs one gossip rule on the chain thread.
@@ -268,18 +461,13 @@ impl<P: Preset> GossipHandler<P> {
     /// - `data`: the decompressed SSZ payload.
     /// - `rule`: the gossip rule for the message's topic.
     /// - `then`: what to keep of an accepted message, if anything.
-    async fn check<M, R, T>(
-        &self,
-        data: &[u8],
-        rule: R,
-        then: T,
-    ) -> (ValidationOutcome, Option<Accepted<P>>)
+    async fn check<M, R, T>(&self, data: Vec<u8>, rule: R, then: T) -> Checked<P>
     where
         M: Ssz + Send + 'static,
         R: FnOnce(&mut GossipValidator<'_, '_, P>, &M) -> Result<(), GossipError> + Send + 'static,
         T: FnOnce(M) -> Option<Accepted<P>>,
     {
-        let Ok(message) = M::decode(data) else {
+        let Ok(message) = M::decode(&data) else {
             return (ValidationOutcome::Reject, None);
         };
         let checked = self
@@ -308,9 +496,9 @@ impl<P: Preset> GossipHandler<P> {
     async fn apply(&self, accepted: Accepted<P>) {
         let outcome = match accepted {
             Accepted::Block(block) => {
-                let payload = self.execution.verdict(&block.message).await;
+                let payload = self.execution.verdict(&block).await;
                 // Gossip admits a block up to the clock disparity early; it waits for its slot.
-                let slot = block.message.slot;
+                let slot = block.slot();
                 if let Ok(start) = self.chain.run(move |chain| chain.slot_start_ms(slot)).await {
                     let early = start.saturating_sub(self.clock.now_ms());
                     time::sleep(Duration::from_millis(early)).await;
@@ -324,26 +512,13 @@ impl<P: Preset> GossipHandler<P> {
                     })
                     .await
             }
-            Accepted::Aggregate(aggregate) => {
+            Accepted::Envelope(envelope) => {
+                let payload = self.execution.judge_envelope(&self.chain, &envelope).await;
                 self.chain
-                    .run(move |chain| chain.on_attestation(&aggregate.message.aggregate))
+                    .run(move |chain| chain.submit_envelope(envelope, payload).map(|_| ()))
                     .await
             }
-            Accepted::Single(attestation) => {
-                self.chain
-                    .run(move |chain| chain.on_single_attestation(&attestation))
-                    .await
-            }
-            Accepted::AttesterSlashing(slashing) => {
-                self.chain
-                    .run(move |chain| chain.on_attester_slashing(&slashing))
-                    .await
-            }
-            Accepted::Column(column) => {
-                self.chain
-                    .run(move |chain| chain.submit_column(column).map(|_| ()))
-                    .await
-            }
+            Accepted::Job(job) => self.chain.run(job).await,
         };
         match outcome {
             Ok(Ok(())) | Err(_) => {}
@@ -385,6 +560,10 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::LightClientOptimisticUpdate => "light_client_optimistic_update",
             GossipKind::BlobSidecar(_) => "blob_sidecar",
             GossipKind::DataColumnSidecar(_) => "data_column_sidecar",
+            GossipKind::ExecutionPayload => "execution_payload",
+            GossipKind::PayloadAttestationMessage => "payload_attestation_message",
+            GossipKind::ExecutionPayloadBid => "execution_payload_bid",
+            GossipKind::ProposerPreferences => "proposer_preferences",
         }
     }
 }

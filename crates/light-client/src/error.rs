@@ -1,11 +1,11 @@
-//! Reasons a light client refuses a bootstrap or an update.
+//! Reasons light client data is refused, or cannot be created.
 
 use axiom_bls::BlsError;
 use axiom_ssz::{DecodeError, Root};
 use axiom_types::{ForkName, Slot};
 use thiserror::Error;
 
-/// A bootstrap or update the light client cannot accept.
+/// A bootstrap or update the light client cannot accept, or a full node cannot create.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum LightClientError {
@@ -117,6 +117,46 @@ pub enum LightClientError {
         /// Format of the finalized header.
         finalized: ForkName,
     },
+    /// A state has advanced past the block it should be the post-state of.
+    #[error("state at slot {state} has advanced past its latest block at slot {block}")]
+    StateAdvanced {
+        /// The state's slot.
+        state: Slot,
+        /// Slot of the state's latest block header.
+        block: Slot,
+    },
+    /// A state is the post-state of another block than the one given.
+    #[error("state is the post-state of block {state}, not of block {block}")]
+    NotPostState {
+        /// Root of the block the state follows.
+        state: Root,
+        /// Root of the block given with it.
+        block: Root,
+    },
+    /// The signature block does not build on the attested block.
+    #[error("signature block has parent {parent}, not the attested block {attested}")]
+    NotParent {
+        /// Parent root of the signature block.
+        parent: Root,
+        /// Root of the attested block.
+        attested: Root,
+    },
+    /// The finalized block is not the one the attested state finalized.
+    #[error("attested state finalized {checkpoint}, but the finalized block stands for {block}")]
+    FinalizedMismatch {
+        /// Finalized checkpoint root in the attested state.
+        checkpoint: Root,
+        /// Root the finalized block stands for, zero for the genesis block.
+        block: Root,
+    },
+    /// A state's tree has no node where its fork's layout places a proven field.
+    #[error("{fork} state has no node at generalized index {gindex}")]
+    MissingNode {
+        /// Fork of the state.
+        fork: ForkName,
+        /// Position of the missing node.
+        gindex: u64,
+    },
     /// The sync committee signature does not decompress.
     #[error("sync committee signature does not decompress: {0}")]
     MalformedSignature(#[source] BlsError),
@@ -129,5 +169,44 @@ pub enum LightClientError {
         signature_slot: Slot,
         /// Members whose keys the signature is checked against.
         participants: usize,
+    },
+}
+
+/// Why a full node ignores a light client update on gossip, rather than forwarding it.
+///
+/// Every outcome here is an ignore: an honest but slow or early peer may send it.
+/// See the `light_client_finality_update` and `light_client_optimistic_update` topics.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum GossipIgnore {
+    /// The update is not the one the node computed from its own chain.
+    #[error("update attested at slot {attested} is not the one computed locally")]
+    NotLocal {
+        /// Slot of the update's attested header.
+        attested: Slot,
+    },
+    /// The signature block has not had time to propagate.
+    #[error("update arrived at {now_ms} ms, before the earliest allowed {earliest_ms} ms")]
+    Early {
+        /// Arrival time, in milliseconds since the Unix epoch.
+        now_ms: u64,
+        /// Signature slot start plus the sync message due time, less the clock disparity.
+        earliest_ms: u64,
+    },
+    /// A finality update for this finalized slot, or a later one, was already forwarded.
+    #[error("finalized slot {finalized} does not advance past the forwarded slot {forwarded}")]
+    StaleFinality {
+        /// Slot of the update's finalized header.
+        finalized: Slot,
+        /// Highest finalized slot forwarded so far.
+        forwarded: Slot,
+    },
+    /// An optimistic update for this attested slot, or a later one, was already forwarded.
+    #[error("attested slot {attested} does not advance past the forwarded slot {forwarded}")]
+    StaleOptimistic {
+        /// Slot of the update's attested header.
+        attested: Slot,
+        /// Highest attested slot forwarded so far.
+        forwarded: Slot,
     },
 }
