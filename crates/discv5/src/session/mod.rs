@@ -30,6 +30,11 @@ pub struct Session {
     write: Aes128Gcm,
     /// Opens incoming messages.
     read: Aes128Gcm,
+    /// The read key of the session this one replaced, still accepted.
+    ///
+    /// Two nodes that challenge each other at once each finish a handshake.
+    /// Each side then writes with its newest keys, which the other may hold only as the older session.
+    previous_read: Option<Aes128Gcm>,
     /// Messages sealed so far.
     counter: u32,
 }
@@ -41,8 +46,17 @@ impl Session {
         Self {
             write: Aes128Gcm::new(write_key),
             read: Aes128Gcm::new(read_key),
+            previous_read: None,
             counter: 0,
         }
+    }
+
+    /// This session, still accepting messages sealed for the one it replaces.
+    #[must_use]
+    pub fn replacing(mut self, old: &Self) -> Self {
+        // Only one generation back: older keys are dropped.
+        self.previous_read = Some(old.read.clone());
+        self
     }
 
     /// The initiator's view: it writes with the initiator key.
@@ -96,14 +110,16 @@ impl Session {
     ///
     /// Fails when the tag does not verify or the plaintext is not a message.
     pub fn open(&self, packet: &Packet) -> Result<Message, OpenError> {
-        // The same additional data the sender authenticated.
+        // The same additional data the sender authenticated, under the current key first.
+        let nonce = &packet.header.nonce.0;
+        let ad = packet.message_ad();
         let plaintext = self
             .read
-            .open(
-                &packet.header.nonce.0,
-                &packet.message_ad(),
-                &packet.message,
-            )
+            .open(nonce, &ad, &packet.message)
+            .or_else(|error| match &self.previous_read {
+                Some(previous) => previous.open(nonce, &ad, &packet.message),
+                None => Err(error),
+            })
             .map_err(|_| OpenError::Authentication)?;
         Message::decode(&plaintext).map_err(OpenError::Message)
     }

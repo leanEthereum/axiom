@@ -41,6 +41,12 @@ impl SessionCache {
         })
     }
 
+    /// The session with a peer at an endpoint, without touching its use time.
+    #[must_use]
+    pub fn get(&self, node: NodeId, addr: SocketAddr) -> Option<&Session> {
+        self.entries.get(&(node, addr)).map(|(session, _)| session)
+    }
+
     /// Whether a session exists, without touching its use time.
     #[must_use]
     pub fn contains(&self, node: NodeId, addr: SocketAddr) -> bool {

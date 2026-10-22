@@ -7,7 +7,9 @@ pub mod message;
 mod node_id;
 pub mod packet;
 mod rng;
+pub mod service;
 pub mod session;
+pub mod table;
 
 pub use base64::{Base64Error, Base64Url};
 pub use distance::{Distance, DistanceError, LogDistance};
