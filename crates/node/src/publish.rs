@@ -22,7 +22,10 @@ use axiom_types::{
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::{Chain, ChainError, ChainHandle, Clock, ExecutionLayer};
+use crate::{
+    Chain, ChainError, ChainHandle, Clock, ExecutionLayer,
+    monitor::{Observed, Source},
+};
 
 /// What happened to a published block.
 #[derive(Debug)]
@@ -252,7 +255,12 @@ impl<P: Preset> Publisher<P> {
         let verdict = self
             .chain
             .run(move |chain| {
-                chain.validate_gossip(|validator| validator.any_beacon_block(&checked, now))
+                let verdict =
+                    chain.validate_gossip(|validator| validator.any_beacon_block(&checked, now));
+                if verdict.is_ok() {
+                    chain.observe(Observed::Block(&checked), Source::Api, now);
+                }
+                verdict
             })
             .await
             .map_err(|_| PublishError::ChainStopped)?;

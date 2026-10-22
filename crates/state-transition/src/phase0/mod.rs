@@ -20,8 +20,8 @@ pub use slashing::Slashing;
 pub use slot::SlotRoots;
 
 use crate::{
-    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
-    PayloadEngine, Registry, StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes,
+    Fork, PayloadEngine, Registry, StateError,
     phase0::{
         block::{AttestationRecord, DepositQuota, RandaoReveal},
         epoch::{
@@ -115,6 +115,12 @@ impl<P: Preset> Fork for BeaconState<P> {
         let participation = PendingParticipation::new(&mut state, total)?;
         let rewards = AttestationRewards::new(state.beacon(), &participation);
         AttesterRewards::of_pending(&rewards, state.beacon())
+    }
+
+    fn previous_epoch_votes(mut state: CachedState<'_, Self>) -> Result<EpochVotes, StateError> {
+        let total = ActiveBalance::of(state.beacon());
+        let participation = PendingParticipation::new(&mut state, total)?;
+        Ok(EpochVotes::of_pending(state.beacon(), &participation))
     }
 
     /// Runs phase0's block processing.

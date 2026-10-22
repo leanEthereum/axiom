@@ -14,8 +14,8 @@ use axiom_types::{
 };
 
 use crate::{
-    BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork, PayloadEngine,
-    Registry, StateError,
+    BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes, Fork,
+    PayloadEngine, Registry, StateError,
     altair::{AltairEpoch, block::ParticipantDeposit},
     capella::{block::PayloadWithdrawals, epoch::HistoricalSummaryUpdate},
     deneb::block::{Exit, PayloadExecution, UnboundedAttestation},
@@ -102,6 +102,10 @@ impl<P: Preset> Fork for BeaconState<P> {
         config: &ChainConfig,
     ) -> Result<AttesterRewards, StateError> {
         Ok(AltairEpoch::attester_rewards(state.beacon(), config))
+    }
+
+    fn previous_epoch_votes(state: CachedState<'_, Self>) -> Result<EpochVotes, StateError> {
+        Ok(EpochVotes::of_participation(state.beacon()))
     }
 
     /// Runs Deneb's block processing.

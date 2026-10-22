@@ -35,7 +35,10 @@ use super::{
     query::{Body, Query},
     reply::{ApiError, ApiResult, Failure, Reply, Routes},
 };
-use crate::Chain;
+use crate::{
+    Chain,
+    monitor::{Observed, Source},
+};
 
 /// What an accepted submission does on the network.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,8 +231,12 @@ impl PoolRoutes {
                     let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
                     // A vote of the current slot counts in fork choice only from the next slot.
                     // It is pooled and broadcast all the same; the store sees it again in a block.
-                    if let Err(error) = chain.on_subnet_vote(&vote, claim) {
-                        debug!(%error, "vote pooled but not counted yet");
+                    match chain.on_subnet_vote(&vote, claim) {
+                        Ok(attester) => {
+                            let data = vote.data();
+                            chain.observe(Observed::Single { attester, data }, Source::Api, now);
+                        }
+                        Err(error) => debug!(%error, "vote pooled but not counted yet"),
                     }
                     Ok(subnet)
                 })
@@ -268,7 +275,14 @@ impl PoolRoutes {
                     if Spread::of_aggregate(verdict)? == Spread::Known {
                         return Ok(Spread::Known);
                     }
-                    if let Err(error) = chain.on_vote(&signed.aggregate().committee_vote()) {
+                    let vote = signed.aggregate().committee_vote();
+                    let aggregator = signed.aggregator_index();
+                    let observed = Observed::Aggregate {
+                        aggregator,
+                        vote: &vote,
+                    };
+                    chain.observe(observed, Source::Api, now);
+                    if let Err(error) = chain.on_vote(&vote) {
                         debug!(%error, "aggregate pooled but not counted yet");
                     }
                     Ok(Spread::Broadcast)
@@ -301,7 +315,9 @@ impl PoolRoutes {
                 chain
                     .validate_gossip(|validator| validator.attester_slashing(&slashing))
                     .map_err(Self::refusal)?;
-                chain.on_attester_slashing(&slashing.conflicting_votes())?;
+                let votes = slashing.conflicting_votes();
+                chain.observe(Observed::AttesterSlashing(&votes), Source::Api, 0);
+                chain.on_attester_slashing(&votes)?;
                 Ok(chain.store().current_epoch())
             })
             .await?;
@@ -323,6 +339,7 @@ impl PoolRoutes {
                 chain
                     .validate_gossip(|validator| validator.proposer_slashing(&slashing))
                     .map_err(Self::refusal)?;
+                chain.observe(Observed::ProposerSlashing(&slashing), Source::Api, 0);
                 chain.on_proposer_slashing(slashing)?;
                 Ok(Spread::Broadcast)
             },
@@ -366,6 +383,7 @@ impl PoolRoutes {
                     }),
                 };
                 verdict.map_err(Self::refusal)?;
+                chain.observe(Observed::Exit(&exit.message), Source::Api, now);
                 chain.on_voluntary_exit(exit)?;
                 Ok(Spread::Broadcast)
             },
@@ -409,6 +427,7 @@ impl PoolRoutes {
                             })
                             .map_err(Self::refusal)?;
                     }
+                    chain.observe(Observed::SyncMessage(&message), Source::Api, now);
                     chain.on_sync_message(&message)?;
                     Ok(subnets)
                 })
@@ -441,6 +460,11 @@ impl PoolRoutes {
                 if Spread::of_aggregate(verdict)? == Spread::Known {
                     return Ok(Spread::Known);
                 }
+                let observed = Observed::Contribution {
+                    aggregator: signed.message.aggregator_index,
+                    contribution: &signed.message.contribution,
+                };
+                chain.observe(observed, Source::Api, now);
                 chain.on_contribution(&signed.message.contribution)?;
                 Ok(Spread::Broadcast)
             },

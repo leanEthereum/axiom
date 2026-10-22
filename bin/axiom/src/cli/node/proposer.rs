@@ -160,6 +160,8 @@ impl ProposerFlags {
             graffiti: self.graffiti.unwrap_or_default(),
             prepare_lookahead: self.lookahead,
             always_prepare_payload: self.always_prepare,
+            // The reorg flags have their own group, which sets this.
+            ..ProposerSettings::default()
         })
     }
 
@@ -245,6 +247,7 @@ mod tests {
                 graffiti: Bytes32(graffiti),
                 prepare_lookahead: Some(Duration::from_secs(8)),
                 always_prepare_payload: true,
+                ..ProposerSettings::default()
             }
         );
     }

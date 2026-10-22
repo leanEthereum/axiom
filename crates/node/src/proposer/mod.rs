@@ -4,6 +4,7 @@ mod context;
 mod engine_payload;
 mod error;
 mod preparation;
+mod reorg;
 
 use std::{
     collections::HashMap,
@@ -29,10 +30,12 @@ use axiom_types::{
 use context::ProposalContext;
 pub use error::ProposerError;
 use preparation::Preparations;
+pub(crate) use reorg::EngineTarget;
+pub use reorg::ProposerReorgs;
 use tracing::{debug, warn};
 
 use self::engine_payload::{BuildOrder, EnginePayload};
-use crate::{ChainHandle, ExecutionHead, ExecutionLayer};
+use crate::{ChainHandle, Clock, ExecutionHead, ExecutionLayer, Head};
 
 /// What a validator client asks for when it proposes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,14 +81,21 @@ pub struct ProposerService<P: Preset> {
     graffiti: Bytes32,
     /// Whether payloads are prepared for every slot, not only for prepared proposers.
     always_prepare: bool,
+    /// Whether proposals orphan a late, weak head.
+    reorgs: ProposerReorgs,
+    /// The wall clock, which the reorg cutoff is measured against.
+    clock: Arc<dyn Clock>,
 }
 
 impl<P: Preset> ProposerService<P> {
     /// A desk over the chain, the engine, and the builders, paying a default fee recipient.
+    ///
+    /// Proposer reorgs are on, as the honest validator guide recommends.
     #[must_use]
     pub fn new(
         chain: ChainHandle<P>,
         execution: Arc<ExecutionLayer>,
+        clock: Arc<dyn Clock>,
         default_fee_recipient: ExecutionAddress,
         relays: Option<RelaySet>,
     ) -> Self {
@@ -99,6 +109,39 @@ impl<P: Preset> ProposerService<P> {
             breaker: CircuitBreaker::for_preset::<P>(),
             graffiti: Bytes32::default(),
             always_prepare: false,
+            reorgs: ProposerReorgs::Enabled,
+            clock,
+        }
+    }
+
+    /// The same desk, orphaning late heads or not as told.
+    #[must_use]
+    pub const fn with_reorgs(mut self, reorgs: ProposerReorgs) -> Self {
+        self.reorgs = reorgs;
+        self
+    }
+
+    /// The block the engine should follow for a new consensus head.
+    ///
+    /// While one of this node's validators may orphan a late head next slot, that is its parent.
+    /// The engine then never makes the late block its head, and the reorg payload builds cleanly.
+    /// Otherwise it is the head itself.
+    pub(crate) async fn forkchoice_target(&self, head: Head) -> EngineTarget {
+        let reorgs = self.reorgs;
+        let decided = self
+            .chain
+            .run(move |chain| reorgs.engine_override(chain))
+            .await;
+        match decided {
+            Ok(Ok(Some((proposer, target)))) if self.preparations().is_prepared(proposer) => {
+                debug!(slot = %head.slot, root = %head.root, "engine kept on the late head's parent");
+                target
+            }
+            Ok(Ok(_)) | Err(_) => EngineTarget::of(head),
+            Ok(Err(error)) => {
+                debug!(%error, "no engine override decision");
+                EngineTarget::of(head)
+            }
         }
     }
 
@@ -182,10 +225,16 @@ impl<P: Preset> ProposerService<P> {
     /// Starts the engine building the payload of the next slot, when its proposer prepared.
     ///
     /// Building ahead gives the engine the whole slot to fill the payload.
+    /// Electing the proposer advances the head state to the slot, which costs the chain thread.
+    /// So with no validator prepared at all, the chain is not visited, unless told to always prepare.
     pub async fn prepare_next(&self, slot: Slot) {
+        if !self.always_prepare && !self.preparations().any_prepared() {
+            return;
+        }
+        let reorgs = self.reorgs;
         let gathered = self
             .chain
-            .run(move |chain| ProposalContext::gather(chain, slot))
+            .run(move |chain| ProposalContext::gather(chain, slot, reorgs))
             .await;
         let Ok(Ok(context)) = gathered else {
             return;
@@ -215,16 +264,22 @@ impl<P: Preset> ProposerService<P> {
         }
     }
 
-    /// Produces the unsigned block of a slot on the current head.
+    /// Produces the unsigned block of a slot on the current head, or a late head's parent.
     ///
     /// # Errors
     ///
     /// Fails when the slot is not after the head, the engine fails, or the block is invalid.
     pub async fn produce(&self, order: BlockOrder) -> Result<Proposal<P>, ProposerError> {
         let slot = order.slot;
+        let reorgs = self.reorgs;
+        let now = self.clock.now_ms();
         let context = self
             .chain
-            .run(move |chain| ProposalContext::gather(chain, slot))
+            .run(move |chain| {
+                // The reorg cutoff is read off the store's clock, so it must stand at now.
+                chain.on_tick(now)?;
+                ProposalContext::gather(chain, slot, reorgs)
+            })
             .await??;
         let (execution, fallback) = match context.execution.clone() {
             None => (ExecutionChoice::PreMerge, None),
@@ -416,5 +471,75 @@ impl<P: Preset> ProposerService<P> {
     /// The builds started ahead, through the same kind of lock.
     fn builds(&self) -> MutexGuard<'_, HashMap<(Slot, Root), PayloadId>> {
         self.builds.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use axiom_types::{ChainConfig, Minimal, combined, phase0};
+    use tokio::{runtime::Builder, sync::oneshot, time::timeout};
+
+    use super::*;
+    use crate::{Chain, ChainDatabase, ManualClock};
+
+    #[test]
+    fn nothing_is_prepared_without_a_prepared_validator() {
+        // Fixture state: a chain thread held busy by a job that waits for the test.
+        // Any visit to the chain then waits too, so a visit shows as a timeout.
+        let config = ChainConfig::minimal();
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let genesis = combined::BeaconState::Phase0(phase0::BeaconState::<Minimal>::default());
+        let chain = Chain::from_genesis(config, genesis, database).unwrap();
+        let (chain, _thread) = ChainHandle::spawn(chain).unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let (started, holding) = oneshot::channel::<()>();
+        let busy = chain.clone();
+        runtime.spawn(async move {
+            busy.run(move |_| {
+                let _waiting = started.send(());
+                held.recv()
+            })
+            .await
+        });
+        runtime.block_on(holding).unwrap();
+        let proposer = ProposerService::new(
+            chain,
+            Arc::new(ExecutionLayer::disconnected()),
+            Arc::new(ManualClock::at(0)),
+            ExecutionAddress::ZERO,
+            None,
+        );
+        let wait = Duration::from_millis(200);
+
+        // Nobody prepared: the call returns at once, without the chain.
+        let skipped =
+            runtime.block_on(async { timeout(wait, proposer.prepare_next(Slot(1_000))).await });
+        assert_eq!(skipped, Ok(()));
+
+        // Once a validator prepared, the same call needs the chain and waits on it.
+        proposer.prepare([(ValidatorIndex(0), ExecutionAddress([1; 20]))]);
+        let visited =
+            runtime.block_on(async { timeout(wait, proposer.prepare_next(Slot(1_000))).await });
+        assert!(
+            visited.is_err(),
+            "a prepared validator makes the call visit the chain"
+        );
+
+        // Told to always prepare, the desk visits the chain even with nobody prepared.
+        let always = ProposerService::new(
+            proposer.chain,
+            Arc::new(ExecutionLayer::disconnected()),
+            Arc::new(ManualClock::at(0)),
+            ExecutionAddress::ZERO,
+            None,
+        )
+        .preparing_always();
+        let visited =
+            runtime.block_on(async { timeout(wait, always.prepare_next(Slot(1_000))).await });
+        assert!(visited.is_err(), "always preparing visits the chain");
+        release.send(()).unwrap();
     }
 }

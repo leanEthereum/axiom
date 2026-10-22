@@ -1,6 +1,6 @@
 //! A beacon API over an in-memory chain, driven without a socket, for the route tests.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use axiom_bls::SecretKey;
 use axiom_http::{Method, Request, Response, Router, StatusCode};
@@ -55,8 +55,13 @@ impl TestApi {
             Arc::clone(&clock) as Arc<dyn Clock>,
             None,
         );
-        let proposer =
-            ProposerService::new(chain.clone(), execution, ExecutionAddress::default(), None);
+        let proposer = ProposerService::new(
+            chain.clone(),
+            execution,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            ExecutionAddress::default(),
+            None,
+        );
         // No hub runs, so an event stream request finds it stopped.
         let (_hub, _sender, events) = EventHub::new();
         let services = ApiServices {
@@ -139,6 +144,11 @@ impl TestApi {
         job: impl FnOnce(&mut Chain<Minimal>) -> R + Send + 'static,
     ) -> R {
         self.runtime.block_on(self.chain.run(job)).unwrap()
+    }
+
+    /// Runs a future on the fixture's runtime, where the routes' own tasks also run.
+    pub(crate) fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
     }
 
     /// Sends a request to the routes.

@@ -6,6 +6,7 @@ use axiom_builder_client::BuilderError;
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
+use axiom_http::HttpError;
 use axiom_light_client::LightClientError;
 use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
@@ -256,6 +257,15 @@ pub enum NodeError {
     /// The checkpoint could not be downloaded.
     #[error("checkpoint sync: {0}")]
     Checkpoint(#[from] CheckpointError),
+    /// The client stats endpoint is not a plain http URL.
+    #[error("client stats endpoint {endpoint}: {source}")]
+    ClientStats {
+        /// The endpoint as configured.
+        endpoint: String,
+        /// Why it is unusable.
+        #[source]
+        source: HttpError,
+    },
     /// The chain thread stopped before the node did.
     #[error("chain service stopped unexpectedly")]
     ChainStopped,

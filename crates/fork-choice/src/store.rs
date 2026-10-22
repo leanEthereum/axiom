@@ -411,6 +411,45 @@ impl<P: Preset> Store<P> {
         if self.proposer_boost_root == head.root {
             return Err(ForkChoiceError::HeadStillBoosted(head.root));
         }
+        self.weigh_late_head(head, slot, |reorg| reorg.parent_for(slot))
+    }
+
+    /// The node the engine should follow instead of the head, when the next proposer may reorg it.
+    ///
+    /// A late, weak head the next proposer means to orphan must not become the engine's head.
+    /// Otherwise the engine builds the next payload on it, and the reorg has nothing to build on.
+    /// The caller still checks that the next slot's proposer is one of its own validators.
+    /// See `should_override_forkchoice_update` in the Bellatrix fork choice spec of v1.4.0.
+    ///
+    /// # Returns
+    ///
+    /// The head's parent node when the update should point there, or nothing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head, its parent, or the head's state is missing.
+    pub fn forkchoice_override(
+        &mut self,
+        head: ForkChoiceNode,
+    ) -> Result<Option<ForkChoiceNode>, ForkChoiceError> {
+        let head_slot = self
+            .blocks
+            .get(&head.root)
+            .ok_or(ForkChoiceError::UnknownBlock(head.root))?
+            .slot;
+        let current_slot = self.current_slot();
+        self.weigh_late_head(head, head_slot + 1, |reorg| {
+            reorg.overrides_update(current_slot).then_some(reorg.parent)
+        })
+    }
+
+    /// Weighs a head against its parent for a proposal at a slot, and decides with the weights.
+    fn weigh_late_head<R>(
+        &mut self,
+        head: ForkChoiceNode,
+        slot: Slot,
+        decide: impl FnOnce(&LateHeadReorg<'_, P>) -> R,
+    ) -> Result<R, ForkChoiceError> {
         let head_block = *self
             .blocks
             .get(&head.root)
@@ -454,7 +493,7 @@ impl<P: Preset> Store<P> {
             parent_score,
             committee,
         };
-        Ok(reorg.parent_for(slot))
+        Ok(decide(&reorg))
     }
 
     /// Whether a proposer at a slot builds on the head's full variant or its empty one.

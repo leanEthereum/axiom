@@ -13,7 +13,7 @@ use thiserror::Error;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::{runtime::Builder, signal::ctrl_c, sync::Notify, task};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     cli::Purge,
@@ -70,6 +70,8 @@ pub(crate) struct Run {
     pub(crate) dumps: Dumps,
     /// The logger.
     pub(crate) log: LogConfig,
+    /// Flags given that no longer have an effect, warned about once logging starts.
+    pub(crate) deprecated: Vec<&'static str>,
 }
 
 /// Why a run stopped with an error.
@@ -100,6 +102,9 @@ impl Run {
             deposit_contract_block = self.deposit_contract_block,
             "network"
         );
+        for flag in &self.deprecated {
+            warn!(flag, "deprecated flag has no effect");
+        }
         if let (Some(purge), Some(datadir)) = (self.purge, &self.node.data_dir) {
             purge.apply(datadir)?;
         }

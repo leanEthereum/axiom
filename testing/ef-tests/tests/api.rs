@@ -1,7 +1,7 @@
 //! Conformance of the beacon API against its published definition and the spec's configuration.
 //!
 //! The route check walks the pinned OpenAPI definition of the beacon node API.
-//! Every path and method there is served, or listed below with the reason it is not.
+//! Every path and method there is served.
 //!
 //! The configuration check reads the pinned release's configuration and preset files.
 //! Every key there must come back from the config route with the same value.
@@ -16,32 +16,6 @@ use axiom_types::{
     ChainConfig, ConfigValue, Mainnet, Minimal, Preset, altair, capella, electra, gloas, phase0,
 };
 use axiom_yaml::Yaml;
-
-/// Routes of the definition the node does not serve yet, each with its reason.
-///
-/// Each entry is asserted to exist in the definition and to be unserved, so the list cannot go stale.
-const NOT_SERVED: [(&str, &str, &str); 4] = [
-    (
-        "GET",
-        "/eth/v1/beacon/pool/payload_attestations",
-        "the Gloas payload vote pool",
-    ),
-    (
-        "GET",
-        "/eth/v1/beacon/proposer_preferences",
-        "the Gloas preferences pool",
-    ),
-    (
-        "POST",
-        "/eth/v1/beacon/execution_payload_bids",
-        "bids submitted by builders",
-    ),
-    (
-        "POST",
-        "/eth/v1/validator/builder_preferences",
-        "the Gloas builder preferences",
-    ),
-];
 
 /// A file of the pinned vectors.
 fn read(path: &Path) -> String {
@@ -118,13 +92,9 @@ fn every_defined_route_is_served() {
         .map(|(method, path)| (method.as_str().to_owned(), path))
         .collect();
 
-    // Every defined route is served, but for the listed ones.
-    let missing: Vec<(String, String)> = defined.difference(&served).cloned().collect();
-    let listed: Vec<(String, String)> = NOT_SERVED
-        .iter()
-        .map(|(method, path, _)| ((*method).to_owned(), (*path).to_owned()))
-        .collect();
-    assert_eq!(missing, listed);
+    // Every defined route is served.
+    let missing: Vec<&(String, String)> = defined.difference(&served).collect();
+    assert_eq!(missing, Vec::<&(String, String)>::new());
 
     // Routes served beyond the definition, each kept on purpose.
     let extra: Vec<_> = served.difference(&defined).collect();

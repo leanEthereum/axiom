@@ -220,6 +220,8 @@ pub(crate) struct EngineFollower<P: Preset> {
     events: broadcast::Receiver<ChainEvent>,
     /// The engine.
     execution: Arc<ExecutionLayer>,
+    /// The proposal desk, which keeps the engine off a head it is about to orphan.
+    proposer: Arc<ProposerService<P>>,
     /// The fork schedule, which picks the engine method version of each head.
     config: ChainConfig,
 }
@@ -230,12 +232,14 @@ impl<P: Preset> EngineFollower<P> {
         chain: ChainHandle<P>,
         events: broadcast::Receiver<ChainEvent>,
         execution: Arc<ExecutionLayer>,
+        proposer: Arc<ProposerService<P>>,
         config: ChainConfig,
     ) -> Self {
         Self {
             chain,
             events,
             execution,
+            proposer,
             config,
         }
     }
@@ -246,14 +250,16 @@ impl<P: Preset> EngineFollower<P> {
             match self.events.recv().await {
                 Ok(ChainEvent::Head(head)) => {
                     let fork = self.config.fork_at(head.slot.epoch::<P>());
+                    let target = self.proposer.forkchoice_target(head).await;
                     let Some(verdict) = self
                         .execution
-                        .update_forkchoice::<P>(fork, head.execution)
+                        .update_forkchoice::<P>(fork, target.execution)
                         .await
                     else {
                         continue;
                     };
-                    let root = head.root;
+                    // The verdict is on the payload the engine was pointed at.
+                    let root = target.root;
                     let applied = self
                         .chain
                         .run(move |chain| chain.on_payload_verdict(root, verdict))

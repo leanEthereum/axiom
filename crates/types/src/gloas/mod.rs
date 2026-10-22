@@ -11,6 +11,7 @@ mod bid;
 mod block;
 mod block_contents;
 mod builder;
+mod builder_preferences;
 mod data_column;
 mod envelope;
 mod execution;
@@ -30,6 +31,11 @@ pub use block_contents::BlockContents;
 pub use builder::{
     Builder, BuilderDepositRequest, BuilderExitRequest, BuilderPendingPayment,
     BuilderPendingPayments, BuilderPendingWithdrawal, BuilderPendingWithdrawals, Builders,
+};
+pub use builder_preferences::{
+    BuilderPreferences, BuilderPreferencesEntries, BuilderPreferencesEntry,
+    BuilderPreferencesRequest, BuilderRequestAuth, MaxBuilderAuthDataSize,
+    MaxBuilderPreferencesEntries, MaxBuilderUrlSize, SignedBuilderRequestAuth,
 };
 pub use data_column::{DataColumn, DataColumnSidecar, KzgProofs};
 pub use envelope::{ExecutionPayloadEnvelope, SignedExecutionPayloadEnvelope};

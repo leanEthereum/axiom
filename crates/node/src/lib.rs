@@ -13,18 +13,21 @@
 mod api;
 mod chain;
 mod checkpoint;
+mod client_stats;
 mod clock;
 mod config;
 mod engine;
 mod error;
 mod events;
 mod genesis;
+mod monitor;
 pub(crate) mod network;
 mod proposer;
 mod publish;
 mod race;
 mod service;
 mod slasher;
+mod target_committees;
 mod tasks;
 
 pub use api::BeaconApi;
@@ -36,6 +39,7 @@ pub use chain::{
     VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
 pub use checkpoint::{CheckpointError, CheckpointServer};
+pub use client_stats::{ClientStatsSettings, DEFAULT_PUSH_PERIOD};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
     AnchorSource, BuilderClientSettings, BuilderFallback, DatabaseSettings, EngineConfig,
@@ -48,7 +52,8 @@ pub use events::{
     UnknownTopic,
 };
 pub use genesis::{EmbeddedGenesis, GenesisDownload, GenesisState};
+pub use monitor::MonitorSettings;
 pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
-pub use proposer::{BlockOrder, ProposerError, ProposerService};
+pub use proposer::{BlockOrder, ProposerError, ProposerReorgs, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

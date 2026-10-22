@@ -50,11 +50,13 @@ impl<P: Preset> StartedChain<'_, P> {
         let proposer = ProposerService::new(
             self.handle.clone(),
             Arc::clone(execution),
+            Arc::clone(clock),
             settings.default_fee_recipient,
             relays,
         )
         .with_breaker(settings.builder_fallback.breaker::<P>())
-        .with_graffiti(settings.graffiti);
+        .with_graffiti(settings.graffiti)
+        .with_reorgs(settings.reorgs);
         let proposer = Arc::new(if settings.always_prepare_payload {
             proposer.preparing_always()
         } else {
@@ -248,6 +250,7 @@ impl<P: Preset> Node<P> {
             event_sender.clone(),
         ))
         .await?;
+        let chain = config.attach_monitor(chain, &registry)?;
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.
@@ -263,6 +266,7 @@ impl<P: Preset> Node<P> {
 
         // The engine, or a stand-in that keeps every payload optimistic.
         let execution = Arc::new(config.open_engine()?.with_metrics(metrics.clone()));
+        let stats = config.start_client_stats(&handle, &clock, metrics.clone())?;
 
         // The network, when configured, runs its own event loop.
         let network = match (identity, &config.network) {
@@ -305,7 +309,7 @@ impl<P: Preset> Node<P> {
                 Arc::clone(&clock),
                 network.as_ref().map(|(p2p, _)| p2p.clone()),
             )),
-            proposer,
+            proposer: Arc::clone(&proposer),
             identity,
             events: streams,
         };
@@ -316,8 +320,9 @@ impl<P: Preset> Node<P> {
 
         // Background loops run until aborted.
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
-        let follower =
-            task::spawn(EngineFollower::new(handle.clone(), events, execution, schedule).run());
+        let follower = task::spawn(
+            EngineFollower::new(handle.clone(), events, execution, proposer, schedule).run(),
+        );
 
         // An operator who only wants the chain synced stops the node once it is.
         let synced = SyncWatcher::new(handle.clone(), slots).stop(config.shutdown_after_sync);
@@ -343,7 +348,7 @@ impl<P: Preset> Node<P> {
             service.abort();
             let _cancelled = service.await;
         }
-        Self::abort_all([ticker, follower, preparer, hub]).await;
+        Self::abort_all([ticker, follower, preparer, hub].into_iter().chain(stats)).await;
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);

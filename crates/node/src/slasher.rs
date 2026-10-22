@@ -1,37 +1,24 @@
 //! The slasher beside the chain: fed verified votes and headers, it hands back evidence.
 
-use std::{
-    io,
-    marker::PhantomData,
-    path::Path,
-    sync::{Arc, mpsc as std_mpsc},
-    thread,
-    time::Duration,
-};
+use std::{io, marker::PhantomData, path::Path, sync::mpsc as std_mpsc, thread, time::Duration};
 
 use axiom_fork_choice::Store;
 use axiom_slasher::{Slasher, SlasherConfig, SlasherDatabase, SlasherError, Slashing};
-use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    BlsSignature, Epoch, Preset, ValidatorIndex,
-    accessors::CoreState,
-    combined,
-    phase0::{AttestationData, Checkpoint, SignedBeaconBlockHeader},
+    BlsSignature, Epoch, Preset, ValidatorIndex, combined,
+    phase0::{AttestationData, SignedBeaconBlockHeader},
     vote::{CommitteeVote, IndexedVote},
 };
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, info, warn};
 
-use crate::NodeError;
+use crate::{NodeError, target_committees::TargetCommittees};
 
 /// Observations that may queue for the slasher thread before new ones are dropped.
 ///
 /// A mainnet epoch brings about 32 thousand aggregates, under a thousand a slot.
 /// The bound absorbs a pass that runs long without letting the queue grow unbounded.
 const FEED_DEPTH: usize = 1 << 16;
-
-/// Target checkpoints whose committees the feed keeps: two epochs, two branches each.
-const COMMITTEE_CACHE: usize = 4;
 
 /// What the chain thread hands the slasher thread.
 #[derive(Debug)]
@@ -65,8 +52,8 @@ pub(crate) struct SlasherFeed<P: Preset> {
     queue: mpsc::Sender<Observation>,
     /// Evidence the slasher thread found.
     evidence: std_mpsc::Receiver<Slashing>,
-    /// Committees by target checkpoint, the most recent last.
-    committees: Vec<(Checkpoint, Arc<EpochCommittees>)>,
+    /// Committees of recent targets, to name each vote's signers.
+    committees: TargetCommittees,
     /// Least time between two passes, in milliseconds; zero passes at every tick.
     period_ms: u64,
     /// When the last pass was asked for, in Unix milliseconds.
@@ -106,7 +93,7 @@ impl<P: Preset> SlasherFeed<P> {
         Ok(Self {
             queue,
             evidence,
-            committees: Vec::new(),
+            committees: TargetCommittees::default(),
             period_ms: 0,
             last_pass_ms: None,
             preset: PhantomData,
@@ -127,21 +114,13 @@ impl<P: Preset> SlasherFeed<P> {
     /// Queues an aggregate vote, once its signers are known.
     pub(crate) fn vote(&mut self, store: &Store<P>, vote: &CommitteeVote) {
         let data = &vote.data;
-        let Some(committees) = self.committees(store, data.target) else {
-            debug!(slot = %data.slot, "no committees for the vote's target; slasher skips it");
-            return;
-        };
-        match committees.attesters(
-            data.slot,
-            vote.committees.iter().copied(),
-            vote.bits.iter().copied(),
-        ) {
-            Ok(signers) => self.send(Observation::Vote(IndexedVote {
-                indices: signers.into_iter().collect(),
+        match self.committees.signers(store, vote) {
+            Some(indices) => self.send(Observation::Vote(IndexedVote {
+                indices,
                 data: data.clone(),
                 signature: vote.signature,
             })),
-            Err(error) => debug!(slot = %data.slot, %error, "vote signers unresolved"),
+            None => debug!(slot = %data.slot, "vote signers unresolved; slasher skips it"),
         }
     }
 
@@ -197,33 +176,6 @@ impl<P: Preset> SlasherFeed<P> {
             // A stopped thread already logged why.
             Ok(()) | Err(TrySendError::Closed(_)) => {}
         }
-    }
-
-    /// The committees of a target checkpoint, from the cache or the target block's state.
-    ///
-    /// Shuffling walks every validator, so each target's committees are computed once.
-    /// A target block more than an epoch old is advanced to the target's epoch first.
-    /// Its active set and seed then match the checkpoint state's, see the phase0 fork choice spec.
-    fn committees(&mut self, store: &Store<P>, target: Checkpoint) -> Option<Arc<EpochCommittees>> {
-        if let Some((_, committees)) = self.committees.iter().find(|(seen, _)| *seen == target) {
-            return Some(Arc::clone(committees));
-        }
-        let state = store.block_state(&target.root)?;
-        let computed = if state.beacon().current_epoch() + 1 < target.epoch {
-            let mut advanced = state.clone();
-            advanced
-                .process_slots(store.config(), target.epoch.start_slot::<P>())
-                .ok()?;
-            EpochCommittees::compute(advanced.beacon(), target.epoch)
-        } else {
-            EpochCommittees::compute(state.beacon(), target.epoch)
-        };
-        let computed = Arc::new(computed);
-        if self.committees.len() == COMMITTEE_CACHE {
-            self.committees.remove(0);
-        }
-        self.committees.push((target, Arc::clone(&computed)));
-        Some(computed)
     }
 }
 

@@ -165,9 +165,17 @@ impl PreparationRoutes {
         context: ApiContext<P>,
         request: Request,
     ) -> ApiResult {
-        let _subscriptions: Vec<BeaconCommitteeSubscription> = Body(&request).json_items()?;
+        let subscriptions: Vec<BeaconCommitteeSubscription> = Body(&request).json_items()?;
         // A subscription needs a running chain, whose subnets it would join.
-        context.query(|_| Ok(())).await?;
+        // Its validator is the node's own, which the monitor may watch.
+        context
+            .query(move |chain| {
+                for subscription in &subscriptions {
+                    chain.auto_register(subscription.validator_index);
+                }
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(StatusCode::OK))
     }
 
@@ -179,8 +187,15 @@ impl PreparationRoutes {
         context: ApiContext<P>,
         request: Request,
     ) -> ApiResult {
-        let _subscriptions: Vec<SyncCommitteeSubscription> = Body(&request).json_items()?;
-        context.query(|_| Ok(())).await?;
+        let subscriptions: Vec<SyncCommitteeSubscription> = Body(&request).json_items()?;
+        context
+            .query(move |chain| {
+                for subscription in &subscriptions {
+                    chain.auto_register(subscription.validator_index);
+                }
+                Ok(())
+            })
+            .await?;
         Ok(Response::new(StatusCode::OK))
     }
 

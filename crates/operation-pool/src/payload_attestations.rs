@@ -103,24 +103,50 @@ impl PayloadAttestationPool {
         chosen.truncate(limit);
         chosen
             .into_iter()
-            .map(|(data, best)| {
-                let mut aggregation_bits = BitVector::<P::PtcSize>::new();
-                if best.bits.len() > aggregation_bits.len() {
-                    return Err(PoolError::TooManySigners {
-                        count: best.bits.len(),
-                        limit: aggregation_bits.len(),
-                    });
-                }
-                for seat in best.bits.ones() {
-                    aggregation_bits.set(seat, true);
-                }
-                Ok(PayloadAttestation {
-                    aggregation_bits,
-                    data: data.clone(),
-                    signature: best.signature,
-                })
-            })
+            .map(|(data, best)| Self::attestation(data, best))
             .collect()
+    }
+
+    /// The best aggregate of every vote held, of one slot or of all, oldest slot first.
+    ///
+    /// See `getPoolPayloadAttestations` in the beacon API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a committee is larger than the preset allows.
+    pub fn pooled<P: Preset>(
+        &self,
+        slot: Option<Slot>,
+    ) -> Result<Vec<PayloadAttestation<P>>, PoolError> {
+        self.votes
+            .iter()
+            .filter(|(voted, _)| slot.is_none_or(|slot| **voted == slot))
+            .flat_map(|(_, votes)| votes.values())
+            .filter_map(|vote| vote.votes.best().map(|best| (&vote.data, best)))
+            .map(|(data, best)| Self::attestation(data, best))
+            .collect()
+    }
+
+    /// An aggregate of one vote, with its seats as the committee's bits.
+    fn attestation<P: Preset>(
+        data: &PayloadAttestationData,
+        best: &Aggregate,
+    ) -> Result<PayloadAttestation<P>, PoolError> {
+        let mut aggregation_bits = BitVector::<P::PtcSize>::new();
+        if best.bits.len() > aggregation_bits.len() {
+            return Err(PoolError::TooManySigners {
+                count: best.bits.len(),
+                limit: aggregation_bits.len(),
+            });
+        }
+        for seat in best.bits.ones() {
+            aggregation_bits.set(seat, true);
+        }
+        Ok(PayloadAttestation {
+            aggregation_bits,
+            data: data.clone(),
+            signature: best.signature,
+        })
     }
 
     /// Drops votes older than the slot before a given one, which no block can use.
@@ -189,6 +215,38 @@ mod tests {
             pool.for_block::<Minimal>(Slot(4), Root([9; 32]), 4),
             Ok(Vec::new())
         );
+    }
+
+    #[test]
+    fn the_pool_lists_its_best_aggregates_by_slot() {
+        // Fixture state: a committee of seats 3 and 5; validator 3 votes at slot 4, 5 at slot 5.
+        let committee = [3, 5].map(ValidatorIndex);
+        let mut later = message(5, 2, false);
+        later.data.slot = Slot(5);
+        let mut pool = PayloadAttestationPool::default();
+        pool.insert(&message(3, 1, true), &committee).unwrap();
+        pool.insert(&later, &committee).unwrap();
+
+        // Each vote comes back as one aggregate: seat 0 at slot 4, seat 1 at slot 5.
+        let listed = |slot| {
+            pool.pooled::<Minimal>(slot)
+                .unwrap()
+                .iter()
+                .map(|attestation| {
+                    let seats: Vec<usize> = attestation
+                        .aggregation_bits
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, bit)| *bit)
+                        .map(|(seat, _)| seat)
+                        .collect();
+                    (attestation.data.slot, seats)
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(None), [(Slot(4), vec![0]), (Slot(5), vec![1])]);
+        assert_eq!(listed(Some(Slot(5))), [(Slot(5), vec![1])]);
+        assert_eq!(listed(Some(Slot(6))), []);
     }
 
     #[test]

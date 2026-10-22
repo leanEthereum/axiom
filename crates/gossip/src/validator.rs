@@ -38,6 +38,7 @@ use axiom_types::{
 use crate::{
     BlobSubnets, ChainView, CheckedBlob, Detail, GossipError, GossipFork, Seen, SeenPartialHeader,
     VoteIndex, VoteWindow,
+    error::{UNSEEN_PARENT, UNSEEN_VOTED_BLOCK},
     fork::{Bounded, BuilderFunds, ExecutionRequestLimits, GasTarget, Ptc, Verdict},
     partial_column::{PartialCells, PartialHeader},
     signers::Signers,
@@ -102,7 +103,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         )?;
         let parent_detail = Detail::Block(header.parent_root);
         let Some(parent) = self.view.block(&header.parent_root) else {
-            return Err(GossipError::ignore("block's parent has not been seen").with(parent_detail));
+            return Err(GossipError::ignore(UNSEEN_PARENT).with(parent_detail));
         };
         if !self.view.is_imported(&header.parent_root) {
             return Err(F::failed_parent(self.view, block));
@@ -1714,9 +1715,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     .with(validator_detail),
             );
         }
-        self.seen
-            .proposer_preferences
-            .insert(key, preferences.clone());
+        self.seen.proposer_preferences.insert(key, signed.clone());
         Ok(())
     }
 
@@ -1823,6 +1822,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .seen
             .proposer_preferences
             .get(&(bid.slot, dependent_root))
+            .map(|signed| &signed.message)
         else {
             return Err(
                 GossipError::ignore("matching proposer preferences have not been seen")
@@ -2121,10 +2121,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     /// Checks that the block a vote names is known and valid.
     fn voted_block_is_valid(&self, root: Root) -> Verdict {
         if self.view.block(&root).is_none() {
-            return Err(
-                GossipError::ignore("block being voted for has not been seen")
-                    .with(Detail::Block(root)),
-            );
+            return Err(GossipError::ignore(UNSEEN_VOTED_BLOCK).with(Detail::Block(root)));
         }
         if !self.view.is_imported(&root) {
             return Err(

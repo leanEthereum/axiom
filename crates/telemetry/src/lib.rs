@@ -16,11 +16,13 @@
 //! The registry is read only when scraped, in the Prometheus text format 0.0.4.
 
 mod exporter;
+mod host;
 mod logging;
 mod metrics;
 mod node;
 
 pub use exporter::MetricsServer;
+pub use host::{ProcessUsage, SystemUsage};
 pub use logging::{LogConfig, LogError, LogFile, LogFormat};
 pub use metrics::{
     Buckets, BucketsError, CONTENT_TYPE, Counter, CounterVec, Gauge, GaugeVec, Histogram,
