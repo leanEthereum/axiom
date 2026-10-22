@@ -5,6 +5,7 @@
 //! Each module serves one protocol need.
 //!
 //! - Keccak-256 hashes public keys into node identities and addresses.
+//! - SHA-3 and SHAKE, the rest of the Keccak family, serve the hash-based signatures.
 //! - secp256k1 signs node records and agrees on discv5 session keys.
 //! - X25519 and ChaCha20-Poly1305 run the libp2p Noise handshake.
 //! - AES-128-GCM seals discv5 messages, and AES-128-CTR masks their headers.
