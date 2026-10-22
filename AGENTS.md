@@ -86,7 +86,7 @@ Everything else is written here:
 - Encodings: SSZ and merkleization, snappy, YAML, JSON, RLP.
 - Cryptography: BLS12-381, KZG, secp256k1, X25519, Keccak, the AEADs.
 - Systems: the database, HTTP, the engine API, Prometheus metrics.
-- Networking: libp2p, Noise, yamux, gossipsub, discv5.
+- Networking: libp2p, Noise, yamux, gossipsub, discv5, QUIC, TLS.
 
 Adding a crate requires a reason recorded in the commit message and in the root manifest.
 
@@ -99,6 +99,7 @@ Dependencies point one way only.
 ```text
 L0  ssz, yaml, snappy, json, rlp               encodings                            pure
 L0  bls12-381, bls, kzg, crypto                curves, signatures, commitments      pure
+L0  tls                                        TLS 1.3 and 1.2, X.509, web PKI      pure
 L0  types                                      newtypes, presets, containers        pure
 L1  state-transition                           per-slot, per-block, per-epoch       pure
 L1  beacon-json                                the API's JSON form of containers    pure
