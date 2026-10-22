@@ -8,7 +8,16 @@
 //! The node sends commands to the swarm and receives events from it.
 //! The swarm runs on tokio and hosts the gossipsub router, the req/resp codec, identify, and ping.
 //!
-//! Below the swarm, the stack has four layers, top to bottom:
+//! Below the swarm run two transports.
+//! QUIC is the primary one, with three layers, top to bottom:
+//!
+//! 1. QUIC streams, with multistream-select on each stream.
+//! 2. QUIC, its packets protected by TLS 1.3 keys.
+//! 3. UDP.
+//!
+//! TLS authenticates each side with a libp2p certificate that binds its secp256k1 identity.
+//!
+//! TCP is the fallback, with four layers, top to bottom:
 //!
 //! 1. Yamux streams, with multistream-select on each stream.
 //! 2. The Noise secure channel, or plaintext in tests.
