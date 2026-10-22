@@ -157,7 +157,6 @@ dependencies = [
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-types",
- "criterion",
  "proptest",
  "thiserror",
 ]
