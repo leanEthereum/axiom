@@ -7,12 +7,11 @@ use axiom_fork_choice::{DataAvailability, FastConfirmation, PayloadStatus, Store
 use axiom_kzg::Kzg;
 use axiom_state_transition::Verification;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar, Epoch,
-    Hash32, Preset, Root, SignedBeaconBlock, Slot,
+    Attestation, AttesterSlashing, BeaconBlock, BeaconState, ChainConfig, Checkpoint,
+    DataColumnSidecar, Epoch, Hash32, Preset, Root, SignedBeaconBlock, Slot,
 };
 use axiom_yaml::Yaml;
 
-use super::config_of;
 use crate::{Case, Failure, Runner};
 
 /// Check keys that belong to the fast confirmation rule rather than the store.
@@ -124,7 +123,7 @@ impl<P: Preset> StoreReplay<P> {
 
     /// Data availability of a block step, from the columns the step lists.
     pub(super) fn availability(case: &Case, step: &Yaml) -> Result<DataAvailability, Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         // No columns listed means nothing to sample; an empty list means sampling failed.
         let availability = match step.get("columns").and_then(Yaml::as_sequence) {
             None => DataAvailability::Available,
@@ -201,7 +200,7 @@ impl<P: Preset> StoreReplay<P> {
                     Self::expect_eq(
                         "genesis time",
                         &Self::scalar(expected)?,
-                        &(store.genesis_time_ms() / 1000),
+                        &(store.slot_clock().genesis_ms() / 1000),
                     )?;
                 }
                 "justified_checkpoint" => {
@@ -327,8 +326,12 @@ impl<P: Preset> Runner for StoreReplay<P> {
         };
         let anchor_state = case.ssz::<BeaconState<P>>("anchor_state")?;
         let anchor_block = case.ssz::<BeaconBlock<P>>("anchor_block")?;
-        let mut store = Store::new(config_of::<P>(), anchor_state, &anchor_block)
-            .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
+        let mut store = Store::new(
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
+            anchor_state,
+            &anchor_block,
+        )
+        .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
         let mut confirmation = FastConfirmation::new(&store);
         let mut payload_statuses = HashMap::new();
 

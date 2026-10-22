@@ -1,6 +1,10 @@
 //! A seeded generator for nonces, masking vectors, and ephemeral keys.
 
-use std::fmt;
+use std::{
+    fmt,
+    fs::File,
+    io::{self, Read},
+};
 
 use axiom_crypto::secp256k1::SecretKey;
 use sha2::{Digest, Sha256};
@@ -38,6 +42,19 @@ impl Csprng {
             buffer: [0; 32],
             used: 32,
         }
+    }
+
+    /// A seed read from the operating system's entropy source.
+    ///
+    /// The generator needs only this one secret to be unpredictable.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the entropy source cannot be read.
+    pub fn os_seed() -> io::Result<[u8; 32]> {
+        let mut seed = [0_u8; 32];
+        File::open("/dev/urandom")?.read_exact(&mut seed)?;
+        Ok(seed)
     }
 
     /// Fills a buffer with fresh bytes.

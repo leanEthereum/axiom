@@ -24,16 +24,20 @@ impl Default for IpLimits {
     }
 }
 
-impl IpLimits {
+/// The /24 prefix of an IPv4 address, the unit the caps count in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct Subnet24(pub [u8; 3]);
+
+impl Subnet24 {
     /// The /24 prefix of an address.
     #[must_use]
-    pub const fn subnet(ip: Ipv4Addr) -> [u8; 3] {
+    pub(crate) const fn of(ip: Ipv4Addr) -> Self {
         let [a, b, c, _] = ip.octets();
-        [a, b, c]
+        Self([a, b, c])
     }
 
-    /// How many entries share a /24 prefix.
-    pub fn count<'a>(entries: impl Iterator<Item = &'a Entry>, subnet: [u8; 3]) -> usize {
+    /// How many entries advertise an address in this prefix.
+    pub(crate) fn count_in<'a>(self, entries: impl Iterator<Item = &'a Entry>) -> usize {
         // Entries without an IPv4 address never count.
         entries
             .filter(|entry| {
@@ -41,7 +45,7 @@ impl IpLimits {
                     .enr
                     .endpoints()
                     .ip4
-                    .is_some_and(|ip| Self::subnet(ip) == subnet)
+                    .is_some_and(|ip| Self::of(ip) == self)
             })
             .count()
     }

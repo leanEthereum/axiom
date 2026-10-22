@@ -47,12 +47,7 @@ impl<P: Preset> Operation<P> for SignedVoluntaryExit {
         );
         processor.verify_signature(exit.validator_index, exit, domain, &self.signature)?;
 
-        let total_active_balance = processor.total_active_balance;
-        processor.state.initiate_validator_exit(
-            processor.config,
-            exit.validator_index,
-            total_active_balance,
-        )?;
+        processor.registry().initiate_exit(exit.validator_index)?;
         Ok(())
     }
 }

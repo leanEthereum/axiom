@@ -44,13 +44,10 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
         }
 
         let pending = state.pending_balance_to_withdraw(index);
-        let total_active_balance = processor.total_active_balance;
         if is_full_exit {
             // Only exit when nothing is queued, so a queued withdrawal is never stranded.
             if pending.0 == 0 {
-                processor
-                    .state
-                    .initiate_validator_exit(config, index, total_active_balance)?;
+                processor.registry().initiate_exit(index)?;
             }
             return Ok(());
         }
@@ -67,14 +64,9 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
             && has_excess_balance
         {
             let to_withdraw = (balance - floor).min(self.amount);
-            let exit_epoch = processor.state.compute_exit_epoch_and_update_churn(
-                config,
-                to_withdraw,
-                total_active_balance,
-            );
-            let withdrawable_epoch = exit_epoch
-                .checked_add(config.min_validator_withdrawability_delay)
-                .ok_or(StateError::Overflow)?;
+            let mut registry = processor.registry();
+            let exit_epoch = registry.exit_epoch(to_withdraw);
+            let withdrawable_epoch = registry.withdrawable_epoch(exit_epoch)?;
             processor
                 .state
                 .beacon

@@ -36,10 +36,7 @@ impl<P: Preset> Operation<P> for ProposerSlashing {
             processor.verify_signature(proposer, &signed.message, domain, &signed.signature)?;
         }
 
-        let total_active_balance = processor.total_active_balance;
-        processor
-            .state
-            .slash_validator(processor.config, proposer, None, total_active_balance)?;
+        processor.registry().slash(proposer, None)?;
         Ok(())
     }
 }

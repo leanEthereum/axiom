@@ -11,23 +11,30 @@ mod withdrawals;
 use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BeaconBlock, BeaconBlockBody, BlsSignature, ChainConfig, Domain, Gwei, Preset, Root,
-    SignedBeaconBlock, SigningData, ValidatorIndex, constants::DOMAIN_BEACON_PROPOSER,
+    BeaconBlock, BeaconBlockBody, BlsSignature, ChainConfig, Domain, IndexedAttestation, Preset,
+    Root, SignedBeaconBlock, SigningData, ValidatorIndex,
+    constants::{DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER},
 };
+pub use execution_payload::PayloadExecution;
+use randao::RandaoReveal;
 pub use withdrawals::ExpectedWithdrawals;
 
-use crate::{BlockError, ExecutionEngine, SignatureBatch, State, Verification};
+use crate::{
+    ActiveBalance, BlockError, ExecutionEngine, SignatureBatch, State, StateError, Verification,
+    registry::Registry,
+};
 
-/// A block operation: one kind of message a block carries.
+/// One part of a block that processing checks, then applies to the state.
 ///
-/// Every operation checks its own validity, then mutates the state.
-/// See `process_operations` in the Fulu beacon chain spec.
+/// The header, the payload's withdrawals, the payload, the randao reveal, the eth1 vote,
+/// every kind of operation, and the sync aggregate each implement it.
+/// See `process_block` and `process_operations` in the Fulu beacon chain spec.
 pub trait Operation<P: Preset> {
-    /// Checks the operation against the state, then applies it.
+    /// Checks the part against the state, then applies it.
     ///
     /// # Errors
     ///
-    /// Fails when the operation is invalid, which invalidates the whole block.
+    /// Fails when the part is invalid, which invalidates the whole block.
     fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError>;
 }
 
@@ -35,7 +42,7 @@ pub trait Operation<P: Preset> {
 ///
 /// # Overview
 ///
-/// The steps run in the spec's order, each its own method.
+/// The parts apply in the spec's order, each its own operation.
 ///
 /// ```text
 /// header -> withdrawals -> execution payload -> randao -> eth1 data -> operations -> sync aggregate
@@ -54,7 +61,7 @@ pub struct BlockProcessor<'a, P: Preset> {
     /// Total active balance, fixed for the whole block.
     ///
     /// Activity changes only at epoch boundaries, and effective balances only in epoch processing.
-    total_active_balance: Gwei,
+    total_active_balance: ActiveBalance,
 }
 
 impl<'a, P: Preset> BlockProcessor<'a, P> {
@@ -64,7 +71,7 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         config: &'a ChainConfig,
         verification: Verification,
     ) -> Self {
-        let total_active_balance = state.beacon().total_active_balance();
+        let total_active_balance = ActiveBalance::of(state.beacon());
         Self {
             state,
             config,
@@ -85,13 +92,14 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         block: &BeaconBlock<P>,
         engine: &impl ExecutionEngine<P>,
     ) -> Result<(), BlockError> {
-        self.process_block_header(block)?;
-        self.process_withdrawals(&block.body.execution_payload)?;
-        self.process_execution_payload(&block.body, engine)?;
-        self.process_randao(&block.body)?;
-        self.process_eth1_data(&block.body)?;
-        self.process_operations(&block.body)?;
-        self.process_sync_aggregate(&block.body.sync_aggregate)
+        let body = &block.body;
+        self.apply(&block.header())?;
+        self.apply(body.execution_payload.withdrawals.as_slice())?;
+        self.apply(&PayloadExecution::new(body, engine))?;
+        self.apply(&RandaoReveal(body.randao_reveal))?;
+        self.apply(&body.eth1_data)?;
+        self.process_operations(body)?;
+        self.apply(&body.sync_aggregate)
     }
 
     /// Applies every operation of a body, in the spec's order.
@@ -119,7 +127,7 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
     /// # Errors
     ///
     /// Fails when the operation is invalid.
-    pub fn apply<O: Operation<P>>(&mut self, operation: &O) -> Result<(), BlockError> {
+    pub fn apply<O: Operation<P> + ?Sized>(&mut self, operation: &O) -> Result<(), BlockError> {
         operation.apply(self)
     }
 
@@ -149,6 +157,49 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
             .beacon
             .domain(DOMAIN_BEACON_PROPOSER, self.state.beacon.current_epoch());
         self.verify_signature(block.proposer_index, block, domain, &signed_block.signature)
+    }
+
+    /// Queues the check of an indexed attestation: sorted unique signers, and their aggregate signature.
+    ///
+    /// See `is_valid_indexed_attestation` in the phase0 beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the indices are empty, unsorted, repeated, or unknown, or the signature is malformed.
+    pub fn verify_indexed_attestation(
+        &mut self,
+        attestation: &IndexedAttestation<P>,
+    ) -> Result<(), BlockError> {
+        let indices = &attestation.attesting_indices;
+        let strictly_increasing = indices.windows(2).all(|pair| pair[0] < pair[1]);
+        if indices.is_empty() || !strictly_increasing {
+            return Err(BlockError::InvalidAttestingIndices);
+        }
+        // Every index must name a validator, signatures checked or not.
+        let registry_size = self.state.beacon.validators.len() as u64;
+        if let Some(unknown) = indices.iter().find(|index| index.0 >= registry_size) {
+            return Err(StateError::UnknownValidator(*unknown).into());
+        }
+
+        if !self.signatures.is_enabled() {
+            return Ok(());
+        }
+        let keys = indices
+            .iter()
+            .map(|index| self.state.public_key(*index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = PublicKey::aggregate(&keys).map_err(|_| BlockError::InvalidSignature)?;
+        let domain = self
+            .state
+            .beacon
+            .domain(DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch);
+        let root = SigningData::signing_root(&attestation.data, domain);
+        self.verify_root(key, root, &attestation.signature)
+    }
+
+    /// The state's registry, under the block's total active balance.
+    const fn registry(&mut self) -> Registry<'_, P> {
+        Registry::new(self.state, self.config, self.total_active_balance)
     }
 
     /// Applies a list of operations in order.

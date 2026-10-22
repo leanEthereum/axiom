@@ -5,24 +5,35 @@ use axiom_types::{
     BeaconBlockBody, ExecutionPayloadHeader, KzgCommitment, NewPayloadRequest, Preset,
 };
 
-use super::BlockProcessor;
+use super::{BlockProcessor, Operation};
 use crate::{BlockError, ExecutionEngine, StateError};
 
-impl<P: Preset> BlockProcessor<'_, P> {
+/// A block body's execution payload, with the engine that judges it.
+#[derive(Debug)]
+pub struct PayloadExecution<'a, P: Preset, E> {
+    /// The body carrying the payload, its blob commitments, and its requests.
+    body: &'a BeaconBlockBody<P>,
+    /// The execution engine.
+    engine: &'a E,
+}
+
+impl<'a, P: Preset, E: ExecutionEngine<P>> PayloadExecution<'a, P, E> {
+    /// A body's payload, to be judged by an engine.
+    pub const fn new(body: &'a BeaconBlockBody<P>, engine: &'a E) -> Self {
+        Self { body, engine }
+    }
+}
+
+impl<P: Preset, E: ExecutionEngine<P>> Operation<P> for PayloadExecution<'_, P, E> {
     /// Checks the payload against the chain, has the engine validate it, and caches its header.
     ///
+    /// The payload must extend the latest payload, use the current randomness and timestamp,
+    /// stay within the blob limit, and satisfy the engine.
+    ///
     /// See `process_execution_payload` in the Fulu beacon chain spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the payload does not extend the latest payload, uses the wrong randomness,
-    /// has the wrong timestamp, carries too many blobs, or the engine rejects it.
-    pub fn process_execution_payload(
-        &mut self,
-        body: &BeaconBlockBody<P>,
-        engine: &impl ExecutionEngine<P>,
-    ) -> Result<(), BlockError> {
-        let state = &self.state.beacon;
+    fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError> {
+        let body = self.body;
+        let state = &processor.state.beacon;
         let payload = &body.execution_payload;
         let epoch = state.current_epoch();
 
@@ -36,13 +47,13 @@ impl<P: Preset> BlockProcessor<'_, P> {
         let slot_ms = state
             .slot
             .0
-            .checked_mul(self.config.slot_duration_ms)
+            .checked_mul(processor.config.slot_duration_ms)
             .ok_or(StateError::Overflow)?;
         let expected_timestamp = state.genesis_time + slot_ms / 1000;
         if payload.timestamp != expected_timestamp {
             return Err(BlockError::PayloadTimestampMismatch);
         }
-        let limit = self.config.blob_parameters(epoch).max_blobs_per_block;
+        let limit = processor.config.blob_parameters(epoch).max_blobs_per_block;
         if body.blob_kzg_commitments.len() as u64 > limit {
             return Err(BlockError::TooManyBlobs {
                 count: body.blob_kzg_commitments.len(),
@@ -56,11 +67,11 @@ impl<P: Preset> BlockProcessor<'_, P> {
             parent_beacon_block_root: state.latest_block_header.parent_root,
             execution_requests: body.execution_requests.clone(),
         };
-        if !engine.verify_and_notify_new_payload(&request) {
+        if !self.engine.verify_and_notify_new_payload(&request) {
             return Err(BlockError::PayloadInvalid);
         }
 
-        self.state.beacon.latest_execution_payload_header = ExecutionPayloadHeader {
+        processor.state.beacon.latest_execution_payload_header = ExecutionPayloadHeader {
             parent_hash: payload.parent_hash,
             fee_recipient: payload.fee_recipient,
             state_root: payload.state_root,

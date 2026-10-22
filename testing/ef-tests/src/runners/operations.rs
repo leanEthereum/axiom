@@ -4,17 +4,17 @@ use std::marker::PhantomData;
 
 use axiom_ssz::Ssz;
 use axiom_state_transition::{
-    BlockError, BlockProcessor, KnownVerdict, Operation, State, Verification,
+    BlockError, BlockProcessor, KnownVerdict, Operation, PayloadExecution, State, Verification,
 };
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, ConsolidationRequest,
-    DepositRequest, ExecutionPayload, Preset, ProposerSlashing, SignedBlsToExecutionChange,
-    SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
+    Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, ChainConfig,
+    ConsolidationRequest, DepositRequest, ExecutionPayload, Preset, ProposerSlashing,
+    SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
 };
 use axiom_yaml::Yaml;
 
-use super::{BEACON_STATE_FIELDS, config_of};
-use crate::{Case, Failure, Runner, assert_container_eq};
+use super::BEACON_STATE_FIELDS;
+use crate::{Case, Failure, Runner};
 
 /// Applies the case's operation, and compares with the post-state or expects rejection.
 #[derive(Debug, Default)]
@@ -43,7 +43,7 @@ impl<P: Preset> Runner for Operations<P> {
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let meta = case.meta()?;
         let verification = if meta.bls_ignored() {
             Verification::Skip
@@ -89,11 +89,11 @@ impl<P: Preset> Runner for Operations<P> {
                     &mut processor,
                 )?,
                 "block_header" => Self::input::<BeaconBlock<P>>(case, "block")?
-                    .and_then(|block| processor.process_block_header(&block)),
+                    .and_then(|block| processor.apply(&block.header())),
                 "sync_aggregate" => Self::input::<SyncAggregate<P>>(case, "sync_aggregate")?
-                    .and_then(|aggregate| processor.process_sync_aggregate(&aggregate)),
+                    .and_then(|aggregate| processor.apply(&aggregate)),
                 "withdrawals" => Self::input::<ExecutionPayload<P>>(case, "execution_payload")?
-                    .and_then(|payload| processor.process_withdrawals(&payload)),
+                    .and_then(|payload| processor.apply(payload.withdrawals.as_slice())),
                 "execution_payload" => {
                     let valid = case
                         .yaml("execution.yaml")?
@@ -101,7 +101,7 @@ impl<P: Preset> Runner for Operations<P> {
                         .and_then(Yaml::as_bool)
                         .ok_or_else(|| Failure::new("execution.yaml has no verdict"))?;
                     Self::input::<BeaconBlockBody<P>>(case, "body")?.and_then(|body| {
-                        processor.process_execution_payload(&body, &KnownVerdict(valid))
+                        processor.apply(&PayloadExecution::new(&body, &KnownVerdict(valid)))
                     })
                 }
                 other => return Err(Failure(format!("unsupported operation {other}"))),
@@ -110,9 +110,7 @@ impl<P: Preset> Runner for Operations<P> {
         };
 
         match (outcome, expected) {
-            (Ok(()), Some(expected)) => {
-                assert_container_eq(&expected, state.beacon(), &BEACON_STATE_FIELDS)
-            }
+            (Ok(()), Some(expected)) => BEACON_STATE_FIELDS.check(&expected, state.beacon()),
             (Err(_), None) => Ok(()),
             (Ok(()), None) => Err(Failure::new("operation accepted, the vector rejects it")),
             (Err(error), Some(_)) => Err(Failure(format!("operation rejected: {error}"))),

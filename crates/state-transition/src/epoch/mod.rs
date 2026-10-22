@@ -1,16 +1,32 @@
 //! Epoch processing: the accounting run once at the end of every epoch.
 
+mod consolidations;
+mod deposits;
+mod effective_balance;
 mod finality;
-mod queues;
-mod registry;
-mod resets;
+mod inactivity;
+mod lookahead;
+mod participation;
+mod registry_updates;
 mod rewards;
-mod sync_committee;
+mod rollover;
+mod slashings;
 
-use axiom_types::{ChainConfig, Epoch, Gwei, Preset};
+use axiom_types::{ChainConfig, Epoch, Preset};
+use consolidations::ConsolidationQueue;
+use deposits::DepositQueue;
+use effective_balance::Hysteresis;
+use finality::Justification;
+use inactivity::InactivityUpdates;
+use lookahead::Lookahead;
+pub use participation::Participation;
+use registry_updates::RegistryUpdates;
 pub use rewards::Deltas;
+use rewards::RewardsAndPenalties;
+use rollover::Rollover;
+use slashings::CorrelationPenalty;
 
-use crate::{State, StateError};
+use crate::{ActiveBalance, State, StateError, registry::Registry};
 
 /// One sub-transition of epoch processing, in spec order.
 ///
@@ -101,6 +117,9 @@ impl EpochStep {
 
 /// Runs the epoch transition on a state at the last slot of an epoch.
 ///
+/// # Overview
+///
+/// Each step is its own type, built from what the step reads and then applied.
 /// Totals that stay fixed through the early steps are computed once, up front.
 #[derive(Debug)]
 pub struct EpochProcessor<'a, P: Preset> {
@@ -110,26 +129,21 @@ pub struct EpochProcessor<'a, P: Preset> {
     config: &'a ChainConfig,
     /// The epoch that is ending.
     current_epoch: Epoch,
-    /// The epoch before it.
-    previous_epoch: Epoch,
     /// Total active balance of the ending epoch.
     ///
     /// Only the effective balance step changes it, and no later step reads it.
-    total_active_balance: Gwei,
+    total_active_balance: ActiveBalance,
 }
 
 impl<'a, P: Preset> EpochProcessor<'a, P> {
     /// A processor for a state at the last slot of an epoch.
     pub fn new(state: &'a mut State<P>, config: &'a ChainConfig) -> Self {
-        let beacon = &state.beacon;
-        let current_epoch = beacon.current_epoch();
-        let previous_epoch = beacon.previous_epoch();
-        let total_active_balance = beacon.total_active_balance();
+        let current_epoch = state.beacon.current_epoch();
+        let total_active_balance = ActiveBalance::of(&state.beacon);
         Self {
             state,
             config,
             current_epoch,
-            previous_epoch,
             total_active_balance,
         }
     }
@@ -151,70 +165,70 @@ impl<'a, P: Preset> EpochProcessor<'a, P> {
     ///
     /// Fails when the state breaks an invariant.
     pub fn run(&mut self, step: EpochStep) -> Result<(), StateError> {
+        let current = self.current_epoch;
         match step {
             EpochStep::JustificationAndFinalization => {
-                self.process_justification_and_finalization()
+                Justification::tally(&self.participation()).weigh(&mut self.state.beacon)
             }
             EpochStep::InactivityUpdates => {
-                self.process_inactivity_updates();
+                InactivityUpdates::new(&self.participation(), self.config)
+                    .apply(&mut self.state.beacon);
                 Ok(())
             }
-            EpochStep::RewardsAndPenalties => self.process_rewards_and_penalties(),
-            EpochStep::RegistryUpdates => self.process_registry_updates(),
-            EpochStep::Slashings => self.process_slashings(),
+            EpochStep::RewardsAndPenalties => {
+                RewardsAndPenalties::new(&self.participation(), self.config).apply(self.state)
+            }
+            EpochStep::RegistryUpdates => {
+                RegistryUpdates::new(&self.state.beacon, self.config).apply(&mut self.registry())
+            }
+            EpochStep::Slashings => {
+                CorrelationPenalty::new(&self.state.beacon, self.total_active_balance)?
+                    .apply(self.state)
+            }
             EpochStep::Eth1DataReset => {
-                self.process_eth1_data_reset();
+                Rollover::new(current).reset_eth1_data(&mut self.state.beacon);
                 Ok(())
             }
-            EpochStep::PendingDeposits => self.process_pending_deposits(),
-            EpochStep::PendingConsolidations => self.process_pending_consolidations(),
+            EpochStep::PendingDeposits => {
+                DepositQueue::new(&self.state.beacon, self.config, self.total_active_balance)
+                    .apply(&mut self.registry())
+            }
+            EpochStep::PendingConsolidations => ConsolidationQueue::new(current).apply(self.state),
             EpochStep::EffectiveBalanceUpdates => {
-                self.process_effective_balance_updates();
+                Hysteresis::new::<P>().apply(&mut self.state.beacon);
                 Ok(())
             }
             EpochStep::SlashingsReset => {
-                self.process_slashings_reset();
+                Rollover::new(current).reset_slashings(&mut self.state.beacon);
                 Ok(())
             }
             EpochStep::RandaoMixesReset => {
-                self.process_randao_mixes_reset();
+                Rollover::new(current).reset_randao_mix(&mut self.state.beacon);
                 Ok(())
             }
-            EpochStep::HistoricalSummariesUpdate => self.process_historical_summaries_update(),
-            EpochStep::ParticipationFlagUpdates => self.process_participation_flag_updates(),
-            EpochStep::SyncCommitteeUpdates => self.process_sync_committee_updates(),
-            EpochStep::ProposerLookahead => self.process_proposer_lookahead(),
+            EpochStep::HistoricalSummariesUpdate => {
+                Rollover::new(current).update_historical_summaries(&mut self.state.beacon)
+            }
+            EpochStep::ParticipationFlagUpdates => {
+                Rollover::rotate_participation(&mut self.state.beacon)
+            }
+            EpochStep::SyncCommitteeUpdates => {
+                Lookahead::new(current).rotate_sync_committees(self.state)
+            }
+            EpochStep::ProposerLookahead => {
+                Lookahead::new(current).shift_proposers(&mut self.state.beacon)
+            }
         }
     }
 
-    /// Total effective balance of unslashed validators with a flag, in an epoch.
-    ///
-    /// The epoch is the previous or the current one, whose participation the state keeps.
-    fn unslashed_participating_balance(&self, flag: usize, epoch: Epoch) -> Gwei {
-        let beacon = &self.state.beacon;
-        let participation = if epoch == self.current_epoch {
-            &beacon.current_epoch_participation
-        } else {
-            &beacon.previous_epoch_participation
-        };
-        let sum: Gwei = beacon
-            .validators
-            .iter()
-            .zip(participation.iter())
-            .filter(|(validator, flags)| {
-                validator.is_active_at(epoch) && !validator.slashed && flags.has(flag)
-            })
-            .map(|(validator, _)| validator.effective_balance)
-            .sum();
-        sum.max(P::EFFECTIVE_BALANCE_INCREMENT)
+    /// The ending epoch's participation, as rewards and finality read it.
+    #[must_use]
+    pub const fn participation(&self) -> Participation<'_, P> {
+        Participation::new(&self.state.beacon, self.total_active_balance)
     }
 
-    /// Whether a validator is an unslashed participant with a flag in the previous epoch.
-    fn is_previous_participant(&self, index: usize, flag: usize) -> bool {
-        let beacon = &self.state.beacon;
-        let validator = &beacon.validators[index];
-        validator.is_active_at(self.previous_epoch)
-            && !validator.slashed
-            && beacon.previous_epoch_participation[index].has(flag)
+    /// The state's registry, under the ending epoch's total active balance.
+    const fn registry(&mut self) -> Registry<'_, P> {
+        Registry::new(self.state, self.config, self.total_active_balance)
     }
 }

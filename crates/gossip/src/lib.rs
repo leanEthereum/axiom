@@ -16,6 +16,8 @@
 
 mod error;
 mod seen;
+mod signers;
+mod signing_claim;
 mod validator;
 mod view;
 

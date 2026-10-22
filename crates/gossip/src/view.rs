@@ -135,28 +135,20 @@ impl<'a, P: Preset> ChainView<'a, P> {
         self.checkpoint_block(root, self.finalized.epoch) == Some(self.finalized.root)
     }
 
-    /// Start of a slot, in milliseconds since the Unix epoch.
-    #[must_use]
-    pub const fn slot_start_ms(&self, slot: Slot) -> u64 {
-        self.store.genesis_time_ms() + slot.0 * self.config().slot_duration_ms
-    }
-
     /// Whether a slot starts after the current time plus the allowed clock disparity.
     ///
     /// See `is_future_slot` in the phase0 p2p spec.
     #[must_use]
     pub const fn is_future_slot(&self, slot: Slot, now_ms: u64) -> bool {
-        now_ms + self.config().maximum_gossip_clock_disparity_ms < self.slot_start_ms(slot)
+        now_ms + self.config().maximum_gossip_clock_disparity_ms
+            < self.store.slot_clock().slot_start_ms(slot)
     }
 
     /// Whether an epoch starts after the current time plus the allowed clock disparity.
     #[must_use]
     pub fn is_future_epoch(&self, epoch: Epoch, now_ms: u64) -> bool {
         let shifted = now_ms + self.config().maximum_gossip_clock_disparity_ms;
-        let slot = Slot(
-            shifted.saturating_sub(self.store.genesis_time_ms()) / self.config().slot_duration_ms,
-        );
-        slot.epoch::<P>() < epoch
+        self.store.slot_clock().slot_at(shifted).epoch::<P>() < epoch
     }
 
     /// Whether the current time falls in the slot range from a slot through range more slots.
@@ -166,8 +158,9 @@ impl<'a, P: Preset> ChainView<'a, P> {
     #[must_use]
     pub fn is_within_slot_range(&self, slot: Slot, range: u64, now_ms: u64) -> bool {
         let disparity = self.config().maximum_gossip_clock_disparity_ms;
-        let start = self.slot_start_ms(slot);
-        let end = self.slot_start_ms(slot + range + 1);
+        let clock = self.store.slot_clock();
+        let start = clock.slot_start_ms(slot);
+        let end = clock.slot_start_ms(slot + range + 1);
         now_ms + disparity >= start && end + disparity >= now_ms
     }
 

@@ -2,7 +2,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use axiom_rlp::Decoder;
+use super::raw_value::RawValue;
 
 /// Key of the IPv4 address, 4 bytes.
 pub(crate) const KEY_IP: &[u8] = b"ip";
@@ -47,14 +47,16 @@ impl Endpoints {
     pub(crate) fn read<'a>(value: impl Fn(&[u8]) -> Option<&'a [u8]>) -> Self {
         // Each key decodes on its own; a failure leaves only that field empty.
         Self {
-            ip4: value(KEY_IP).and_then(Self::array::<4>).map(Ipv4Addr::from),
+            ip4: value(KEY_IP)
+                .and_then(|raw| RawValue(raw).array::<4>())
+                .map(Ipv4Addr::from),
             ip6: value(KEY_IP6)
-                .and_then(Self::array::<16>)
+                .and_then(|raw| RawValue(raw).array::<16>())
                 .map(Ipv6Addr::from),
-            tcp4: value(KEY_TCP).and_then(Self::port),
-            tcp6: value(KEY_TCP6).and_then(Self::port),
-            udp4: value(KEY_UDP).and_then(Self::port),
-            udp6: value(KEY_UDP6).and_then(Self::port),
+            tcp4: value(KEY_TCP).and_then(|raw| RawValue(raw).port()),
+            tcp6: value(KEY_TCP6).and_then(|raw| RawValue(raw).port()),
+            udp4: value(KEY_UDP).and_then(|raw| RawValue(raw).port()),
+            udp6: value(KEY_UDP6).and_then(|raw| RawValue(raw).port()),
         }
     }
 
@@ -88,23 +90,5 @@ impl Endpoints {
         let v4 = || Some(SocketAddr::new(self.ip4?.into(), self.tcp4?));
         let v6 = || Some(SocketAddr::new(self.ip6?.into(), self.tcp6.or(self.tcp4)?));
         v4().or_else(v6)
-    }
-
-    /// A string value of exactly N bytes.
-    fn array<const N: usize>(raw: &[u8]) -> Option<[u8; N]> {
-        // Exactly one RLP string of the right length.
-        let mut decoder = Decoder::new(raw);
-        let bytes = decoder.array().ok()?;
-        decoder.finish().ok()?;
-        Some(bytes)
-    }
-
-    /// A port: a canonical integer of at most 16 bits.
-    fn port(raw: &[u8]) -> Option<u16> {
-        // Exactly one canonical RLP integer.
-        let mut decoder = Decoder::new(raw);
-        let port = decoder.u16().ok()?;
-        decoder.finish().ok()?;
-        Some(port)
     }
 }

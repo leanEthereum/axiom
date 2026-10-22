@@ -2,8 +2,9 @@
 
 use std::str::FromStr;
 
+use axiom_http::Request;
 use axiom_json::Data;
-use axiom_types::{Preset, Root, Slot};
+use axiom_types::{Preset, Root, SignedBeaconBlock, Slot};
 
 use super::ApiError;
 use crate::{Chain, ChainError};
@@ -51,6 +52,36 @@ impl FromStr for BlockId {
 }
 
 impl BlockId {
+    /// The block identifier in a request's path.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a bad request when the path names no block, or names one badly.
+    pub(crate) fn from_request(request: &Request) -> Result<Self, ApiError> {
+        request
+            .param("block_id")
+            .ok_or_else(|| ApiError::bad_request("missing block id"))?
+            .parse()
+    }
+
+    /// The block this names and its root, or a 404.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a 404 when the node knows no such block.
+    pub(crate) fn find<P: Preset>(
+        self,
+        chain: &Chain<P>,
+    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
+        let root = self
+            .resolve(chain)?
+            .ok_or_else(|| ApiError::not_found("block not found"))?;
+        let block = chain
+            .block(root)?
+            .ok_or_else(|| ApiError::not_found("block not found"))?;
+        Ok((root, block))
+    }
+
     /// The root of the block this names, if the node knows one.
     ///
     /// # Errors
@@ -95,6 +126,36 @@ impl FromStr for StateId {
 }
 
 impl StateId {
+    /// The state identifier in a request's path.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a bad request when the path names no state, or names one badly.
+    pub(crate) fn from_request(request: &Request) -> Result<Self, ApiError> {
+        request
+            .param("state_id")
+            .ok_or_else(|| ApiError::bad_request("missing state id"))?
+            .parse()
+    }
+
+    /// The block whose post-state this names, and its root, or a 404.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a 404 when the node holds no such state.
+    pub(crate) fn find_block<P: Preset>(
+        self,
+        chain: &Chain<P>,
+    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
+        let root = self
+            .resolve(chain)?
+            .ok_or_else(|| ApiError::not_found("state not found"))?;
+        let block = chain
+            .block(root)?
+            .ok_or_else(|| ApiError::not_found("state not found"))?;
+        Ok((root, block))
+    }
+
     /// The root of the block whose post-state this names, if the node holds that state.
     ///
     /// # Errors

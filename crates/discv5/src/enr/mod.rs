@@ -4,6 +4,7 @@ mod builder;
 mod endpoint;
 mod error;
 mod eth2;
+mod raw_value;
 mod record;
 
 pub use builder::EnrBuilder;

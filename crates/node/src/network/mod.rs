@@ -4,6 +4,7 @@ mod discovery;
 mod gossip;
 mod identity;
 mod requests;
+mod responder;
 mod server;
 mod subnets;
 mod sync;
@@ -28,7 +29,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Preset, Slot};
+use axiom_types::{ChainConfig, ColumnIndex, Preset, SlotClock};
 use tokio::{
     sync::{Semaphore, mpsc::UnboundedReceiver},
     task, time,
@@ -47,7 +48,7 @@ use self::{
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
 };
-use crate::{ChainHandle, Clock, ExecutionLayer, race::Either};
+use crate::{ChainHandle, Clock, ExecutionLayer, NodeError, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
@@ -58,6 +59,29 @@ pub(crate) struct NetworkIdentity {
     pub(crate) custody_group_count: u64,
     /// Peers to dial at startup.
     pub(crate) boot_nodes: Vec<Multiaddr>,
+}
+
+impl NetworkIdentity {
+    /// The columns the node samples: those of its custody groups, and more if sampling needs it.
+    ///
+    /// A node samples at least the spec's samples per slot, whatever its custody.
+    /// The draw is a prefix: the first groups drawn are exactly the custody groups.
+    /// See `get_custody_groups` and "Custody sampling" in the Fulu DAS core spec.
+    pub(crate) fn sampling_columns<P: Preset>(
+        &self,
+        config: &ChainConfig,
+    ) -> Result<Vec<ColumnIndex>, NodeError> {
+        let sampling_size = self.custody_group_count.max(config.samples_per_slot);
+        let groups = self
+            .node_id
+            .custody_groups(sampling_size, config)
+            .map_err(NodeError::Custody)?;
+        let mut columns = Vec::new();
+        for group in groups {
+            columns.extend(group.columns::<P>(config).map_err(NodeError::Custody)?);
+        }
+        Ok(columns)
+    }
 }
 
 /// The node's network service.
@@ -84,10 +108,8 @@ pub(crate) struct NetworkService<P: Preset> {
     chain: ChainHandle<P>,
     /// The wall clock.
     clock: Arc<dyn Clock>,
-    /// Genesis, in milliseconds since the Unix epoch.
-    genesis_time_ms: u64,
-    /// Slot length in milliseconds.
-    slot_ms: u64,
+    /// Genesis and the slot length.
+    slots: SlotClock,
     /// Gossip validation and import.
     gossip: GossipHandler<P>,
     /// Answers to peers.
@@ -166,7 +188,7 @@ impl<P: Preset> NetworkService<P> {
         let NetworkSetup {
             config,
             custody,
-            genesis_time_ms,
+            slots,
             execution,
             clock,
             metrics,
@@ -176,7 +198,6 @@ impl<P: Preset> NetworkService<P> {
             .map_or((None, None), |(discovery, events)| {
                 (Some(discovery), Some(events))
             });
-        let slot_ms = config.slot_duration_ms;
         let (sync, sync_outcomes) =
             RangeSync::new(chain.clone(), Arc::clone(&execution), network.clone());
         let metadata = Arc::new(LocalMetadata {
@@ -205,8 +226,7 @@ impl<P: Preset> NetworkService<P> {
             network,
             chain,
             clock,
-            genesis_time_ms,
-            slot_ms,
+            slots,
             metadata,
             handshakes: Vec::new(),
             peers: BTreeSet::new(),
@@ -248,7 +268,7 @@ impl<P: Preset> NetworkService<P> {
 
     /// Handles network and discovery events until the network stops, with upkeep once a slot.
     pub(crate) async fn run(mut self, mut events: NetworkEvents) {
-        let mut upkeep = time::interval(Duration::from_millis(self.slot_ms.max(1)));
+        let mut upkeep = time::interval(Duration::from_millis(self.slots.slot_duration_ms()));
         let mut discovered = self.discovery_events.take();
         let mut outcomes = self.sync_outcomes.take();
         loop {
@@ -303,8 +323,7 @@ impl<P: Preset> NetworkService<P> {
 
     /// Rotates topics and refreshes peer statuses.
     async fn maintain(&mut self) {
-        let elapsed = self.clock.now_ms().saturating_sub(self.genesis_time_ms);
-        let slot = Slot(elapsed / self.slot_ms.max(1));
+        let slot = self.slots.slot_at(self.clock.now_ms());
         let epoch = slot.epoch::<P>();
         let Ok((head, digest)) = self
             .chain
@@ -471,8 +490,8 @@ pub(crate) struct NetworkSetup {
     pub(crate) config: ChainConfig,
     /// The node's custody columns.
     pub(crate) custody: BTreeSet<ColumnIndex>,
-    /// Genesis, in milliseconds since the Unix epoch.
-    pub(crate) genesis_time_ms: u64,
+    /// Genesis and the slot length, never zero.
+    pub(crate) slots: SlotClock,
     /// The engine.
     pub(crate) execution: Arc<ExecutionLayer>,
     /// The wall clock.

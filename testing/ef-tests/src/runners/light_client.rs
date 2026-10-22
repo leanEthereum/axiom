@@ -7,7 +7,7 @@ use axiom_ssz::{Root, Ssz};
 use axiom_types::{LightClientBootstrap, LightClientHeader, LightClientUpdate, Preset, Slot};
 use axiom_yaml::Yaml;
 
-use super::{MerkleProofs, case_config};
+use super::MerkleProofs;
 use crate::{Case, Failure, Runner};
 
 /// Fork version of a light client store whose types Axiom implements.
@@ -22,7 +22,7 @@ pub struct LightClient<P>(PhantomData<P>);
 impl<P: Preset> LightClient<P> {
     /// Runs a sync case: bootstrap, then updates and forced updates with checks.
     fn sync(case: &Case) -> Result<(), Failure> {
-        let config = case_config::<P>(case)?;
+        let config = case.config::<P>()?;
         let meta = case.yaml("meta.yaml")?;
         let hex = |key: &str| {
             meta.get(key)

@@ -1,8 +1,8 @@
 //! Consolidation requests: merging one validator's stake into another.
 
-use axiom_types::{ConsolidationRequest, Epoch, PendingConsolidation, Preset, ValidatorIndex};
+use axiom_types::{ConsolidationRequest, Epoch, PendingConsolidation, Preset};
 
-use crate::{BlockError, BlockProcessor, Operation, State, StateError};
+use crate::{BlockError, BlockProcessor, Operation, StateError};
 
 impl<P: Preset> Operation<P> for ConsolidationRequest {
     /// Switches a validator to compounding, or queues a consolidation of two validators.
@@ -12,24 +12,34 @@ impl<P: Preset> Operation<P> for ConsolidationRequest {
     ///
     /// See `process_consolidation_request` in the Electra beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError> {
-        if let Some(source) = processor.switch_to_compounding_source(self) {
-            processor.state.switch_to_compounding_validator(source)?;
-            return Ok(());
-        }
-
+        // Equal keys ask to switch to compounding credentials.
         // A consolidation into oneself would be an exit that skips the exit queue.
         if self.source_pubkey == self.target_pubkey {
+            let Some(index) = processor.state.validator_index(&self.source_pubkey) else {
+                return Ok(());
+            };
+            // See `is_valid_switch_to_compounding_request` in the Electra beacon chain spec.
+            let state = &processor.state.beacon;
+            let validator = &state.validators[index.as_usize()];
+            let valid = validator.withdrawal_address() == self.source_address
+                && validator.has_eth1_withdrawal_credential()
+                && validator.is_active_at(state.current_epoch())
+                && validator.exit_epoch == Epoch::FAR_FUTURE;
+            if valid {
+                processor.registry().switch_to_compounding(index)?;
+            }
             return Ok(());
         }
         let config = processor.config;
-        let total_active_balance = processor.total_active_balance;
         if processor.state.beacon.pending_consolidations.len() as u64
             == P::PENDING_CONSOLIDATIONS_LIMIT
         {
             return Ok(());
         }
         // Threshold: the consolidation churn must exceed one activation balance per epoch.
-        if State::<P>::consolidation_churn_limit(config, total_active_balance)
+        if processor
+            .total_active_balance
+            .consolidation_churn_limit::<P>(config)
             <= P::MIN_ACTIVATION_BALANCE
         {
             return Ok(());
@@ -65,19 +75,13 @@ impl<P: Preset> Operation<P> for ConsolidationRequest {
         }
 
         let source_balance = source.effective_balance;
-        let exit_epoch = processor
-            .state
-            .compute_consolidation_epoch_and_update_churn(
-                config,
-                source_balance,
-                total_active_balance,
-            );
+        let mut registry = processor.registry();
+        let exit_epoch = registry.consolidation_epoch(source_balance);
+        let withdrawable_epoch = registry.withdrawable_epoch(exit_epoch)?;
         let state = &mut processor.state.beacon;
         let source = &mut state.validators[source_index.as_usize()];
         source.exit_epoch = exit_epoch;
-        source.withdrawable_epoch = exit_epoch
-            .checked_add(config.min_validator_withdrawability_delay)
-            .ok_or(StateError::Overflow)?;
+        source.withdrawable_epoch = withdrawable_epoch;
         state
             .pending_consolidations
             .push(PendingConsolidation {
@@ -86,27 +90,5 @@ impl<P: Preset> Operation<P> for ConsolidationRequest {
             })
             .map_err(|_| StateError::ListFull)?;
         Ok(())
-    }
-}
-
-impl<P: Preset> BlockProcessor<'_, P> {
-    /// The validator a request validly asks to switch to compounding credentials, if any.
-    ///
-    /// See `is_valid_switch_to_compounding_request` in the Electra beacon chain spec.
-    fn switch_to_compounding_source(
-        &mut self,
-        request: &ConsolidationRequest,
-    ) -> Option<ValidatorIndex> {
-        if request.source_pubkey != request.target_pubkey {
-            return None;
-        }
-        let index = self.state.validator_index(&request.source_pubkey)?;
-        let state = &self.state.beacon;
-        let validator = &state.validators[index.as_usize()];
-        let valid = validator.withdrawal_address() == request.source_address
-            && validator.has_eth1_withdrawal_credential()
-            && validator.is_active_at(state.current_epoch())
-            && validator.exit_epoch == Epoch::FAR_FUTURE;
-        valid.then_some(index)
     }
 }
