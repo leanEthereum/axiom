@@ -35,6 +35,8 @@ OPTIONS:
     --no-http                    disable the beacon API
     --metrics-address <ADDR>     Prometheus endpoint address [default: disabled]
     --listen-address <ADDR>      libp2p TCP address [default: 0.0.0.0:9000]
+    --quic-port <PORT>           libp2p QUIC UDP port [default: the libp2p port + 1]
+    --no-quic                    listen and dial over TCP only
     --boot-node <MULTIADDR>      peer to dial at startup, repeatable
     --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
     --discovery-port <PORT>      discv5 UDP port [default: the libp2p port]
@@ -55,6 +57,18 @@ const DEFAULT_HTTP_ADDRESS: &str = "127.0.0.1:5052";
 
 /// Default libp2p address, the port every client uses.
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:9000";
+
+/// Whether and where libp2p listens on QUIC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum QuicChoice {
+    /// The UDP port after the libp2p TCP port.
+    #[default]
+    Default,
+    /// A chosen UDP port.
+    Port(u16),
+    /// TCP only.
+    Off,
+}
 
 /// What the command line asks for.
 #[derive(Debug)]
@@ -142,6 +156,8 @@ pub(crate) struct Cli {
     metrics_address: Option<SocketAddr>,
     /// The libp2p address.
     listen_address: Option<SocketAddr>,
+    /// The libp2p QUIC choice.
+    quic: QuicChoice,
     /// Peers to dial at startup.
     boot_nodes: Vec<Multiaddr>,
     /// Custody groups to keep.
@@ -209,6 +225,11 @@ impl Cli {
                         value("--listen-address")?,
                     )?);
                 }
+                "--quic-port" => {
+                    let text = value("--quic-port")?;
+                    cli.quic = QuicChoice::Port(Self::parsed("--quic-port", text)?);
+                }
+                "--no-quic" => cli.quic = QuicChoice::Off,
                 "--boot-node" => {
                     let text = value("--boot-node")?;
                     cli.boot_nodes.push(Self::parsed("--boot-node", text)?);
@@ -265,8 +286,15 @@ impl Cli {
                 enr_address: self.enr_address,
                 boot_enrs: self.boot_enrs,
             });
+            // QUIC takes the next UDP port by default, since discovery holds the libp2p one.
+            let quic_port = match self.quic {
+                QuicChoice::Default => Some(listen_address.port().wrapping_add(1)),
+                QuicChoice::Port(port) => Some(port),
+                QuicChoice::Off => None,
+            };
             Some(NetworkSettings {
                 listen_address,
+                quic_port,
                 boot_nodes: self.boot_nodes,
                 discovery,
                 // Every node keeps at least the spec's minimum.
@@ -405,6 +433,7 @@ mod tests {
                 http_address: Some("127.0.0.1:5052".parse().unwrap()),
                 network: Some(NetworkSettings {
                     listen_address: "0.0.0.0:9000".parse().unwrap(),
+                    quic_port: Some(9001),
                     boot_nodes: Vec::new(),
                     custody_group_count: 4,
                     discovery: Some(DiscoverySettings {
@@ -442,6 +471,8 @@ mod tests {
             "json",
             "--listen-address",
             "127.0.0.1:9001",
+            "--quic-port",
+            "9101",
             "--boot-node",
             "/ip4/10.0.0.1/tcp/9000",
             "--custody-groups",
@@ -469,6 +500,7 @@ mod tests {
                 }),
                 network: Some(NetworkSettings {
                     listen_address: "127.0.0.1:9001".parse().unwrap(),
+                    quic_port: Some(9101),
                     boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
                     custody_group_count: 128,
                     discovery: Some(DiscoverySettings {

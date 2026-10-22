@@ -106,6 +106,7 @@ impl<P: Preset> StartedChain<'_, P> {
             Some(discovery) => {
                 let record = RecordSetup {
                     tcp_port: settings.listen_address.port(),
+                    quic_port: settings.quic_port,
                     epoch,
                     genesis_validators_root,
                     attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),

@@ -542,6 +542,7 @@ fn a_node_range_syncs_from_a_peer_over_noise() {
         //     B dials A, the status handshake shows A ahead, B fetches slots 1 and 2.
         let a_address = free_address();
         let settings = |listen_address, boot_nodes| NetworkSettings {
+            quic_port: None,
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -601,6 +602,7 @@ fn a_node_finds_its_peer_through_discovery() {
             boot_enrs,
         };
         let settings = |boot_enrs| NetworkSettings {
+            quic_port: None,
             listen_address: free_address(),
             boot_nodes: Vec::new(),
             custody_group_count: 4,
@@ -709,6 +711,7 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
         // It must rewind to finality and fetch the whole long branch, without blaming A.
         let a_address = free_address();
         let settings = |listen_address, boot_nodes| NetworkSettings {
+            quic_port: None,
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -879,6 +882,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
         let (b_engine, b_engine_config) =
             valid_engine(terminal, &directory.join("b-jwt.hex")).await;
         let settings = |listen_address, boot_nodes| NetworkSettings {
+            quic_port: None,
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -1215,6 +1219,7 @@ fn publish_blobs_and_sync(fork: ForkName) {
         let start = |listen_address, boot_nodes| {
             let api = free_address();
             let network = NetworkSettings {
+                quic_port: None,
                 listen_address,
                 boot_nodes,
                 custody_group_count: 4,

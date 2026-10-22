@@ -14,7 +14,7 @@ mod sync;
 mod topics;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     future::pending,
     sync::{
         Arc,
@@ -40,7 +40,7 @@ use tracing::{debug, info, warn};
 
 pub use self::{discovery::DiscoverySettings, identity::NodeKey};
 pub(crate) use self::{
-    discovery::{Discovery, RecordSetup},
+    discovery::{DialPlan, Discovery, RecordSetup},
     forks::ForkDigests,
     server::LocalMetadata,
     subnets::AttestationSubnets,
@@ -144,6 +144,8 @@ pub(crate) struct NetworkService<P: Preset> {
     boot_nodes: Vec<Multiaddr>,
     /// Discovery's events, until the run loop takes them.
     discovery_events: Option<Discv5Events>,
+    /// TCP addresses to try when the QUIC dial to the same peer fails, by QUIC address.
+    fallbacks: HashMap<Multiaddr, Multiaddr>,
 }
 
 /// How the node presents itself on the network, as the identity route reports it.
@@ -176,6 +178,11 @@ const MAX_CONCURRENT_VALIDATIONS: usize = 256;
 /// A mesh wants 6 to 12 peers, per the phase0 gossipsub parameters.
 /// Sixty-four peers fill every topic's mesh and leave spares.
 const TARGET_PEERS: usize = 64;
+
+/// Dials awaiting their outcome whose fallback address is remembered.
+///
+/// A dial reports success or failure within the handshake timeout, so a few hundred cover a lookup's worth.
+const MAX_PENDING_FALLBACKS: usize = 256;
 
 impl<P: Preset> NetworkService<P> {
     /// Joins the network: subscribes to the topics and dials the boot nodes.
@@ -254,6 +261,7 @@ impl<P: Preset> NetworkService<P> {
             discovery,
             discovery_events,
             boot_nodes: identity.boot_nodes.clone(),
+            fallbacks: HashMap::new(),
         };
 
         // The first upkeep joins the topics of the current epoch and dials the boot nodes.
@@ -308,19 +316,17 @@ impl<P: Preset> NetworkService<P> {
                 Either::Left(Some(event)) => self.handle(event).await,
                 Either::Left(None) => break,
                 Either::Right(Either::Left(Some(event))) => {
-                    let addresses = self
+                    let plans = self
                         .discovery
                         .as_mut()
                         .map(|discovery| discovery.on_event(event))
                         .unwrap_or_default();
-                    for (peer, address) in addresses {
+                    for plan in plans {
                         // A peer already connected needs no second connection.
-                        if self.peers.contains(&peer) {
+                        if self.peers.contains(&plan.peer) {
                             continue;
                         }
-                        if let Err(error) = self.network.dial(address.clone()).await {
-                            debug!(%error, %address, "could not dial a discovered peer");
-                        }
+                        self.dial_plan(plan).await;
                     }
                 }
                 // Discovery stopped: carry on with the peers already known.
@@ -464,7 +470,13 @@ impl<P: Preset> NetworkService<P> {
     /// Handles one event.
     async fn handle(&mut self, event: NetworkEvent) {
         match event {
-            NetworkEvent::PeerConnected { peer, outbound, .. } => {
+            NetworkEvent::PeerConnected {
+                peer,
+                address,
+                outbound,
+            } => {
+                // The dial succeeded: its fallback is no longer needed.
+                self.fallbacks.remove(&address);
                 self.peers.insert(peer.clone());
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 // The dialer opens the handshake; the listener answers it.
@@ -539,8 +551,31 @@ impl<P: Preset> NetworkService<P> {
             }
             NetworkEvent::ConnectionFailed { address, error } => {
                 debug!(%address, %error, "connection failed");
+                // A failed QUIC dial falls back to the peer's TCP endpoint.
+                if let Some(fallback) = self.fallbacks.remove(&address)
+                    && let Err(error) = self.network.dial(fallback.clone()).await
+                {
+                    debug!(%error, address = %fallback, "could not dial the fallback");
+                }
             }
             _ => {}
+        }
+    }
+
+    /// Dials a discovered peer at its best address, remembering the fallback.
+    async fn dial_plan(&mut self, plan: DialPlan) {
+        let DialPlan {
+            primary, fallback, ..
+        } = plan;
+        if let Some(fallback) = fallback {
+            // Threshold: fallbacks of dials that never report back are forgotten past a bound.
+            if self.fallbacks.len() >= MAX_PENDING_FALLBACKS {
+                self.fallbacks.clear();
+            }
+            self.fallbacks.insert(primary.clone(), fallback);
+        }
+        if let Err(error) = self.network.dial(primary.clone()).await {
+            debug!(%error, address = %primary, "could not dial a discovered peer");
         }
     }
 
