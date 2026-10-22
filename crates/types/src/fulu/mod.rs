@@ -9,7 +9,7 @@ mod data_column;
 mod partial_column;
 mod state;
 
-pub use block_contents::SignedBlockContents;
+pub use block_contents::{BlockContents, SignedBlockContents};
 pub use data_column::{
     Cell, DataColumn, DataColumnSidecar, DataColumnsByRootIdentifier, KzgCommitmentsInclusionProof,
     KzgProofs, MatrixEntry,

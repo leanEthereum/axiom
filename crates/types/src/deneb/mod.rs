@@ -12,7 +12,7 @@ mod state;
 
 pub use blob::{Blob, BlobIdentifier, BlobSidecar};
 pub use block::{BeaconBlock, BeaconBlockBody, BlobKzgCommitments, SignedBeaconBlock};
-pub use block_contents::SignedBlockContents;
+pub use block_contents::{BlockContents, SignedBlockContents};
 pub use execution::{ExecutionPayload, ExecutionPayloadHeader, NewPayloadRequest, VersionedHashes};
 pub use light_client::{
     LightClientBootstrap, LightClientFinalityUpdate, LightClientHeader,

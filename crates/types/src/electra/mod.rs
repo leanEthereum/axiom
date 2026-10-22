@@ -22,7 +22,7 @@ pub use attestation::{
     SingleAttestation,
 };
 pub use block::{BeaconBlock, BeaconBlockBody, SignedBeaconBlock};
-pub use block_contents::SignedBlockContents;
+pub use block_contents::{BlockContents, SignedBlockContents};
 pub use consolidation::{ConsolidationRequest, PendingConsolidation};
 pub use deposit::{DepositRequest, PendingDeposit};
 pub use execution::{
