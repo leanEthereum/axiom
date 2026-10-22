@@ -59,7 +59,7 @@ impl<P: Preset> SyncPool<P> {
     /// # Errors
     ///
     /// Fails when the validator is unknown, or holds no seat.
-    pub fn seats<S: CoreState + SyncCommitteeState>(
+    pub fn seats<S: CoreState + SyncCommitteeState + ?Sized>(
         state: &S,
         validator: ValidatorIndex,
     ) -> Result<Vec<usize>, PoolError> {

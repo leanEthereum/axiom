@@ -255,6 +255,7 @@ dependencies = [
  "axiom-json",
  "axiom-kzg",
  "axiom-light-client",
+ "axiom-operation-pool",
  "axiom-p2p",
  "axiom-ssz",
  "axiom-state-transition",

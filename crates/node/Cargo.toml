@@ -24,6 +24,7 @@ axiom-http.workspace = true
 axiom-json.workspace = true
 axiom-kzg.workspace = true
 axiom-light-client.workspace = true
+axiom-operation-pool.workspace = true
 axiom-p2p.workspace = true
 axiom-ssz.workspace = true
 axiom-state-transition.workspace = true

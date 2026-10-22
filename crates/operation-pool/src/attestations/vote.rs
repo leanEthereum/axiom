@@ -5,6 +5,7 @@ use axiom_types::{
     electra::{self, SingleAttestation},
     gloas,
     phase0::{self, AttestationData},
+    vote::CommitteeVote,
 };
 
 use crate::{Aggregate, Bits, PoolError};
@@ -69,6 +70,25 @@ impl CommitteeAggregate {
             aggregate: Aggregate {
                 bits: Bits::from_bools(attestation.aggregation_bits.iter()),
                 signature: attestation.signature,
+            },
+        })
+    }
+
+    /// A vote of exactly one committee, in the form every fork shares.
+    ///
+    /// Gossip hands aggregates and single votes over in that form once they pass its rules.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the vote names no committee or several.
+    pub fn from_vote(vote: &CommitteeVote) -> Result<Self, PoolError> {
+        let committee = Self::sole_committee(vote.committees.iter().copied())?;
+        Ok(Self {
+            data: vote.data.clone(),
+            committee,
+            aggregate: Aggregate {
+                bits: Bits::from_bools(vote.bits.iter().copied()),
+                signature: vote.signature,
             },
         })
     }
