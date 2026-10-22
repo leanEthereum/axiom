@@ -101,6 +101,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-builder-client"
+version = "0.1.0"
+dependencies = [
+ "axiom-beacon-json",
+ "axiom-bls",
+ "axiom-http",
+ "axiom-json",
+ "axiom-ssz",
+ "axiom-types",
+ "proptest",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "axiom-crypto"
 version = "0.1.0"
 dependencies = [
@@ -245,6 +260,9 @@ dependencies = [
 name = "axiom-node"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
+ "axiom-block-production",
+ "axiom-bls",
  "axiom-crypto",
  "axiom-das",
  "axiom-discv5",
