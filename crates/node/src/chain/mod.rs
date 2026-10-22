@@ -447,7 +447,7 @@ impl<P: Preset> Chain<P> {
     /// Start of a slot, in milliseconds since the Unix epoch.
     #[must_use]
     pub const fn slot_start_ms(&self, slot: Slot) -> u64 {
-        self.store.genesis_time_ms() + slot.0 * self.config().slot_duration_ms
+        self.store.slot_clock().slot_start_ms(slot)
     }
 
     /// Counts a vote received on its own, outside any block.

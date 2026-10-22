@@ -8,7 +8,7 @@ use axiom_types::{
     ValidatorIndex,
 };
 
-use crate::{ForkChoiceError, Store};
+use crate::{ForkChoiceError, Ghost, Store, committee_weight::CommitteeWeight};
 
 /// Per mille added to a committee weight estimate across an epoch boundary.
 ///
@@ -97,7 +97,7 @@ impl FastConfirmation {
         let slot = store.current_slot();
         if (slot + 1).is_epoch_start::<P>() {
             self.previous_epoch_greatest_unrealized_checkpoint =
-                store.unrealized_justified_checkpoint;
+                store.checkpoints.unrealized_justified();
         }
         if slot.is_epoch_start::<P>() {
             self.previous_epoch_observed_justified_checkpoint =
@@ -132,7 +132,7 @@ impl FastConfirmation {
             || off_chain
             || (is_epoch_start && !self.is_confirmed_chain_safe(store, confirmed)?)
         {
-            confirmed = store.finalized_checkpoint.root;
+            confirmed = store.checkpoints.finalized().root;
         }
 
         // Phase 2: restart from the observed justified checkpoint.
@@ -278,8 +278,8 @@ impl FastConfirmation {
         root: Root,
         head: Root,
     ) -> Result<bool, ForkChoiceError> {
-        let support = store
-            .attestation_scores(balance_source)
+        let support = Ghost::new(store, balance_source)
+            .attestation_scores()
             .get(&root)
             .copied()
             .unwrap_or_default();
@@ -306,7 +306,7 @@ impl FastConfirmation {
 
         let total = balance_source.total_active_balance();
         let proposer_score =
-            Store::committee_fraction(balance_source, store.config.proposer_score_boost);
+            CommitteeWeight::of(balance_source).percent(store.config.proposer_score_boost);
         let maximum_support = Self::estimate_committee_weight::<P>(
             total,
             parent_slot + 1,
@@ -476,7 +476,7 @@ impl FastConfirmation {
         store: &Store<P>,
         head: Root,
     ) -> Result<bool, ForkChoiceError> {
-        if Self::current_target(store, head)? == store.unrealized_justified_checkpoint {
+        if Self::current_target(store, head)? == store.checkpoints.unrealized_justified() {
             return Ok(true);
         }
         let state = Self::pulled_up_head_state(store, head)?;

@@ -9,6 +9,7 @@ mod indices;
 mod kzg;
 mod participation;
 mod slot;
+mod slot_clock;
 
 pub use bls::{BlsPubkey, BlsSignature};
 pub use bytes::{
@@ -23,3 +24,4 @@ pub use indices::{
 pub use kzg::{KzgCommitment, KzgProof};
 pub use participation::ParticipationFlags;
 pub use slot::Slot;
+pub use slot_clock::SlotClock;

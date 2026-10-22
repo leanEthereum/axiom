@@ -12,21 +12,23 @@
 //! The store is a pure state machine.
 //! Time, blocks, votes, and data availability verdicts are inputs, never side effects.
 
+mod availability;
 mod block_tree;
+mod checkpoints;
+mod committee_weight;
 mod error;
 mod fast_confirmation;
-mod handlers;
 mod head;
 mod payload;
 mod proposer_head;
-mod prune;
 mod store;
 mod votes;
 
+pub use availability::DataAvailability;
 pub use block_tree::{BlockNode, BlockTree, ExecutionStatus};
 pub use error::ForkChoiceError;
 pub use fast_confirmation::FastConfirmation;
-pub use handlers::DataAvailability;
+pub use head::Ghost;
 pub use payload::PayloadStatus;
 pub use store::Store;
 pub use votes::{LatestMessage, Votes};

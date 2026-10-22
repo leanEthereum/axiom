@@ -18,7 +18,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
-use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, SignedBeaconBlock, Slot};
+use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, SignedBeaconBlock, SlotClock};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -103,8 +103,19 @@ pub struct NodeConfig {
 struct StartedChain<'a, P: Preset> {
     /// The chain thread.
     handle: &'a ChainHandle<P>,
-    /// Genesis, in milliseconds since the Unix epoch.
-    genesis_time_ms: u64,
+    /// Genesis and the slot length.
+    slots: SlotClock,
+}
+
+/// The services every network component shares.
+#[derive(Clone, Debug)]
+struct SharedServices {
+    /// The execution engine.
+    execution: Arc<ExecutionLayer>,
+    /// The wall clock.
+    clock: Arc<dyn Clock>,
+    /// The node's metrics.
+    metrics: NodeMetrics,
 }
 
 /// A beacon node for one preset.
@@ -158,8 +169,12 @@ impl<P: Preset> Node<P> {
             None => None,
         };
         let events = chain.subscribe();
-        let genesis_time_ms = chain.store().genesis_time_ms();
-        let slot_ms = chain.config().slot_duration_ms;
+        // A zero slot length would divide by zero, so the node's timers clamp it to one.
+        let store_slots = chain.store().slot_clock();
+        let slots = SlotClock::new(
+            store_slots.genesis_ms(),
+            store_slots.slot_duration_ms().max(1),
+        );
         let (handle, chain_thread) = ChainHandle::spawn(chain).map_err(|error| NodeError::Io {
             context: "spawning the chain thread",
             error,
@@ -174,10 +189,15 @@ impl<P: Preset> Node<P> {
             (Some(identity), Some(settings)) => {
                 let started = StartedChain {
                     handle: &handle,
-                    genesis_time_ms,
+                    slots,
                 };
-                let services = (Arc::clone(&execution), Arc::clone(&clock), metrics);
-                Some(Self::start_network(identity, settings, started, services).await?)
+                let services = SharedServices {
+                    execution: Arc::clone(&execution),
+                    clock: Arc::clone(&clock),
+                    metrics,
+                };
+                let (key, identity) = identity;
+                Some(Self::start_network(key, identity, settings, started, services).await?)
             }
             _ => None,
         };
@@ -200,7 +220,7 @@ impl<P: Preset> Node<P> {
             Self::start_servers(&config, &handle, publisher, identity, registry, &stopped).await?;
 
         // Background loops run until aborted.
-        let mut ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
+        let mut ticker = task::spawn(Self::tick(handle.clone(), clock, slots.slot_duration_ms()));
         let follower = task::spawn(Self::follow(handle.clone(), events, execution));
 
         // The ticker only ends when the chain thread is gone, such as after a panic.
@@ -278,13 +298,19 @@ impl<P: Preset> Node<P> {
     ///
     /// The network handle, for shutdown and publishing, the service's task, and the node's identity.
     async fn start_network(
-        (key, identity): (NodeKey, NetworkIdentity),
+        key: NodeKey,
+        identity: NetworkIdentity,
         settings: &NetworkSettings,
         chain: StartedChain<'_, P>,
-        (execution, clock, metrics): (Arc<ExecutionLayer>, Arc<dyn Clock>, NodeMetrics),
+        services: SharedServices,
     ) -> Result<(NetworkHandle, JoinHandle<()>, NodeIdentity), NodeError> {
+        let SharedServices {
+            execution,
+            clock,
+            metrics,
+        } = services;
         // The record is stated for the wall clock's epoch, not the anchor's.
-        let elapsed = clock.now_ms().saturating_sub(chain.genesis_time_ms);
+        let epoch = chain.slots.slot_at(clock.now_ms()).epoch::<P>();
         let (config, custody, genesis_validators_root) = chain
             .handle
             .run(|chain| {
@@ -296,7 +322,6 @@ impl<P: Preset> Node<P> {
             })
             .await
             .map_err(|_| NodeError::ChainStopped)?;
-        let epoch = Slot(elapsed / config.slot_duration_ms.max(1)).epoch::<P>();
 
         let (network, events) = Self::start_p2p(&key, settings).await?;
         let discovery = match &settings.discovery {
@@ -326,7 +351,7 @@ impl<P: Preset> Node<P> {
             NetworkSetup {
                 config,
                 custody,
-                genesis_time_ms: chain.genesis_time_ms,
+                slots: chain.slots,
                 execution,
                 clock,
                 metrics,

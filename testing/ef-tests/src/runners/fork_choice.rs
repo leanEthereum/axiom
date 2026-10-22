@@ -201,7 +201,7 @@ impl<P: Preset> StoreReplay<P> {
                     Self::expect_eq(
                         "genesis time",
                         &Self::scalar(expected)?,
-                        &(store.genesis_time_ms() / 1000),
+                        &(store.slot_clock().genesis_ms() / 1000),
                     )?;
                 }
                 "justified_checkpoint" => {

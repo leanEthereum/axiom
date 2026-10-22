@@ -28,7 +28,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Preset, Slot};
+use axiom_types::{ChainConfig, ColumnIndex, Preset, SlotClock};
 use tokio::{
     sync::{Semaphore, mpsc::UnboundedReceiver},
     task, time,
@@ -84,10 +84,8 @@ pub(crate) struct NetworkService<P: Preset> {
     chain: ChainHandle<P>,
     /// The wall clock.
     clock: Arc<dyn Clock>,
-    /// Genesis, in milliseconds since the Unix epoch.
-    genesis_time_ms: u64,
-    /// Slot length in milliseconds.
-    slot_ms: u64,
+    /// Genesis and the slot length.
+    slots: SlotClock,
     /// Gossip validation and import.
     gossip: GossipHandler<P>,
     /// Answers to peers.
@@ -166,7 +164,7 @@ impl<P: Preset> NetworkService<P> {
         let NetworkSetup {
             config,
             custody,
-            genesis_time_ms,
+            slots,
             execution,
             clock,
             metrics,
@@ -176,7 +174,6 @@ impl<P: Preset> NetworkService<P> {
             .map_or((None, None), |(discovery, events)| {
                 (Some(discovery), Some(events))
             });
-        let slot_ms = config.slot_duration_ms;
         let (sync, sync_outcomes) =
             RangeSync::new(chain.clone(), Arc::clone(&execution), network.clone());
         let metadata = Arc::new(LocalMetadata {
@@ -205,8 +202,7 @@ impl<P: Preset> NetworkService<P> {
             network,
             chain,
             clock,
-            genesis_time_ms,
-            slot_ms,
+            slots,
             metadata,
             handshakes: Vec::new(),
             peers: BTreeSet::new(),
@@ -248,7 +244,7 @@ impl<P: Preset> NetworkService<P> {
 
     /// Handles network and discovery events until the network stops, with upkeep once a slot.
     pub(crate) async fn run(mut self, mut events: NetworkEvents) {
-        let mut upkeep = time::interval(Duration::from_millis(self.slot_ms.max(1)));
+        let mut upkeep = time::interval(Duration::from_millis(self.slots.slot_duration_ms()));
         let mut discovered = self.discovery_events.take();
         let mut outcomes = self.sync_outcomes.take();
         loop {
@@ -303,8 +299,7 @@ impl<P: Preset> NetworkService<P> {
 
     /// Rotates topics and refreshes peer statuses.
     async fn maintain(&mut self) {
-        let elapsed = self.clock.now_ms().saturating_sub(self.genesis_time_ms);
-        let slot = Slot(elapsed / self.slot_ms.max(1));
+        let slot = self.slots.slot_at(self.clock.now_ms());
         let epoch = slot.epoch::<P>();
         let Ok((head, digest)) = self
             .chain
@@ -471,8 +466,8 @@ pub(crate) struct NetworkSetup {
     pub(crate) config: ChainConfig,
     /// The node's custody columns.
     pub(crate) custody: BTreeSet<ColumnIndex>,
-    /// Genesis, in milliseconds since the Unix epoch.
-    pub(crate) genesis_time_ms: u64,
+    /// Genesis and the slot length, never zero.
+    pub(crate) slots: SlotClock,
     /// The engine.
     pub(crate) execution: Arc<ExecutionLayer>,
     /// The wall clock.
