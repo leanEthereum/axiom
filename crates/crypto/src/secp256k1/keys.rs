@@ -6,12 +6,11 @@ use super::{
     error::Secp256k1Error,
     field::FieldElement,
     point::AffinePoint,
-    rfc6979::NonceGenerator,
     scalar::Scalar,
     signature::{RecoverableSignature, RecoveryId, Signature},
     table::GeneratorTable,
 };
-use crate::ct::wipe;
+use crate::{ct::wipe, rfc6979::NonceGenerator};
 
 /// A secp256k1 secret key: a scalar d in [1, n).
 ///
@@ -84,7 +83,7 @@ impl SecretKey {
         wipe(&mut secret);
 
         loop {
-            let mut k = nonces.next_nonce();
+            let mut k = nonces.next_nonce(Scalar::from_nonce_bytes);
 
             // Invariant: k is in [1, n), so k G is finite.
             let big_r = GeneratorTable::get()

@@ -1,24 +1,25 @@
 //! Fixed-width unsigned integers in little-endian 64-bit limbs.
 //!
-//! Field elements and scalars share the 256-bit form for decoding, encoding, and carry chains.
-//! The 320-bit form holds the running value of a signed-digit recoding.
+//! Field elements and scalars of every curve share the 256-bit form.
+//! It serves decoding, encoding, carry chains, and signed-digit recoding.
+//! The 320-bit form holds the running value of that recoding.
 
 use std::array;
 
 /// An unsigned 256-bit integer, limb 0 least significant.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) struct U256(pub(super) [u64; 4]);
+pub(crate) struct U256(pub(crate) [u64; 4]);
 
 impl U256 {
     /// Decodes 32 big-endian bytes.
-    pub(super) fn from_be_bytes(bytes: &[u8; 32]) -> Self {
+    pub(crate) fn from_be_bytes(bytes: &[u8; 32]) -> Self {
         // Limb 0 is the least significant, so it comes from the last eight bytes.
         let (words, _) = bytes.as_chunks::<8>();
         Self(array::from_fn(|i| u64::from_be_bytes(words[3 - i])))
     }
 
     /// Encodes as 32 big-endian bytes.
-    pub(super) fn to_be_bytes(self) -> [u8; 32] {
+    pub(crate) fn to_be_bytes(self) -> [u8; 32] {
         // Limb 3 is the most significant, so it goes first.
         let mut out = [0_u8; 32];
         let (words, _) = out.as_chunks_mut::<8>();
@@ -29,7 +30,7 @@ impl U256 {
     }
 
     /// The sum modulo 2^256 and its carry bit.
-    pub(super) fn add_with_carry(self, rhs: Self) -> (Self, u64) {
+    pub(crate) fn add_with_carry(self, rhs: Self) -> (Self, u64) {
         // A 128-bit sum per limb lets the compiler emit one add-with-carry chain.
         let mut out = [0_u64; 4];
         let mut carry = 0_u128;
@@ -42,7 +43,7 @@ impl U256 {
     }
 
     /// The difference modulo 2^256 and its borrow bit.
-    pub(super) fn sub_with_borrow(self, rhs: Self) -> (Self, u64) {
+    pub(crate) fn sub_with_borrow(self, rhs: Self) -> (Self, u64) {
         // A 128-bit difference per limb lets the compiler emit one subtract-with-borrow chain.
         // A borrow leaves the top half all ones, so its top bit is the borrow.
         let mut out = [0_u64; 4];
@@ -54,33 +55,69 @@ impl U256 {
         }
         (Self(out), borrow as u64)
     }
+    /// The signed-digit width-w NAF, least significant digit first.
+    ///
+    /// Every non-zero digit is odd and in (-2^(w-1), 2^(w-1)), and any two are w positions apart.
+    /// Used only on public integers: the digit pattern depends on the value.
+    pub(crate) fn wnaf_vartime(self, width: u32) -> [i8; 257] {
+        // Digit i multiplies 2^i.
+        // Most digits stay zero.
+        let mut digits = [0_i8; 257];
+        let window = 1_u64 << width;
+
+        // A five-limb copy holds the running value, which may reach 2^256 after adding a digit.
+        let mut k = U320::from_u256(self);
+        let mut position = 0;
+        while !k.is_zero() {
+            if k.low() & 1 == 1 {
+                // Take the low w bits as a signed digit, then clear them from k.
+                //
+                //     low = 0b10011 (19), w = 5 -> digit 19 - 32 = -13, k += 13
+                let low = k.low() & (window - 1);
+                if low < window / 2 {
+                    // A positive digit: subtract it.
+                    digits[position] = (low as u8).cast_signed();
+                    k.sub_small(low);
+                } else {
+                    // A negative digit low - 2^w: add its magnitude.
+                    // The magnitude is below 2^(w-1), since low is odd.
+                    let magnitude = window - low;
+                    digits[position] = -(magnitude as u8).cast_signed();
+                    k.add_small(magnitude);
+                }
+            }
+            k.halve();
+            position += 1;
+        }
+        digits
+    }
 }
 
 /// An unsigned 320-bit integer, limb 0 least significant.
 ///
 /// A 256-bit value plus a digit up to 2^7 needs one more limb than the value itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct U320([u64; 5]);
+struct U320([u64; 5]);
 
 impl U320 {
     /// Widens a 256-bit integer.
-    pub(super) const fn from_u256(value: U256) -> Self {
+    const fn from_u256(value: U256) -> Self {
         let [l0, l1, l2, l3] = value.0;
         Self([l0, l1, l2, l3, 0])
     }
 
     /// Holds when the value is zero.
-    pub(super) fn is_zero(&self) -> bool {
+    fn is_zero(&self) -> bool {
         self.0.iter().all(|&limb| limb == 0)
     }
 
     /// The low 64 bits.
-    pub(super) const fn low(&self) -> u64 {
+    const fn low(&self) -> u64 {
         self.0[0]
     }
 
     /// Adds a small value.
-    pub(super) fn add_small(&mut self, value: u64) {
+    fn add_small(&mut self, value: u64) {
         // Ripple the carry upwards.
         let mut carry = value;
         for limb in &mut self.0 {
@@ -91,7 +128,7 @@ impl U320 {
     }
 
     /// Subtracts a small value, which must not exceed the integer.
-    pub(super) fn sub_small(&mut self, value: u64) {
+    fn sub_small(&mut self, value: u64) {
         // Ripple the borrow upwards.
         let mut borrow = value;
         for limb in &mut self.0 {
@@ -102,7 +139,7 @@ impl U320 {
     }
 
     /// Halves the integer, dropping the low bit.
-    pub(super) fn halve(&mut self) {
+    fn halve(&mut self) {
         // Each limb takes the low bit of the limb above as its new top bit.
         for i in 0..5 {
             let next = if i < 4 { self.0[i + 1] } else { 0 };
