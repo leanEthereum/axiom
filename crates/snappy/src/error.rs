@@ -15,8 +15,15 @@ pub enum SnappyError {
     InvalidPreamble,
 
     /// The input ends inside an element, a chunk header, or a chunk body.
-    #[error("input ends unexpectedly")]
-    UnexpectedEnd,
+    ///
+    /// Both counts start where the truncated part starts.
+    #[error("input ends with {available} of {needed} bytes")]
+    UnexpectedEnd {
+        /// Bytes the part needs.
+        needed: usize,
+        /// Bytes the input still held.
+        available: usize,
+    },
 
     /// The output would exceed the caller's bound.
     ///
@@ -39,10 +46,12 @@ pub enum SnappyError {
     },
 
     /// An element writes past the length the block declares.
-    #[error("elements write past the declared length {declared}")]
+    #[error("elements reach {reached} bytes, past the declared length {declared}")]
     ExceedsDeclaredLength {
         /// Length the block declares.
         declared: usize,
+        /// Length the output would reach with the offending element.
+        reached: usize,
     },
 
     /// The elements end before producing the length the block declares.
@@ -97,7 +106,7 @@ impl From<SnappyError> for io::Error {
     ///
     /// Truncation reports an unexpected end of file, and every other error invalid data.
     fn from(err: SnappyError) -> Self {
-        let kind = if err == SnappyError::UnexpectedEnd {
+        let kind = if matches!(err, SnappyError::UnexpectedEnd { .. }) {
             io::ErrorKind::UnexpectedEof
         } else {
             io::ErrorKind::InvalidData

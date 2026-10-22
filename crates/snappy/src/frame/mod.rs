@@ -80,13 +80,19 @@ pub fn decompress(input: &[u8], max_len: usize) -> Result<Vec<u8>, SnappyError> 
     let mut rest = input;
     while let Some((header, after)) = rest.split_first_chunk::<{ ChunkHeader::LEN }>() {
         let header = chunks.header(*header)?;
-        let body = after.get(..header.len).ok_or(SnappyError::UnexpectedEnd)?;
+        let body = after.get(..header.len).ok_or(SnappyError::UnexpectedEnd {
+            needed: header.len,
+            available: after.len(),
+        })?;
         chunks.body(header, body, &mut out)?;
         rest = &after[header.len..];
     }
     // Fewer bytes than a header remain.
     if !rest.is_empty() {
-        return Err(SnappyError::UnexpectedEnd);
+        return Err(SnappyError::UnexpectedEnd {
+            needed: ChunkHeader::LEN,
+            available: rest.len(),
+        });
     }
     Ok(out)
 }
@@ -254,14 +260,21 @@ mod tests {
     #[test]
     fn truncation_inside_a_header_or_a_body() {
         let framed = stream(&[&stored_chunk(b"abc")]);
-        // Cut inside the second header, then inside the body.
+        // Cut 2 bytes into the second 4-byte header.
         assert_eq!(
             decompress(&framed[..12], 10),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 4,
+                available: 2
+            })
         );
+        // Cut 6 bytes into the 7-byte body: a 4-byte checksum, then "abc".
         assert_eq!(
             decompress(&framed[..framed.len() - 1], 10),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 7,
+                available: 6
+            })
         );
     }
 

@@ -83,12 +83,22 @@ pub enum DecodeError {
     InvalidBoolean(u8),
 
     /// A bitlist lacks its length-marking sentinel bit.
-    #[error("bitlist lacks its sentinel bit")]
-    MissingSentinel,
+    ///
+    /// The input is empty or ends in a zero byte.
+    #[error("bitlist of {length} bytes lacks its sentinel bit")]
+    MissingSentinel {
+        /// Length of the input in bytes.
+        length: usize,
+    },
 
     /// A bitvector sets padding bits beyond its length.
     ///
     /// Accepting them would give one value two encodings.
-    #[error("bitvector sets bits beyond its length")]
-    ExcessBits,
+    #[error("bitvector of {length} bits sets padding bits in its last byte {last_byte:#04x}")]
+    ExcessBits {
+        /// Number of bits the type holds.
+        length: usize,
+        /// The last byte of the input, which holds the padding.
+        last_byte: u8,
+    },
 }

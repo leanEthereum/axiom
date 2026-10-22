@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
     fn enter(&mut self) -> Result<(), ParseError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.scanner.error(ErrorKind::TooDeep));
+            return Err(self.scanner.error(ErrorKind::TooDeep { limit: MAX_DEPTH }));
         }
         Ok(())
     }
@@ -670,7 +670,7 @@ mapping: [1, 2,
     fn nesting_beyond_the_depth_bound() {
         // 200 open brackets: the 129th crosses the bound of 128.
         let text = "[".repeat(200);
-        assert_eq!(fail(&text), (ErrorKind::TooDeep, 1, 129));
+        assert_eq!(fail(&text), (ErrorKind::TooDeep { limit: 128 }, 1, 129));
     }
 
     #[test]

@@ -60,7 +60,10 @@ impl<'a> Input<'a> {
         let bytes = self
             .bytes
             .get(self.position..self.position + width)
-            .ok_or(SnappyError::UnexpectedEnd)?;
+            .ok_or_else(|| SnappyError::UnexpectedEnd {
+                needed: width,
+                available: self.remaining(),
+            })?;
         self.position += width;
         Ok(bytes
             .iter()
@@ -74,9 +77,18 @@ impl<'a> Input<'a> {
         let bytes = self
             .bytes
             .get(self.position..self.position.saturating_add(len))
-            .ok_or(SnappyError::UnexpectedEnd)?;
+            .ok_or_else(|| SnappyError::UnexpectedEnd {
+                needed: len,
+                available: self.remaining(),
+            })?;
         self.position += len;
         Ok(bytes)
+    }
+
+    /// Number of unread bytes.
+    #[inline]
+    const fn remaining(&self) -> usize {
+        self.bytes.len() - self.position
     }
 }
 
@@ -127,7 +139,13 @@ mod tests {
         // Bytes 01 02 03: a 2-byte integer 0x0201, then one byte left.
         let mut input = Input::new(&[0x01, 0x02, 0x03]);
         assert_eq!(input.le(2), Ok(0x0201));
-        assert_eq!(input.take(2), Err(SnappyError::UnexpectedEnd));
+        assert_eq!(
+            input.take(2),
+            Err(SnappyError::UnexpectedEnd {
+                needed: 2,
+                available: 1
+            })
+        );
         assert_eq!(input.tag(), Some(0x03));
         assert_eq!(input.tag(), None);
     }

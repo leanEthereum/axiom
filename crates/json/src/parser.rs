@@ -80,7 +80,10 @@ impl<'a> Parser<'a> {
         if self.bytes.len() > self.limits.max_bytes {
             return Err(ParseError {
                 offset: self.limits.max_bytes,
-                kind: ErrorKind::TooLarge,
+                kind: ErrorKind::TooLarge {
+                    length: self.bytes.len(),
+                    limit: self.limits.max_bytes,
+                },
             });
         }
 
@@ -190,7 +193,9 @@ impl<'a> Parser<'a> {
     const fn check_depth(&self, open: usize) -> Result<(), ParseError> {
         // The container about to open makes the depth one more than those already open.
         if open >= self.limits.max_depth {
-            return Err(self.error(ErrorKind::TooDeep));
+            return Err(self.error(ErrorKind::TooDeep {
+                limit: self.limits.max_depth,
+            }));
         }
         Ok(())
     }
@@ -384,7 +389,7 @@ impl<'a> Parser<'a> {
                 Some(byte @ b'0'..=b'9') => byte - b'0',
                 Some(byte @ b'a'..=b'f') => byte - b'a' + 10,
                 Some(byte @ b'A'..=b'F') => byte - b'A' + 10,
-                Some(_) => return Err(self.error(ErrorKind::InvalidUnicodeEscape)),
+                Some(byte) => return Err(self.error(ErrorKind::InvalidUnicodeEscape(byte))),
                 None => return Err(self.error(ErrorKind::UnexpectedEnd)),
             };
             unit = (unit << 4) | u16::from(digit);

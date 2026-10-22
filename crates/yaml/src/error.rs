@@ -99,8 +99,11 @@ pub enum ErrorKind {
     /// Collections nest deeper than the parser allows.
     ///
     /// The bound keeps recursion, and so stack use, finite on hostile input.
-    #[error("collections nest too deeply")]
-    TooDeep,
+    #[error("collections nest deeper than {limit} levels")]
+    TooDeep {
+        /// Deepest nesting the parser accepts.
+        limit: usize,
+    },
 
     /// A valid YAML construct outside the supported subset.
     #[error("{0} are not supported")]

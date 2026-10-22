@@ -200,10 +200,12 @@ impl<N: Length> Ssz for BitList<N> {
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         // Invariant: the last byte holds the sentinel, so it is never zero.
         let Some((&last, _)) = bytes.split_last() else {
-            return Err(DecodeError::MissingSentinel);
+            return Err(DecodeError::MissingSentinel { length: 0 });
         };
         if last == 0 {
-            return Err(DecodeError::MissingSentinel);
+            return Err(DecodeError::MissingSentinel {
+                length: bytes.len(),
+            });
         }
 
         // The sentinel is the highest set bit of the last byte.
@@ -265,8 +267,14 @@ mod tests {
 
     #[test]
     fn missing_sentinel_is_rejected() {
-        assert_eq!(Bits::decode(&[]), Err(DecodeError::MissingSentinel));
-        assert_eq!(Bits::decode(&[1, 0]), Err(DecodeError::MissingSentinel));
+        assert_eq!(
+            Bits::decode(&[]),
+            Err(DecodeError::MissingSentinel { length: 0 })
+        );
+        assert_eq!(
+            Bits::decode(&[1, 0]),
+            Err(DecodeError::MissingSentinel { length: 2 })
+        );
     }
 
     #[test]

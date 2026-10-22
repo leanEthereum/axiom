@@ -39,7 +39,10 @@ impl Quantity for u64 {
         let digits = HexDigits::new(text)?.quantity()?;
         // Sixteen hex digits hold 64 bits; a seventeenth significant digit cannot fit.
         if digits.len() > 16 {
-            return Err(HexError::Overflow);
+            return Err(HexError::Overflow {
+                digits: digits.len(),
+                limit: 16,
+            });
         }
         // Shift each digit in, most significant first.
         Ok(digits
@@ -77,7 +80,10 @@ impl Quantity for U256 {
         let digits = HexDigits::new(text)?.quantity()?;
         // Sixty-four hex digits hold 256 bits.
         if digits.len() > 64 {
-            return Err(HexError::Overflow);
+            return Err(HexError::Overflow {
+                digits: digits.len(),
+                limit: 64,
+            });
         }
 
         // Place nibbles from the least significant end.
@@ -124,7 +130,10 @@ mod tests {
         // 2^64 needs seventeen digits.
         assert_eq!(
             u64::from_quantity("0x10000000000000000"),
-            Err(HexError::Overflow)
+            Err(HexError::Overflow {
+                digits: 17,
+                limit: 16
+            })
         );
     }
 
@@ -146,7 +155,13 @@ mod tests {
 
         // Sixty-five digits is past 256 bits.
         let over = format!("0x1{}", "0".repeat(64));
-        assert_eq!(U256::from_quantity(&over), Err(HexError::Overflow));
+        assert_eq!(
+            U256::from_quantity(&over),
+            Err(HexError::Overflow {
+                digits: 65,
+                limit: 64
+            })
+        );
     }
 
     proptest! {

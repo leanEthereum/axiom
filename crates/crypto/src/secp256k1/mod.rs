@@ -311,11 +311,11 @@ mod tests {
         // Mutation: lengths other than 33 and 65.
         assert_eq!(
             PublicKey::from_sec1_bytes(&uncompressed[..64]),
-            Err(Secp256k1Error::InvalidPublicKey)
+            Err(Secp256k1Error::InvalidPublicKeyLength(64))
         );
         assert_eq!(
             PublicKey::from_sec1_bytes(&[]),
-            Err(Secp256k1Error::InvalidPublicKey)
+            Err(Secp256k1Error::InvalidPublicKeyLength(0))
         );
     }
 
@@ -328,13 +328,13 @@ mod tests {
         bytes[..32].fill(0);
         assert_eq!(
             Signature::from_bytes(&bytes),
-            Err(Secp256k1Error::InvalidSignature)
+            Err(Secp256k1Error::InvalidSignature { offset: 0 })
         );
         let mut bytes = [1_u8; 64];
         bytes[32..].copy_from_slice(&n);
         assert_eq!(
             Signature::from_bytes(&bytes),
-            Err(Secp256k1Error::InvalidSignature)
+            Err(Secp256k1Error::InvalidSignature { offset: 32 })
         );
         let mut recoverable = [1_u8; 65];
         recoverable[64] = 4;

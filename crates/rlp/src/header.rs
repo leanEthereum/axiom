@@ -102,7 +102,10 @@ impl Header {
     /// Fails on any non-canonical form, and when the payload runs past the input.
     pub fn decode(input: &[u8]) -> Result<(Self, usize), RlpError> {
         let Some(&prefix) = input.first() else {
-            return Err(RlpError::UnexpectedEnd);
+            return Err(RlpError::UnexpectedEnd {
+                needed: 1,
+                available: 0,
+            });
         };
         let (header, offset) = match prefix {
             // A byte below 0x80 is a one-byte string encoded as itself.
@@ -110,9 +113,11 @@ impl Header {
             SHORT_STRING..LONG_STRING => {
                 let header = Self::string(usize::from(prefix - SHORT_STRING));
                 // Canonical: a lone byte below 0x80 never takes a header.
-                if header.payload_len == 1 && input.get(1).is_some_and(|&byte| byte < SHORT_STRING)
+                if let Some(&byte) = input.get(1)
+                    && header.payload_len == 1
+                    && byte < SHORT_STRING
                 {
-                    return Err(RlpError::NonCanonicalSingleByte);
+                    return Err(RlpError::NonCanonicalSingleByte(byte));
                 }
                 (header, 1)
             }
@@ -131,14 +136,20 @@ impl Header {
             .checked_add(header.payload_len)
             .ok_or(RlpError::LengthOverflow)?;
         if end > input.len() {
-            return Err(RlpError::UnexpectedEnd);
+            return Err(RlpError::UnexpectedEnd {
+                needed: end,
+                available: input.len(),
+            });
         }
         Ok((header, offset))
     }
 
     /// Reads a long-form length of a given byte width, right after the prefix.
     fn long_length(input: &[u8], width: usize) -> Result<usize, RlpError> {
-        let bytes = input.get(1..1 + width).ok_or(RlpError::UnexpectedEnd)?;
+        let bytes = input.get(1..1 + width).ok_or(RlpError::UnexpectedEnd {
+            needed: 1 + width,
+            available: input.len(),
+        })?;
         // Canonical: the length is minimal, so it never opens with zero.
         if bytes[0] == 0 {
             return Err(RlpError::LeadingZeroInLength);
@@ -153,7 +164,7 @@ impl Header {
         }
         // Canonical: the long form starts where the short form ends.
         if length <= SHORT_LIMIT {
-            return Err(RlpError::NonCanonicalLength);
+            return Err(RlpError::NonCanonicalLength(length));
         }
         Ok(length)
     }
@@ -204,12 +215,12 @@ mod tests {
         // 0x81 0x7f wraps a byte that must stand alone.
         assert_eq!(
             Header::decode(&[0x81, 0x7f]),
-            Err(RlpError::NonCanonicalSingleByte)
+            Err(RlpError::NonCanonicalSingleByte(0x7f))
         );
         // 0xb8 0x02 uses the long form for two bytes.
         assert_eq!(
             Header::decode(&[0xb8, 0x02, 0, 0]),
-            Err(RlpError::NonCanonicalLength)
+            Err(RlpError::NonCanonicalLength(2))
         );
         // 0xb9 0x00 0x40 pads its length with a zero byte.
         assert_eq!(
@@ -217,11 +228,20 @@ mod tests {
             Err(RlpError::LeadingZeroInLength)
         );
         // 0x83 promises three bytes but only one follows.
-        assert_eq!(Header::decode(&[0x83, 0x01]), Err(RlpError::UnexpectedEnd));
-        // Eight length bytes declare 2^56 bytes, far past the input.
+        assert_eq!(
+            Header::decode(&[0x83, 0x01]),
+            Err(RlpError::UnexpectedEnd {
+                needed: 4,
+                available: 2
+            })
+        );
+        // Eight length bytes declare 2^56 bytes, far past the input: 9 + 2^56 needed.
         assert_eq!(
             Header::decode(&[0xff, 1, 0, 0, 0, 0, 0, 0, 0]),
-            Err(RlpError::UnexpectedEnd)
+            Err(RlpError::UnexpectedEnd {
+                needed: 9 + (1 << 56),
+                available: 9
+            })
         );
         // A length of 2^64 - 1 plus a nine-byte header overflows the address space.
         assert_eq!(
@@ -229,6 +249,12 @@ mod tests {
             Err(RlpError::LengthOverflow)
         );
         // An empty input has no header at all.
-        assert_eq!(Header::decode(&[]), Err(RlpError::UnexpectedEnd));
+        assert_eq!(
+            Header::decode(&[]),
+            Err(RlpError::UnexpectedEnd {
+                needed: 1,
+                available: 0
+            })
+        );
     }
 }

@@ -10,13 +10,22 @@ pub enum Secp256k1Error {
     #[error("secret key is zero or not below the group order")]
     InvalidSecretKey,
 
-    /// A public key encoding has the wrong length or prefix, or is off the curve.
+    /// A public key encoding has a wrong prefix, or its point is off the curve.
     #[error("invalid public key encoding")]
     InvalidPublicKey,
 
+    /// A public key encoding is neither 33 nor 65 bytes long.
+    ///
+    /// The value is the length received.
+    #[error("public key encoding of {0} bytes is neither 33 nor 65")]
+    InvalidPublicKeyLength(usize),
+
     /// A signature component is zero or not below the group order.
-    #[error("signature component is zero or not below the group order")]
-    InvalidSignature,
+    #[error("signature component at byte {offset} is zero or not below the group order")]
+    InvalidSignature {
+        /// Byte offset of the component in the signature: 0 for r, 32 for s.
+        offset: usize,
+    },
 
     /// A recovery identifier is above 3.
     #[error("recovery id {0} is above 3")]

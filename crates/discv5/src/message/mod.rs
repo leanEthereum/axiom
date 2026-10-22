@@ -378,7 +378,7 @@ mod tests {
         // An extra field after a PING's sequence number.
         assert_eq!(
             Message::decode(&[0x01, 0xc3, 0x80, 0x01, 0x02]),
-            Err(MessageError::Rlp(RlpError::TrailingBytes))
+            Err(MessageError::Rlp(RlpError::TrailingBytes { remaining: 1 }))
         );
         // A 5-byte address in a PONG.
         assert_eq!(

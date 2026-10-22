@@ -86,7 +86,10 @@ mod tests {
     fn rejections() {
         // Each malformed form maps to one error.
         assert_eq!(Vec::from_data("0041"), Err(HexError::MissingPrefix));
-        assert_eq!(Vec::from_data("0x041"), Err(HexError::OddLength));
+        assert_eq!(
+            Vec::from_data("0x041"),
+            Err(HexError::OddLength { digits: 3 })
+        );
         assert_eq!(
             Vec::from_data("0x00zz"),
             Err(HexError::InvalidDigit { offset: 4 })

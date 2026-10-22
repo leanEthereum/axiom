@@ -9,18 +9,28 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum RlpError {
     /// The input ends inside a header or a payload.
-    #[error("input ends inside an item")]
-    UnexpectedEnd,
+    ///
+    /// Both counts start at the item's first byte.
+    #[error("item needs {needed} bytes, input holds {available}")]
+    UnexpectedEnd {
+        /// Bytes the header and payload need.
+        needed: usize,
+        /// Bytes left in the input.
+        available: usize,
+    },
 
     /// A single byte below `0x80` is wrapped in a string header.
     ///
     /// Such a byte must encode as itself, per the Yellow Paper, appendix B.
-    #[error("single byte below 0x80 wrapped in a string header")]
-    NonCanonicalSingleByte,
+    /// The value is the wrapped byte.
+    #[error("byte {0:#04x} below 0x80 wrapped in a string header")]
+    NonCanonicalSingleByte(u8),
 
     /// A length uses the long form for a payload under 56 bytes.
-    #[error("long-form length for a short payload")]
-    NonCanonicalLength,
+    ///
+    /// The value is the payload length the long form declares.
+    #[error("long-form length {0} fits the short form below 56")]
+    NonCanonicalLength(usize),
 
     /// A long-form length starts with a zero byte.
     #[error("long-form length starts with zero")]
@@ -63,10 +73,16 @@ pub enum RlpError {
     },
 
     /// Bytes remain after the last expected item.
-    #[error("bytes remain after the last item")]
-    TrailingBytes,
+    #[error("{remaining} bytes remain after the last item")]
+    TrailingBytes {
+        /// Number of bytes left unread.
+        remaining: usize,
+    },
 
     /// Lists nest deeper than the decoder allows.
-    #[error("lists nest too deeply")]
-    TooDeep,
+    #[error("lists nest deeper than {limit} levels")]
+    TooDeep {
+        /// Deepest nesting the decoder accepts.
+        limit: usize,
+    },
 }

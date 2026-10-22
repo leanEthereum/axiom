@@ -56,9 +56,11 @@ pub enum ErrorKind {
     #[error("invalid escape byte 0x{0:02x}")]
     InvalidEscape(u8),
 
-    /// A unicode escape is not four hex digits.
-    #[error("unicode escape needs four hex digits")]
-    InvalidUnicodeEscape,
+    /// A unicode escape holds a byte that is not a hex digit.
+    ///
+    /// The value is the offending byte.
+    #[error("unicode escape holds non-hex byte 0x{0:02x}")]
+    InvalidUnicodeEscape(u8),
 
     /// A unicode escape names half of a surrogate pair without the other half.
     #[error("lone surrogate \\u{0:04x}")]
@@ -77,10 +79,18 @@ pub enum ErrorKind {
     TrailingCharacters,
 
     /// Arrays and objects nest deeper than the limit.
-    #[error("arrays and objects nest too deeply")]
-    TooDeep,
+    #[error("arrays and objects nest deeper than {limit} levels")]
+    TooDeep {
+        /// Deepest nesting the limits accept.
+        limit: usize,
+    },
 
     /// The text is longer than the limit.
-    #[error("input exceeds the size limit")]
-    TooLarge,
+    #[error("input of {length} bytes exceeds the limit of {limit}")]
+    TooLarge {
+        /// Length of the text in bytes.
+        length: usize,
+        /// Longest text the limits accept, in bytes.
+        limit: usize,
+    },
 }
