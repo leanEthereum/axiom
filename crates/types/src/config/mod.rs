@@ -9,8 +9,10 @@ mod blob_schedule;
 mod fork_name;
 mod yaml;
 
+use axiom_yaml::Yaml;
 pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
+use yaml::ConfigEntry;
 pub use yaml::ConfigError;
 
 use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Preset, Root, Version};
@@ -173,6 +175,26 @@ pub struct ChainConfig {
 }
 
 impl ChainConfig {
+    /// A configuration read from YAML, starting from the defaults of its preset base.
+    ///
+    /// Keys this client does not know, such as those of future forks, are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a known key has a value of the wrong type, or the preset base is unknown.
+    pub fn from_yaml(yaml: &Yaml) -> Result<Self, ConfigError> {
+        let mapping = yaml.as_mapping().ok_or(ConfigError::NotAMapping)?;
+        let mut config = match yaml.get("PRESET_BASE").and_then(Yaml::as_str) {
+            None | Some("mainnet") => Self::mainnet(),
+            Some("minimal") => Self::minimal(),
+            Some(other) => return Err(ConfigError::UnknownPresetBase(other.to_owned())),
+        };
+        for (key, value) in mapping {
+            ConfigEntry::new(key, value).apply_to(&mut config)?;
+        }
+        Ok(config)
+    }
+
     /// The mainnet configuration.
     #[must_use]
     pub fn mainnet() -> Self {
