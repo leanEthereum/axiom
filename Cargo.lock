@@ -154,6 +154,7 @@ dependencies = [
 name = "axiom-ef-tests"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
  "axiom-block-production",
  "axiom-bls",
  "axiom-das",

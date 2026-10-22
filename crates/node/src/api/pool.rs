@@ -197,7 +197,11 @@ impl PoolRoutes {
                         })
                         .map_err(Self::refusal)?;
                     let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
-                    chain.on_subnet_vote(&vote, claim)?;
+                    // A vote of the current slot counts in fork choice only from the next slot.
+                    // It is pooled and broadcast all the same; the store sees it again in a block.
+                    if let Err(error) = chain.on_subnet_vote(&vote, claim) {
+                        debug!(%error, "vote pooled but not counted yet");
+                    }
                     Ok(subnet)
                 })
                 .await;
@@ -234,7 +238,9 @@ impl PoolRoutes {
                             validator.aggregate_and_proof::<F>(&signed, now)
                         })
                         .map_err(Self::refusal)?;
-                    chain.on_vote(&signed.aggregate().committee_vote())?;
+                    if let Err(error) = chain.on_vote(&signed.aggregate().committee_vote()) {
+                        debug!(%error, "aggregate pooled but not counted yet");
+                    }
                     Ok(())
                 })
                 .await;
