@@ -45,16 +45,25 @@ pub struct Vectors {
 impl Vectors {
     /// The vectors named by `AXIOM_VECTORS`, or those under `testing/vectors`.
     ///
-    /// Returns nothing when they have not been downloaded.
+    /// Returns nothing when they have not been downloaded, so a local run can skip them.
+    ///
+    /// # Panics
+    ///
+    /// Panics when they are missing and `AXIOM_REQUIRE_VECTORS` is set, as in CI.
+    /// A suite that silently skips there would pass without testing anything.
     #[must_use]
     pub fn locate() -> Option<Self> {
         let root = env::var_os("AXIOM_VECTORS").map_or_else(
             || Path::new(env!("CARGO_MANIFEST_DIR")).join("../vectors"),
             PathBuf::from,
         );
-        root.join("consensus-spec-tests/tests")
-            .is_dir()
-            .then_some(Self { root })
+        let found = root.join("consensus-spec-tests/tests").is_dir();
+        assert!(
+            found || env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+            "vectors required but missing under {}; run `make -C testing/ef-tests`",
+            root.display()
+        );
+        found.then_some(Self { root })
     }
 
     /// Root of the consensus spec vectors.

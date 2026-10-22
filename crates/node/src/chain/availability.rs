@@ -183,7 +183,10 @@ mod tests {
     fn a_block_without_blobs_passes_straight_through() {
         let mut buffer = Buffer::new([ColumnIndex(3)]);
 
-        assert!(buffer.offer_block(Root::ZERO, block(1, false)).is_some());
+        assert_eq!(
+            buffer.offer_block(Root::ZERO, block(1, false)),
+            Some(block(1, false))
+        );
         assert!(buffer.blocks.is_empty());
     }
 
@@ -223,14 +226,24 @@ mod tests {
 
     #[test]
     fn finality_prunes_what_waits_at_or_before_it() {
-        // Fixture state: a block waiting at slot 4, and a lone column at slot 9.
-        let mut buffer = Buffer::new([ColumnIndex(3), ColumnIndex(40)]);
-        buffer.offer_block(Root([4; 32]), block(4, true));
-        buffer.offer_column(Root([9; 32]), column(3, 9));
+        // Fixture state: blocks waiting at slots 7, 8, and 9, finality at slot 8.
+        //
+        //     slot 7  before finality   dropped
+        //     slot 8  the finalized slot dropped: nothing there can still become canonical
+        //     slot 9  after finality    kept
+        let mut buffer = Buffer::new([ColumnIndex(3)]);
+        for slot in [7_u8, 8, 9] {
+            buffer.offer_block(Root([slot; 32]), block(u64::from(slot), true));
+            buffer.offer_column(Root([slot + 100; 32]), column(3, u64::from(slot)));
+        }
 
         buffer.prune(Slot(8));
 
-        assert!(!buffer.blocks.contains_key(&Root([4; 32])));
-        assert_eq!(buffer.take_columns(&Root([9; 32])).len(), 1);
+        let mut waiting: Vec<Root> = buffer.blocks.keys().copied().collect();
+        waiting.sort();
+        assert_eq!(waiting, [Root([9; 32])]);
+        let mut columns: Vec<Root> = buffer.columns.keys().copied().collect();
+        columns.sort();
+        assert_eq!(columns, [Root([109; 32])]);
     }
 }

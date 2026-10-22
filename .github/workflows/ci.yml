@@ -53,7 +53,10 @@ jobs:
           key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
       - run: make -C testing/ef-tests
       # Release mode: the spec suite runs real BLS and KZG over thousands of cases.
+      # Missing vectors fail the run instead of skipping it.
       - run: cargo test --workspace --all-features --locked --release
+        env:
+          AXIOM_REQUIRE_VECTORS: "1"
 
   docs:
     name: Docs

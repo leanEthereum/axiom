@@ -29,7 +29,10 @@ use axiom_p2p::{
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{ChainConfig, ColumnIndex, Preset, Slot};
-use tokio::{task, time};
+use tokio::{
+    sync::{Semaphore, mpsc::UnboundedReceiver},
+    task, time,
+};
 use tracing::{debug, info, warn};
 
 pub use self::{discovery::DiscoverySettings, identity::NodeKey};
@@ -38,7 +41,12 @@ pub(crate) use self::{
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
-use self::{gossip::GossipHandler, server::RequestServer, sync::RangeSync, topics::Subscriptions};
+use self::{
+    gossip::GossipHandler,
+    server::RequestServer,
+    sync::{BatchOutcome, RangeSync},
+    topics::Subscriptions,
+};
 use crate::{ChainHandle, Clock, ExecutionLayer, race::Either};
 
 /// Who the node is on the network, and what it custodies.
@@ -83,9 +91,15 @@ pub(crate) struct NetworkService<P: Preset> {
     /// Gossip validation and import.
     gossip: GossipHandler<P>,
     /// Answers to peers.
-    server: RequestServer<P>,
+    server: Arc<RequestServer<P>>,
     /// Range sync.
     sync: RangeSync<P>,
+    /// Processed batches, until the run loop takes them.
+    sync_outcomes: Option<UnboundedReceiver<BatchOutcome>>,
+    /// Inbound requests answered at once.
+    requests: Arc<Semaphore>,
+    /// Gossip messages in validation at once.
+    validations: Arc<Semaphore>,
     /// Topics joined, and how they change.
     subscriptions: Subscriptions,
     /// What peers are told about this node.
@@ -98,6 +112,8 @@ pub(crate) struct NetworkService<P: Preset> {
     metrics: NodeMetrics,
     /// Peer discovery, when enabled.
     discovery: Option<Discovery>,
+    /// Peers dialed at startup, and again whenever the node is alone.
+    boot_nodes: Vec<Multiaddr>,
     /// Discovery's events, until the run loop takes them.
     discovery_events: Option<Discv5Events>,
 }
@@ -116,6 +132,16 @@ pub(crate) struct NodeIdentity {
     /// The metadata peers fetch.
     pub(crate) metadata: Arc<LocalMetadata>,
 }
+
+/// Inbound requests answered at once.
+///
+/// Each answer reads the chain and may encode megabytes, so the count is kept modest.
+const MAX_CONCURRENT_REQUESTS: usize = 32;
+
+/// Gossip messages validated at once.
+///
+/// Enough to keep the chain thread busy without letting a flood pile up tasks.
+const MAX_CONCURRENT_VALIDATIONS: usize = 256;
 
 /// Peers the node keeps looking for until it has them.
 ///
@@ -151,6 +177,8 @@ impl<P: Preset> NetworkService<P> {
                 (Some(discovery), Some(events))
             });
         let slot_ms = config.slot_duration_ms;
+        let (sync, sync_outcomes) =
+            RangeSync::new(chain.clone(), Arc::clone(&execution), network.clone());
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
             attnets: AtomicU64::new(0),
@@ -164,8 +192,15 @@ impl<P: Preset> NetworkService<P> {
                 network.clone(),
                 metrics.clone(),
             ),
-            server: RequestServer::new(chain.clone(), network.clone(), Arc::clone(&metadata)),
-            sync: RangeSync::new(chain.clone(), execution, network.clone()),
+            server: Arc::new(RequestServer::new(
+                chain.clone(),
+                network.clone(),
+                Arc::clone(&metadata),
+            )),
+            sync,
+            sync_outcomes: Some(sync_outcomes),
+            requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
+            validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
             subscriptions: Subscriptions::new(identity.node_id, config, &custody),
             network,
             chain,
@@ -178,15 +213,11 @@ impl<P: Preset> NetworkService<P> {
             metrics,
             discovery,
             discovery_events,
+            boot_nodes: identity.boot_nodes.clone(),
         };
 
-        // The first upkeep joins the topics of the current epoch.
+        // The first upkeep joins the topics of the current epoch and dials the boot nodes.
         service.maintain().await;
-        for address in &identity.boot_nodes {
-            if let Err(error) = service.network.dial(address.clone()).await {
-                warn!(%error, %address, "could not dial boot node");
-            }
-        }
         info!(
             peer = %service.network.local_peer(),
             address = %service.network.listen_addr(),
@@ -219,6 +250,7 @@ impl<P: Preset> NetworkService<P> {
     pub(crate) async fn run(mut self, mut events: NetworkEvents) {
         let mut upkeep = time::interval(Duration::from_millis(self.slot_ms.max(1)));
         let mut discovered = self.discovery_events.take();
+        let mut outcomes = self.sync_outcomes.take();
         loop {
             // Without discovery, its branch simply never completes.
             let found = async {
@@ -227,7 +259,15 @@ impl<P: Preset> NetworkService<P> {
                     None => pending().await,
                 }
             };
-            match Either::race(events.next(), Either::race(found, upkeep.tick())).await {
+            // Processed sync batches come back through their own channel.
+            let processed = async {
+                match &mut outcomes {
+                    Some(receiver) => receiver.recv().await,
+                    None => pending().await,
+                }
+            };
+            let others = Either::race(found, Either::race(processed, upkeep.tick()));
+            match Either::race(events.next(), others).await {
                 Either::Left(Some(event)) => self.handle(event).await,
                 Either::Left(None) => break,
                 Either::Right(Either::Left(Some(event))) => {
@@ -236,7 +276,11 @@ impl<P: Preset> NetworkService<P> {
                         .as_mut()
                         .map(|discovery| discovery.on_event(event))
                         .unwrap_or_default();
-                    for address in addresses {
+                    for (peer, address) in addresses {
+                        // A peer already connected needs no second connection.
+                        if self.peers.contains(&peer) {
+                            continue;
+                        }
                         if let Err(error) = self.network.dial(address.clone()).await {
                             debug!(%error, %address, "could not dial a discovered peer");
                         }
@@ -244,7 +288,11 @@ impl<P: Preset> NetworkService<P> {
                 }
                 // Discovery stopped: carry on with the peers already known.
                 Either::Right(Either::Left(None)) => discovered = None,
-                Either::Right(Either::Right(_)) => self.maintain().await,
+                Either::Right(Either::Right(Either::Left(Some(outcome)))) => {
+                    self.sync.on_outcome(outcome).await;
+                }
+                Either::Right(Either::Right(Either::Left(None))) => outcomes = None,
+                Either::Right(Either::Right(Either::Right(_))) => self.maintain().await,
             }
         }
         if let Some(discovery) = &self.discovery {
@@ -288,6 +336,15 @@ impl<P: Preset> NetworkService<P> {
             self.metadata.seq_number.fetch_add(1, Ordering::Relaxed);
         }
 
+        // Alone, the node dials its boot nodes again: they may have been down before.
+        if self.peers.is_empty() {
+            for address in &self.boot_nodes {
+                if let Err(error) = self.network.dial(address.clone()).await {
+                    warn!(%error, %address, "could not dial boot node");
+                }
+            }
+        }
+
         // Too few peers: look for more on this fork.
         if self.peers.len() < TARGET_PEERS
             && let Some(discovery) = &mut self.discovery
@@ -324,8 +381,15 @@ impl<P: Preset> NetworkService<P> {
             NetworkEvent::GossipMessage {
                 id, topic, data, ..
             } => {
+                // Validation is bounded: past the limit, the loop waits and the swarm's queue absorbs the rest.
+                let Ok(permit) = Arc::clone(&self.validations).acquire_owned().await else {
+                    return;
+                };
                 let gossip = self.gossip.clone();
-                task::spawn(async move { gossip.handle(id, &topic, data).await });
+                task::spawn(async move {
+                    gossip.handle(id, &topic, data).await;
+                    drop(permit);
+                });
             }
             NetworkEvent::Request {
                 peer,
@@ -339,7 +403,15 @@ impl<P: Preset> NetworkService<P> {
                 {
                     self.sync.on_status(peer.clone(), status).await;
                 }
-                self.server.answer(&peer, id, protocol, payload).await;
+                // Answers run in their own tasks, so one slow query never blocks the loop.
+                let Ok(permit) = Arc::clone(&self.requests).acquire_owned().await else {
+                    return;
+                };
+                let server = Arc::clone(&self.server);
+                task::spawn(async move {
+                    server.answer(&peer, id, protocol, payload).await;
+                    drop(permit);
+                });
             }
             NetworkEvent::Response {
                 request,

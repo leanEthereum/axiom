@@ -12,7 +12,7 @@ use axiom_discv5::{
     enr::EnrForkId,
     service::{Config, EnrFilter, Event},
 };
-use axiom_p2p::Multiaddr;
+use axiom_p2p::{Multiaddr, PeerId, PublicKey};
 use axiom_ssz::BitVector;
 use axiom_types::{ChainConfig, Epoch, ForkDigest, Root};
 use tracing::{debug, info, warn};
@@ -21,6 +21,11 @@ use super::NodeKey;
 
 /// Records a lookup asks for: enough to fill the peer table in a few rounds.
 const LOOKUP_PEERS: usize = 16;
+
+/// Upkeeps a lookup may run before a new one replaces it.
+///
+/// A lookup ends within a few request timeouts; several slots without an answer means it was lost.
+const LOOKUP_PATIENCE: u32 = 4;
 
 /// Where the node listens and what it announces, as the discovery record says.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,9 +71,9 @@ pub(crate) struct LocalRecord {
 pub(crate) struct Discovery {
     /// The discv5 driver.
     discv5: Discv5,
-    /// Whether a lookup is running.
-    searching: bool,
-    /// Records already handed out for dialing.
+    /// Upkeeps since the running lookup started, if one is running.
+    searching: Option<u32>,
+    /// Records handed out for dialing since the last lookup started.
     dialed: HashSet<NodeId>,
     /// Randomness for lookup targets.
     rng: Csprng,
@@ -101,7 +106,7 @@ impl Discovery {
         Ok((
             Self {
                 discv5,
-                searching: false,
+                searching: None,
                 dialed: HashSet::new(),
                 rng: Csprng::from_seed(seed),
             },
@@ -111,9 +116,15 @@ impl Discovery {
 
     /// Starts a lookup for peers on a fork, unless one is already running.
     pub(crate) async fn search(&mut self, fork_digest: ForkDigest) {
-        if self.searching {
-            return;
+        // A lookup that never reports back is given up after a few upkeeps.
+        if let Some(waited) = &mut self.searching {
+            *waited += 1;
+            if *waited < LOOKUP_PATIENCE {
+                return;
+            }
         }
+        // Peers dialed before may have left since, so each lookup may dial them again.
+        self.dialed.clear();
         // A random target spreads lookups across the whole identifier space.
         let target = NodeId(self.rng.bytes());
         match self
@@ -121,16 +132,16 @@ impl Discovery {
             .lookup(target, EnrFilter::ForkDigest(fork_digest), LOOKUP_PEERS)
             .await
         {
-            Ok(_) => self.searching = true,
+            Ok(_) => self.searching = Some(0),
             Err(_) => warn!("discovery stopped"),
         }
     }
 
     /// Takes a discovery event, returning the addresses of new peers worth dialing.
-    pub(crate) fn on_event(&mut self, event: Event) -> Vec<Multiaddr> {
+    pub(crate) fn on_event(&mut self, event: Event) -> Vec<(PeerId, Multiaddr)> {
         match event {
             Event::LookupFinished { peers, .. } => {
-                self.searching = false;
+                self.searching = None;
                 debug!(found = peers.len(), "lookup finished");
                 peers.iter().filter_map(|enr| self.dialable(enr)).collect()
             }
@@ -154,12 +165,15 @@ impl Discovery {
         self.discv5.shutdown();
     }
 
-    /// The TCP address of a record not dialed before.
-    fn dialable(&mut self, enr: &Enr) -> Option<Multiaddr> {
+    /// The peer and TCP address of a record not dialed since the last lookup.
+    ///
+    /// Discovery and libp2p share the secp256k1 key, so the record names the peer too.
+    fn dialable(&mut self, enr: &Enr) -> Option<(PeerId, Multiaddr)> {
         let address = enr.endpoints().tcp_socket()?;
+        let peer = PeerId::from_public_key(&PublicKey::secp256k1(enr.public_key().to_compressed()));
         self.dialed
             .insert(enr.node_id())
-            .then(|| Multiaddr::from_tcp(address))
+            .then(|| (peer, Multiaddr::from_tcp(address)))
     }
 
     /// The node's signed record.

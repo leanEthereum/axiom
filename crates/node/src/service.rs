@@ -27,7 +27,7 @@ use tokio::{
     task::{self, JoinHandle},
     time,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, DiscoverySettings,
@@ -36,6 +36,7 @@ use crate::{
         AttestationSubnets, Discovery, LocalRecord, NetworkIdentity, NetworkService, NetworkSetup,
         NodeIdentity,
     },
+    race::Either,
 };
 
 /// How many times per slot the fork choice clock advances.
@@ -199,11 +200,17 @@ impl<P: Preset> Node<P> {
             Self::start_servers(&config, &handle, publisher, identity, registry, &stopped).await?;
 
         // Background loops run until aborted.
-        let ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
+        let mut ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
         let follower = task::spawn(Self::follow(handle.clone(), events, execution));
 
-        shutdown.await;
-        info!("shutting down");
+        // The ticker only ends when the chain thread is gone, such as after a panic.
+        // The node then stops too, rather than serving from a dead chain.
+        let crashed = matches!(Either::race(shutdown, &mut ticker).await, Either::Right(_));
+        if crashed {
+            error!("chain thread stopped; shutting down");
+        } else {
+            info!("shutting down");
+        }
 
         // Servers first, so no request reaches a chain that is going away.
         let _unwatched = stop.send(true);
@@ -223,10 +230,10 @@ impl<P: Preset> Node<P> {
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);
-        task::spawn_blocking(move || chain_thread.join())
-            .await
-            .map_err(|_| NodeError::ChainStopped)?
-            .map_err(|_| NodeError::ChainStopped)?;
+        let joined = task::spawn_blocking(move || chain_thread.join()).await;
+        if crashed || !matches!(joined, Ok(Ok(_))) {
+            return Err(NodeError::ChainStopped);
+        }
         info!("stopped");
         Ok(())
     }

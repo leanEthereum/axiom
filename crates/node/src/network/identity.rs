@@ -1,5 +1,7 @@
 //! The node's long-term network key, and the identifiers derived from it.
 
+#[cfg(unix)]
+use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 use std::{
     fs::{self, File},
     io::{self, Read},
@@ -48,6 +50,9 @@ impl NodeKey {
             fs::create_dir_all(directory)?;
         }
         fs::write(path, key.secret.to_bytes())?;
+        // The key is the node's identity: only its owner may read it.
+        #[cfg(unix)]
+        fs::set_permissions(path, Permissions::from_mode(0o600))?;
         Ok(key)
     }
 

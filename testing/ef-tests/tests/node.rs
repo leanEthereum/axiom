@@ -38,6 +38,20 @@ const BLOCKS: [&str; 2] = [
     "block_0x8b932df328b89fd55311a65e4d5bf43288fb22f2e31a59da1bdd5714ac11452e",
 ];
 
+/// A case with two branches from genesis: a long one and a short, heavier one.
+const FORK_CASE: &str =
+    "minimal/fulu/fork_choice/get_head/pyspec_tests/shorter_chain_but_heavier_weight";
+
+/// The long branch, slots 1 to 3.
+const FORK_LONG: [&str; 3] = [
+    "block_0x74accc6cc86aa84d9b90602053aee7738f063e0fe5855192d08e5a1a6778fe36",
+    "block_0x8b932df328b89fd55311a65e4d5bf43288fb22f2e31a59da1bdd5714ac11452e",
+    "block_0x0b5c1cb7cc0a47d47d3d6fbabbfd71845588478817b6eb8a64f2991bde80b24d",
+];
+
+/// The short branch, one block.
+const FORK_SHORT: &str = "block_0xd732ef4e56577b5a756d9af8926eb3c9d5efb3f4a0b80436f3215f7d2d3af6fe";
+
 /// The head after both blocks.
 const HEAD: &str = "0x8b932df328b89fd55311a65e4d5bf43288fb22f2e31a59da1bdd5714ac11452e";
 
@@ -49,17 +63,22 @@ struct Fixture {
     directory: PathBuf,
     /// The genesis file.
     genesis: PathBuf,
-    /// Milliseconds at the start of slot 2, when both blocks are timely.
+    /// Milliseconds at the start of the slot the clock stands at.
     ///
     ///     slot:   0        1        2
-    ///     time:   0 s      6 s      12 s   <- clock
+    ///     time:   0 s      6 s      12 s   <- clock at slot 2, when both blocks are timely
     now_ms: u64,
 }
 
 impl Fixture {
-    /// The fixture, or nothing when the vectors are not downloaded.
+    /// The main case with the clock at slot 2, or nothing when the vectors are not downloaded.
     fn load(name: &str) -> Option<Self> {
-        let case = Case::new(Vectors::locate()?.consensus().join(CASE));
+        Self::load_case(name, CASE, 2)
+    }
+
+    /// A case with the clock at the start of a slot.
+    fn load_case(name: &str, case: &str, slot: u64) -> Option<Self> {
+        let case = Case::new(Vectors::locate()?.consensus().join(case));
         let directory = env::temp_dir().join(format!("axiom-{name}-{}", process::id()));
         fs::create_dir_all(&directory).expect("temporary directory is writable");
         let genesis = directory.join("genesis.ssz");
@@ -74,7 +93,8 @@ impl Fixture {
             case,
             directory,
             genesis,
-            now_ms: (genesis_time + 12) * 1000,
+            // Minimal slots last six seconds.
+            now_ms: (genesis_time + 6 * slot) * 1000,
         })
     }
 
@@ -437,5 +457,53 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
             anchor
         );
         node.stop().await;
+    });
+}
+
+#[test]
+fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
+    let Some(fixture) = Fixture::load_case("fork", FORK_CASE, 3) else {
+        return;
+    };
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        // Fixture state: two branches from genesis; A holds the long one, B only the short one.
+        //
+        //     A: genesis -> 1 (0x74ac) -> 2 (0x8b93) -> 3 (0x0b5c)
+        //     B: genesis -> 1 (0xd732)
+        //
+        // B starts first and cannot reach A yet, so it holds its branch before they meet.
+        // Then B asks for slots 2 and 3, whose parent it does not know.
+        // It must rewind to finality and fetch the whole long branch, without blaming A.
+        let a_address = free_address();
+        let settings = |listen_address, boot_nodes| NetworkSettings {
+            listen_address,
+            boot_nodes,
+            custody_group_count: 4,
+            discovery: None,
+        };
+        let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port()).parse().unwrap();
+        let b = TestNode::start(&fixture, Some(settings(free_address(), vec![boot]))).await;
+        assert_eq!(b.publish(&fixture.contents(FORK_SHORT)).await.status, StatusCode::OK);
+
+        let a = TestNode::start(&fixture, Some(settings(a_address, Vec::new()))).await;
+        for name in FORK_LONG {
+            assert_eq!(a.publish(&fixture.contents(name)).await.status, StatusCode::OK);
+        }
+
+        // B redials its boot node at its next upkeep, one slot later, and ends up holding A's tip.
+        let tip = "/eth/v1/beacon/blocks/0x0b5c1cb7cc0a47d47d3d6fbabbfd71845588478817b6eb8a64f2991bde80b24d/root";
+        let mut found = false;
+        for _ in 0..1000 {
+            if b.json(tip).await.is_ok() {
+                found = true;
+                break;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(found, "node B never fetched the long branch");
+
+        b.stop().await;
+        a.stop().await;
     });
 }

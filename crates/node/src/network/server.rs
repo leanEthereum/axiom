@@ -1,8 +1,11 @@
 //! Answers to peers' requests: status, metadata, blocks, and columns.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use axiom_p2p::{
@@ -293,6 +296,8 @@ impl<P: Preset> RequestServer<P> {
         indices: impl Iterator<Item = ColumnIndex>,
         chunks: &mut Vec<ResponseChunk>,
     ) -> Result<(), ChainError> {
+        // Responses list a block's columns once each, in index order, as the spec requires.
+        let indices: BTreeSet<ColumnIndex> = indices.collect();
         for index in indices {
             // Only custody columns are stored; others are simply absent from the response.
             if let Some(column) = chain.database().column(root, index)? {
