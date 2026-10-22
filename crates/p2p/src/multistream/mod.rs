@@ -24,17 +24,13 @@
 
 mod dialer;
 mod listener;
-
-use std::str;
+mod message;
 
 pub use dialer::{Dialer, Lister};
 pub use listener::Listener;
 use thiserror::Error;
 
-use crate::{
-    protobuf::{ProtobufError, split_length_prefixed},
-    varint,
-};
+use crate::protobuf::ProtobufError;
 
 /// The header both sides send first.
 pub const PROTOCOL_HEADER: &str = "/multistream/1.0.0";
@@ -60,71 +56,6 @@ pub struct Negotiated {
     pub protocol: String,
     /// Bytes received after agreement, which belong to that protocol.
     pub remainder: Vec<u8>,
-}
-
-/// Appends one message: a varint length, the text, and a newline.
-fn encode_message(text: &str, out: &mut Vec<u8>) {
-    encode_raw_message(text.as_bytes(), out);
-}
-
-/// Appends one message whose body may be arbitrary bytes.
-fn encode_raw_message(body: &[u8], out: &mut Vec<u8>) {
-    // The length counts the trailing newline.
-    varint::encode(body.len() as u64 + 1, out);
-    out.extend_from_slice(body);
-    out.push(b'\n');
-}
-
-/// Splits one message off the front of a buffer.
-///
-/// # Returns
-///
-/// - The text without its newline, and the bytes the message took.
-/// - Nothing while the message is incomplete.
-fn decode_message(buffer: &[u8]) -> Result<Option<(&str, usize)>, NegotiationError> {
-    let Some((body, consumed)) = decode_raw_message(buffer)? else {
-        return Ok(None);
-    };
-    let text = str::from_utf8(body).map_err(|_| NegotiationError::InvalidUtf8)?;
-    Ok(Some((text, consumed)))
-}
-
-/// Splits one message off the front of a buffer, keeping its body as bytes.
-fn decode_raw_message(buffer: &[u8]) -> Result<Option<(&[u8], usize)>, NegotiationError> {
-    let Some((body, consumed)) = split_length_prefixed(buffer, MAX_MESSAGE_LEN)? else {
-        return Ok(None);
-    };
-    // Every message ends with a newline, which is not part of the body.
-    let body = body
-        .strip_suffix(b"\n")
-        .ok_or(NegotiationError::MissingNewline)?;
-    Ok(Some((body, consumed)))
-}
-
-/// Encodes the body of an `ls` answer: one nested message per protocol.
-///
-/// ```text
-/// outer body = [ len "/a\n" ][ len "/b\n" ] ...
-/// ```
-fn encode_list<'a>(protocols: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
-    let mut body = Vec::new();
-    for protocol in protocols {
-        encode_message(protocol, &mut body);
-    }
-    body
-}
-
-/// Decodes the body of an `ls` answer back into protocol names.
-fn decode_list(mut body: &[u8]) -> Result<Vec<String>, NegotiationError> {
-    let mut protocols = Vec::new();
-    // Peel nested messages until the body is used up.
-    while !body.is_empty() {
-        let (name, consumed) =
-            decode_message(body)?.ok_or(NegotiationError::Framing(ProtobufError::Truncated))?;
-        protocols.push(name.to_owned());
-        body = &body[consumed..];
-    }
-    Ok(protocols)
 }
 
 /// A stream that broke the negotiation rules.

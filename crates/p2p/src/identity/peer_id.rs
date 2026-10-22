@@ -5,7 +5,12 @@ use std::{fmt, str::FromStr};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{base58, identity::PublicKey, protobuf::ProtoMessage, varint};
+use crate::{
+    base58,
+    identity::PublicKey,
+    protobuf::ProtoMessage,
+    varint::{self, Varint},
+};
 
 /// Multihash code of the identity function, which stores its input verbatim.
 const IDENTITY_CODE: u64 = 0x00;
@@ -64,18 +69,16 @@ impl PeerId {
 
     /// Parses a binary multihash.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PeerIdError> {
+        let mut digest = bytes;
         // Phase 1: the hash function code.
-        let (code, code_len) = varint::decode_multiformat(bytes)
-            .ok()
-            .flatten()
-            .ok_or(PeerIdError::InvalidMultihash)?;
+        let code = Varint::Multiformat
+            .read(&mut digest)
+            .map_err(|_| PeerIdError::InvalidMultihash)?;
         // Phase 2: the digest length.
-        let (len, len_len) = varint::decode_multiformat(&bytes[code_len..])
-            .ok()
-            .flatten()
-            .ok_or(PeerIdError::InvalidMultihash)?;
+        let len = Varint::Multiformat
+            .read(&mut digest)
+            .map_err(|_| PeerIdError::InvalidMultihash)?;
         // Phase 3: the digest must fill the rest exactly.
-        let digest = &bytes[code_len + len_len..];
         if digest.len() as u64 != len {
             return Err(PeerIdError::InvalidMultihash);
         }
@@ -144,18 +147,17 @@ impl FromStr for PeerId {
         //     b <base32( [0x01 version][0x72 libp2p-key][multihash] )>
         if let Some(body) = text.strip_prefix('b') {
             let cid = decode_base32(body).ok_or(PeerIdError::InvalidText)?;
-            let (version, version_len) = varint::decode_multiformat(&cid)
-                .ok()
-                .flatten()
-                .ok_or(PeerIdError::InvalidText)?;
-            let (codec, codec_len) = varint::decode_multiformat(&cid[version_len..])
-                .ok()
-                .flatten()
-                .ok_or(PeerIdError::InvalidText)?;
+            let mut multihash = &cid[..];
+            let version = Varint::Multiformat
+                .read(&mut multihash)
+                .map_err(|_| PeerIdError::InvalidText)?;
+            let codec = Varint::Multiformat
+                .read(&mut multihash)
+                .map_err(|_| PeerIdError::InvalidText)?;
             if version != 1 || codec != LIBP2P_KEY_CODEC {
                 return Err(PeerIdError::InvalidText);
             }
-            return Self::from_bytes(&cid[version_len + codec_len..]);
+            return Self::from_bytes(multihash);
         }
         Err(PeerIdError::InvalidText)
     }

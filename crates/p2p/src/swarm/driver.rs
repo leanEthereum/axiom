@@ -612,7 +612,7 @@ impl Swarm {
     ) {
         let now = self.now();
         if let Some(limiter) = &mut self.limiter {
-            let cost = request_cost(protocol, &payload);
+            let cost = protocol.request_cost(&payload);
             if limiter.allow(peer, protocol, cost, now).is_err() {
                 let chunk = ResponseChunk::error(RATE_LIMITED, "rate limited");
                 self.send_to_connection(id, ConnectionInput::Respond(stream, vec![chunk]));
@@ -727,30 +727,6 @@ impl Swarm {
             self.cut(id);
         }
     }
-}
-
-/// Tokens a request costs: the number of items it asks for, or one.
-fn request_cost(protocol: Protocol, payload: &[u8]) -> u32 {
-    // Reads a little-endian u64 at an offset.
-    let read_u64 = |offset: usize| {
-        payload
-            .get(offset..offset + 8)
-            .and_then(|bytes| bytes.try_into().ok())
-            .map_or(1, u64::from_le_bytes)
-    };
-    let items = match protocol {
-        // start_slot, then count.
-        Protocol::BeaconBlocksByRangeV2
-        | Protocol::BlobSidecarsByRangeV1
-        | Protocol::DataColumnSidecarsByRangeV1 => read_u64(8),
-        // beacon_root, then count.
-        Protocol::BeaconBlocksByHeadV1 => read_u64(32),
-        // Lists of 32-byte roots or 40-byte identifiers.
-        Protocol::BeaconBlocksByRootV2 => payload.len() as u64 / 32,
-        Protocol::BlobSidecarsByRootV1 => payload.len() as u64 / 40,
-        _ => 1,
-    };
-    u32::try_from(items.max(1)).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

@@ -4,9 +4,7 @@ use axiom_crypto::secp256k1::PublicKey as Secp256k1PublicKey;
 use sha2::{Digest, Sha256};
 
 use super::DerSignature;
-use crate::protobuf::{
-    FieldReader, ProtoMessage, ProtobufError, encode_bytes_field, encode_varint_field,
-};
+use crate::protobuf::{FieldReader, FieldWriter, ProtoMessage, ProtobufError};
 
 /// The signature scheme a public key belongs to.
 ///
@@ -116,8 +114,9 @@ impl PublicKey {
 impl ProtoMessage for PublicKey {
     fn encode_to(&self, out: &mut Vec<u8>) {
         // Deterministic order: type first, data second.
-        encode_varint_field(1, self.key_type.code(), out);
-        encode_bytes_field(2, &self.data, out);
+        let mut fields = FieldWriter::new(out);
+        fields.varint(1, self.key_type.code());
+        fields.bytes(2, &self.data);
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, ProtobufError> {

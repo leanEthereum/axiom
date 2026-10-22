@@ -25,7 +25,7 @@ use thiserror::Error;
 
 use crate::{
     identity::{PeerId, PeerIdError},
-    varint,
+    varint::{self, Varint},
 };
 
 /// Multicodec of IPv4.
@@ -89,33 +89,20 @@ impl Protocol {
         }
     }
 
-    /// Decodes one layer, returning it and the bytes it took.
-    fn decode(bytes: &[u8]) -> Result<(Self, usize), MultiaddrError> {
-        let (code, mut at) = varint::decode_multiformat(bytes)
-            .ok()
-            .flatten()
-            .ok_or(MultiaddrError::Truncated)?;
-        // Takes the next fixed-size value off the input.
-        let take = |at: usize, len: usize| bytes.get(at..at + len).ok_or(MultiaddrError::Truncated);
+    /// Reads one layer off the front of the input, advancing past it.
+    fn read(input: &mut &[u8]) -> Result<Self, MultiaddrError> {
+        // Any malformed varint makes the address unreadable from here on.
+        let read_varint = |input: &mut &[u8]| {
+            Varint::Multiformat
+                .read(input)
+                .map_err(|_| MultiaddrError::Truncated)
+        };
+        let code = read_varint(input)?;
         let protocol = match code {
-            CODE_IP4 => {
-                let octets: [u8; 4] = take(at, 4)?
-                    .try_into()
-                    .map_err(|_| MultiaddrError::Truncated)?;
-                at += 4;
-                Self::Ip4(Ipv4Addr::from(octets))
-            }
-            CODE_IP6 => {
-                let octets: [u8; 16] = take(at, 16)?
-                    .try_into()
-                    .map_err(|_| MultiaddrError::Truncated)?;
-                at += 16;
-                Self::Ip6(Ipv6Addr::from(octets))
-            }
+            CODE_IP4 => Self::Ip4(Ipv4Addr::from(Self::read_array::<4>(input)?)),
+            CODE_IP6 => Self::Ip6(Ipv6Addr::from(Self::read_array::<16>(input)?)),
             CODE_TCP | CODE_UDP => {
-                let port = take(at, 2)?;
-                let port = u16::from_be_bytes([port[0], port[1]]);
-                at += 2;
+                let port = u16::from_be_bytes(Self::read_array(input)?);
                 if code == CODE_TCP {
                     Self::Tcp(port)
                 } else {
@@ -124,19 +111,27 @@ impl Protocol {
             }
             CODE_QUIC_V1 => Self::QuicV1,
             CODE_P2P => {
-                let (len, len_len) = varint::decode_multiformat(&bytes[at..])
-                    .ok()
-                    .flatten()
-                    .ok_or(MultiaddrError::Truncated)?;
-                at += len_len;
+                let len = read_varint(input)?;
                 let len = usize::try_from(len).map_err(|_| MultiaddrError::Truncated)?;
-                let peer = PeerId::from_bytes(take(at, len)?)?;
-                at += len;
+                let (peer, rest) = input
+                    .split_at_checked(len)
+                    .ok_or(MultiaddrError::Truncated)?;
+                let peer = PeerId::from_bytes(peer)?;
+                *input = rest;
                 Self::P2p(peer)
             }
             other => return Err(MultiaddrError::UnknownCode(other)),
         };
-        Ok((protocol, at))
+        Ok(protocol)
+    }
+
+    /// Reads a fixed-size value off the front of the input.
+    fn read_array<const N: usize>(input: &mut &[u8]) -> Result<[u8; N], MultiaddrError> {
+        let (head, rest) = input
+            .split_first_chunk::<N>()
+            .ok_or(MultiaddrError::Truncated)?;
+        *input = rest;
+        Ok(*head)
     }
 }
 
@@ -200,10 +195,13 @@ impl Multiaddr {
     #[must_use]
     pub const fn tcp_socket_addr(&self) -> Option<SocketAddr> {
         match self.protocols.as_slice() {
-            [Protocol::Ip4(ip), Protocol::Tcp(port), rest @ ..] if is_peer_suffix(rest) => {
+            // The socket layers, alone or followed by one peer layer.
+            [Protocol::Ip4(ip), Protocol::Tcp(port)]
+            | [Protocol::Ip4(ip), Protocol::Tcp(port), Protocol::P2p(_)] => {
                 Some(SocketAddr::new(IpAddr::V4(*ip), *port))
             }
-            [Protocol::Ip6(ip), Protocol::Tcp(port), rest @ ..] if is_peer_suffix(rest) => {
+            [Protocol::Ip6(ip), Protocol::Tcp(port)]
+            | [Protocol::Ip6(ip), Protocol::Tcp(port), Protocol::P2p(_)] => {
                 Some(SocketAddr::new(IpAddr::V6(*ip), *port))
             }
             _ => None,
@@ -225,9 +223,7 @@ impl Multiaddr {
         let mut protocols = Vec::new();
         // Peel layers off the front until the input runs out.
         while !bytes.is_empty() {
-            let (protocol, len) = Protocol::decode(bytes)?;
-            protocols.push(protocol);
-            bytes = &bytes[len..];
+            protocols.push(Protocol::read(&mut bytes)?);
         }
         Ok(Self { protocols })
     }
@@ -243,11 +239,6 @@ impl Multiaddr {
             protocols: vec![ip, Protocol::Tcp(addr.port())],
         }
     }
-}
-
-/// Whether the layers after a socket address are empty or one peer layer.
-const fn is_peer_suffix(rest: &[Protocol]) -> bool {
-    matches!(rest, [] | [Protocol::P2p(_)])
 }
 
 impl fmt::Display for Multiaddr {
