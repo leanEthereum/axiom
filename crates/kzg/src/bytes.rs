@@ -45,7 +45,7 @@ impl AsRef<[u8]> for Bytes32 {
 
 impl fmt::Debug for Bytes32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_hex(f, &self.0)
+        fmt::Display::fmt(&Hex(&self.0), f)
     }
 }
 
@@ -96,52 +96,22 @@ impl AsRef<[u8]> for Bytes48 {
 
 impl fmt::Debug for Bytes48 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_hex(f, &self.0)
+        fmt::Display::fmt(&Hex(&self.0), f)
     }
 }
 
-/// Decodes consecutive 32-byte big-endian field elements, as blob_to_polynomial does.
-///
-/// The length must be a multiple of 32.
-///
-/// # Errors
-///
-/// Fails when any element is not below the scalar field modulus.
-pub(crate) fn decode_field_elements(bytes: &[u8]) -> Result<Vec<Scalar>, KzgError> {
-    let (elements, rest) = bytes.as_chunks::<SCALAR_BYTES>();
-    debug_assert!(rest.is_empty(), "field elements span 32 bytes each");
-    elements
-        .iter()
-        .map(|element| Bytes32(*element).to_scalar())
-        .collect()
-}
+/// Bytes shown as 0x-prefixed lowercase hex, the form the specs and vectors print.
+#[derive(Clone, Copy, Debug)]
+struct Hex<'a>(&'a [u8]);
 
-/// Encodes field elements as consecutive 32-byte big-endian strings.
-pub(crate) fn encode_field_elements(elements: &[Scalar]) -> Vec<u8> {
-    elements.iter().flat_map(Scalar::to_bytes_be).collect()
-}
-
-/// Moves a vector of known length into a boxed array, without a stack copy of the array.
-///
-/// # Panics
-///
-/// Panics when the length differs from N, which callers rule out by construction.
-pub(crate) fn into_boxed_array<T, const N: usize>(values: Vec<T>) -> Box<[T; N]> {
-    let length = values.len();
-    // Invariant: every caller builds exactly N values, by a loop or a map over N inputs.
-    let Ok(array) = values.into_boxed_slice().try_into() else {
-        unreachable!("expected {N} values, built {length}");
-    };
-    array
-}
-
-/// Renders bytes as 0x-prefixed lowercase hex, the form the specs and vectors print.
-fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
-    f.write_str("0x")?;
-    for byte in bytes {
-        write!(f, "{byte:02x}")?;
+impl fmt::Display for Hex<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("0x")?;
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]

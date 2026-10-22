@@ -24,7 +24,7 @@
 
 use axiom_bls12_381::{G1_COMPRESSED_BYTES, G1Affine, G2_COMPRESSED_BYTES, G2Affine};
 
-use crate::{FIELD_ELEMENTS_PER_BLOB, fft::bit_reverse_permute, parallel};
+use crate::{FIELD_ELEMENTS_PER_BLOB, basis::Basis, bit_reversal::BitReversal, parallel::Threads};
 
 /// The mainnet setup file, as c-kzg-4844 distributes it.
 ///
@@ -40,9 +40,9 @@ const G2_POINTS: usize = 65;
 #[derive(Clone, Debug)]
 pub(crate) struct TrustedSetup {
     /// The Lagrange basis in bit-reversal order, matching the order of blob evaluations.
-    pub(crate) g1_lagrange_brp: Vec<G1Affine>,
+    pub(crate) g1_lagrange_brp: Basis,
     /// The powers [s^i] in G1, in increasing order.
-    pub(crate) g1_monomial: Vec<G1Affine>,
+    pub(crate) g1_monomial: Basis,
     /// The powers [s^i]_2 in G2, in increasing order.
     pub(crate) g2_monomial: Vec<G2Affine>,
 }
@@ -78,18 +78,22 @@ impl TrustedSetup {
         }
 
         // Phase 2: the three point lists, in file order.
-        let lagrange_lines: Vec<&str> = lines.by_ref().take(g1_count).collect();
-        let g2_lines: Vec<&str> = lines.by_ref().take(g2_count).collect();
-        let monomial_lines: Vec<&str> = lines.by_ref().take(g1_count).collect();
+        let lagrange_lines: Vec<HexLine<'_>> = lines.by_ref().take(g1_count).map(HexLine).collect();
+        let g2_lines: Vec<HexLine<'_>> = lines.by_ref().take(g2_count).map(HexLine).collect();
+        let monomial_lines: Vec<HexLine<'_>> = lines.by_ref().take(g1_count).map(HexLine).collect();
         if lines.any(|line| !line.is_empty()) {
             return None;
         }
 
         // Phase 3: decompress every point.
         // Each G1 decompression is one square root, so the 8192 of them run on all cores.
-        let mut g1_lagrange_brp = decode_all(&lagrange_lines, decode_g1)?;
-        let g1_monomial = decode_all(&monomial_lines, decode_g1)?;
-        let g2_monomial = decode_all(&g2_lines, decode_g2)?;
+        let threads = Threads::available();
+        let g1_lagrange_brp: Option<Vec<G1Affine>> =
+            threads.map(&lagrange_lines, |line| line.to_g1());
+        let g1_monomial: Option<Vec<G1Affine>> = threads.map(&monomial_lines, |line| line.to_g1());
+        let g2_monomial: Option<Vec<G2Affine>> = threads.map(&g2_lines, |line| line.to_g2());
+        let (mut g1_lagrange_brp, g1_monomial, g2_monomial) =
+            (g1_lagrange_brp?, g1_monomial?, g2_monomial?);
         if [g1_lagrange_brp.len(), g1_monomial.len()] != [g1_count; 2]
             || g2_monomial.len() != g2_count
         {
@@ -97,54 +101,43 @@ impl TrustedSetup {
         }
 
         // Phase 4: the spec indexes the Lagrange basis in bit-reversal order, like the blob.
-        bit_reverse_permute(&mut g1_lagrange_brp);
+        BitReversal::of_length(FIELD_ELEMENTS_PER_BLOB).permute(&mut g1_lagrange_brp);
         Some(Self {
-            g1_lagrange_brp,
-            g1_monomial,
+            g1_lagrange_brp: Basis::new(g1_lagrange_brp),
+            g1_monomial: Basis::new(g1_monomial),
             g2_monomial,
         })
     }
 }
 
-/// Decodes every line in parallel, failing when any line fails.
-fn decode_all<P: Send>(lines: &[&str], decode: fn(&str) -> Option<P>) -> Option<Vec<P>> {
-    parallel::map(lines, |line| decode(line))
-        .into_iter()
-        .collect()
-}
+/// One point line of the setup file: a compressed point in hex digits, with no prefix.
+#[derive(Clone, Copy, Debug)]
+struct HexLine<'a>(&'a str);
 
-/// Decodes one compressed G1 point on the curve, without the subgroup check.
-fn decode_g1(line: &str) -> Option<G1Affine> {
-    let bytes: [u8; G1_COMPRESSED_BYTES] = decode_hex(line)?;
-    G1Affine::from_compressed_unchecked(&bytes).ok()
-}
-
-/// Decodes one compressed G2 point on the curve, without the subgroup check.
-fn decode_g2(line: &str) -> Option<G2Affine> {
-    let bytes: [u8; G2_COMPRESSED_BYTES] = decode_hex(line)?;
-    G2Affine::from_compressed_unchecked(&bytes).ok()
-}
-
-/// Decodes exactly N bytes from 2N hex digits, with no prefix.
-fn decode_hex<const N: usize>(line: &str) -> Option<[u8; N]> {
-    let (pairs, odd) = line.as_bytes().as_chunks::<2>();
-    if pairs.len() != N || !odd.is_empty() {
-        return None;
+impl HexLine<'_> {
+    /// Decodes a G1 point on the curve, without the subgroup check.
+    fn to_g1(self) -> Option<G1Affine> {
+        G1Affine::from_compressed_unchecked(&self.to_bytes::<G1_COMPRESSED_BYTES>()?).ok()
     }
-    let mut bytes = [0; N];
-    for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
-        *byte = (hex_value(*high)? << 4) | hex_value(*low)?;
-    }
-    Some(bytes)
-}
 
-/// The value of one hex digit, in either case.
-const fn hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
+    /// Decodes a G2 point on the curve, without the subgroup check.
+    fn to_g2(self) -> Option<G2Affine> {
+        G2Affine::from_compressed_unchecked(&self.to_bytes::<G2_COMPRESSED_BYTES>()?).ok()
+    }
+
+    /// Decodes exactly N bytes from 2N hex digits.
+    fn to_bytes<const N: usize>(self) -> Option<[u8; N]> {
+        let (pairs, odd) = self.0.as_bytes().as_chunks::<2>();
+        if pairs.len() != N || !odd.is_empty() {
+            return None;
+        }
+        let mut bytes = [0; N];
+        // A digit is one of 0-9, a-f, or A-F, worth at most 15, so the narrowing is exact.
+        let digit = |ascii: u8| char::from(ascii).to_digit(16).map(|value| value as u8);
+        for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
+            *byte = (digit(*high)? << 4) | digit(*low)?;
+        }
+        Some(bytes)
     }
 }
 
@@ -158,13 +151,15 @@ mod tests {
     fn mainnet_points_lie_in_their_subgroups() {
         // Decoding skips the subgroup checks, so this test is what licenses that shortcut.
         let setup = TrustedSetup::mainnet();
-        let g1_points = setup.g1_lagrange_brp.iter().chain(&setup.g1_monomial);
-        assert!(
-            parallel::map(&g1_points.collect::<Vec<_>>(), |point| point
-                .is_torsion_free())
-            .into_iter()
-            .all(|in_subgroup| in_subgroup)
-        );
+        let g1_points: Vec<&G1Affine> = setup
+            .g1_lagrange_brp
+            .points()
+            .iter()
+            .chain(setup.g1_monomial.points())
+            .collect();
+        let in_subgroup: Vec<bool> =
+            Threads::available().map(&g1_points, |point| point.is_torsion_free());
+        assert!(in_subgroup.into_iter().all(|in_subgroup| in_subgroup));
         assert!(setup.g2_monomial.iter().all(G2Affine::is_torsion_free));
     }
 
@@ -173,17 +168,22 @@ mod tests {
         let setup = TrustedSetup::mainnet();
 
         // Both bases start from the generators: [s^0] = G1 and [s^0]_2 = G2.
-        assert_eq!(setup.g1_monomial[0], G1Affine::GENERATOR);
+        assert_eq!(setup.g1_monomial.points()[0], G1Affine::GENERATOR);
         assert_eq!(setup.g2_monomial[0], G2Affine::GENERATOR);
 
         // The G1 and G2 powers hide the same s: e([s], [1]_2) = e([1], [s]_2).
         assert_eq!(
-            Gt::pairing(&setup.g1_monomial[1], &setup.g2_monomial[0]),
-            Gt::pairing(&setup.g1_monomial[0], &setup.g2_monomial[1])
+            Gt::pairing(&setup.g1_monomial.points()[1], &setup.g2_monomial[0]),
+            Gt::pairing(&setup.g1_monomial.points()[0], &setup.g2_monomial[1])
         );
 
         // The Lagrange basis sums to the constant polynomial one: sum_i L_i(s) = 1.
-        let sum: G1Projective = setup.g1_lagrange_brp.iter().map(G1Projective::from).sum();
+        let sum: G1Projective = setup
+            .g1_lagrange_brp
+            .points()
+            .iter()
+            .map(G1Projective::from)
+            .sum();
         assert_eq!(G1Affine::from(sum), G1Affine::GENERATOR);
     }
 
@@ -194,7 +194,7 @@ mod tests {
         // A truncated file runs out of points.
         assert!(TrustedSetup::parse("4096\n65\nc0").is_none());
         // Hex digits must come in full pairs of valid digits.
-        assert_eq!(decode_hex::<1>("0g"), None);
-        assert_eq!(decode_hex::<1>("aB"), Some([0xab]));
+        assert_eq!(HexLine("0g").to_bytes::<1>(), None);
+        assert_eq!(HexLine("aB").to_bytes::<1>(), Some([0xab]));
     }
 }

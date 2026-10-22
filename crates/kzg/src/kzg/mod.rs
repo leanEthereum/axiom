@@ -1,57 +1,45 @@
-//! The KZG context: the trusted setup and the precomputed domains every operation shares.
+//! The KZG context: one entry point over the four parts of the scheme.
 //!
-//! The public operations live in focused files, one per spec section:
+//! Each part owns the setup points and domains it needs, one per spec section:
 //!
-//! - blob commitments and openings of EIP-4844,
-//! - cell computation and batch verification of EIP-7594,
-//! - erasure recovery of EIP-7594.
+//! - the blob commitments and openings of EIP-4844,
+//! - the cell prover of EIP-7594, with its FK20 tables,
+//! - the cell verifier of EIP-7594,
+//! - the erasure recovery of EIP-7594.
 
-mod blob_proofs;
-mod cell_proofs;
+mod blob_scheme;
+mod cell_batch;
+mod cell_prover;
+mod cell_verifier;
+mod cosets;
+mod opening;
 mod recovery;
 
 use std::{fmt, sync::OnceLock};
 
-use axiom_bls12_381::Scalar;
-
-use crate::{
-    Blob, FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL,
-    fft::{Domain, bit_reverse_permute, reverse_bits},
-    fk20::Fk20,
-    setup::TrustedSetup,
+use self::{
+    blob_scheme::BlobScheme, cell_batch::CellBatch, cell_prover::CellProver,
+    cell_verifier::CellVerifier, cosets::Cosets, recovery::CellRecovery,
 };
-
-/// Base-two logarithm of the blob size, 4096 evaluations.
-const LOG_BLOB: u32 = 12;
-
-/// Base-two logarithm of the extended blob size, 8192 evaluations.
-const LOG_EXT_BLOB: u32 = 13;
-
-/// Base-two logarithm of the cell size, 64 evaluations.
-const LOG_CELL: u32 = 6;
-
-/// Base-two logarithm of the number of cells, 128 per extended blob.
-const LOG_CELLS: u32 = 7;
+use crate::{
+    Blob, Bytes32, Bytes48, CELLS_PER_EXT_BLOB, Cell, CellIndex, CellsAndProofs,
+    FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL, FIELD_ELEMENTS_PER_EXT_BLOB, KzgError,
+    fft::Domain, setup::TrustedSetup,
+};
 
 /// The KZG commitment scheme over the mainnet trusted setup.
 ///
 /// Building it decodes the setup and precomputes roots of unity, so one shared instance serves all calls.
 /// The FK20 tables for cell proofs are built on first use, since verifiers never need them.
 pub struct Kzg {
-    /// The decoded trusted setup.
-    pub(crate) setup: TrustedSetup,
-    /// The 4096-th roots of unity, the blob's evaluation domain.
-    blob_domain: Domain,
-    /// The blob domain in bit-reversal order, matching the order of blob evaluations.
-    blob_roots_brp: Vec<Scalar>,
-    /// The 8192-th roots of unity, the extended blob's evaluation domain.
-    extended_domain: Domain,
-    /// The 64-th roots of unity, the subgroup each cell's coset shifts.
-    cell_domain: Domain,
-    /// The 128-th roots of unity, one per cell.
-    pub(crate) cell_count_domain: Domain,
-    /// The FK20 setup transforms, built on the first proof computation.
-    fk20: OnceLock<Fk20>,
+    /// The EIP-4844 prover and verifier.
+    blobs: BlobScheme,
+    /// The EIP-7594 cell prover.
+    cell_prover: CellProver,
+    /// The EIP-7594 cell verifier.
+    cell_verifier: CellVerifier,
+    /// The EIP-7594 erasure decoder.
+    recovery: CellRecovery,
 }
 
 impl Kzg {
@@ -65,56 +53,191 @@ impl Kzg {
         MAINNET.get_or_init(|| Self::new(TrustedSetup::mainnet()))
     }
 
-    /// Precomputes the domains around a decoded setup.
+    /// Hands each part its share of the setup and the domains it works over.
     fn new(setup: TrustedSetup) -> Self {
-        let blob_domain = Domain::new(LOG_BLOB);
-        // The spec stores blob evaluations at the bit-reversed roots, so the roots follow suit.
-        let mut blob_roots_brp = blob_domain.roots().to_vec();
-        bit_reverse_permute(&mut blob_roots_brp);
+        let blob_domain = Domain::new(FIELD_ELEMENTS_PER_BLOB.trailing_zeros());
+        let extended_domain = Domain::new(FIELD_ELEMENTS_PER_EXT_BLOB.trailing_zeros());
+        let cosets = Cosets::new(&extended_domain);
+        // Openings at one point pair against [s]_2, cell openings against [s^64]_2.
+        let s_g2 = setup.g2_monomial[1];
+        let s64_g2 = setup.g2_monomial[FIELD_ELEMENTS_PER_CELL];
         Self {
-            setup,
-            blob_domain,
-            blob_roots_brp,
-            extended_domain: Domain::new(LOG_EXT_BLOB),
-            cell_domain: Domain::new(LOG_CELL),
-            cell_count_domain: Domain::new(LOG_CELLS),
-            fk20: OnceLock::new(),
+            blobs: BlobScheme::new(setup.g1_lagrange_brp, s_g2, &blob_domain),
+            cell_verifier: CellVerifier::new(
+                setup.g1_monomial.prefix(FIELD_ELEMENTS_PER_CELL),
+                s64_g2,
+                cosets.clone(),
+            ),
+            recovery: CellRecovery::new(extended_domain.clone(), cosets),
+            cell_prover: CellProver::new(setup.g1_monomial, blob_domain, extended_domain),
         }
     }
 
-    /// The FK20 tables, built on first use.
-    pub(crate) fn fk20(&self) -> &Fk20 {
-        self.fk20
-            .get_or_init(|| Fk20::new(&self.setup.g1_monomial, &self.cell_count_domain))
-    }
-
-    /// The inverse h_k^{-1} of the shift of cell k's coset, coset_shift_for_cell in the Fulu spec.
+    /// Commits to a blob: [f(s)] for the polynomial its evaluations define.
+    ///
+    /// The Lagrange basis turns the commitment into one MSM over the evaluations.
     ///
     /// ```text
-    ///     h_k = w^{rev_7(k)}        w of order 8192
+    ///     [f(s)] = sum_i f(omega_i) [L_i(s)]
     /// ```
-    pub(crate) fn coset_shift_inverse(&self, cell: usize) -> Scalar {
-        // w^{-i} sits at position i of the inverse root table.
-        self.extended_domain.inverse_roots()[reverse_bits(cell, LOG_CELLS)]
-    }
-
-    /// The constant h_k^64 of the vanishing polynomial X^64 - h_k^64 of cell k's coset.
     ///
-    /// ```text
-    ///     h_k^64 = w^{64 rev_7(k)}        a root of unity of order 128
-    /// ```
-    pub(crate) fn coset_vanishing_constant(&self, cell: usize) -> Scalar {
-        self.extended_domain.roots()[FIELD_ELEMENTS_PER_CELL * reverse_bits(cell, LOG_CELLS)]
+    /// See blob_to_kzg_commitment in the Deneb spec.
+    #[must_use]
+    pub fn blob_to_kzg_commitment(&self, blob: &Blob) -> Bytes48 {
+        self.blobs.commit(blob)
     }
 
-    /// Converts a blob from evaluations to its 4096 coefficients, polynomial_eval_to_coeff in the Fulu spec.
-    fn blob_coefficients(&self, blob: &Blob) -> Vec<Scalar> {
-        // Undo the storage order, then interpolate over the 4096-th roots of unity.
-        let mut coefficients = blob.evaluations().to_vec();
-        debug_assert_eq!(coefficients.len(), FIELD_ELEMENTS_PER_BLOB);
-        bit_reverse_permute(&mut coefficients);
-        self.blob_domain.ifft(&mut coefficients);
-        coefficients
+    /// Opens the blob's polynomial at z.
+    ///
+    /// See compute_kzg_proof in the Deneb spec.
+    ///
+    /// # Returns
+    ///
+    /// The proof and the evaluation y = f(z).
+    ///
+    /// # Errors
+    ///
+    /// Fails when z is not a canonical field element.
+    pub fn compute_kzg_proof(
+        &self,
+        blob: &Blob,
+        z: &Bytes32,
+    ) -> Result<(Bytes48, Bytes32), KzgError> {
+        self.blobs.compute_kzg_proof(blob, z)
+    }
+
+    /// Opens the blob at the Fiat-Shamir challenge derived from the blob and its commitment.
+    ///
+    /// The commitment is only validated, never checked against the blob.
+    ///
+    /// See compute_blob_kzg_proof in the Deneb spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the commitment is not a point of G1.
+    pub fn compute_blob_kzg_proof(
+        &self,
+        blob: &Blob,
+        commitment: &Bytes48,
+    ) -> Result<Bytes48, KzgError> {
+        self.blobs.compute_blob_kzg_proof(blob, commitment)
+    }
+
+    /// Checks a proof that the committed polynomial takes the value y at z.
+    ///
+    /// See verify_kzg_proof in the Deneb spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a point or a field element is malformed.
+    /// A well-formed but wrong proof returns false.
+    pub fn verify_kzg_proof(
+        &self,
+        commitment: &Bytes48,
+        z: &Bytes32,
+        y: &Bytes32,
+        proof: &Bytes48,
+    ) -> Result<bool, KzgError> {
+        self.blobs.verify_kzg_proof(commitment, z, y, proof)
+    }
+
+    /// Checks a blob proof: the opening at the challenge matches the blob's own evaluation there.
+    ///
+    /// See verify_blob_kzg_proof in the Deneb spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the commitment or the proof is not a point of G1.
+    pub fn verify_blob_kzg_proof(
+        &self,
+        blob: &Blob,
+        commitment: &Bytes48,
+        proof: &Bytes48,
+    ) -> Result<bool, KzgError> {
+        self.blobs.verify_blob_kzg_proof(blob, commitment, proof)
+    }
+
+    /// Checks many blob proofs with one pairing check, true for an empty batch.
+    ///
+    /// See verify_blob_kzg_proof_batch in the Deneb spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lists differ in length or any point is malformed.
+    pub fn verify_blob_kzg_proof_batch(
+        &self,
+        blobs: &[Blob],
+        commitments: &[Bytes48],
+        proofs: &[Bytes48],
+    ) -> Result<bool, KzgError> {
+        self.blobs
+            .verify_blob_kzg_proof_batch(blobs, commitments, proofs)
+    }
+
+    /// Extends a blob to 8192 evaluations and cuts them into 128 cells.
+    ///
+    /// See compute_cells in the Fulu spec.
+    #[must_use]
+    pub fn compute_cells(&self, blob: &Blob) -> Box<[Cell; CELLS_PER_EXT_BLOB]> {
+        self.cell_prover.compute_cells(blob)
+    }
+
+    /// Computes the 128 cells of a blob and the proof of each.
+    ///
+    /// The spec opens each cell separately, in quadratic time.
+    /// FK20 computes all 128 proofs with FFTs and 128 MSMs of 64 points instead.
+    ///
+    /// See compute_cells_and_kzg_proofs in the Fulu spec.
+    #[must_use]
+    pub fn compute_cells_and_kzg_proofs(&self, blob: &Blob) -> CellsAndProofs {
+        self.cell_prover.compute_cells_and_kzg_proofs(blob)
+    }
+
+    /// Checks that every cell matches its commitment at its position, with one pairing check.
+    ///
+    /// The lists pair up entry by entry, and commitments may repeat.
+    /// An empty batch is valid.
+    ///
+    /// See verify_cell_kzg_proof_batch in the Fulu spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lists differ in length or any point is malformed.
+    pub fn verify_cell_kzg_proof_batch(
+        &self,
+        commitments: &[Bytes48],
+        cell_indices: &[CellIndex],
+        cells: &[Cell],
+        proofs: &[Bytes48],
+    ) -> Result<bool, KzgError> {
+        let batch = CellBatch::new(commitments, cell_indices, cells, proofs)?;
+        self.cell_verifier.verify(&batch)
+    }
+
+    /// Recovers all 128 cells and their proofs from at least 64 distinct cells.
+    ///
+    /// Cell indices must be strictly ascending.
+    /// The cells are not checked against any commitment, so callers verify them first.
+    /// Cells off the code still recover to some codeword, the one the spec's truncation picks.
+    ///
+    /// See recover_cells_and_kzg_proofs in the Fulu spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when:
+    ///
+    /// - the indices and cells differ in number,
+    /// - there are fewer than 64 or more than 128 cells,
+    /// - an index repeats,
+    /// - the indices are not ascending.
+    pub fn recover_cells_and_kzg_proofs(
+        &self,
+        cell_indices: &[CellIndex],
+        cells: &[Cell],
+    ) -> Result<CellsAndProofs, KzgError> {
+        // Recovery yields the polynomial, from which the prover recomputes everything.
+        let coefficients = self.recovery.recover(cell_indices, cells)?;
+        Ok(self.cell_prover.cells_and_proofs(&coefficients))
     }
 }
 
@@ -122,7 +245,7 @@ impl fmt::Debug for Kzg {
     /// Omits the setup, whose 8257 points would flood any log.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Kzg")
-            .field("fk20_ready", &self.fk20.get().is_some())
+            .field("fk20_ready", &self.cell_prover.is_ready())
             .finish_non_exhaustive()
     }
 }
