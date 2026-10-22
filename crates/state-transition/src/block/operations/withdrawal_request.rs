@@ -44,13 +44,10 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
         }
 
         let pending = state.pending_balance_to_withdraw(index);
-        let total_active_balance = processor.total_active_balance;
         if is_full_exit {
             // Only exit when nothing is queued, so a queued withdrawal is never stranded.
             if pending.0 == 0 {
-                processor
-                    .state
-                    .initiate_validator_exit(config, index, total_active_balance)?;
+                processor.registry().initiate_exit(index)?;
             }
             return Ok(());
         }
@@ -60,21 +57,18 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
             validator.effective_balance >= P::MIN_ACTIVATION_BALANCE;
         let floor = P::MIN_ACTIVATION_BALANCE
             .checked_add(pending)
-            .ok_or(StateError::Overflow)?;
+            .ok_or(StateError::Overflow {
+                quantity: "withdrawal floor",
+            })?;
         let has_excess_balance = balance > floor;
         if validator.has_compounding_withdrawal_credential()
             && has_sufficient_effective_balance
             && has_excess_balance
         {
             let to_withdraw = (balance - floor).min(self.amount);
-            let exit_epoch = processor.state.compute_exit_epoch_and_update_churn(
-                config,
-                to_withdraw,
-                total_active_balance,
-            );
-            let withdrawable_epoch = exit_epoch
-                .checked_add(config.min_validator_withdrawability_delay)
-                .ok_or(StateError::Overflow)?;
+            let mut registry = processor.registry();
+            let exit_epoch = registry.exit_epoch(to_withdraw);
+            let withdrawable_epoch = registry.withdrawable_epoch(exit_epoch)?;
             processor
                 .state
                 .beacon
@@ -84,7 +78,10 @@ impl<P: Preset> Operation<P> for WithdrawalRequest {
                     amount: to_withdraw,
                     withdrawable_epoch,
                 })
-                .map_err(|_| StateError::ListFull)?;
+                .map_err(|source| StateError::Capacity {
+                    list: "pending partial withdrawals",
+                    source,
+                })?;
         }
         Ok(())
     }

@@ -6,7 +6,8 @@ use std::{
 };
 
 use axiom_snappy::raw;
-use axiom_ssz::{Container, Ssz};
+use axiom_ssz::Ssz;
+use axiom_types::{ChainConfig, Preset};
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
@@ -127,6 +128,19 @@ impl Case {
         Yaml::parse(&text).map_err(|error| Failure(format!("{file}: {error}")))
     }
 
+    /// The configuration of the case: its own file when it ships one, the preset's otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the case's configuration file does not parse.
+    pub fn config<P: Preset>(&self) -> Result<ChainConfig, Failure> {
+        if !self.has("config.yaml") {
+            return Ok(ChainConfig::for_preset::<P>().with_forks_at_genesis());
+        }
+        ChainConfig::from_yaml(&self.yaml("config.yaml")?)
+            .map_err(|error| Failure(format!("config.yaml: {error}")))
+    }
+
     /// The case metadata, with defaults when the file is absent.
     ///
     /// # Errors
@@ -143,38 +157,4 @@ impl Case {
             blocks_count: field("blocks_count") as usize,
         })
     }
-}
-
-/// Compares two containers, naming the fields that differ.
-///
-/// A state mismatch printed in full is unreadable.
-/// The differing field roots point straight at the faulty step.
-///
-/// # Errors
-///
-/// Fails when the containers differ.
-pub fn assert_container_eq<C: Container + PartialEq>(
-    expected: &C,
-    actual: &C,
-    field_names: &[&str],
-) -> Result<(), Failure> {
-    if expected == actual {
-        return Ok(());
-    }
-    let differing: Vec<String> = expected
-        .field_roots()
-        .iter()
-        .zip(actual.field_roots())
-        .enumerate()
-        .filter(|(_, (left, right))| *left != right)
-        .map(|(index, _)| {
-            field_names
-                .get(index)
-                .map_or_else(|| format!("field {index}"), |name| (*name).to_owned())
-        })
-        .collect();
-    Err(Failure(format!(
-        "post-state differs in: {}",
-        differing.join(", ")
-    )))
 }

@@ -17,13 +17,7 @@ mod command;
 mod error;
 mod handle;
 
-use std::{
-    fs::File,
-    io::{self, Read},
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use axiom_crypto::secp256k1::SecretKey;
 use command::{Command, Input};
@@ -37,6 +31,7 @@ use tokio::{
 };
 
 use crate::{
+    Csprng,
     enr::Enr,
     packet::MAX_PACKET_LEN,
     service::{Config, Event, Output, Service},
@@ -44,14 +39,6 @@ use crate::{
 
 /// How long the loop sleeps when the service has no deadline at all.
 const IDLE_WAIT: Duration = Duration::from_secs(3600);
-
-/// Reads a 32-byte seed from the operating system's entropy source.
-fn os_seed() -> io::Result<[u8; 32]> {
-    // The service's generator needs only this one secret to be unpredictable.
-    let mut seed = [0_u8; 32];
-    File::open("/dev/urandom")?.read_exact(&mut seed)?;
-    Ok(seed)
-}
 
 /// The loop state: the service and the effects it needs.
 struct Driver {
@@ -74,7 +61,7 @@ impl Driver {
         bind: SocketAddr,
     ) -> io::Result<(Discv5, Discv5Events)> {
         // Phase 1: the pure service, seeded from the operating system.
-        let service = Service::new(key, local_enr.clone(), config, os_seed()?)
+        let service = Service::new(key, local_enr.clone(), config, Csprng::os_seed()?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let socket = Arc::new(UdpSocket::bind(bind).await?);
         let local_addr = socket.local_addr()?;

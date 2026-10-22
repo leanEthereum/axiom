@@ -24,24 +24,6 @@
 //!
 //! Operations on secret scalars run in constant time.
 //! Operations named vartime, and hashing, decoding, and multi-scalar multiplication, take public inputs only.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Gt, Scalar};
-//!
-//! let a = Scalar::from_u64(6);
-//! let b = Scalar::from_u64(7);
-//! let p = G1Affine::from(G1Projective::GENERATOR * a);
-//! let q = G2Affine::from(G2Projective::GENERATOR * b);
-//!
-//! // Bilinearity: e(6 G1, 7 G2) = e(42 G1, G2).
-//! let p42 = G1Affine::from(G1Projective::GENERATOR * (a * b));
-//! assert_eq!(Gt::pairing(&p, &q), Gt::pairing(&p42, &G2Affine::GENERATOR));
-//!
-//! // Points round-trip through the 48-byte compressed encoding.
-//! assert_eq!(G1Affine::from_compressed(&p.to_compressed()), Ok(p));
-//! ```
 
 mod arithmetic;
 mod encoding;

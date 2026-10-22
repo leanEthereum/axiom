@@ -132,6 +132,7 @@ impl Display for ProcessValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::Registry;
 
     #[test]
     fn values_print_exactly() {
@@ -147,6 +148,22 @@ mod tests {
         // A running test process has memory, has spent CPU, and holds descriptors.
         for stat in ProcessStat::ALL {
             assert!(stat.sample().is_some(), "{stat:?} missing");
+        }
+    }
+
+    #[test]
+    fn process_metrics_have_their_conventional_types() {
+        let registry = Registry::new();
+        registry.register_process_metrics().unwrap();
+        let text = registry.render();
+
+        // Linux exposes all three; other platforms leave them out.
+        if cfg!(target_os = "linux") {
+            assert!(text.contains("# TYPE process_cpu_seconds_total counter\n"));
+            assert!(text.contains("# TYPE process_open_fds gauge\n"));
+            assert!(text.contains("# TYPE process_resident_memory_bytes gauge\n"));
+        } else {
+            assert_eq!(text, "");
         }
     }
 }

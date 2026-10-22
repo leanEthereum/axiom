@@ -2,7 +2,7 @@
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
@@ -10,10 +10,10 @@ use axiom_json::{Json, Limits as JsonLimits};
 use axiom_types::{NewPayloadRequest, Preset, VersionedHash};
 
 use crate::{
-    EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec, JwtSecret,
-    PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, WireError, WireErrorKind,
-    rpc::{self, ResponseError},
-    wire::BlobAndProof,
+    Claims, EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec,
+    JwtSecret, PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, WireError, WireErrorKind,
+    rpc::Call,
+    wire::{BlobAndProof, Items, Reader},
 };
 
 /// Timeout of engine_newPayload and engine_forkchoiceUpdated, from `src/engine/cancun.md`.
@@ -115,14 +115,13 @@ impl EngineClient {
         timeout: Duration,
     ) -> Result<Json, EngineError> {
         // Phase 1: the JSON-RPC body.
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = rpc::request(id, method, params).to_string().into_bytes();
+        let call = Call::new(self.next_id.fetch_add(1, Ordering::Relaxed), method, params);
 
         // Phase 2: a token issued now, so the engine's 60-second window always holds it.
-        let token = self.secret.token(unix_now());
+        let token = self.secret.token(Claims::issued_now());
         let request = Request::new(Method::Post, self.http.endpoint().path())
             .with_header("authorization", format!("Bearer {token}"))
-            .with_body("application/json", body);
+            .with_body("application/json", call.to_bytes());
 
         // Phase 3: the exchange; the engine answers 200 even for JSON-RPC errors.
         let response = self.http.send_with_timeout(&request, timeout).await?;
@@ -136,10 +135,7 @@ impl EngineClient {
             max_bytes: MAX_RESPONSE_BYTES,
         };
         let json = Json::parse_with(&response.body, limits).map_err(EngineError::Json)?;
-        rpc::result(json, id).map_err(|error| match error {
-            ResponseError::Envelope(error) => EngineError::Envelope(error),
-            ResponseError::Rpc(error) => EngineError::Rpc(error),
-        })
+        call.result(json)
     }
 
     /// Calls a method and decodes its result.
@@ -169,17 +165,7 @@ impl EngineClient {
             .call("engine_exchangeCapabilities", vec![ours], LOOKUP_TIMEOUT)
             .await?;
         // An array of strings; a bad element is located by its index.
-        let items = result.as_array().ok_or_else(|| {
-            WireError::new(WireErrorKind::Type {
-                expected: "array",
-                found: result.kind(),
-            })
-        })?;
-        let mut theirs = Vec::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            theirs.push(String::from_json(item).map_err(|error| error.at_index(index))?);
-        }
-        Ok(theirs)
+        Ok(Reader::new(&result).items()?.decode()?)
     }
 
     /// Hands a payload to the engine for validation: engine_newPayloadV4.
@@ -270,12 +256,9 @@ impl EngineClient {
         if result.is_null() {
             return Ok(None);
         }
-        let items = result.as_array().ok_or_else(|| {
-            WireError::new(WireErrorKind::Type {
-                expected: "array or null",
-                found: result.kind(),
-            })
-        })?;
+        let items = result
+            .as_array()
+            .ok_or_else(|| WireError::wrong_type("array or null", &result))?;
         // One entry per requested hash, in request order.
         if items.len() != versioned_hashes.len() {
             return Err(WireError::new(WireErrorKind::LengthMismatch {
@@ -284,11 +267,8 @@ impl EngineClient {
             })
             .into());
         }
-        let mut blobs = Vec::with_capacity(items.len());
-        for (index, item) in items.iter().enumerate() {
-            blobs.push(BlobAndProof::from_json(item).map_err(|error| error.at_index(index))?);
-        }
-        Ok(Some(blobs))
+        // A bad entry is located by its index.
+        Ok(Some(Items::new(items).decode()?))
     }
 
     /// The chain id the engine runs: eth_chainId.
@@ -312,13 +292,4 @@ impl EngineClient {
         self.call_typed("eth_syncing", Vec::new(), LOOKUP_TIMEOUT)
             .await
     }
-}
-
-/// Seconds since the Unix epoch on the local clock.
-///
-/// The engine compares the token's issued-at to its own clock, so both hosts need sane time.
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
 }

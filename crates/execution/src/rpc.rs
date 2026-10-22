@@ -11,56 +11,71 @@
 use axiom_json::{Json, Object};
 use thiserror::Error;
 
-use crate::EnvelopeError;
+use crate::{EngineError, EnvelopeError};
 
-/// Builds the request envelope for a call.
-pub(crate) fn request(id: u64, method: &str, params: Vec<Json>) -> Json {
-    // Member order follows the spec's examples, which keeps logs easy to compare.
-    let mut envelope = Object::new();
-    envelope.insert("jsonrpc", Json::from("2.0"));
-    envelope.insert("id", Json::from(id));
-    envelope.insert("method", Json::from(method));
-    envelope.insert("params", Json::Array(params));
-    Json::Object(envelope)
-}
-
-/// Extracts the result of a response to the request with a given id.
-///
-/// # Errors
-///
-/// Fails on a broken envelope, or with the engine's error object.
-pub(crate) fn result(response: Json, id: u64) -> Result<Json, ResponseError> {
-    let Json::Object(mut envelope) = response else {
-        return Err(EnvelopeError::NotAnObject.into());
-    };
-    if envelope.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
-        return Err(EnvelopeError::WrongVersion.into());
-    }
-    if envelope.get("id").and_then(Json::as_u64) != Some(id) {
-        return Err(EnvelopeError::IdMismatch.into());
-    }
-
-    // Exactly one of result and error, per JSON-RPC 2.0 section 5.
-    // A null result is a real result, such as engine_getBlobsV2 reporting missing blobs.
-    match (envelope.remove("result"), envelope.remove("error")) {
-        (Some(result), None) => Ok(result),
-        (None, Some(error)) => Err(ResponseError::Rpc(RpcError::from_json(&error)?)),
-        _ => Err(EnvelopeError::ResultOrError.into()),
-    }
-}
-
-/// Why a response yields no result.
+/// One JSON-RPC request, kept to check the response that answers it.
 #[derive(Debug)]
-pub(crate) enum ResponseError {
-    /// The envelope is broken.
-    Envelope(EnvelopeError),
-    /// The engine reported an error.
-    Rpc(RpcError),
+pub(crate) struct Call {
+    /// The number the response must echo.
+    id: u64,
+    /// The request envelope.
+    request: Json,
 }
 
-impl From<EnvelopeError> for ResponseError {
-    fn from(error: EnvelopeError) -> Self {
-        Self::Envelope(error)
+impl Call {
+    /// Builds the request envelope for a call.
+    pub(crate) fn new(id: u64, method: &str, params: Vec<Json>) -> Self {
+        // Member order follows the spec's examples, which keeps logs easy to compare.
+        let mut envelope = Object::new();
+        envelope.insert("jsonrpc", Json::from("2.0"));
+        envelope.insert("id", Json::from(id));
+        envelope.insert("method", Json::from(method));
+        envelope.insert("params", Json::Array(params));
+        Self {
+            id,
+            request: Json::Object(envelope),
+        }
+    }
+
+    /// The request as compact JSON text, ready to send.
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        self.request.to_string().into_bytes()
+    }
+
+    /// Extracts the result of the response to this call.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a broken envelope, or with the engine's error object.
+    pub(crate) fn result(&self, response: Json) -> Result<Json, EngineError> {
+        let Json::Object(mut envelope) = response else {
+            return Err(EnvelopeError::NotAnObject {
+                found: response.kind(),
+            }
+            .into());
+        };
+        if envelope.get("jsonrpc").and_then(Json::as_str) != Some("2.0") {
+            return Err(EnvelopeError::WrongVersion.into());
+        }
+        let Some(id) = envelope.get("id").and_then(Json::as_u64) else {
+            return Err(EnvelopeError::MissingId { expected: self.id }.into());
+        };
+        if id != self.id {
+            return Err(EnvelopeError::IdMismatch {
+                expected: self.id,
+                found: id,
+            }
+            .into());
+        }
+
+        // Exactly one of result and error, per JSON-RPC 2.0 section 5.
+        // A null result is a real result, such as engine_getBlobsV2 reporting missing blobs.
+        match (envelope.remove("result"), envelope.remove("error")) {
+            (Some(result), None) => Ok(result),
+            (None, Some(error)) => Err(RpcError::from_json(&error)?.into()),
+            (None, None) => Err(EnvelopeError::ResultOrError { present: 0 }.into()),
+            (Some(_), Some(_)) => Err(EnvelopeError::ResultOrError { present: 2 }.into()),
+        }
     }
 }
 
@@ -161,24 +176,25 @@ mod tests {
     #[test]
     fn request_layout() {
         // The exact bytes a call with id 7 and one parameter puts on the wire.
-        let envelope = request(7, "eth_chainId", vec![Json::from("x")]);
+        let call = Call::new(7, "eth_chainId", vec![Json::from("x")]);
         assert_eq!(
-            envelope.to_string(),
-            r#"{"jsonrpc":"2.0","id":7,"method":"eth_chainId","params":["x"]}"#
+            call.to_bytes(),
+            br#"{"jsonrpc":"2.0","id":7,"method":"eth_chainId","params":["x"]}"#
         );
     }
 
     #[test]
     fn result_extraction() {
         // A null result is still a result.
+        let call = Call::new(3, "engine_getBlobsV2", Vec::new());
         let response = json(r#"{"jsonrpc":"2.0","id":3,"result":null}"#);
-        assert_eq!(result(response, 3).ok(), Some(Json::Null));
+        assert_eq!(call.result(response).ok(), Some(Json::Null));
 
         // An error object comes back typed, data included.
         let response = json(
             r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Server error","data":{"err":"db"}}}"#,
         );
-        let Err(ResponseError::Rpc(error)) = result(response, 3) else {
+        let Err(EngineError::Rpc(error)) = call.result(response) else {
             panic!("expected an error object");
         };
         assert_eq!(error.code, RpcError::SERVER_ERROR);
@@ -189,27 +205,48 @@ mod tests {
     fn envelope_rejections() {
         // Each broken envelope maps to one error.
         let cases = [
-            ("[]", EnvelopeError::NotAnObject),
+            ("[]", EnvelopeError::NotAnObject { found: "array" }),
             (r#"{"id":3,"result":1}"#, EnvelopeError::WrongVersion),
             (
                 r#"{"jsonrpc":"2.0","id":4,"result":1}"#,
-                EnvelopeError::IdMismatch,
+                EnvelopeError::IdMismatch {
+                    expected: 3,
+                    found: 4,
+                },
             ),
-            (r#"{"jsonrpc":"2.0","id":3}"#, EnvelopeError::ResultOrError),
+            (
+                r#"{"jsonrpc":"2.0","id":"3","result":1}"#,
+                EnvelopeError::MissingId { expected: 3 },
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":3}"#,
+                EnvelopeError::ResultOrError { present: 0 },
+            ),
             (
                 r#"{"jsonrpc":"2.0","id":3,"result":1,"error":{"code":1,"message":"x"}}"#,
-                EnvelopeError::ResultOrError,
+                EnvelopeError::ResultOrError { present: 2 },
             ),
             (
                 r#"{"jsonrpc":"2.0","id":3,"error":{"message":"x"}}"#,
                 EnvelopeError::MalformedError,
             ),
         ];
+        let call = Call::new(3, "eth_chainId", Vec::new());
         for (text, expected) in cases {
-            match result(json(text), 3) {
-                Err(ResponseError::Envelope(error)) => assert_eq!(error, expected, "{text}"),
+            match call.result(json(text)) {
+                Err(EngineError::Envelope(error)) => assert_eq!(error, expected, "{text}"),
                 other => panic!("{text}: {other:?}"),
             }
         }
+
+        // The log line names both ids.
+        let error = EnvelopeError::IdMismatch {
+            expected: 3,
+            found: 4,
+        };
+        assert_eq!(
+            error.to_string(),
+            "response id 4 does not echo request id 3"
+        );
     }
 }

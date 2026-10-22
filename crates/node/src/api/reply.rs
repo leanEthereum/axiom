@@ -4,7 +4,7 @@ use std::future::Future;
 
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
-use axiom_types::ForkName;
+use axiom_types::{BeaconBlockHeader, Checkpoint, ForkName};
 
 use crate::{ChainError, ChainStopped};
 
@@ -133,11 +133,6 @@ impl Reply {
             .with_body(SSZ, bytes)
     }
 
-    /// An object from named members.
-    pub(crate) fn object<const N: usize>(members: [(&str, Json); N]) -> Json {
-        Json::from(members.into_iter().collect::<Object>())
-    }
-
     /// A number as the beacon API writes it: a decimal string.
     pub(crate) fn number(value: u64) -> Json {
         Json::from(value.to_string())
@@ -146,6 +141,25 @@ impl Reply {
     /// Any value through its display form, such as a 0x-prefixed root.
     pub(crate) fn text(value: &impl ToString) -> Json {
         Json::from(value.to_string())
+    }
+
+    /// A header in the beacon API's JSON form.
+    pub(crate) fn header(header: &BeaconBlockHeader) -> Json {
+        Json::from([
+            ("slot", Self::number(header.slot.0)),
+            ("proposer_index", Self::number(header.proposer_index.0)),
+            ("parent_root", Self::text(&header.parent_root)),
+            ("state_root", Self::text(&header.state_root)),
+            ("body_root", Self::text(&header.body_root)),
+        ])
+    }
+
+    /// A checkpoint in the beacon API's JSON form.
+    pub(crate) fn checkpoint(checkpoint: Checkpoint) -> Json {
+        Json::from([
+            ("epoch", Self::number(checkpoint.epoch.0)),
+            ("root", Self::text(&checkpoint.root)),
+        ])
     }
 
     /// Whether a request accepts SSZ.

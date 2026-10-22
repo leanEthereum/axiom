@@ -1,9 +1,6 @@
 //! A set of series of one metric, told apart by label values.
 
-use std::{
-    cmp::Ordering,
-    sync::{PoisonError, RwLock},
-};
+use std::sync::{PoisonError, RwLock};
 
 use crate::metrics::name::LabelName;
 
@@ -42,11 +39,6 @@ impl<M: Clone> Family<M> {
         }
     }
 
-    /// The label names, in declaration order.
-    pub(crate) fn names(&self) -> &[LabelName] {
-        &self.names
-    }
-
     /// The child for these values, created by a constructor on first use.
     ///
     /// The caller guarantees one value per label name.
@@ -55,7 +47,7 @@ impl<M: Clone> Family<M> {
         // A poisoned lock still holds a valid list, since no update panics midway.
         {
             let children = self.children.read().unwrap_or_else(PoisonError::into_inner);
-            if let Ok(index) = children.binary_search_by(|(key, _)| compare(key, values)) {
+            if let Ok(index) = Self::search(&children, values) {
                 return children[index].1.clone();
             }
         }
@@ -66,7 +58,7 @@ impl<M: Clone> Family<M> {
             .children
             .write()
             .unwrap_or_else(PoisonError::into_inner);
-        match children.binary_search_by(|(key, _)| compare(key, values)) {
+        match Self::search(&children, values) {
             Ok(index) => children[index].1.clone(),
             Err(index) => {
                 // Insert at the sorted position, keeping later searches valid.
@@ -78,6 +70,16 @@ impl<M: Clone> Family<M> {
         }
     }
 
+    /// Pairs the label names with one child's values, in declaration order.
+    pub(crate) fn labels<'a>(&'a self, values: &'a [String]) -> Vec<(&'a str, &'a str)> {
+        // The family stores exactly one value per name, so the zip loses nothing.
+        self.names
+            .iter()
+            .map(LabelName::as_str)
+            .zip(values.iter().map(String::as_str))
+            .collect()
+    }
+
     /// A copy of every child with its values, sorted by values.
     pub(crate) fn children(&self) -> Vec<(Box<[String]>, M)> {
         // Clone handles under the lock, so formatting happens without it.
@@ -86,12 +88,17 @@ impl<M: Clone> Family<M> {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
-}
 
-/// Orders a stored key against looked-up values, element by element.
-fn compare(key: &[String], values: &[&str]) -> Ordering {
-    // Lexicographic order over the tuple, matching the order children are stored in.
-    key.iter().map(String::as_str).cmp(values.iter().copied())
+    /// Finds the position of these values among the sorted children.
+    ///
+    /// # Returns
+    ///
+    /// The index of the matching child, or the index where it would be inserted.
+    fn search(children: &[(Box<[String]>, M)], values: &[&str]) -> Result<usize, usize> {
+        // Lexicographic order over the tuple, matching the order children are stored in.
+        children
+            .binary_search_by(|(key, _)| key.iter().map(String::as_str).cmp(values.iter().copied()))
+    }
 }
 
 #[cfg(test)]

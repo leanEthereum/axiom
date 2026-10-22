@@ -9,11 +9,13 @@ mod blob_schedule;
 mod fork_name;
 mod yaml;
 
+use axiom_yaml::Yaml;
 pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
+use yaml::ConfigEntry;
 pub use yaml::ConfigError;
 
-use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Root, Version};
+use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Preset, Root, Version};
 
 /// Every runtime parameter of a beacon chain network.
 ///
@@ -173,6 +175,26 @@ pub struct ChainConfig {
 }
 
 impl ChainConfig {
+    /// A configuration read from YAML, starting from the defaults of its preset base.
+    ///
+    /// Keys this client does not know, such as those of future forks, are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a known key has a value of the wrong type, or the preset base is unknown.
+    pub fn from_yaml(yaml: &Yaml) -> Result<Self, ConfigError> {
+        let mapping = yaml.as_mapping().ok_or(ConfigError::NotAMapping)?;
+        let mut config = match yaml.get("PRESET_BASE").and_then(Yaml::as_str) {
+            None | Some("mainnet") => Self::mainnet(),
+            Some("minimal") => Self::minimal(),
+            Some(other) => return Err(ConfigError::UnknownPresetBase(other.to_owned())),
+        };
+        for (key, value) in mapping {
+            ConfigEntry::new(key, value).apply_to(&mut config)?;
+        }
+        Ok(config)
+    }
+
     /// The mainnet configuration.
     #[must_use]
     pub fn mainnet() -> Self {
@@ -260,6 +282,30 @@ impl ChainConfig {
                 },
             ]),
         }
+    }
+
+    /// The configuration published alongside a preset.
+    #[must_use]
+    pub fn for_preset<P: Preset>() -> Self {
+        if P::NAME == "mainnet" {
+            Self::mainnet()
+        } else {
+            Self::minimal()
+        }
+    }
+
+    /// The same configuration with every fork through Fulu active from genesis.
+    ///
+    /// Spec test vectors are generated this way, whatever the published fork epochs say.
+    #[must_use]
+    pub const fn with_forks_at_genesis(mut self) -> Self {
+        self.altair_fork_epoch = Epoch::GENESIS;
+        self.bellatrix_fork_epoch = Epoch::GENESIS;
+        self.capella_fork_epoch = Epoch::GENESIS;
+        self.deneb_fork_epoch = Epoch::GENESIS;
+        self.electra_fork_epoch = Epoch::GENESIS;
+        self.fulu_fork_epoch = Epoch::GENESIS;
+        self
     }
 
     /// The minimal configuration, which every fork starts disabled in.
@@ -501,6 +547,39 @@ mod tests {
         assert_eq!(
             config.blob_parameters(Epoch(420_000)).max_blobs_per_block,
             21
+        );
+    }
+
+    #[test]
+    fn a_malformed_value_names_its_key_and_shape() {
+        // A slot length of "fast" is not an integer.
+        let yaml = Yaml::parse("SLOT_DURATION_MS: fast\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::InvalidValue {
+                key: "SLOT_DURATION_MS".to_owned(),
+                expected: "an integer",
+            })
+        );
+
+        // A fork version of two bytes is not the four bytes a version holds.
+        let yaml = Yaml::parse("FULU_FORK_VERSION: '0x0605'\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::InvalidValue {
+                key: "FULU_FORK_VERSION".to_owned(),
+                expected: "4 hex bytes",
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_preset_base_is_named() {
+        // Only mainnet and minimal exist as preset bases.
+        let yaml = Yaml::parse("PRESET_BASE: gnosis\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&yaml),
+            Err(ConfigError::UnknownPresetBase("gnosis".to_owned()))
         );
     }
 }

@@ -46,8 +46,9 @@ impl Ping {
 
     /// Checks the echo and measures the round trip.
     pub fn verify(&self, echo: &[u8; PING_SIZE], now: Duration) -> Result<Duration, PingError> {
-        if *echo != self.payload {
-            return Err(PingError::Mismatch);
+        // The first differing byte locates the corruption.
+        if let Some(offset) = echo.iter().zip(&self.payload).position(|(a, b)| a != b) {
+            return Err(PingError::Mismatch { offset });
         }
         // A clock that moves backwards yields zero rather than a panic.
         Ok(now.saturating_sub(self.sent_at))
@@ -77,8 +78,11 @@ impl PingResponder {
 #[non_exhaustive]
 pub enum PingError {
     /// The echo differs from the probe.
-    #[error("ping echo does not match the probe")]
-    Mismatch,
+    #[error("ping echo differs from the probe at byte {offset}")]
+    Mismatch {
+        /// Position of the first differing byte.
+        offset: usize,
+    },
 }
 
 #[cfg(test)]
@@ -108,9 +112,13 @@ mod tests {
     #[test]
     fn corrupted_echo_is_rejected() {
         let ping = Ping::new([7; PING_SIZE], Duration::ZERO);
-        // Mutation: the first byte comes back changed.
+        // Mutation: bytes 5 and 9 come back changed; the first one is reported.
         let mut echo = [7; PING_SIZE];
-        echo[0] = 8;
-        assert_eq!(ping.verify(&echo, Duration::ZERO), Err(PingError::Mismatch));
+        echo[5] = 8;
+        echo[9] = 8;
+        assert_eq!(
+            ping.verify(&echo, Duration::ZERO),
+            Err(PingError::Mismatch { offset: 5 })
+        );
     }
 }

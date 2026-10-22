@@ -172,9 +172,13 @@ impl XxState {
 
     /// Reads an e token, returning the rest of the message.
     fn read_ephemeral<'a>(&mut self, message: &'a [u8]) -> Result<&'a [u8], SecureError> {
-        let (key, rest) = message
-            .split_first_chunk::<DH_LEN>()
-            .ok_or(SecureError::MessageTooShort)?;
+        let (key, rest) =
+            message
+                .split_first_chunk::<DH_LEN>()
+                .ok_or(SecureError::MessageTooShort {
+                    needed: DH_LEN,
+                    len: message.len(),
+                })?;
         self.symmetric.mix_hash(key);
         self.remote_ephemeral = Some(PublicKey::from_bytes(*key));
         Ok(rest)
@@ -185,7 +189,10 @@ impl XxState {
         // The key carries a tag once a key is mixed in, which XX guarantees here.
         let sealed_len = self.symmetric.sealed_len(DH_LEN);
         if message.len() < sealed_len {
-            return Err(SecureError::MessageTooShort);
+            return Err(SecureError::MessageTooShort {
+                needed: sealed_len,
+                len: message.len(),
+            });
         }
         let (sealed, rest) = message.split_at(sealed_len);
         let key: [u8; DH_LEN] = self

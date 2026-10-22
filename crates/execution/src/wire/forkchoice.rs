@@ -15,10 +15,10 @@
 
 use std::fmt;
 
-use axiom_json::{Json, data};
+use axiom_json::{Data, Json};
 use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, Withdrawals};
 
-use super::{Fields, JsonCodec, PayloadStatus, nullable, object, primitives::read_fixed};
+use super::{Fields, JsonCodec, PayloadStatus, Reader};
 use crate::WireError;
 
 /// The execution blocks the consensus layer considers head, safe, and finalized.
@@ -38,7 +38,7 @@ pub struct ForkchoiceState {
 
 impl JsonCodec for ForkchoiceState {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("headBlockHash", self.head_block_hash.to_json()),
             ("safeBlockHash", self.safe_block_hash.to_json()),
             ("finalizedBlockHash", self.finalized_block_hash.to_json()),
@@ -78,7 +78,7 @@ pub struct PayloadAttributes<P: Preset> {
 
 impl<P: Preset> JsonCodec for PayloadAttributes<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("timestamp", self.timestamp.to_json()),
             ("prevRandao", self.prev_randao.to_json()),
             (
@@ -111,17 +111,17 @@ pub struct PayloadId(pub [u8; 8]);
 
 impl JsonCodec for PayloadId {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
 impl fmt::Display for PayloadId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&data::encode(&self.0))
+        f.write_str(&self.0.to_data())
     }
 }
 
@@ -139,9 +139,9 @@ pub struct ForkchoiceUpdated {
 
 impl JsonCodec for ForkchoiceUpdated {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("payloadStatus", self.payload_status.to_json()),
-            ("payloadId", nullable(self.payload_id.as_ref())),
+            ("payloadId", self.payload_id.to_json()),
         ])
     }
 
@@ -151,5 +151,40 @@ impl JsonCodec for ForkchoiceUpdated {
             payload_status: fields.required("payloadStatus")?,
             payload_id: fields.optional("payloadId")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_ssz::List;
+    use axiom_types::Minimal;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::wire::payload::tests::withdrawal;
+
+    proptest! {
+        #[test]
+        fn attributes_and_state_round_trip(
+            withdrawals in proptest::collection::vec(withdrawal(), 0..=4),
+            timestamp in any::<u64>(),
+            hashes in any::<[[u8; 32]; 3]>(),
+        ) {
+            let attributes = PayloadAttributes::<Minimal> {
+                timestamp,
+                prev_randao: Bytes32(hashes[0]),
+                suggested_fee_recipient: ExecutionAddress([hashes[1][0]; 20]),
+                withdrawals: List::try_from(withdrawals).unwrap(),
+                parent_beacon_block_root: Root(hashes[2]),
+            };
+            prop_assert_eq!(PayloadAttributes::from_json(&attributes.to_json()), Ok(attributes));
+
+            let state = ForkchoiceState {
+                head_block_hash: Hash32(hashes[0]),
+                safe_block_hash: Hash32(hashes[1]),
+                finalized_block_hash: Hash32(hashes[2]),
+            };
+            prop_assert_eq!(ForkchoiceState::from_json(&state.to_json()), Ok(state));
+        }
     }
 }

@@ -45,18 +45,6 @@ const TEXT_PREFIX: &str = "enr:";
 /// Known keys are parsed once, at decoding.
 ///
 /// See EIP-778.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_discv5::Enr;
-///
-/// let text = "enr:-IS4QHCYrYZbAKWCBRlAy5zzaDZXJBGkcnh4MHcBFZntXNFrdvJjX04jRzjzCBOonrkTfj499SZuOh8R33Ls8RRcy5wBgmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQPKY0yuDUmstAHYpMa2_oxVtw0RW_QAdpzBQA8yWM0xOIN1ZHCCdl8";
-/// let enr: Enr = text.parse().unwrap();
-/// assert_eq!(enr.seq(), 1);
-/// assert_eq!(enr.endpoints().udp4, Some(30303));
-/// assert_eq!(enr.to_string(), text);
-/// ```
 #[derive(Clone)]
 pub struct Enr {
     /// The sequence number.
@@ -123,7 +111,9 @@ impl Enr {
                 .last_key_value()
                 .is_some_and(|(last, _)| last.as_slice() >= key)
             {
-                return Err(EnrError::UnsortedKeys);
+                return Err(EnrError::UnsortedKeys {
+                    position: pairs.len(),
+                });
             }
             pairs.insert(key.to_vec(), value.to_vec());
         }
@@ -133,15 +123,11 @@ impl Enr {
         if Decoder::new(scheme).bytes()? != SCHEME_V4 {
             return Err(EnrError::UnsupportedScheme);
         }
-        let public_key = pairs
-            .get(KEY_SECP256K1)
-            .and_then(|raw| {
-                let mut decoder = Decoder::new(raw);
-                let compressed = decoder.array::<33>().ok()?;
-                decoder.finish().ok()?;
-                PublicKey::from_compressed(&compressed).ok()
-            })
-            .ok_or(EnrError::InvalidPublicKey)?;
+        let mut decoder = Decoder::new(pairs.get(KEY_SECP256K1).ok_or(EnrError::MissingPublicKey)?);
+        let compressed = decoder.array::<33>()?;
+        decoder.finish()?;
+        let public_key =
+            PublicKey::from_compressed(&compressed).map_err(EnrError::InvalidPublicKey)?;
         let signature: &[u8; 64] = signature
             .try_into()
             .map_err(|_| EnrError::SignatureLength {

@@ -10,51 +10,18 @@
 //! - A field-by-field decode.
 //!
 //! Every SSZ operation then follows from that description.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Root, Ssz};
-//!
-//! struct Checkpoint {
-//!     epoch: u64,
-//!     root: Root,
-//! }
-//!
-//! impl Container for Checkpoint {
-//!     const FIELDS: &'static [Option<usize>] = &[u64::FIXED_SIZE, Root::FIXED_SIZE];
-//!
-//!     fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
-//!         visitor.field(&self.epoch);
-//!         visitor.field(&self.root);
-//!     }
-//!
-//!     fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
-//!         Ok(Self {
-//!             epoch: fields.field()?,
-//!             root: fields.field()?,
-//!         })
-//!     }
-//! }
-//!
-//! let checkpoint = Checkpoint {
-//!     epoch: 3,
-//!     root: Root::ZERO,
-//! };
-//! assert_eq!(checkpoint.encode().len(), 40);
-//! ```
 
 mod decoder;
+mod layout;
 mod visitors;
 
 pub use decoder::FieldDecoder;
+use layout::Layout;
 use visitors::{
     FieldProver, FieldRoots, FixedPartWriter, LengthCounter, RootMerkleizer, VariablePartWriter,
 };
 
-use crate::{
-    BYTES_PER_LENGTH_OFFSET, DecodeError, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz,
-};
+use crate::{DecodeError, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz};
 
 /// A record of named fields, serialized and merkleized in declaration order.
 ///
@@ -124,37 +91,11 @@ pub trait FieldVisitor: visitors::Sealed {
     fn field<T: Ssz>(&mut self, value: &T);
 }
 
-/// Total size of the fixed part: fixed fields in full, variable fields as offsets.
-const fn fixed_part_len(fields: &[Option<usize>]) -> usize {
-    let mut total = 0;
-    let mut index = 0;
-    while index < fields.len() {
-        total += match fields[index] {
-            Some(size) => size,
-            None => BYTES_PER_LENGTH_OFFSET,
-        };
-        index += 1;
-    }
-    total
-}
-
-/// Fixed size of a container, when every field is fixed-size.
-const fn fixed_size(fields: &[Option<usize>]) -> Option<usize> {
-    let mut index = 0;
-    while index < fields.len() {
-        if fields[index].is_none() {
-            return None;
-        }
-        index += 1;
-    }
-    Some(fixed_part_len(fields))
-}
-
 impl<C: Container> Ssz for C {
-    const FIXED_SIZE: Option<usize> = fixed_size(C::FIELDS);
+    const FIXED_SIZE: Option<usize> = Layout::new(C::FIELDS).fixed_size();
 
     fn encoded_len(&self) -> usize {
-        let mut counter = LengthCounter::new(C::FIELDS);
+        let mut counter = LengthCounter::new(Layout::new(C::FIELDS));
         self.visit_fields(&mut counter);
         counter.total()
     }
@@ -162,7 +103,7 @@ impl<C: Container> Ssz for C {
     fn encode_to(&self, out: &mut Vec<u8>) {
         // Phase 1: fixed fields inline, and an offset in place of each variable field.
         let start = out.len();
-        let mut fixed = FixedPartWriter::new(out, C::FIELDS, fixed_part_len(C::FIELDS));
+        let mut fixed = FixedPartWriter::new(out, Layout::new(C::FIELDS));
         self.visit_fields(&mut fixed);
 
         // Phase 2: variable fields, in order, right after the fixed part.
@@ -173,14 +114,14 @@ impl<C: Container> Ssz for C {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut fields = FieldDecoder::new(bytes, C::FIELDS, fixed_part_len(C::FIELDS))?;
+        let mut fields = FieldDecoder::new(bytes, Layout::new(C::FIELDS))?;
         let value = C::decode_fields(&mut fields)?;
         fields.finish();
         Ok(value)
     }
 
     fn hash_tree_root(&self) -> Root {
-        let mut merkleizer = RootMerkleizer::new(C::FIELDS);
+        let mut merkleizer = RootMerkleizer::new(Layout::new(C::FIELDS));
         self.visit_fields(&mut merkleizer);
         merkleizer.finish()
     }

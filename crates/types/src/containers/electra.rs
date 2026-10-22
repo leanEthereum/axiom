@@ -1,13 +1,14 @@
 //! The beacon state of the Electra fork, kept to cross the boundary into Fulu.
 
-use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
+use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz, Vector};
 
 use crate::{
-    Balances, BeaconBlockHeader, BlockRoots, Checkpoint, Epoch, EpochParticipation, Eth1Data,
-    Eth1DataVotes, ExecutionPayloadHeader, Fork, Gwei, HistoricalRoots, HistoricalSummaries,
-    InactivityScores, JustificationBits, PendingConsolidations, PendingDeposits,
-    PendingPartialWithdrawals, Preset, RandaoMixes, Root, Slashings, Slot, StateRoots,
-    SyncCommittee, ValidatorIndex, Validators, WithdrawalIndex,
+    Balances, BeaconBlockHeader, BeaconState as FuluState, BlockRoots, Checkpoint, Epoch,
+    EpochParticipation, Eth1Data, Eth1DataVotes, ExecutionPayloadHeader, Fork, Gwei,
+    HistoricalRoots, HistoricalSummaries, InactivityScores, JustificationBits,
+    PendingConsolidations, PendingDeposits, PendingPartialWithdrawals, Preset, RandaoMixes, Root,
+    Slashings, Slot, StateRoots, SyncCommittee, ValidatorIndex, Validators, Version,
+    WithdrawalIndex,
 };
 
 /// The full consensus state at one slot, before Fulu.
@@ -248,5 +249,62 @@ impl<P: Preset> Container for BeaconState<P> {
             pending_partial_withdrawals: fields.field()?,
             pending_consolidations: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> BeaconState<P> {
+    /// The Fulu state this Electra state becomes, with an empty proposer lookahead.
+    ///
+    /// Every field carries over, and the fork version advances to the given one.
+    /// The lookahead depends on proposer sampling, so the state transition fills it.
+    ///
+    /// See `upgrade_to_fulu` in the Fulu fork spec.
+    #[must_use]
+    pub fn upgrade_to_fulu(self, fulu_fork_version: Version) -> FuluState<P> {
+        let epoch = self.slot.epoch::<P>();
+        FuluState {
+            genesis_time: self.genesis_time,
+            genesis_validators_root: self.genesis_validators_root,
+            slot: self.slot,
+            fork: Fork {
+                previous_version: self.fork.current_version,
+                current_version: fulu_fork_version,
+                epoch,
+            },
+            latest_block_header: self.latest_block_header,
+            block_roots: self.block_roots,
+            state_roots: self.state_roots,
+            historical_roots: self.historical_roots,
+            eth1_data: self.eth1_data,
+            eth1_data_votes: self.eth1_data_votes,
+            eth1_deposit_index: self.eth1_deposit_index,
+            validators: self.validators,
+            balances: self.balances,
+            randao_mixes: self.randao_mixes,
+            slashings: self.slashings,
+            previous_epoch_participation: self.previous_epoch_participation,
+            current_epoch_participation: self.current_epoch_participation,
+            justification_bits: self.justification_bits,
+            previous_justified_checkpoint: self.previous_justified_checkpoint,
+            current_justified_checkpoint: self.current_justified_checkpoint,
+            finalized_checkpoint: self.finalized_checkpoint,
+            inactivity_scores: self.inactivity_scores,
+            current_sync_committee: self.current_sync_committee,
+            next_sync_committee: self.next_sync_committee,
+            latest_execution_payload_header: self.latest_execution_payload_header,
+            next_withdrawal_index: self.next_withdrawal_index,
+            next_withdrawal_validator_index: self.next_withdrawal_validator_index,
+            historical_summaries: self.historical_summaries,
+            deposit_requests_start_index: self.deposit_requests_start_index,
+            deposit_balance_to_consume: self.deposit_balance_to_consume,
+            exit_balance_to_consume: self.exit_balance_to_consume,
+            earliest_exit_epoch: self.earliest_exit_epoch,
+            consolidation_balance_to_consume: self.consolidation_balance_to_consume,
+            earliest_consolidation_epoch: self.earliest_consolidation_epoch,
+            pending_deposits: self.pending_deposits,
+            pending_partial_withdrawals: self.pending_partial_withdrawals,
+            pending_consolidations: self.pending_consolidations,
+            proposer_lookahead: Vector::default(),
+        }
     }
 }

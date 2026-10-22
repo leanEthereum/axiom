@@ -24,17 +24,13 @@
 
 mod dialer;
 mod listener;
-
-use std::str;
+mod message;
 
 pub use dialer::{Dialer, Lister};
 pub use listener::Listener;
 use thiserror::Error;
 
-use crate::{
-    protobuf::{ProtobufError, split_length_prefixed},
-    varint,
-};
+use crate::protobuf::ProtobufError;
 
 /// The header both sides send first.
 pub const PROTOCOL_HEADER: &str = "/multistream/1.0.0";
@@ -62,71 +58,6 @@ pub struct Negotiated {
     pub remainder: Vec<u8>,
 }
 
-/// Appends one message: a varint length, the text, and a newline.
-fn encode_message(text: &str, out: &mut Vec<u8>) {
-    encode_raw_message(text.as_bytes(), out);
-}
-
-/// Appends one message whose body may be arbitrary bytes.
-fn encode_raw_message(body: &[u8], out: &mut Vec<u8>) {
-    // The length counts the trailing newline.
-    varint::encode(body.len() as u64 + 1, out);
-    out.extend_from_slice(body);
-    out.push(b'\n');
-}
-
-/// Splits one message off the front of a buffer.
-///
-/// # Returns
-///
-/// - The text without its newline, and the bytes the message took.
-/// - Nothing while the message is incomplete.
-fn decode_message(buffer: &[u8]) -> Result<Option<(&str, usize)>, NegotiationError> {
-    let Some((body, consumed)) = decode_raw_message(buffer)? else {
-        return Ok(None);
-    };
-    let text = str::from_utf8(body).map_err(|_| NegotiationError::InvalidUtf8)?;
-    Ok(Some((text, consumed)))
-}
-
-/// Splits one message off the front of a buffer, keeping its body as bytes.
-fn decode_raw_message(buffer: &[u8]) -> Result<Option<(&[u8], usize)>, NegotiationError> {
-    let Some((body, consumed)) = split_length_prefixed(buffer, MAX_MESSAGE_LEN)? else {
-        return Ok(None);
-    };
-    // Every message ends with a newline, which is not part of the body.
-    let body = body
-        .strip_suffix(b"\n")
-        .ok_or(NegotiationError::MissingNewline)?;
-    Ok(Some((body, consumed)))
-}
-
-/// Encodes the body of an `ls` answer: one nested message per protocol.
-///
-/// ```text
-/// outer body = [ len "/a\n" ][ len "/b\n" ] ...
-/// ```
-fn encode_list<'a>(protocols: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
-    let mut body = Vec::new();
-    for protocol in protocols {
-        encode_message(protocol, &mut body);
-    }
-    body
-}
-
-/// Decodes the body of an `ls` answer back into protocol names.
-fn decode_list(mut body: &[u8]) -> Result<Vec<String>, NegotiationError> {
-    let mut protocols = Vec::new();
-    // Peel nested messages until the body is used up.
-    while !body.is_empty() {
-        let (name, consumed) =
-            decode_message(body)?.ok_or(NegotiationError::Framing(ProtobufError::Truncated))?;
-        protocols.push(name.to_owned());
-        body = &body[consumed..];
-    }
-    Ok(protocols)
-}
-
 /// A stream that broke the negotiation rules.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -136,28 +67,49 @@ pub enum NegotiationError {
     Framing(#[from] ProtobufError),
 
     /// A message does not end with a newline.
-    #[error("message lacks its trailing newline")]
-    MissingNewline,
+    #[error("message of {len} bytes lacks its trailing newline")]
+    MissingNewline {
+        /// Length of the message, in bytes.
+        len: usize,
+    },
 
     /// A message is not UTF-8.
-    #[error("message is not UTF-8")]
-    InvalidUtf8,
+    #[error("message is not UTF-8 after byte {valid_up_to}")]
+    InvalidUtf8 {
+        /// Length of the longest valid UTF-8 prefix.
+        valid_up_to: usize,
+    },
 
     /// The peer opened with something other than the protocol header.
     #[error("unexpected header {0:?}")]
     InvalidHeader(String),
 
     /// The listener refused every proposal.
-    #[error("no protocol in common")]
-    NoCommonProtocol,
+    #[error("listener refused all {refused} proposals, the last {last:?}")]
+    NoCommonProtocol {
+        /// Number of proposals refused.
+        refused: usize,
+        /// The last protocol proposed.
+        last: String,
+    },
 
     /// The listener answered a proposal with neither an echo nor a refusal.
-    #[error("unexpected response {0:?}")]
-    UnexpectedResponse(String),
+    #[error("unexpected response {response:?} to proposal {proposed:?}")]
+    UnexpectedResponse {
+        /// The protocol proposed.
+        proposed: String,
+        /// The answer received.
+        response: String,
+    },
 
     /// The dialer kept proposing past the listener's patience.
-    #[error("too many proposals")]
-    TooManyProposals,
+    #[error("dialer sent more than {max} unsupported proposals, the last {last:?}")]
+    TooManyProposals {
+        /// Most unsupported proposals the listener answers.
+        max: usize,
+        /// The proposal that crossed the bound.
+        last: String,
+    },
 
     /// The dialer was given no protocol to propose.
     #[error("no protocol to propose")]

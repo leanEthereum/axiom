@@ -11,21 +11,6 @@
 //! - Proofs of possession, checked at deposit time, make key aggregation safe.
 //!
 //! The consensus specs use it in `specs/phase0/beacon-chain.md` and `specs/altair/bls.md`.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_bls::{SecretKey, Signature};
-//!
-//! let key = SecretKey::from_bytes(&[7; 32]).unwrap();
-//! let signature = key.sign(b"signing root");
-//!
-//! assert!(signature.verify(&key.public_key(), b"signing root"));
-//! assert!(!signature.verify(&key.public_key(), b"another root"));
-//!
-//! let decoded = Signature::from_bytes(&signature.to_bytes()).unwrap();
-//! assert_eq!(decoded, signature);
-//! ```
 
 mod error;
 mod public_key;

@@ -436,10 +436,10 @@ impl<P: Preset> Chain<P> {
         matches!(
             error,
             ChainError::ForkChoice(
-                ForkChoiceError::InvalidBlock(_)
-                    | ForkChoiceError::DataUnavailable
-                    | ForkChoiceError::NotDescendantOfFinalized
-                    | ForkChoiceError::BeforeFinalized(_)
+                ForkChoiceError::InvalidBlock { .. }
+                    | ForkChoiceError::DataUnavailable(_)
+                    | ForkChoiceError::NotDescendantOfFinalized { .. }
+                    | ForkChoiceError::BeforeFinalized { .. }
             )
         )
     }
@@ -447,7 +447,7 @@ impl<P: Preset> Chain<P> {
     /// Start of a slot, in milliseconds since the Unix epoch.
     #[must_use]
     pub const fn slot_start_ms(&self, slot: Slot) -> u64 {
-        self.store.genesis_time_ms() + slot.0 * self.config().slot_duration_ms
+        self.store.slot_clock().slot_start_ms(slot)
     }
 
     /// Counts a vote received on its own, outside any block.
@@ -472,27 +472,31 @@ impl<P: Preset> Chain<P> {
     ///
     /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
     pub fn on_single_attestation(&mut self, single: &SingleAttestation) -> Result<(), ChainError> {
+        let invalid = |reason| ChainError::InvalidVote {
+            validator: single.attester_index,
+            slot: single.data.slot,
+            committee: single.committee_index,
+            reason,
+        };
         let committees = self.committees_at(single.data.target.epoch)?;
         let committee = committees
             .committee(single.data.slot, single.committee_index)
-            .ok_or(ChainError::InvalidVote("no such committee at the slot"))?;
+            .ok_or_else(|| invalid("no such committee at the slot"))?;
         let position = committee
             .iter()
             .position(|validator| *validator == single.attester_index)
-            .ok_or(ChainError::InvalidVote("attester not in the committee"))?;
+            .ok_or_else(|| invalid("attester not in the committee"))?;
 
         // One committee bit, and one participant bit at the attester's place in that committee.
         //
         //     committee 2 of the slot: [v9, v4, v7]   attester v4   ->   aggregation bits 010
         let mut aggregation_bits = AggregationBits::<P>::with_len(committee.len())
-            .map_err(|_| ChainError::InvalidVote("committee larger than the bitfield bound"))?;
+            .map_err(|_| invalid("committee larger than the bitfield bound"))?;
         aggregation_bits.set(position, true);
         let mut committee_bits = CommitteeBits::<P>::default();
         let index = single.committee_index.as_usize();
         if single.committee_index.0 >= P::MAX_COMMITTEES_PER_SLOT {
-            return Err(ChainError::InvalidVote(
-                "committee index past the slot's committees",
-            ));
+            return Err(invalid("committee index past the slot's committees"));
         }
         committee_bits.set(index, true);
         let attestation = Attestation {

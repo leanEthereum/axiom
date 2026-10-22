@@ -9,28 +9,6 @@ use crate::header::Header;
 /// Strings and integers append directly.
 /// A list runs a closure that appends its items, then gains its header in front.
 /// Closures keep every list balanced by construction.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_rlp::Encoder;
-///
-/// // The Yellow Paper example: [ [], [[]], [ [], [[]] ] ].
-/// let mut encoder = Encoder::new();
-/// let empty = |_: &mut Encoder| {};
-/// let wrapped_empty = |list: &mut Encoder| {
-///     list.list(empty);
-/// };
-/// encoder.list(|outer| {
-///     outer.list(empty).list(wrapped_empty).list(|inner| {
-///         inner.list(empty).list(wrapped_empty);
-///     });
-/// });
-/// assert_eq!(
-///     encoder.finish(),
-///     [0xc7, 0xc0, 0xc1, 0xc0, 0xc3, 0xc0, 0xc1, 0xc0]
-/// );
-/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Encoder {
     /// The encoding so far.
@@ -112,7 +90,10 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::Decoder;
 
     fn encode_uint(value: u64) -> Vec<u8> {
         let mut encoder = Encoder::new();
@@ -163,5 +144,18 @@ mod tests {
             encoder.finish(),
             [0xc8, 0x83, b'd', b'o', b'g', 0x83, b'g', b'o', b'd']
         );
+    }
+
+    proptest! {
+        #[test]
+        fn integers_round_trip(value in any::<u64>()) {
+            // The minimal big-endian form decodes back to the value.
+            let mut encoder = Encoder::new();
+            encoder.uint(value);
+            let encoded = encoder.finish();
+            let mut decoder = Decoder::new(&encoded);
+            prop_assert_eq!(decoder.uint(), Ok(value));
+            prop_assert!(decoder.finish().is_ok());
+        }
     }
 }

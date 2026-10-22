@@ -18,11 +18,15 @@
 //! The format is specified in `google/snappy/format_description.txt`.
 //! Consensus gossip carries every message in this format.
 
-mod compress;
-mod decompress;
+mod decoder;
+mod encoder;
+mod input;
+mod sink;
+mod table;
 
-pub use compress::compress_into;
-pub use decompress::decompress_into;
+pub use decoder::decompress_into;
+pub use encoder::Encoder;
+use input::Input;
 
 use crate::SnappyError;
 
@@ -40,21 +44,21 @@ pub const fn max_compressed_len(len: usize) -> usize {
 
 /// Compresses bytes into one block.
 ///
+/// Each call allocates a fresh hash table; a long-lived encoder reuses one.
+///
 /// # Panics
 ///
 /// Panics when the input exceeds 2^32 - 1 bytes, the most a block can describe.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    compress_into(input, &mut out);
-    out
+    Encoder::new().compress(input)
 }
 
 /// The uncompressed length a block declares, read from its preamble alone.
 ///
 /// No element is checked, so a valid preamble does not make the block valid.
 pub fn decompressed_len(input: &[u8]) -> Result<usize, SnappyError> {
-    read_preamble(input).map(|(len, _)| len)
+    Input::new(input).preamble()
 }
 
 /// Decompresses one block, rejecting any that declares more than the given bound.
@@ -67,78 +71,72 @@ pub fn decompress(input: &[u8], max_len: usize) -> Result<Vec<u8>, SnappyError> 
     Ok(out)
 }
 
-/// Reads the varint preamble.
-///
-/// Returns the declared length and the number of preamble bytes.
-///
-/// ```text
-/// 7 data bits per byte, least significant group first, high bit set on all but the last:
-///
-///     64       ->  0x40
-///     2097150  ->  0xfe 0xff 0x7f
-/// ```
-pub(crate) fn read_preamble(input: &[u8]) -> Result<(usize, usize), SnappyError> {
-    let mut value = 0_u64;
-    // A 32-bit value needs at most 5 groups of 7 bits.
-    for (i, &byte) in input.iter().take(5).enumerate() {
-        value |= u64::from(byte & 0x7f) << (7 * i);
-        if byte & 0x80 == 0 {
-            if value > MAX_BLOCK_LEN {
-                return Err(SnappyError::InvalidPreamble);
-            }
-            let len = usize::try_from(value).map_err(|_| SnappyError::InvalidPreamble)?;
-            return Ok((len, i + 1));
-        }
-    }
-    // Either the input ended mid-varint or a fifth byte still asked for more.
-    Err(SnappyError::InvalidPreamble)
-}
-
-/// Appends the varint preamble for a length.
-pub(crate) fn write_preamble(len: u32, out: &mut Vec<u8>) {
-    let mut value = len;
-    while value >= 0x80 {
-        // Low 7 bits, with the high bit flagging that more groups follow.
-        out.push(value.to_le_bytes()[0] | 0x80);
-        value >>= 7;
-    }
-    // Last group: below 0x80, so its high bit is clear.
-    out.push(value.to_le_bytes()[0]);
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod tests {
+    use proptest::prelude::*;
 
-    #[test]
-    fn preamble_examples_from_the_format_description() {
-        // The two worked examples of the format description, both ways.
-        for (len, bytes) in [(64_u32, &[0x40][..]), (2_097_150, &[0xfe, 0xff, 0x7f][..])] {
-            let mut out = Vec::new();
-            write_preamble(len, &mut out);
-            assert_eq!(out, bytes);
-            assert_eq!(read_preamble(bytes), Ok((len as usize, bytes.len())));
-        }
+    use super::*;
+    use crate::frame;
+
+    /// Inputs with the structure compressors meet: runs, repeats, and noise.
+    pub(crate) fn arb_data() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            // Pure noise: mostly literals.
+            prop::collection::vec(any::<u8>(), 0..3000),
+            // A small alphabet: short, frequent matches.
+            prop::collection::vec(0_u8..4, 0..3000),
+            // Repeated random pieces: long matches at varied offsets.
+            (prop::collection::vec(any::<u8>(), 1..40), 1_usize..200)
+                .prop_map(|(piece, times)| piece.repeat(times)),
+        ]
     }
 
-    #[test]
-    fn preamble_boundaries() {
-        // 2^32 - 1 takes all 5 bytes, with only 4 bits used in the last.
-        let max = [0xff, 0xff, 0xff, 0xff, 0x0f];
-        assert_eq!(read_preamble(&max), Ok((u32::MAX as usize, 5)));
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
 
-        // 2^32 overflows the 32-bit length.
-        assert_eq!(
-            read_preamble(&[0x80, 0x80, 0x80, 0x80, 0x10]),
-            Err(SnappyError::InvalidPreamble)
-        );
+        #[test]
+        fn raw_round_trip(data in arb_data()) {
+            // Law: decompress(compress(x)) == x, within the worst-case size.
+            let block = compress(&data);
+            prop_assert!(block.len() <= max_compressed_len(data.len()));
+            prop_assert_eq!(decompressed_len(&block), Ok(data.len()));
+            prop_assert_eq!(decompress(&block, data.len()), Ok(data));
+        }
 
-        // A sixth byte, an unfinished varint, and no input at all.
-        assert_eq!(
-            read_preamble(&[0x80, 0x80, 0x80, 0x80, 0x80, 0x00]),
-            Err(SnappyError::InvalidPreamble)
-        );
-        assert_eq!(read_preamble(&[0x80]), Err(SnappyError::InvalidPreamble));
-        assert_eq!(read_preamble(&[]), Err(SnappyError::InvalidPreamble));
+        #[test]
+        fn raw_bound_is_enforced(data in arb_data().prop_filter("non-empty", |d| !d.is_empty())) {
+            // A bound one byte short of the declared length fails before decoding.
+            let block = compress(&data);
+            let max = data.len() - 1;
+            prop_assert_eq!(
+                decompress(&block, max),
+                Err(SnappyError::TooLarge { len: data.len(), max })
+            );
+        }
+
+        #[test]
+        fn corrupted_blocks_never_panic(
+            data in arb_data(),
+            flips in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..8),
+            cut in any::<prop::sample::Index>(),
+        ) {
+            // Mutate a valid block in a few places and truncate it: the decoder must stay sound.
+            let mut block = compress(&data);
+            for (at, byte) in flips {
+                let i = at.index(block.len());
+                block[i] ^= byte;
+            }
+            block.truncate(cut.index(block.len() + 1));
+            if let Ok(out) = decompress(&block, 1 << 16) {
+                // A success must match the length the block declares.
+                prop_assert_eq!(decompressed_len(&block), Ok(out.len()));
+            }
+
+            // The same corruption inside a framed stream: a checksum or decode error, no panic.
+            let mut framed = frame::compress(&data);
+            let i = cut.index(framed.len());
+            framed[i] ^= 0x55;
+            let _ = frame::decompress(&framed, 1 << 16);
+        }
     }
 }

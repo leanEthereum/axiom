@@ -12,8 +12,11 @@ pub enum PointDecodeError {
     ///
     /// Compressed encodings set the top bit of the first byte.
     /// Uncompressed ones clear it.
-    #[error("compression flag does not match the encoding length")]
-    InvalidCompressionFlag,
+    #[error("compression flag does not match the {length}-byte encoding")]
+    InvalidCompressionFlag {
+        /// Length of the encoding, which fixes its form.
+        length: usize,
+    },
 
     /// The infinity flag is set but other bits are not all zero.
     ///

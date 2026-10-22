@@ -40,14 +40,17 @@ impl Base64Url {
         let symbols = text.as_bytes();
         // A lone trailing symbol carries 6 bits, not enough for a byte.
         if symbols.len() % 4 == 1 {
-            return Err(Base64Error::InvalidLength);
+            return Err(Base64Error::InvalidLength(symbols.len()));
         }
         let mut bytes = Vec::with_capacity(symbols.len() * 3 / 4);
-        for chunk in symbols.chunks(4) {
+        for (chunk_index, chunk) in symbols.chunks(4).enumerate() {
             // Gather up to four sextets into the top of a 24-bit word.
             let mut bits = 0_u32;
             for (index, &symbol) in chunk.iter().enumerate() {
-                let value = Self::sextet(symbol).ok_or(Base64Error::InvalidSymbol(symbol))?;
+                let value = Self::sextet(symbol).ok_or(Base64Error::InvalidSymbol {
+                    symbol,
+                    position: 4 * chunk_index + index,
+                })?;
                 bits |= u32::from(value) << (18 - 6 * index);
             }
             // Two symbols make one byte, three make two, four make three.
@@ -81,12 +84,17 @@ impl Base64Url {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum Base64Error {
     /// A byte outside the URL-safe alphabet, padding included.
-    #[error("byte 0x{0:02x} is not base64url")]
-    InvalidSymbol(u8),
+    #[error("byte 0x{symbol:02x} at position {position} is not base64url")]
+    InvalidSymbol {
+        /// The byte.
+        symbol: u8,
+        /// Its position in the text, counting from zero.
+        position: usize,
+    },
 
     /// A length that leaves one symbol dangling.
-    #[error("base64url length leaves a dangling symbol")]
-    InvalidLength,
+    #[error("base64url length {0} leaves a dangling symbol")]
+    InvalidLength(usize),
 
     /// Nonzero bits past the last encoded byte.
     #[error("base64url has nonzero trailing bits")]
@@ -121,18 +129,27 @@ mod tests {
 
     #[test]
     fn strictness() {
-        // Padding is outside the alphabet.
+        // Padding is outside the alphabet: the first = sits at position 2.
         assert_eq!(
             Base64Url::decode("Zg=="),
-            Err(Base64Error::InvalidSymbol(b'='))
+            Err(Base64Error::InvalidSymbol {
+                symbol: b'=',
+                position: 2,
+            })
         );
-        // The standard alphabet's + is refused.
+        // The standard alphabet's + is refused, here at position 0.
         assert_eq!(
             Base64Url::decode("+w"),
-            Err(Base64Error::InvalidSymbol(b'+'))
+            Err(Base64Error::InvalidSymbol {
+                symbol: b'+',
+                position: 0,
+            })
         );
         // Five symbols leave one dangling.
-        assert_eq!(Base64Url::decode("Zm9vY"), Err(Base64Error::InvalidLength));
+        assert_eq!(
+            Base64Url::decode("Zm9vY"),
+            Err(Base64Error::InvalidLength(5))
+        );
         // "Zh" spells 0x66 with a stray low bit set.
         assert_eq!(Base64Url::decode("Zh"), Err(Base64Error::NonCanonical));
     }

@@ -150,7 +150,7 @@ impl AuthData {
             return Err(size_error);
         };
         let ephemeral_key =
-            PublicKey::from_compressed(ephemeral_key).map_err(|_| PacketError::EphemeralKey)?;
+            PublicKey::from_compressed(ephemeral_key).map_err(PacketError::EphemeralKey)?;
         let record = match record {
             [] => None,
             bytes => Some(Box::new(Enr::decode(bytes).map_err(PacketError::Record)?)),

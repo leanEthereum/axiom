@@ -139,7 +139,8 @@ impl Handler {
         // Case 2: a handshake is under way, so wait for it.
         // Case 3: open a handshake with a packet the peer cannot read.
         let delivery = if let Some(session) = self.sessions.get_mut(node, addr) {
-            let (nonce, datagram) = Self::seal(session, rng, &self.local_enr, &node, &message);
+            let (nonce, datagram) =
+                session.seal_message(rng, self.local_enr.node_id(), &node, &message);
             out.push(Datagram {
                 to: addr,
                 bytes: datagram,
@@ -196,7 +197,7 @@ impl Handler {
     ) {
         // Invariant: a request only arrives through a session, so one exists unless evicted since.
         if let Some(session) = self.sessions.get_mut(node, addr) {
-            let (_, datagram) = Self::seal(session, rng, &self.local_enr, &node, message);
+            let (_, datagram) = session.seal_message(rng, self.local_enr.node_id(), &node, message);
             out.push(Datagram {
                 to: addr,
                 bytes: datagram,
@@ -207,23 +208,6 @@ impl Handler {
     /// Marks a request answered, so it no longer times out.
     pub(crate) fn complete(&mut self, node: NodeId, request_id: RequestId) {
         self.in_flight.remove(&(node, request_id));
-    }
-
-    /// Seals a message in an ordinary packet under a session.
-    fn seal(
-        session: &mut Session,
-        rng: &mut Csprng,
-        local: &Enr,
-        dest: &NodeId,
-        message: &Message,
-    ) -> (Nonce, Vec<u8>) {
-        // A fresh nonce and masking IV for every packet.
-        let nonce = session.next_nonce(rng);
-        let auth = AuthData::Message {
-            src_id: local.node_id(),
-        };
-        let datagram = session.seal(MaskingIv(rng.bytes()), nonce, auth, message, dest);
-        (nonce, datagram)
     }
 
     /// Processes one datagram.
@@ -435,7 +419,7 @@ impl Handler {
                 continue;
             };
             let (nonce, datagram) =
-                Self::seal(session, rng, &self.local_enr, &node, &request.message);
+                session.seal_message(rng, self.local_enr.node_id(), &node, &request.message);
             out.push(Datagram {
                 to: from,
                 bytes: datagram,

@@ -11,6 +11,7 @@ use std::time::Duration;
 pub use bucket::{KBucket, Pending};
 pub use entry::Entry;
 pub use ip_limit::IpLimits;
+use ip_limit::Subnet24;
 
 use crate::{distance::LogDistance, enr::Enr, node_id::NodeId, rng::Csprng};
 
@@ -162,11 +163,10 @@ impl RoutingTable {
         let (Some(limits), Some(ip)) = (self.config.ip_limits, enr.endpoints().ip4) else {
             return true;
         };
-        let subnet = IpLimits::subnet(ip);
+        let subnet = Subnet24::of(ip);
         let others = |entry: &&Entry| Some(&entry.node_id()) != updating;
-        let in_bucket =
-            IpLimits::count(self.buckets[index].entries().iter().filter(others), subnet);
-        let in_table = IpLimits::count(self.iter().filter(others), subnet);
+        let in_bucket = subnet.count_in(self.buckets[index].entries().iter().filter(others));
+        let in_table = subnet.count_in(self.iter().filter(others));
         in_bucket < limits.per_bucket && in_table < limits.per_table
     }
 

@@ -2,6 +2,8 @@
 
 use std::{fmt, ops::RangeInclusive};
 
+use super::codec::Payload;
+
 /// The prefix every consensus req/resp protocol shares.
 const PREFIX: &str = "/eth2/beacon_chain/req/";
 
@@ -174,6 +176,43 @@ impl Protocol {
         }
     }
 
+    /// The wire form of a request: length prefix and framed payload, or nothing for empty requests.
+    #[must_use]
+    pub fn encode_request(self, ssz: &[u8]) -> Vec<u8> {
+        // Methods without request content send no bytes at all.
+        if self.has_empty_request() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        Payload(ssz).encode_to(&mut out);
+        out
+    }
+
+    /// Tokens a request costs a rate limiter: the number of items it asks for, or one.
+    #[must_use]
+    pub fn request_cost(self, payload: &[u8]) -> u32 {
+        // Reads a little-endian u64 at an offset.
+        let read_u64 = |offset: usize| {
+            payload
+                .get(offset..offset + 8)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map_or(1, u64::from_le_bytes)
+        };
+        let items = match self {
+            // start_slot, then count.
+            Self::BeaconBlocksByRangeV2
+            | Self::BlobSidecarsByRangeV1
+            | Self::DataColumnSidecarsByRangeV1 => read_u64(8),
+            // beacon_root, then count.
+            Self::BeaconBlocksByHeadV1 => read_u64(32),
+            // Lists of 32-byte roots or 40-byte identifiers.
+            Self::BeaconBlocksByRootV2 => payload.len() as u64 / 32,
+            Self::BlobSidecarsByRootV1 => payload.len() as u64 / 40,
+            _ => 1,
+        };
+        u32::try_from(items.max(1)).unwrap_or(u32::MAX)
+    }
+
     /// The SSZ length range of a valid success chunk, capped by the payload limit.
     #[must_use]
     pub fn response_bounds(self, max_payload_size: u64) -> RangeInclusive<u64> {
@@ -224,6 +263,21 @@ mod tests {
             None
         );
         assert_eq!(Protocol::from_protocol_id("/meshsub/1.2.0"), None);
+    }
+
+    #[test]
+    fn request_cost_counts_items() {
+        // A range request of count 64: start_slot 8 bytes, then count 64 little-endian.
+        let mut range = vec![0u8; 24];
+        range[8] = 64;
+        assert_eq!(Protocol::BeaconBlocksByRangeV2.request_cost(&range), 64);
+        // Three 32-byte roots cost 3.
+        assert_eq!(Protocol::BeaconBlocksByRootV2.request_cost(&[0; 96]), 3);
+        // An empty root list and a status both cost the floor of 1.
+        assert_eq!(Protocol::BeaconBlocksByRootV2.request_cost(&[]), 1);
+        assert_eq!(Protocol::StatusV2.request_cost(&[0; 92]), 1);
+        // A truncated range request reads its count as 1.
+        assert_eq!(Protocol::BlobSidecarsByRangeV1.request_cost(&[0; 12]), 1);
     }
 
     #[test]

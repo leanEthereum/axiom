@@ -10,7 +10,7 @@ use std::{
 };
 
 use axiom_discv5::Enr;
-use axiom_ef_tests::{Case, Vectors, config_of};
+use axiom_ef_tests::{Case, Vectors};
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_node::{
@@ -19,7 +19,7 @@ use axiom_node::{
 use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{KnownVerdict, State, Verification};
-use axiom_types::{BeaconState, Minimal, SignedBeaconBlock, SignedBlockContents};
+use axiom_types::{BeaconState, ChainConfig, Minimal, SignedBeaconBlock, SignedBlockContents};
 use tokio::{
     runtime::Builder,
     sync::oneshot,
@@ -144,7 +144,7 @@ impl TestNode {
     async fn start_with(fixture: &Fixture, config: NodeConfig, address: SocketAddr) -> Self {
         let (stop, stopped) = oneshot::channel::<()>();
         let task = task::spawn(Node::<Minimal>::run(
-            config_of::<Minimal>(),
+            ChainConfig::minimal().with_forks_at_genesis(),
             config,
             Arc::new(ManualClock::at(fixture.now_ms)),
             async move {
@@ -418,7 +418,7 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
     let mut state = State::new(genesis);
     state
         .state_transition(
-            &config_of::<Minimal>(),
+            &ChainConfig::minimal().with_forks_at_genesis(),
             &anchor,
             Verification::Verify,
             &KnownVerdict(true),

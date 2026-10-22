@@ -101,7 +101,7 @@ impl<'a> Parser<'a> {
     fn enter(&mut self) -> Result<(), ParseError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
-            return Err(self.scanner.error(ErrorKind::TooDeep));
+            return Err(self.scanner.error(ErrorKind::TooDeep { limit: MAX_DEPTH }));
         }
         Ok(())
     }
@@ -437,5 +437,278 @@ impl<'a> Parser<'a> {
         self.scanner.bump();
         self.depth -= 1;
         Ok(Yaml::Mapping(mapping))
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use proptest::prelude::*;
+
+    use crate::{ErrorKind, Mapping, Unsupported, Yaml};
+
+    /// A string node.
+    pub(crate) fn s(text: &str) -> Yaml {
+        Yaml::String(text.into())
+    }
+
+    /// A sequence node.
+    pub(crate) const fn seq(items: Vec<Yaml>) -> Yaml {
+        Yaml::Sequence(items)
+    }
+
+    /// A mapping node, entries in the given order.
+    pub(crate) fn map(entries: Vec<(&str, Yaml)>) -> Yaml {
+        let mut mapping = Mapping::new();
+        for (key, value) in entries {
+            mapping.insert(key, value);
+        }
+        Yaml::Mapping(mapping)
+    }
+
+    /// Parses text that must be valid.
+    pub(crate) fn parse(text: &str) -> Yaml {
+        Yaml::parse(text).expect("text is valid YAML")
+    }
+
+    /// Parses text that must fail and returns its kind, line, and column.
+    pub(crate) fn fail(text: &str) -> (ErrorKind, usize, usize) {
+        let err = Yaml::parse(text).expect_err("text is invalid YAML");
+        (err.kind().clone(), err.line(), err.column())
+    }
+
+    #[test]
+    fn nested_block_mappings() {
+        // Three levels, two spaces each, with a scalar back at level one.
+        let text = "\
+a:
+  b:
+    c: 1
+  d: x y
+e: 2
+";
+        let expected = map(vec![
+            (
+                "a",
+                map(vec![("b", map(vec![("c", s("1"))])), ("d", s("x y"))]),
+            ),
+            ("e", s("2")),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn indentless_sequence_under_a_key() {
+        // The light-client proof shape: dashes at the key's own column.
+        let text = "\
+leaf_index: 25
+branch:
+- '0xaa'
+- '0xbb'
+after: 1
+";
+        let expected = map(vec![
+            ("leaf_index", s("25")),
+            ("branch", seq(vec![s("0xaa"), s("0xbb")])),
+            ("after", s("1")),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn compact_mappings_and_sequences_after_dashes() {
+        // The fork choice steps shape: a mapping starts on its dash's line.
+        let text = "\
+- tick: 6
+  valid: false
+- - a
+  - b
+- checks:
+    head: {slot: 1}
+";
+        let expected = seq(vec![
+            map(vec![("tick", s("6")), ("valid", Yaml::Bool(false))]),
+            seq(vec![s("a"), s("b")]),
+            map(vec![(
+                "checks",
+                map(vec![("head", map(vec![("slot", s("1"))]))]),
+            )]),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn dash_alone_takes_the_deeper_block_or_null() {
+        // A dash with nothing after it: the entry is the indented block below, or null.
+        let text = "\
+-
+  k: v
+-
+- x
+";
+        let expected = seq(vec![map(vec![("k", s("v"))]), Yaml::Null, s("x")]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn empty_values_are_null() {
+        // A key with nothing after it, at the end and before a sibling.
+        let text = "a:\nb: ~\nc:\n";
+        let expected = map(vec![
+            ("a", Yaml::Null),
+            ("b", Yaml::Null),
+            ("c", Yaml::Null),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn multi_line_flow_sequence_with_ragged_indentation() {
+        // The shuffling mapping shape: lines wrap at varying depths with trailing spaces.
+        let text = "\
+mapping: [1, 2,
+    3,
+  4, ]
+";
+        let expected = map(vec![("mapping", seq(vec![s("1"), s("2"), s("3"), s("4")]))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn flow_mappings_nest_and_allow_missing_values() {
+        // Flow mappings inside flow sequences, an implicit null, and an empty collection.
+        let text = "{a: [{b: 1}, []], c, d: , e: 'x'}";
+        let expected = map(vec![
+            ("a", seq(vec![map(vec![("b", s("1"))]), seq(vec![])])),
+            ("c", Yaml::Null),
+            ("d", Yaml::Null),
+            ("e", s("x")),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn document_markers_and_top_level_scalars() {
+        // The sanity slots shape: a bare scalar, then an end marker.
+        assert_eq!(parse("8\n...\n"), s("8"));
+        assert_eq!(parse("true\n...\n"), Yaml::Bool(true));
+
+        // An explicit start, with the root on the next line or on the marker's line.
+        assert_eq!(parse("---\na: 1\n"), map(vec![("a", s("1"))]));
+        assert_eq!(parse("--- [1]\n"), seq(vec![s("1")]));
+
+        // No content at all is a null document.
+        assert_eq!(parse(""), Yaml::Null);
+        assert_eq!(parse("# only a comment\n"), Yaml::Null);
+    }
+
+    #[test]
+    fn top_level_flow_mapping() {
+        // The meta.yaml shape.
+        assert_eq!(
+            parse("{blocks_count: 24}\n"),
+            map(vec![("blocks_count", s("24"))])
+        );
+    }
+
+    #[test]
+    fn deeper_line_after_a_complete_entry() {
+        // A quoted value is complete, so nothing may sit deeper below it.
+        assert_eq!(
+            fail("a: 'x'\n  b: 2\n"),
+            (ErrorKind::InvalidIndentation, 2, 3)
+        );
+
+        // A line shallower than the root block fits no block at all.
+        assert_eq!(
+            fail("  a: 1\nb: 2\n"),
+            (ErrorKind::InvalidIndentation, 2, 1)
+        );
+    }
+
+    #[test]
+    fn line_without_a_key_inside_a_mapping() {
+        // "b" sits at the mapping's column but has no colon.
+        assert_eq!(fail("a: 1\nb\n"), (ErrorKind::ExpectedKey, 2, 1));
+    }
+
+    #[test]
+    fn key_inside_a_value() {
+        // The second colon on the line would make "b" a key.
+        //
+        //     a: b: c
+        //         ^ column 5
+        assert_eq!(fail("a: b: c\n"), (ErrorKind::UnexpectedMappingValue, 1, 5));
+
+        // A continuation line cannot turn a multi-line scalar into a key.
+        assert_eq!(
+            fail("a: b\n  c: d\n"),
+            (ErrorKind::UnexpectedMappingValue, 2, 4)
+        );
+    }
+
+    #[test]
+    fn sequence_entry_on_a_key_line() {
+        // Block sequences start on their own line.
+        assert_eq!(fail("a: - b\n"), (ErrorKind::UnexpectedBlockEntry, 1, 4));
+    }
+
+    #[test]
+    fn duplicate_keys_in_block_and_flow_mappings() {
+        // The error points at the second occurrence.
+        let dup = ErrorKind::DuplicateKey("a".into());
+        assert_eq!(fail("a: 1\na: 2\n"), (dup.clone(), 2, 1));
+        assert_eq!(fail("{a: 1, a: 2}"), (dup, 1, 8));
+    }
+
+    #[test]
+    fn unterminated_flow_points_at_the_opening_bracket() {
+        assert_eq!(fail("a: [1, 2\n"), (ErrorKind::UnterminatedFlow, 1, 4));
+        assert_eq!(fail("{a: 1"), (ErrorKind::UnterminatedFlow, 1, 1));
+    }
+
+    #[test]
+    fn nesting_beyond_the_depth_bound() {
+        // 200 open brackets: the 129th crosses the bound of 128.
+        let text = "[".repeat(200);
+        assert_eq!(fail(&text), (ErrorKind::TooDeep { limit: 128 }, 1, 129));
+    }
+
+    #[test]
+    fn unsupported_features_are_named() {
+        // Each feature is rejected where it starts.
+        let cases = [
+            ("a: &x 1", Unsupported::Anchor, 1, 4),
+            ("a: *x", Unsupported::Alias, 1, 4),
+            ("a: !!str 1", Unsupported::Tag, 1, 4),
+            ("a: |\n  x\n", Unsupported::BlockScalar, 1, 4),
+            ("%YAML 1.2\n---\na: 1\n", Unsupported::Directive, 1, 1),
+            ("? a\n: b\n", Unsupported::ComplexKey, 1, 1),
+            ("a: 1\n---\nb: 2\n", Unsupported::MultipleDocuments, 2, 1),
+            ("a: 1\n...\nb: 2\n", Unsupported::MultipleDocuments, 3, 1),
+            ("[a: 1]", Unsupported::FlowPair, 1, 3),
+            ("{[a]: 1}", Unsupported::CollectionKey, 1, 2),
+        ];
+        for (text, feature, line, column) in cases {
+            assert_eq!(
+                fail(text),
+                (ErrorKind::Unsupported(feature), line, column),
+                "{text:?}"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+        #[test]
+        fn garbage_never_panics(text in "[ \n\r\t:,#'\"\\\\\\[\\]{}&*!|>%?@`.~a-c0-9-]{0,48}") {
+            // Law: any text over the indicator alphabet parses or fails, never panics.
+            //
+            // Positions in an error stay inside the text.
+            if let Err(err) = Yaml::parse(&text) {
+                prop_assert!(err.line() >= 1 && err.line() <= text.split(['\n', '\r']).count());
+                prop_assert!(err.column() >= 1);
+            }
+        }
     }
 }

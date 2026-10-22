@@ -3,9 +3,12 @@
 //! The parser walks the bytes once, left to right, with an explicit stack of open containers.
 //! Recursion depth on the thread's stack stays constant whatever the input nests.
 
-use std::{mem, str};
+use std::str;
 
-use crate::{ErrorKind, Json, Number, Object, ParseError};
+use crate::{
+    ErrorKind, Json, Number, Object, ParseError,
+    frame::{Frame, OpenObject},
+};
 
 /// Bounds on the input a parse accepts.
 ///
@@ -35,77 +38,6 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self::DEFAULT
-    }
-}
-
-/// An array or object whose closing bracket is still ahead.
-enum Frame {
-    /// An open array and the items read so far.
-    Array(Vec<Json>),
-
-    /// An open object.
-    Object {
-        /// Members read so far.
-        object: Object,
-        /// Name of the member whose value is being read.
-        name: String,
-        /// Byte offset of each member name, in member order.
-        name_offsets: Vec<usize>,
-    },
-}
-
-impl Frame {
-    /// Turns a closed container into its value.
-    ///
-    /// An object's names are checked for uniqueness here, once all are known.
-    fn close(self) -> Result<Json, ParseError> {
-        match self {
-            Self::Array(items) => Ok(Json::Array(items)),
-            Self::Object {
-                object,
-                name_offsets,
-                ..
-            } => {
-                check_unique_names(&object, &name_offsets)?;
-                Ok(Json::Object(object))
-            }
-        }
-    }
-}
-
-/// Rejects an object that repeats a member name.
-///
-/// Sorting member positions by name brings equal names together in O(n log n).
-/// A hostile object with a hundred thousand members then costs milliseconds, not hours.
-///
-/// The reported offset is the earliest second occurrence in the document.
-///
-/// ```text
-///     {"b":1, "a":2, "b":3}        names start at offsets 1, 8, 15
-///     sorted by name: a(8) b(1) b(15)
-///     b repeats -> error at offset 15
-/// ```
-fn check_unique_names(object: &Object, name_offsets: &[usize]) -> Result<(), ParseError> {
-    let members = object.members();
-
-    // Positions 0..n, ordered by member name; a stable sort keeps document order among equals.
-    let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by(|&left, &right| members[left].0.cmp(&members[right].0));
-
-    // Neighbours with equal names are duplicates.
-    // The later of the pair, in document order, is the repeated one.
-    let first_repeat = order
-        .windows(2)
-        .filter(|pair| members[pair[0]].0 == members[pair[1]].0)
-        .map(|pair| pair[1])
-        .min_by_key(|&position| name_offsets[position]);
-
-    match first_repeat {
-        None => Ok(()),
-        Some(position) => Err(ParseError {
-            offset: name_offsets[position],
-            kind: ErrorKind::DuplicateKey(members[position].0.clone()),
-        }),
     }
 }
 
@@ -148,7 +80,10 @@ impl<'a> Parser<'a> {
         if self.bytes.len() > self.limits.max_bytes {
             return Err(ParseError {
                 offset: self.limits.max_bytes,
-                kind: ErrorKind::TooLarge,
+                kind: ErrorKind::TooLarge {
+                    length: self.bytes.len(),
+                    limit: self.limits.max_bytes,
+                },
             });
         }
 
@@ -171,17 +106,7 @@ impl<'a> Parser<'a> {
                     return Ok(value);
                 };
 
-                // The byte that may close this container.
-                let closer = match frame {
-                    Frame::Array(items) => {
-                        items.push(value);
-                        b']'
-                    }
-                    Frame::Object { object, name, .. } => {
-                        object.push_unchecked(mem::take(name), value);
-                        b'}'
-                    }
-                };
+                frame.push(value);
 
                 // After an item: a comma for another, or the closing bracket.
                 self.skip_whitespace();
@@ -189,18 +114,14 @@ impl<'a> Parser<'a> {
                     Some(b',') => {
                         self.at += 1;
                         // An object's next member starts with its name.
-                        if let Frame::Object {
-                            name, name_offsets, ..
-                        } = frame
-                        {
+                        if let Frame::Object(object) = frame {
                             self.skip_whitespace();
                             let (next, offset) = self.member_name()?;
-                            *name = next;
-                            name_offsets.push(offset);
+                            object.next_name(next, offset);
                         }
                         continue 'value;
                     }
-                    Some(byte) if byte == closer => {
+                    Some(byte) if byte == frame.closer() => {
                         self.at += 1;
                         // The container is complete; it becomes the value to attach next.
                         match stack.pop() {
@@ -243,11 +164,7 @@ impl<'a> Parser<'a> {
                 // "{}" closes at once; anything else must be a first member name.
                 if self.peek() != Some(b'}') {
                     let (name, offset) = self.member_name()?;
-                    stack.push(Frame::Object {
-                        object: Object::new(),
-                        name,
-                        name_offsets: vec![offset],
-                    });
+                    stack.push(Frame::Object(OpenObject::new(name, offset)));
                     return Ok(None);
                 }
                 self.at += 1;
@@ -276,7 +193,9 @@ impl<'a> Parser<'a> {
     const fn check_depth(&self, open: usize) -> Result<(), ParseError> {
         // The container about to open makes the depth one more than those already open.
         if open >= self.limits.max_depth {
-            return Err(self.error(ErrorKind::TooDeep));
+            return Err(self.error(ErrorKind::TooDeep {
+                limit: self.limits.max_depth,
+            }));
         }
         Ok(())
     }
@@ -470,7 +389,7 @@ impl<'a> Parser<'a> {
                 Some(byte @ b'0'..=b'9') => byte - b'0',
                 Some(byte @ b'a'..=b'f') => byte - b'a' + 10,
                 Some(byte @ b'A'..=b'F') => byte - b'A' + 10,
-                Some(_) => return Err(self.error(ErrorKind::InvalidUnicodeEscape)),
+                Some(byte) => return Err(self.error(ErrorKind::InvalidUnicodeEscape(byte))),
                 None => return Err(self.error(ErrorKind::UnexpectedEnd)),
             };
             unit = (unit << 4) | u16::from(digit);
@@ -496,6 +415,133 @@ impl<'a> Parser<'a> {
         ParseError {
             offset: self.at,
             kind,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    /// Any number the grammar allows, built from its four optional parts.
+    fn number() -> impl Strategy<Value = Number> {
+        (
+            any::<bool>(),
+            prop_oneof![Just("0".to_owned()), "[1-9][0-9]{0,30}"],
+            proptest::option::of("[0-9]{1,10}"),
+            proptest::option::of(("[eE]", "[+-]?", "[0-9]{1,4}")),
+        )
+            .prop_map(|(negative, int, frac, exp)| {
+                // Assemble sign, integer, fraction, and exponent in grammar order.
+                let mut text = String::new();
+                if negative {
+                    text.push('-');
+                }
+                text.push_str(&int);
+                if let Some(frac) = frac {
+                    text.push('.');
+                    text.push_str(&frac);
+                }
+                if let Some((e, sign, digits)) = exp {
+                    text.push_str(&e);
+                    text.push_str(&sign);
+                    text.push_str(&digits);
+                }
+                text.parse().expect("assembled from the grammar")
+            })
+    }
+
+    /// Any value up to a few levels deep, including every control character and astral planes.
+    fn json() -> impl Strategy<Value = Json> {
+        let leaf = prop_oneof![
+            Just(Json::Null),
+            any::<bool>().prop_map(Json::Bool),
+            number().prop_map(Json::Number),
+            any::<String>().prop_map(Json::String),
+        ];
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Json::Array),
+                // Names may collide in the generator; collecting keeps them unique.
+                proptest::collection::vec((any::<String>(), inner), 0..8)
+                    .prop_map(|members| Json::Object(members.into_iter().collect::<Object>())),
+            ]
+        })
+    }
+
+    /// Inserts whitespace between every token of a compact text.
+    ///
+    /// Whitespace inside strings must stay put, so the walk tracks whether it is inside one.
+    fn spread(compact: &str, pad: &str) -> String {
+        let mut out = String::new();
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in compact.chars() {
+            out.push(c);
+            if in_string {
+                // Track escapes so an escaped quote does not end the string.
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_string = false,
+                    _ => {}
+                }
+            } else if c == '"' {
+                in_string = true;
+            } else if matches!(c, '[' | ']' | '{' | '}' | ',' | ':') {
+                out.push_str(pad);
+            }
+        }
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn serialize_then_parse_is_identity(value in json()) {
+            // Writing a value and reading it back yields the same value.
+            let text = value.to_string();
+            prop_assert_eq!(Json::parse(&text), Ok(value));
+        }
+
+        #[test]
+        fn parse_then_serialize_is_idempotent(value in json(), pad in "[ \t\n\r]{0,3}") {
+            // A padded text parses to the same value, and writes back to the compact form.
+            let compact = value.to_string();
+            let padded = format!("{pad}{}{pad}", spread(&compact, &pad));
+            let parsed = Json::parse(&padded).unwrap();
+            prop_assert_eq!(parsed.to_string(), compact);
+        }
+
+        #[test]
+        fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+            // Any outcome is fine; an error must point inside the input or at its end.
+            if let Err(error) = Json::parse(&bytes) {
+                prop_assert!(error.offset() <= bytes.len());
+            }
+        }
+
+        #[test]
+        fn json_alphabet_never_panics(text in "[\\[\\]{}\",:0-9eE.+\\-a-z\\\\ ]{0,64}") {
+            // Bytes drawn from the JSON alphabet reach far deeper into the grammar than noise.
+            let limits = Limits { max_depth: 4, max_bytes: 64 };
+            if let Err(error) = Json::parse_with(&text, limits) {
+                prop_assert!(error.offset() <= text.len());
+            }
+        }
+
+        #[test]
+        fn truncation_is_always_rejected(value in json(), cut in any::<prop::sample::Index>()) {
+            // Cutting a container's compact text short always fails.
+            // A scalar may survive, as "12" cut to "1" is still a number.
+            let text = value.to_string();
+            if matches!(value, Json::Array(_) | Json::Object(_)) {
+                let end = cut.index(text.len());
+                if text.is_char_boundary(end) {
+                    prop_assert!(Json::parse(&text[..end]).is_err());
+                }
+            }
         }
     }
 }

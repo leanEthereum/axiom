@@ -12,10 +12,7 @@ use std::{
 };
 
 use super::{B, G2Affine, PSI_X, PSI_Y, PSI2_X};
-use crate::{
-    BLS_X, Fp2, Scalar, hash_to_curve,
-    msm::{self, PippengerGroup},
-};
+use crate::{BLS_X, Fp2, Scalar, hash_to_curve::IsoPoint, msm::PippengerGroup};
 
 /// A point of E'(F_{p^2}) in homogeneous projective coordinates.
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +52,13 @@ impl G2Projective {
     /// The running time depends on the message, which must be public.
     #[must_use]
     pub fn hash_to_curve(message: &[u8], dst: &[u8]) -> Self {
-        hash_to_curve::hash_to_g2(message, dst)
+        // Two field elements, mapped independently and added, give a random-oracle output.
+        let [u0, u1] = Fp2::hash_to_field(message, dst);
+        let q0 = IsoPoint::from_field(&u0).to_twist();
+        let q1 = IsoPoint::from_field(&u1).to_twist();
+        // The sum lies on the twist.
+        // Clearing the cofactor moves it into G2.
+        (q0 + q1).clear_cofactor()
     }
 
     /// Whether this is the point at infinity.
@@ -212,7 +215,7 @@ impl G2Projective {
     /// Panics when the two slices differ in length.
     #[must_use]
     pub fn multi_exp(points: &[G2Affine], scalars: &[Scalar]) -> Self {
-        msm::multi_exp(points, scalars)
+        <Self as PippengerGroup>::pippenger(points, scalars)
     }
 
     /// Converts many points to affine form with a single field inversion.

@@ -13,126 +13,128 @@
 
 use axiom_ssz::U256;
 
-use crate::hex::{DIGITS, HexError, digit, strip_prefix};
+use crate::hex::{HexDigits, HexError};
 
-/// Encodes an unsigned 64-bit integer.
-#[must_use]
-pub fn encode(value: u64) -> String {
-    // The alternate hex format is exactly the QUANTITY form: 0x, lowercase, minimal.
-    format!("{value:#x}")
+/// An unsigned integer that the Ethereum JSON-RPC carries as a QUANTITY.
+pub trait Quantity: Sized {
+    /// The minimal 0x-prefixed lowercase hex of the value.
+    #[must_use]
+    fn to_quantity(&self) -> String;
+
+    /// Decodes a QUANTITY.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a missing prefix, no digits, a leading zero, a bad digit, or too many bits.
+    fn from_quantity(text: &str) -> Result<Self, HexError>;
 }
 
-/// Decodes an unsigned 64-bit integer.
-///
-/// # Errors
-///
-/// Fails on a missing prefix, no digits, a leading zero, a bad digit, or more than 64 bits.
-pub fn decode(text: &str) -> Result<u64, HexError> {
-    let digits = checked_digits(text)?;
-    // Sixteen hex digits hold 64 bits; a seventeenth significant digit cannot fit.
-    if digits.len() > 16 {
-        return Err(HexError::Overflow);
+impl Quantity for u64 {
+    fn to_quantity(&self) -> String {
+        // The alternate hex format is exactly the QUANTITY form: 0x, lowercase, minimal.
+        format!("{self:#x}")
     }
-    // Shift each digit in, most significant first.
-    Ok(digits
-        .iter()
-        .fold(0, |value, &nibble| (value << 4) | u64::from(nibble)))
+
+    fn from_quantity(text: &str) -> Result<Self, HexError> {
+        let digits = HexDigits::new(text)?.quantity()?;
+        // Sixteen hex digits hold 64 bits; a seventeenth significant digit cannot fit.
+        if digits.len() > 16 {
+            return Err(HexError::Overflow {
+                digits: digits.len(),
+                limit: 16,
+            });
+        }
+        // Shift each digit in, most significant first.
+        Ok(digits
+            .iter()
+            .fold(0, |value, &nibble| (value << 4) | Self::from(nibble)))
+    }
 }
 
-/// Encodes an unsigned 256-bit integer.
-#[must_use]
-pub fn encode_u256(value: &U256) -> String {
-    // The integer is stored little-endian, so the most significant byte is last.
-    let bytes = value.to_le_bytes();
-    let Some(top) = bytes.iter().rposition(|&byte| byte != 0) else {
-        // All 32 bytes are zero.
-        return "0x0".to_owned();
-    };
+impl Quantity for U256 {
+    fn to_quantity(&self) -> String {
+        // The integer is stored little-endian, so the most significant byte is last.
+        let bytes = self.to_le_bytes();
+        let Some(top) = bytes.iter().rposition(|&byte| byte != 0) else {
+            // All 32 bytes are zero.
+            return "0x0".to_owned();
+        };
 
-    let mut out = String::with_capacity(2 + 2 * (top + 1));
-    out.push_str("0x");
-    // The top byte drops its high nibble when that nibble is zero, so 0x0f is written "f".
-    let high = bytes[top] >> 4;
-    if high != 0 {
-        out.push(char::from(DIGITS[usize::from(high)]));
-    }
-    out.push(char::from(DIGITS[usize::from(bytes[top] & 0xf)]));
-    // Every lower byte is written in full, two digits, walking toward the least significant.
-    for &byte in bytes[..top].iter().rev() {
-        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        out.push(char::from(DIGITS[usize::from(byte & 0xf)]));
-    }
-    out
-}
-
-/// Decodes an unsigned 256-bit integer.
-///
-/// # Errors
-///
-/// Fails on a missing prefix, no digits, a leading zero, a bad digit, or more than 256 bits.
-pub fn decode_u256(text: &str) -> Result<U256, HexError> {
-    let digits = checked_digits(text)?;
-    // Sixty-four hex digits hold 256 bits.
-    if digits.len() > 64 {
-        return Err(HexError::Overflow);
+        let mut out = String::with_capacity(2 + 2 * (top + 1));
+        out.push_str("0x");
+        // The top byte drops its high nibble when that nibble is zero, so 0x0f is written "f".
+        let high = bytes[top] >> 4;
+        if high != 0 {
+            HexDigits::push_nibble(&mut out, high);
+        }
+        HexDigits::push_nibble(&mut out, bytes[top] & 0xf);
+        // Every lower byte is written in full, two digits, walking toward the least significant.
+        for &byte in bytes[..top].iter().rev() {
+            HexDigits::push_nibble(&mut out, byte >> 4);
+            HexDigits::push_nibble(&mut out, byte & 0xf);
+        }
+        out
     }
 
-    // Place nibbles from the least significant end.
-    //
-    //     "0x1234"  nibbles from the right: 4 3 2 1
-    //     byte 0 = 0x34, byte 1 = 0x12   (little-endian storage)
-    let mut bytes = [0_u8; 32];
-    for (position, &nibble) in digits.iter().rev().enumerate() {
-        bytes[position / 2] |= nibble << (4 * (position % 2));
-    }
-    Ok(U256(bytes))
-}
+    fn from_quantity(text: &str) -> Result<Self, HexError> {
+        let digits = HexDigits::new(text)?.quantity()?;
+        // Sixty-four hex digits hold 256 bits.
+        if digits.len() > 64 {
+            return Err(HexError::Overflow {
+                digits: digits.len(),
+                limit: 64,
+            });
+        }
 
-/// The digit values of a well-formed QUANTITY.
-fn checked_digits(text: &str) -> Result<Vec<u8>, HexError> {
-    let digits = strip_prefix(text)?;
-    // "0x" alone carries no value; zero is written "0x0".
-    if digits.is_empty() {
-        return Err(HexError::Empty);
+        // Place nibbles from the least significant end.
+        //
+        //     "0x1234"  nibbles from the right: 4 3 2 1
+        //     byte 0 = 0x34, byte 1 = 0x12   (little-endian storage)
+        let mut bytes = [0_u8; 32];
+        for (position, &nibble) in digits.iter().rev().enumerate() {
+            bytes[position / 2] |= nibble << (4 * (position % 2));
+        }
+        Ok(Self(bytes))
     }
-    // A zero first digit is allowed only when it is the whole number.
-    if digits.len() > 1 && digits[0] == b'0' {
-        return Err(HexError::LeadingZero);
-    }
-    // Map each character to its value; offsets count the two prefix bytes.
-    digits
-        .iter()
-        .enumerate()
-        .map(|(index, &byte)| digit(byte).ok_or(HexError::InvalidDigit { offset: index + 2 }))
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
     fn u64_boundaries() {
         // Zero, one, and the largest value round-trip through their minimal forms.
         for (value, text) in [(0, "0x0"), (1, "0x1"), (u64::MAX, "0xffffffffffffffff")] {
-            assert_eq!(encode(value), text);
-            assert_eq!(decode(text), Ok(value));
+            assert_eq!(value.to_quantity(), text);
+            assert_eq!(u64::from_quantity(text), Ok(value));
         }
         // Uppercase digits decode, as the engine API's encoding pattern allows.
-        assert_eq!(decode("0xFF"), Ok(255));
+        assert_eq!(u64::from_quantity("0xFF"), Ok(255));
     }
 
     #[test]
     fn u64_rejections() {
         // Each malformed form maps to one error.
-        assert_eq!(decode("ff"), Err(HexError::MissingPrefix));
-        assert_eq!(decode("0Xff"), Err(HexError::MissingPrefix));
-        assert_eq!(decode("0x"), Err(HexError::Empty));
-        assert_eq!(decode("0x00"), Err(HexError::LeadingZero));
-        assert_eq!(decode("0x0f"), Err(HexError::LeadingZero));
-        assert_eq!(decode("0x1g"), Err(HexError::InvalidDigit { offset: 3 }));
+        assert_eq!(u64::from_quantity("ff"), Err(HexError::MissingPrefix));
+        assert_eq!(u64::from_quantity("0Xff"), Err(HexError::MissingPrefix));
+        assert_eq!(u64::from_quantity("0x"), Err(HexError::Empty));
+        assert_eq!(u64::from_quantity("0x00"), Err(HexError::LeadingZero));
+        assert_eq!(u64::from_quantity("0x0f"), Err(HexError::LeadingZero));
+        assert_eq!(
+            u64::from_quantity("0x1g"),
+            Err(HexError::InvalidDigit { offset: 3 })
+        );
         // 2^64 needs seventeen digits.
-        assert_eq!(decode("0x10000000000000000"), Err(HexError::Overflow));
+        assert_eq!(
+            u64::from_quantity("0x10000000000000000"),
+            Err(HexError::Overflow {
+                digits: 17,
+                limit: 16
+            })
+        );
     }
 
     #[test]
@@ -141,18 +143,47 @@ mod tests {
         let mut bytes = [0; 32];
         bytes[0] = 0x01;
         bytes[1] = 0x0f;
-        assert_eq!(encode_u256(&U256(bytes)), "0xf01");
-        assert_eq!(decode_u256("0xf01"), Ok(U256(bytes)));
+        assert_eq!(U256(bytes).to_quantity(), "0xf01");
+        assert_eq!(U256::from_quantity("0xf01"), Ok(U256(bytes)));
 
         // Zero and the largest value.
-        assert_eq!(encode_u256(&U256::ZERO), "0x0");
-        assert_eq!(decode_u256("0x0"), Ok(U256::ZERO));
+        assert_eq!(U256::ZERO.to_quantity(), "0x0");
+        assert_eq!(U256::from_quantity("0x0"), Ok(U256::ZERO));
         let max = format!("0x{}", "f".repeat(64));
-        assert_eq!(encode_u256(&U256::MAX), max);
-        assert_eq!(decode_u256(&max), Ok(U256::MAX));
+        assert_eq!(U256::MAX.to_quantity(), max);
+        assert_eq!(U256::from_quantity(&max), Ok(U256::MAX));
 
         // Sixty-five digits is past 256 bits.
         let over = format!("0x1{}", "0".repeat(64));
-        assert_eq!(decode_u256(&over), Err(HexError::Overflow));
+        assert_eq!(
+            U256::from_quantity(&over),
+            Err(HexError::Overflow {
+                digits: 65,
+                limit: 64
+            })
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn quantity_u64_round_trip(value in any::<u64>()) {
+            // The minimal form decodes back and carries no leading zero.
+            let text = value.to_quantity();
+            prop_assert!(value == 0 || !text.starts_with("0x0"));
+            prop_assert_eq!(u64::from_quantity(&text), Ok(value));
+        }
+
+        #[test]
+        fn quantity_u256_round_trip(bytes in any::<[u8; 32]>()) {
+            // Same law over 256 bits.
+            let value = U256(bytes);
+            prop_assert_eq!(U256::from_quantity(&value.to_quantity()), Ok(value));
+        }
+
+        #[test]
+        fn quantity_widths_agree(value in any::<u64>()) {
+            // A 64-bit value has the same text whether read as 64 or 256 bits.
+            prop_assert_eq!(U256::from_u64(value).to_quantity(), value.to_quantity());
+        }
     }
 }

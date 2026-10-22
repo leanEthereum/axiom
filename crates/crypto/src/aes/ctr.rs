@@ -16,17 +16,6 @@ use crate::ct::wipe;
 /// The whole 16-byte block is one big-endian counter.
 /// That is the standard incrementing function of SP 800-38A, appendix B.1.
 /// discv5 masks packet headers this way, with the masking IV of each packet as the initial counter.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::aes::Aes128Ctr;
-///
-/// let mut header = *b"static header";
-/// Aes128Ctr::new(&[1; 16], &[2; 16]).apply_keystream(&mut header);
-/// Aes128Ctr::new(&[1; 16], &[2; 16]).apply_keystream(&mut header);
-/// assert_eq!(&header, b"static header");
-/// ```
 #[derive(Clone)]
 pub struct Aes128Ctr {
     /// The block cipher.

@@ -133,6 +133,8 @@ pub struct HistogramSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{collection::vec, prelude::*};
+
     use super::*;
 
     #[test]
@@ -171,5 +173,39 @@ mod tests {
         let snapshot = histogram.snapshot();
         assert_eq!(snapshot.buckets, vec![(1.0, 0), (f64::INFINITY, 1)]);
         assert!(snapshot.sum.is_nan());
+    }
+
+    proptest! {
+        #[test]
+        fn histogram_counts_match_a_reference(
+            raw_bounds in vec(-1_000.0_f64..1_000.0, 0..8),
+            observations in vec(prop_oneof![-2_000.0_f64..2_000.0, Just(f64::NAN)], 0..64),
+        ) {
+            // Sort and deduplicate random bounds into a valid strictly increasing list.
+            let mut bounds = raw_bounds;
+            bounds.sort_by(f64::total_cmp);
+            bounds.dedup();
+            let histogram = Histogram::new(Buckets::new(&bounds).unwrap());
+            for &value in &observations {
+                histogram.observe(value);
+            }
+            let snapshot = histogram.snapshot();
+
+            // The count is the number of observations, and the last bucket equals it.
+            prop_assert_eq!(snapshot.count, observations.len() as u64);
+            prop_assert_eq!(snapshot.buckets.last().map(|&(_, count)| count), Some(snapshot.count));
+
+            // Buckets never decrease from one bound to the next.
+            for pair in snapshot.buckets.windows(2) {
+                prop_assert!(pair[0].1 <= pair[1].1);
+            }
+
+            // Each finite bucket counts exactly the observations at or below its bound.
+            // NaN is at or below nothing, so it only reaches the infinite bucket.
+            for &(bound, count) in &snapshot.buckets[..bounds.len()] {
+                let reference = observations.iter().filter(|&&value| value <= bound).count();
+                prop_assert_eq!(count, reference as u64);
+            }
+        }
     }
 }

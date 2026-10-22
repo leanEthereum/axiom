@@ -34,15 +34,31 @@ pub struct Quota {
 }
 
 /// A request over quota.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum RateLimited {
-    /// The request would conform after waiting this long.
-    #[error("rate limited, retry after {0:?}")]
-    RetryAfter(Duration),
+    /// The request would conform after waiting.
+    #[error("peer {peer} is over its {protocol} quota, retry after {wait:?}")]
+    RetryAfter {
+        /// The requesting peer.
+        peer: PeerId,
+        /// The protocol requested.
+        protocol: Protocol,
+        /// Time until the request would conform.
+        wait: Duration,
+    },
     /// The request alone exceeds the whole quota and never conforms.
-    #[error("request exceeds the whole quota")]
-    TooLarge,
+    #[error("peer {peer} asks {tokens} tokens of {protocol}, above its whole quota of {max}")]
+    TooLarge {
+        /// The requesting peer.
+        peer: PeerId,
+        /// The protocol requested.
+        protocol: Protocol,
+        /// Tokens the request costs.
+        tokens: u32,
+        /// Tokens in the whole quota.
+        max: u32,
+    },
 }
 
 /// Token buckets per peer and protocol.
@@ -114,7 +130,12 @@ impl RateLimiter {
             return Ok(());
         };
         if tokens > quota.max_tokens {
-            return Err(RateLimited::TooLarge);
+            return Err(RateLimited::TooLarge {
+                peer: peer.clone(),
+                protocol,
+                tokens,
+                max: quota.max_tokens,
+            });
         }
         // Each token is worth one emission interval of the period.
         let interval = quota.period / quota.max_tokens.max(1);
@@ -129,7 +150,11 @@ impl RateLimiter {
         // Invariant: new_tat >= now, so the debt is never negative.
         let debt = new_tat.saturating_sub(now);
         if debt > quota.period {
-            return Err(RateLimited::RetryAfter(debt.saturating_sub(quota.period)));
+            return Err(RateLimited::RetryAfter {
+                peer: peer.clone(),
+                protocol,
+                wait: debt.saturating_sub(quota.period),
+            });
         }
         self.buckets.insert((peer.clone(), protocol), new_tat);
         Ok(())
@@ -172,7 +197,11 @@ mod tests {
         // The fifth would put the debt at 5 s > 4 s: retry after 1 s.
         assert_eq!(
             limiter.allow(&peer, Protocol::PingV1, 1, t0),
-            Err(RateLimited::RetryAfter(Duration::from_secs(1)))
+            Err(RateLimited::RetryAfter {
+                peer: peer.clone(),
+                protocol: Protocol::PingV1,
+                wait: Duration::from_secs(1)
+            })
         );
         // One second later one token has come back.
         assert_eq!(
@@ -182,7 +211,12 @@ mod tests {
         // A request for 5 tokens never fits a 4-token quota.
         assert_eq!(
             limiter.allow(&peer, Protocol::PingV1, 5, t0),
-            Err(RateLimited::TooLarge)
+            Err(RateLimited::TooLarge {
+                peer: peer.clone(),
+                protocol: Protocol::PingV1,
+                tokens: 5,
+                max: 4
+            })
         );
         // Protocols without a quota pass.
         assert_eq!(limiter.allow(&peer, Protocol::StatusV2, 1000, t0), Ok(()));

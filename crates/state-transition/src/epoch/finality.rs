@@ -1,11 +1,45 @@
-//! Casper FFG justification and finalization, and the inactivity scores that back it.
+//! Casper FFG justification and finalization.
 
-use axiom_types::{Checkpoint, Epoch, Preset, constants::TIMELY_TARGET_FLAG_INDEX};
+use axiom_types::{
+    BeaconState, Checkpoint, Epoch, Gwei, Preset, constants::TIMELY_TARGET_FLAG_INDEX,
+};
 
-use super::EpochProcessor;
+use super::Participation;
 use crate::StateError;
 
-impl<P: Preset> EpochProcessor<'_, P> {
+/// The target votes of the two epochs the state tracks, weighed against the total stake.
+///
+/// See `weigh_justification_and_finalization` in the phase0 beacon chain spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Justification {
+    /// The epoch that is ending.
+    current_epoch: Epoch,
+    /// The epoch before it.
+    previous_epoch: Epoch,
+    /// Total active balance.
+    total: Gwei,
+    /// Target votes for the previous epoch.
+    previous_target: Gwei,
+    /// Target votes for the current epoch.
+    current_target: Gwei,
+}
+
+impl Justification {
+    /// Tallies the target votes of both epochs.
+    pub(super) fn tally<P: Preset>(participation: &Participation<'_, P>) -> Self {
+        let current_epoch = participation.current_epoch();
+        let previous_epoch = participation.previous_epoch();
+        Self {
+            current_epoch,
+            previous_epoch,
+            total: participation.total_active_balance().0,
+            previous_target: participation
+                .unslashed_participating_balance(TIMELY_TARGET_FLAG_INDEX, previous_epoch),
+            current_target: participation
+                .unslashed_participating_balance(TIMELY_TARGET_FLAG_INDEX, current_epoch),
+        }
+    }
+
     /// Justifies epochs with two thirds of target votes, and finalizes along justified chains.
     ///
     /// # Algorithm
@@ -29,18 +63,15 @@ impl<P: Preset> EpochProcessor<'_, P> {
     /// # Errors
     ///
     /// Fails when a justified epoch's block root is no longer in the state.
-    pub fn process_justification_and_finalization(&mut self) -> Result<(), StateError> {
+    pub(super) fn weigh<P: Preset>(self, state: &mut BeaconState<P>) -> Result<(), StateError> {
         // The first two epochs keep their genesis checkpoints, whose roots are stubs.
         if self.current_epoch.0 <= Epoch::GENESIS.0 + 1 {
             return Ok(());
         }
-        let total = self.total_active_balance;
-        let previous_target =
-            self.unslashed_participating_balance(TIMELY_TARGET_FLAG_INDEX, self.previous_epoch);
-        let current_target =
-            self.unslashed_participating_balance(TIMELY_TARGET_FLAG_INDEX, self.current_epoch);
+        let total = self.total;
+        let previous_target = self.previous_target;
+        let current_target = self.current_target;
 
-        let state = &mut self.state.beacon;
         let old_previous_justified = state.previous_justified_checkpoint;
         let old_current_justified = state.current_justified_checkpoint;
 
@@ -86,33 +117,5 @@ impl<P: Preset> EpochProcessor<'_, P> {
             state.finalized_checkpoint = old_current_justified;
         }
         Ok(())
-    }
-
-    /// Updates inactivity scores from the previous epoch's target votes.
-    ///
-    /// A missed target adds the bias, a hit removes one point.
-    /// Outside a leak every score also decays by the recovery rate.
-    ///
-    /// See `process_inactivity_updates` in the Altair beacon chain spec.
-    pub fn process_inactivity_updates(&mut self) {
-        if self.current_epoch == Epoch::GENESIS {
-            return;
-        }
-        let in_leak = self.state.beacon.is_in_inactivity_leak();
-        let bias = self.config.inactivity_score_bias;
-        let recovery = self.config.inactivity_score_recovery_rate;
-        for index in self.state.beacon.eligible_validator_indices() {
-            let index = index.as_usize();
-            let participated = self.is_previous_participant(index, TIMELY_TARGET_FLAG_INDEX);
-            let score = &mut self.state.beacon.inactivity_scores[index];
-            *score = if participated {
-                score.saturating_sub(1)
-            } else {
-                score.saturating_add(bias)
-            };
-            if !in_leak {
-                *score = score.saturating_sub(recovery);
-            }
-        }
     }
 }

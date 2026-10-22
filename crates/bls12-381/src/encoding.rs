@@ -70,7 +70,9 @@ impl Flags {
     ) -> Result<bool, PointDecodeError> {
         // The form is fixed by the length, so the flag must agree with it.
         if self.compression != compressed {
-            return Err(PointDecodeError::InvalidCompressionFlag);
+            return Err(PointDecodeError::InvalidCompressionFlag {
+                length: payload.len(),
+            });
         }
         if self.infinity {
             // Infinity has no coordinates and no sign: every other bit must be zero.
@@ -137,7 +139,7 @@ mod tests {
         };
         assert_eq!(
             flags.validate(false, &[0]),
-            Err(PointDecodeError::InvalidCompressionFlag)
+            Err(PointDecodeError::InvalidCompressionFlag { length: 1 })
         );
     }
 }

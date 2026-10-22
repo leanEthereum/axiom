@@ -41,7 +41,7 @@
 //! Each entry carries its own checksum, so a read verifies one value without its frame.
 //! Compaction also copies entries verbatim into new frames, checksum included.
 
-use crate::crc::Crc32c;
+use axiom_snappy::Crc32c;
 
 /// Bytes of the header at the start of every segment and hint file.
 pub(crate) const FILE_HEADER_LEN: u64 = 16;
@@ -175,6 +175,11 @@ pub(crate) struct EntryHeader {
 }
 
 impl EntryHeader {
+    /// The bytes an entry with the given key and value lengths occupies on disk.
+    pub(crate) const fn len_for(key_len: usize, value_len: u32) -> u64 {
+        ENTRY_HEADER_LEN as u64 + key_len as u64 + value_len as u64
+    }
+
     /// Serializes the header.
     pub(crate) fn encode(self) -> [u8; ENTRY_HEADER_LEN] {
         let mut out = [0; ENTRY_HEADER_LEN];
@@ -211,13 +216,8 @@ impl EntryHeader {
 
     /// Returns the bytes the whole entry occupies on disk.
     pub(crate) const fn entry_len(self) -> u64 {
-        entry_len(self.key_len as usize, self.value_len)
+        Self::len_for(self.key_len as usize, self.value_len)
     }
-}
-
-/// Returns the bytes an entry with the given key and value lengths occupies on disk.
-pub(crate) const fn entry_len(key_len: usize, value_len: u32) -> u64 {
-    ENTRY_HEADER_LEN as u64 + key_len as u64 + value_len as u64
 }
 
 #[cfg(test)]

@@ -23,19 +23,22 @@ impl<P: Preset> Operation<P> for SignedBlsToExecutionChange {
         let validator = state
             .validators
             .get(change.validator_index.as_usize())
-            .ok_or(StateError::UnknownValidator(change.validator_index))?;
+            .ok_or(StateError::UnknownValidator {
+                index: change.validator_index,
+                registry_size: state.validators.len(),
+            })?;
+        let invalid = |reason| BlockError::InvalidCredentialChange {
+            validator: change.validator_index,
+            reason,
+        };
 
         let credentials = validator.withdrawal_credentials.0;
         if credentials[0] != BLS_WITHDRAWAL_PREFIX {
-            return Err(BlockError::InvalidCredentialChange(
-                "credentials are not BLS",
-            ));
+            return Err(invalid("credentials are not BLS"));
         }
         // Invariant: credentials = 0x00 || sha256(withdrawal key)[1..].
         if credentials[1..] != Root::sha256(&change.from_bls_pubkey.0).0[1..] {
-            return Err(BlockError::InvalidCredentialChange(
-                "key does not match credentials",
-            ));
+            return Err(invalid("key does not match credentials"));
         }
 
         // Fork-agnostic domain, since a change stays valid across forks.
@@ -46,7 +49,7 @@ impl<P: Preset> Operation<P> for SignedBlsToExecutionChange {
         );
         if processor.signatures.is_enabled() {
             let key = PublicKey::from_bytes(&change.from_bls_pubkey.0)
-                .map_err(|_| BlockError::MalformedSignature)?;
+                .map_err(|_| invalid("withdrawal key does not decompress"))?;
             processor.verify_root(
                 key,
                 SigningData::signing_root(change, domain),

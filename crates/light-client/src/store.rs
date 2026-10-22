@@ -3,17 +3,14 @@
 use std::mem;
 
 use axiom_bls::{PublicKey, Signature};
-use axiom_ssz::{Container, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz, Vector};
+use axiom_ssz::{Root, Ssz, Vector};
 use axiom_types::{
-    Bytes32, ChainConfig, Domain, ExecutionPayloadHeader, LightClientBootstrap,
-    LightClientFinalityUpdate, LightClientHeader, LightClientOptimisticUpdate, LightClientUpdate,
-    Preset, SigningData, Slot, SyncCommittee, constants::DOMAIN_SYNC_COMMITTEE,
+    ChainConfig, Domain, LightClientBootstrap, LightClientFinalityUpdate, LightClientHeader,
+    LightClientOptimisticUpdate, LightClientUpdate, Preset, SigningData, Slot, SyncCommittee,
+    constants::DOMAIN_SYNC_COMMITTEE,
 };
 
-use crate::{LightClientError, UpdateQuality};
-
-/// Position of the execution payload in a block body's tree.
-const EXECUTION_PAYLOAD_GINDEX: u64 = 25;
+use crate::{LightClientError, UpdateQuality, branch::Branch};
 
 /// Position of the finalized checkpoint root in an Electra state's tree.
 const FINALIZED_ROOT_GINDEX: u64 = 169;
@@ -23,9 +20,6 @@ const CURRENT_SYNC_COMMITTEE_GINDEX: u64 = 86;
 
 /// Position of the next sync committee in an Electra state's tree.
 const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 87;
-
-/// Fields of the Capella execution payload header, before Deneb appended the blob gas fields.
-const CAPELLA_PAYLOAD_HEADER_FIELDS: usize = 15;
 
 /// What a light client knows: two committees, a finalized header, and an optimistic one.
 ///
@@ -61,14 +55,24 @@ impl<P: Preset> LightClientStore<P> {
         trusted_block_root: Root,
         bootstrap: &LightClientBootstrap<P>,
     ) -> Result<Self, LightClientError> {
-        Self::verify_header(config, &bootstrap.header)?;
-        if bootstrap.header.beacon.hash_tree_root() != trusted_block_root {
-            return Err(LightClientError::UntrustedBootstrap);
+        if !bootstrap.header.is_valid(config) {
+            return Err(LightClientError::InvalidHeader(
+                bootstrap.header.beacon.slot,
+            ));
         }
-        Self::verify_branch(
-            bootstrap.current_sync_committee.hash_tree_root(),
+        let header_root = bootstrap.header.beacon.hash_tree_root();
+        if header_root != trusted_block_root {
+            return Err(LightClientError::UntrustedBootstrap {
+                header: header_root,
+                trusted: trusted_block_root,
+            });
+        }
+        Branch::new(
             &bootstrap.current_sync_committee_branch,
             CURRENT_SYNC_COMMITTEE_GINDEX,
+        )
+        .proves(
+            bootstrap.current_sync_committee.hash_tree_root(),
             bootstrap.header.beacon.state_root,
         )?;
         Ok(Self {
@@ -124,10 +128,18 @@ impl<P: Preset> LightClientStore<P> {
         }
 
         let finalizes_next_committee = !self.is_next_sync_committee_known()
-            && UpdateQuality::is_sync_committee_update(update)
-            && UpdateQuality::is_finality_update(update)
-            && Self::period(update.finalized_header.beacon.slot)
-                == Self::period(update.attested_header.beacon.slot);
+            && update.is_sync_committee_update()
+            && update.is_finality_update()
+            && update
+                .finalized_header
+                .beacon
+                .slot
+                .sync_committee_period::<P>()
+                == update
+                    .attested_header
+                    .beacon
+                    .slot
+                    .sync_committee_period::<P>();
         // Threshold: participants * 3 >= committee * 2.
         if participants * 3 >= bits.len() * 2
             && (update.finalized_header.beacon.slot > self.finalized_header.beacon.slot
@@ -219,24 +231,37 @@ impl<P: Preset> LightClientStore<P> {
         current_slot: Slot,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
-        let aggregate = &update.sync_aggregate;
-        if (aggregate.sync_committee_bits.count_ones() as u64) < P::MIN_SYNC_COMMITTEE_PARTICIPANTS
-        {
-            return Err(LightClientError::InsufficientParticipants);
+        let participants = update.sync_aggregate.sync_committee_bits.count_ones() as u64;
+        if participants < P::MIN_SYNC_COMMITTEE_PARTICIPANTS {
+            return Err(LightClientError::InsufficientParticipants {
+                participants,
+                minimum: P::MIN_SYNC_COMMITTEE_PARTICIPANTS,
+            });
         }
 
-        Self::verify_header(config, &update.attested_header)?;
         let attested_slot = update.attested_header.beacon.slot;
+        if !update.attested_header.is_valid(config) {
+            return Err(LightClientError::InvalidHeader(attested_slot));
+        }
         let finalized_slot = update.finalized_header.beacon.slot;
         if !(current_slot >= update.signature_slot
             && update.signature_slot > attested_slot
             && attested_slot >= finalized_slot)
         {
-            return Err(LightClientError::InvalidSlots);
+            return Err(LightClientError::InvalidSlots {
+                current: current_slot,
+                signature: update.signature_slot,
+                attested: attested_slot,
+                finalized: finalized_slot,
+            });
         }
 
-        let store_period = Self::period(self.finalized_header.beacon.slot);
-        let signature_period = Self::period(update.signature_slot);
+        let store_period = self
+            .finalized_header
+            .beacon
+            .slot
+            .sync_committee_period::<P>();
+        let signature_period = update.signature_slot.sync_committee_period::<P>();
         let next_known = self.is_next_sync_committee_known();
         let period_ok = if next_known {
             signature_period == store_period || signature_period == store_period + 1
@@ -244,73 +269,84 @@ impl<P: Preset> LightClientStore<P> {
             signature_period == store_period
         };
         if !period_ok {
-            return Err(LightClientError::SkippedPeriod);
+            return Err(LightClientError::SkippedPeriod {
+                period: signature_period,
+                store_period,
+            });
         }
 
         // The update must move the finalized header, or deliver the missing next committee.
-        let attested_period = Self::period(attested_slot);
-        let has_next_committee = !next_known
-            && UpdateQuality::is_sync_committee_update(update)
-            && attested_period == store_period;
+        let attested_period = attested_slot.sync_committee_period::<P>();
+        let has_next_committee =
+            !next_known && update.is_sync_committee_update() && attested_period == store_period;
         if attested_slot <= self.finalized_header.beacon.slot && !has_next_committee {
-            return Err(LightClientError::Irrelevant);
+            return Err(LightClientError::Irrelevant {
+                attested: attested_slot,
+                finalized: self.finalized_header.beacon.slot,
+            });
         }
 
-        if UpdateQuality::is_finality_update(update) {
+        if update.is_finality_update() {
             // The genesis checkpoint's root is zero, and its header stays empty.
             let finalized_root = if finalized_slot == Slot::GENESIS {
                 if update.finalized_header != LightClientHeader::default() {
-                    return Err(LightClientError::UnexpectedData);
+                    return Err(LightClientError::UnexpectedData("finalized header"));
                 }
                 Root::ZERO
             } else {
-                Self::verify_header(config, &update.finalized_header)?;
+                if !update.finalized_header.is_valid(config) {
+                    return Err(LightClientError::InvalidHeader(finalized_slot));
+                }
                 update.finalized_header.beacon.hash_tree_root()
             };
-            Self::verify_branch(
-                finalized_root,
-                &update.finality_branch,
-                FINALIZED_ROOT_GINDEX,
-                update.attested_header.beacon.state_root,
-            )?;
+            Branch::new(&update.finality_branch, FINALIZED_ROOT_GINDEX)
+                .proves(finalized_root, update.attested_header.beacon.state_root)?;
         } else if update.finalized_header != LightClientHeader::default() {
-            return Err(LightClientError::UnexpectedData);
+            return Err(LightClientError::UnexpectedData("finalized header"));
         }
 
-        if UpdateQuality::is_sync_committee_update(update) {
+        if update.is_sync_committee_update() {
             if attested_period == store_period
                 && next_known
                 && update.next_sync_committee != self.next_sync_committee
             {
-                return Err(LightClientError::ConflictingCommittee);
+                return Err(LightClientError::ConflictingCommittee(attested_period));
             }
-            Self::verify_branch(
-                update.next_sync_committee.hash_tree_root(),
+            Branch::new(
                 &update.next_sync_committee_branch,
                 NEXT_SYNC_COMMITTEE_GINDEX,
+            )
+            .proves(
+                update.next_sync_committee.hash_tree_root(),
                 update.attested_header.beacon.state_root,
             )?;
         } else if update.next_sync_committee != SyncCommittee::default() {
-            return Err(LightClientError::UnexpectedData);
+            return Err(LightClientError::UnexpectedData("next sync committee"));
         }
 
-        let committee = if signature_period == store_period {
-            &self.current_sync_committee
-        } else {
-            &self.next_sync_committee
-        };
-        Self::verify_signature(config, update, committee, genesis_validators_root)
+        self.verify_signature(config, update, genesis_validators_root)
     }
 
     /// Moves committees and headers forward with a validated update.
     ///
     /// See `apply_light_client_update` in the Altair light client sync protocol.
     fn apply_update(&mut self, update: &LightClientUpdate<P>) -> Result<(), LightClientError> {
-        let store_period = Self::period(self.finalized_header.beacon.slot);
-        let finalized_period = Self::period(update.finalized_header.beacon.slot);
+        let store_period = self
+            .finalized_header
+            .beacon
+            .slot
+            .sync_committee_period::<P>();
+        let finalized_period = update
+            .finalized_header
+            .beacon
+            .slot
+            .sync_committee_period::<P>();
         if !self.is_next_sync_committee_known() {
             if finalized_period != store_period {
-                return Err(LightClientError::SkippedPeriod);
+                return Err(LightClientError::SkippedPeriod {
+                    period: finalized_period,
+                    store_period,
+                });
             }
             self.next_sync_committee = update.next_sync_committee.clone();
         } else if finalized_period == store_period + 1 {
@@ -342,95 +378,37 @@ impl<P: Preset> LightClientStore<P> {
             / 2
     }
 
-    /// Sync committee period of a slot.
-    const fn period(slot: Slot) -> u64 {
-        slot.epoch::<P>().0 / P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD
-    }
-
-    /// Checks a header's execution payload against its block body.
-    ///
-    /// See `is_valid_light_client_header` in the Deneb light client sync protocol.
-    fn verify_header(
-        config: &ChainConfig,
-        header: &LightClientHeader<P>,
-    ) -> Result<(), LightClientError> {
-        let epoch = header.beacon.slot.epoch::<P>();
-        if epoch < config.deneb_fork_epoch
-            && (header.execution.blob_gas_used != 0 || header.execution.excess_blob_gas != 0)
-        {
-            return Err(LightClientError::InvalidHeader);
-        }
-        if epoch < config.capella_fork_epoch {
-            let empty = header.execution == ExecutionPayloadHeader::default()
-                && header.execution_branch.iter().all(|node| node.0 == [0; 32]);
-            return if empty {
-                Ok(())
-            } else {
-                Err(LightClientError::InvalidHeader)
-            };
-        }
-        Self::verify_branch(
-            Self::execution_root(config, header),
-            &header.execution_branch,
-            EXECUTION_PAYLOAD_GINDEX,
-            header.beacon.body_root,
-        )
-        .map_err(|_| LightClientError::InvalidHeader)
-    }
-
-    /// Root of a header's execution payload header, in the shape of the header's fork.
-    ///
-    /// See `get_lc_execution_root` in the Deneb light client sync protocol.
-    fn execution_root(config: &ChainConfig, header: &LightClientHeader<P>) -> Root {
-        let epoch = header.beacon.slot.epoch::<P>();
-        if epoch >= config.deneb_fork_epoch {
-            return header.execution.hash_tree_root();
-        }
-        // Before Deneb the payload header lacked its last two fields.
-        let mut merkleizer = Merkleizer::with_limit(CAPELLA_PAYLOAD_HEADER_FIELDS);
-        for root in header
-            .execution
-            .field_roots()
-            .into_iter()
-            .take(CAPELLA_PAYLOAD_HEADER_FIELDS)
-        {
-            merkleizer.push(root);
-        }
-        merkleizer.finish()
-    }
-
-    /// Checks a merkle branch from a leaf to a root.
-    fn verify_branch(
-        leaf: Root,
-        branch: &[Bytes32],
-        gindex: u64,
-        root: Root,
-    ) -> Result<(), LightClientError> {
-        let proof = MerkleProof {
-            branch: branch.iter().map(|node| Root(node.0)).collect(),
-        };
-        if proof.verify(leaf, GeneralizedIndex::new(gindex), root) {
-            Ok(())
-        } else {
-            Err(LightClientError::InvalidBranch)
-        }
-    }
-
     /// Checks the sync committee's aggregate signature over the attested header.
+    ///
+    /// The committee is the current one, or the next one for a signature from the next period.
     fn verify_signature(
+        &self,
         config: &ChainConfig,
         update: &LightClientUpdate<P>,
-        committee: &SyncCommittee<P>,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
+        let committee = if update.signature_slot.sync_committee_period::<P>()
+            == self
+                .finalized_header
+                .beacon
+                .slot
+                .sync_committee_period::<P>()
+        {
+            &self.current_sync_committee
+        } else {
+            &self.next_sync_committee
+        };
         let signers = committee
             .pubkeys
             .iter()
             .zip(update.sync_aggregate.sync_committee_bits.iter())
-            .filter(|(_, bit)| *bit)
-            .map(|(pubkey, _)| PublicKey::from_bytes(&pubkey.0))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| LightClientError::InvalidSignature)?;
+            .enumerate()
+            .filter(|(_, (_, bit))| *bit)
+            .map(|(seat, (pubkey, _))| {
+                PublicKey::from_bytes(&pubkey.0)
+                    .map_err(|source| LightClientError::MalformedCommitteeKey { seat, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let signers: Vec<&PublicKey> = signers.iter().collect();
 
         // The committee signs in the fork of the slot before the signature slot.
@@ -439,11 +417,14 @@ impl<P: Preset> LightClientStore<P> {
         let domain = Domain::compute(DOMAIN_SYNC_COMMITTEE, fork_version, genesis_validators_root);
         let signing_root = SigningData::signing_root(&update.attested_header.beacon, domain);
         let signature = Signature::from_bytes(&update.sync_aggregate.sync_committee_signature.0)
-            .map_err(|_| LightClientError::InvalidSignature)?;
+            .map_err(LightClientError::MalformedSignature)?;
         if signature.fast_aggregate_verify(&signers, &signing_root.0) {
             Ok(())
         } else {
-            Err(LightClientError::InvalidSignature)
+            Err(LightClientError::InvalidSignature {
+                signature_slot: update.signature_slot,
+                participants: signers.len(),
+            })
         }
     }
 }

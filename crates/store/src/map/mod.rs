@@ -33,6 +33,7 @@
 //! See Driscoll, Sarnak, Sleator and Tarjan, "Making data structures persistent", 1989.
 
 mod cursor;
+mod range;
 
 use std::{cmp::Ordering, fmt, mem, ops::Bound, sync::Arc};
 

@@ -21,34 +21,22 @@
 //!
 //! The format is specified in `google/snappy/framing_format.txt`.
 
+mod chunk;
+mod chunk_decoder;
+mod chunk_encoder;
 mod decoder;
 mod encoder;
 
+use chunk::{ChunkHeader, TYPE_STREAM_IDENTIFIER};
+use chunk_decoder::ChunkDecoder;
+use chunk_encoder::ChunkEncoder;
 pub use decoder::FrameDecoder;
 pub use encoder::FrameEncoder;
 
-use crate::{
-    Crc32c, SnappyError,
-    raw::{self, decompress_into, max_compressed_len},
-};
+use crate::SnappyError;
 
 /// The identifier chunk that opens every stream, header included.
 const STREAM_IDENTIFIER: [u8; 10] = [0xff, 0x06, 0x00, 0x00, b's', b'N', b'a', b'P', b'p', b'Y'];
-
-/// Chunk type of the stream identifier.
-const TYPE_STREAM_IDENTIFIER: u8 = 0xff;
-
-/// Chunk type of Snappy-compressed data.
-const TYPE_COMPRESSED: u8 = 0x00;
-
-/// Chunk type of stored data.
-const TYPE_UNCOMPRESSED: u8 = 0x01;
-
-/// Last chunk type that decoders must reject.
-const LAST_UNSKIPPABLE: u8 = 0x7f;
-
-/// Bytes of a chunk header: one type byte and a 3-byte length.
-const HEADER_LEN: usize = 4;
 
 /// Bytes of the checksum that opens every data chunk body.
 const CHECKSUM_LEN: usize = 4;
@@ -56,33 +44,15 @@ const CHECKSUM_LEN: usize = 4;
 /// Most uncompressed bytes one data chunk may carry, fixed by the framing format.
 pub const MAX_CHUNK_DATA_LEN: usize = 1 << 16;
 
-/// Longest compressed chunk body accepted.
-///
-/// The format only bounds the uncompressed side.
-/// No compressor exceeds the worst-case expansion of 65536 bytes, so longer bodies are rejected.
-/// That keeps a decoder from buffering a 16 MiB body for 64 KiB of output.
-const MAX_COMPRESSED_BODY_LEN: usize = CHECKSUM_LEN + max_compressed_len(MAX_CHUNK_DATA_LEN);
-
-/// Longest uncompressed chunk body: a checksum and 65536 bytes.
-const MAX_UNCOMPRESSED_BODY_LEN: usize = CHECKSUM_LEN + MAX_CHUNK_DATA_LEN;
-
-/// Masks a CRC so that checksums of data holding checksums stay well distributed.
-///
-/// ```text
-/// masked = rotate_right(crc, 15) + 0xa282ead8   (mod 2^32)
-/// ```
-const fn mask(crc: u32) -> u32 {
-    crc.rotate_right(15).wrapping_add(0xa282_ead8)
-}
-
 /// Compresses bytes into a framed stream.
 ///
 /// An empty input gives a stream holding only the identifier.
 #[must_use]
 pub fn compress(input: &[u8]) -> Vec<u8> {
     let mut out = STREAM_IDENTIFIER.to_vec();
+    let mut chunks = ChunkEncoder::new();
     for data in input.chunks(MAX_CHUNK_DATA_LEN) {
-        encode_chunk(data, &mut out);
+        chunks.encode(data, &mut out);
     }
     out
 }
@@ -92,176 +62,41 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 /// The stream must open with an identifier chunk.
 /// Every checksum is verified.
 pub fn decompress(input: &[u8], max_len: usize) -> Result<Vec<u8>, SnappyError> {
-    // The first byte must already name the identifier chunk.
+    // The first byte must already name the identifier chunk, even in a truncated stream.
     if input.first() != Some(&TYPE_STREAM_IDENTIFIER) {
         return Err(SnappyError::MissingStreamIdentifier);
     }
+    let mut chunks = ChunkDecoder::new(max_len);
     let mut out = Vec::new();
     let mut rest = input;
-    while !rest.is_empty() {
-        let header = rest
-            .first_chunk::<HEADER_LEN>()
-            .ok_or(SnappyError::UnexpectedEnd)?;
-        let (chunk_type, len) = parse_header(*header);
-        check_body_len(chunk_type, len)?;
-        let body = rest
-            .get(HEADER_LEN..HEADER_LEN + len)
-            .ok_or(SnappyError::UnexpectedEnd)?;
-        let produced = out.len();
-        decode_chunk(chunk_type, body, &mut out, produced, max_len)?;
-        rest = &rest[HEADER_LEN + len..];
+    while let Some((header, after)) = rest.split_first_chunk::<{ ChunkHeader::LEN }>() {
+        let header = chunks.header(*header)?;
+        let body = after.get(..header.len).ok_or(SnappyError::UnexpectedEnd {
+            needed: header.len,
+            available: after.len(),
+        })?;
+        chunks.body(header, body, &mut out)?;
+        rest = &after[header.len..];
+    }
+    // Fewer bytes than a header remain.
+    if !rest.is_empty() {
+        return Err(SnappyError::UnexpectedEnd {
+            needed: ChunkHeader::LEN,
+            available: rest.len(),
+        });
     }
     Ok(out)
 }
 
-/// Splits a chunk header into its type and body length.
-///
-/// ```text
-/// [ type ][ len 0..7 ][ len 8..15 ][ len 16..23 ]
-/// ```
-const fn parse_header(header: [u8; HEADER_LEN]) -> (u8, usize) {
-    let [chunk_type, b0, b1, b2] = header;
-    let len = u32::from_le_bytes([b0, b1, b2, 0]) as usize;
-    (chunk_type, len)
-}
-
-/// Rejects a body length its chunk type cannot have, before the body is read.
-const fn check_body_len(chunk_type: u8, len: usize) -> Result<(), SnappyError> {
-    let max = match chunk_type {
-        TYPE_STREAM_IDENTIFIER if len != STREAM_IDENTIFIER.len() - HEADER_LEN => {
-            return Err(SnappyError::InvalidStreamIdentifier);
-        }
-        TYPE_COMPRESSED => MAX_COMPRESSED_BODY_LEN,
-        TYPE_UNCOMPRESSED => MAX_UNCOMPRESSED_BODY_LEN,
-        // Fail on the header, so no reader buffers a body only to reject it.
-        unskippable @ ..=LAST_UNSKIPPABLE => {
-            return Err(SnappyError::UnskippableChunk(unskippable));
-        }
-        _ => return Ok(()),
-    };
-    if len > max {
-        return Err(SnappyError::ChunkTooLarge { len, max });
-    }
-    if len < CHECKSUM_LEN {
-        return Err(SnappyError::ChunkTooShort { len });
-    }
-    Ok(())
-}
-
-/// Decodes one chunk body, appending any data it carries.
-///
-/// # Arguments
-///
-/// - `produced`: bytes the stream produced before this chunk, for the total bound.
-/// - `max_len`: largest total the caller accepts.
-///
-/// On error the output keeps only what earlier chunks produced.
-fn decode_chunk(
-    chunk_type: u8,
-    body: &[u8],
-    out: &mut Vec<u8>,
-    produced: usize,
-    max_len: usize,
-) -> Result<(), SnappyError> {
-    let start = out.len();
-    let checksum = match chunk_type {
-        TYPE_STREAM_IDENTIFIER => {
-            // A repeated identifier is allowed, so concatenated streams decode as one.
-            return if body == &STREAM_IDENTIFIER[HEADER_LEN..] {
-                Ok(())
-            } else {
-                Err(SnappyError::InvalidStreamIdentifier)
-            };
-        }
-        TYPE_COMPRESSED => {
-            let (stored, block) = split_checksum(body)?;
-            // Bound the block by both the chunk limit and what the total still allows.
-            let len = raw::decompressed_len(block)?;
-            check_data_len(len, produced, max_len)?;
-            decompress_into(block, len, out)?;
-            stored
-        }
-        TYPE_UNCOMPRESSED => {
-            let (stored, data) = split_checksum(body)?;
-            check_data_len(data.len(), produced, max_len)?;
-            out.extend_from_slice(data);
-            stored
-        }
-        unskippable @ ..=LAST_UNSKIPPABLE => {
-            return Err(SnappyError::UnskippableChunk(unskippable));
-        }
-        // Padding and reserved skippable chunks carry nothing.
-        _ => return Ok(()),
-    };
-
-    // The checksum covers the uncompressed bytes of this chunk.
-    let computed = mask(Crc32c::checksum(&out[start..]));
-    if computed != checksum {
-        out.truncate(start);
-        return Err(SnappyError::ChecksumMismatch {
-            stored: checksum,
-            computed,
-        });
-    }
-    Ok(())
-}
-
-/// Splits a data chunk body into its stored checksum and its payload.
-const fn split_checksum(body: &[u8]) -> Result<(u32, &[u8]), SnappyError> {
-    match body.split_first_chunk::<CHECKSUM_LEN>() {
-        Some((checksum, payload)) => Ok((u32::from_le_bytes(*checksum), payload)),
-        None => Err(SnappyError::ChunkTooShort { len: body.len() }),
-    }
-}
-
-/// Checks a chunk's data length against the chunk limit and the stream's total bound.
-const fn check_data_len(len: usize, produced: usize, max_len: usize) -> Result<(), SnappyError> {
-    if len > MAX_CHUNK_DATA_LEN {
-        return Err(SnappyError::ChunkTooLarge {
-            len,
-            max: MAX_CHUNK_DATA_LEN,
-        });
-    }
-    // Saturation keeps the sum honest even next to a bound of usize::MAX.
-    let total = produced.saturating_add(len);
-    if total > max_len {
-        return Err(SnappyError::TooLarge {
-            len: total,
-            max: max_len,
-        });
-    }
-    Ok(())
-}
-
-/// Appends one data chunk holding the given bytes.
-///
-/// The chunk is stored uncompressed when compression saves less than 12.5%.
-/// Decoding stored data is a copy, so a small saving is not worth the decode time.
-fn encode_chunk(data: &[u8], out: &mut Vec<u8>) {
-    debug_assert!(data.len() <= MAX_CHUNK_DATA_LEN);
-    let start = out.len();
-    let checksum = mask(Crc32c::checksum(data));
-
-    // Header placeholder, then checksum, then the compressed block.
-    out.extend_from_slice(&[TYPE_COMPRESSED, 0, 0, 0]);
-    out.extend_from_slice(&checksum.to_le_bytes());
-    let payload = out.len();
-    raw::compress_into(data, out);
-
-    if out.len() - payload >= data.len() - data.len() / 8 {
-        out.truncate(payload);
-        out.extend_from_slice(data);
-        out[start] = TYPE_UNCOMPRESSED;
-    }
-
-    // Body length: at most 4 + 76490 bytes, well inside the 3-byte field.
-    let len = (out.len() - start - HEADER_LEN).to_le_bytes();
-    out[start + 1..start + HEADER_LEN].copy_from_slice(&len[..3]);
-}
-
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
+    use chunk::{ChunkType, TYPE_COMPRESSED, TYPE_UNCOMPRESSED};
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::{Crc32c, raw, raw::tests::arb_data};
 
     /// A stream: identifier, then the given chunks.
     fn stream(chunks: &[&[u8]]) -> Vec<u8> {
@@ -278,7 +113,7 @@ mod tests {
             .unwrap()
             .to_le_bytes();
         let mut chunk = vec![TYPE_UNCOMPRESSED, len[0], len[1], len[2]];
-        chunk.extend_from_slice(&mask(Crc32c::checksum(data)).to_le_bytes());
+        chunk.extend_from_slice(&Crc32c::masked(data).to_le_bytes());
         chunk.extend_from_slice(data);
         chunk
     }
@@ -297,8 +132,8 @@ mod tests {
     #[test]
     fn mask_matches_the_reference_formula() {
         // Masking zero is the bare constant; masking rotates before it adds.
-        assert_eq!(mask(0), 0xa282_ead8);
-        assert_eq!(mask(1 << 15), 0xa282_ead9);
+        assert_eq!(Crc32c::mask(0), 0xa282_ead8);
+        assert_eq!(Crc32c::mask(1 << 15), 0xa282_ead9);
     }
 
     #[test]
@@ -326,14 +161,18 @@ mod tests {
         // Walk the headers: identifier, then exactly two data chunks.
         let mut types = Vec::new();
         let mut rest = &framed[..];
-        while let Some(header) = rest.first_chunk::<HEADER_LEN>() {
-            let (chunk_type, len) = parse_header(*header);
-            types.push(chunk_type);
-            rest = &rest[HEADER_LEN + len..];
+        while let Some(header) = rest.first_chunk::<{ ChunkHeader::LEN }>() {
+            let header = ChunkHeader::parse(*header).unwrap();
+            types.push(header.chunk_type);
+            rest = &rest[ChunkHeader::LEN + header.len..];
         }
         assert_eq!(
             types,
-            [TYPE_STREAM_IDENTIFIER, TYPE_COMPRESSED, TYPE_UNCOMPRESSED]
+            [
+                ChunkType::StreamIdentifier,
+                ChunkType::Compressed,
+                ChunkType::Uncompressed
+            ]
         );
     }
 
@@ -398,13 +237,13 @@ mod tests {
     fn checksum_mismatch_reports_both_values() {
         // Flip one data bit after the checksum was computed.
         let mut chunk = stored_chunk(b"abc");
-        let stored = mask(Crc32c::checksum(b"abc"));
+        let stored = Crc32c::masked(b"abc");
         chunk[8] ^= 1;
         assert_eq!(
             decompress(&stream(&[&chunk]), 10),
             Err(SnappyError::ChecksumMismatch {
                 stored,
-                computed: mask(Crc32c::checksum(b"`bc")),
+                computed: Crc32c::masked(b"`bc"),
             })
         );
     }
@@ -412,14 +251,21 @@ mod tests {
     #[test]
     fn truncation_inside_a_header_or_a_body() {
         let framed = stream(&[&stored_chunk(b"abc")]);
-        // Cut inside the second header, then inside the body.
+        // Cut 2 bytes into the second 4-byte header.
         assert_eq!(
             decompress(&framed[..12], 10),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 4,
+                available: 2
+            })
         );
+        // Cut 6 bytes into the 7-byte body: a 4-byte checksum, then "abc".
         assert_eq!(
             decompress(&framed[..framed.len() - 1], 10),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 7,
+                available: 6
+            })
         );
     }
 
@@ -443,8 +289,9 @@ mod tests {
         );
 
         // A compressed block declaring 65537 bytes breaks the per-chunk data limit.
-        let mut body = vec![0, 0, 0, 0];
-        raw::write_preamble(65_537, &mut body);
+        //
+        //     body = checksum 00 00 00 00, then preamble 65537 = 0x81 0x80 0x04
+        let body = [0, 0, 0, 0, 0x81, 0x80, 0x04];
         let len = u8::try_from(body.len()).unwrap();
         let mut chunk = vec![TYPE_COMPRESSED, len, 0, 0];
         chunk.extend_from_slice(&body);
@@ -466,5 +313,52 @@ mod tests {
             decompress(&framed, 3),
             Err(SnappyError::TooLarge { len: 4, max: 3 })
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+        #[test]
+        fn frame_round_trip_through_slices_and_streams(
+            data in arb_data(),
+            piece in 1_usize..5000,
+        ) {
+            // Law: both the one-shot functions and the io adapters invert each other.
+            let framed = compress(&data);
+            prop_assert_eq!(decompress(&framed, data.len()), Ok(data.clone()));
+
+            let mut encoder = FrameEncoder::new(Vec::new());
+            for chunk in data.chunks(piece) {
+                encoder.write_all(chunk).unwrap();
+                // Flushing mid-stream emits short chunks, which must decode the same.
+                encoder.flush().unwrap();
+            }
+            let streamed = encoder.finish().unwrap();
+
+            let mut decoded = Vec::new();
+            FrameDecoder::new(&streamed[..], data.len())
+                .read_to_end(&mut decoded)
+                .unwrap();
+            prop_assert_eq!(decoded, data);
+        }
+
+        #[test]
+        fn frame_bound_is_enforced(data in arb_data().prop_filter("non-empty", |d| !d.is_empty())) {
+            // The total bound fails at the chunk that crosses it.
+            let framed = compress(&data);
+            let result = decompress(&framed, data.len() - 1);
+            let is_too_large = matches!(result, Err(SnappyError::TooLarge { .. }));
+            prop_assert!(is_too_large);
+        }
+
+        #[test]
+        fn garbage_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+            // Law: any bytes decode or fail, never panic, never exceed the bound.
+            if let Ok(out) = raw::decompress(&bytes, 1 << 16) {
+                prop_assert!(out.len() <= 1 << 16);
+            }
+            let _ = decompress(&bytes, 1 << 16);
+            let _ = FrameDecoder::new(&bytes[..], 1 << 16).read_to_end(&mut Vec::new());
+        }
     }
 }

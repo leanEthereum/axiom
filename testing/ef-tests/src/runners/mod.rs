@@ -15,7 +15,6 @@ mod shuffling;
 mod ssz_static;
 mod transition;
 
-use axiom_types::{ChainConfig, Epoch, Preset};
 pub use blocks::Blocks;
 pub use chain::ChainReplay;
 pub use epoch_processing::EpochProcessing;
@@ -30,10 +29,10 @@ pub use shuffling::Shuffling;
 pub use ssz_static::SszStatic;
 pub use transition::Transition;
 
-use crate::{Case, Failure};
+use crate::FieldNames;
 
 /// Field names of the beacon state, in order, for readable mismatch reports.
-pub const BEACON_STATE_FIELDS: [&str; 38] = [
+pub const BEACON_STATE_FIELDS: FieldNames = FieldNames(&[
     "genesis_time",
     "genesis_validators_root",
     "slot",
@@ -72,37 +71,4 @@ pub const BEACON_STATE_FIELDS: [&str; 38] = [
     "pending_partial_withdrawals",
     "pending_consolidations",
     "proposer_lookahead",
-];
-
-/// The configuration of one case: its own file when it ships one, the preset's otherwise.
-///
-/// # Errors
-///
-/// Fails when the case's configuration file does not parse.
-pub fn case_config<P: Preset>(case: &Case) -> Result<ChainConfig, Failure> {
-    if !case.has("config.yaml") {
-        return Ok(config_of::<P>());
-    }
-    ChainConfig::from_yaml(&case.yaml("config.yaml")?)
-        .map_err(|error| Failure(format!("config.yaml: {error}")))
-}
-
-/// The configuration the vectors of a preset were generated with.
-///
-/// The generator activates every fork up to the one under test at genesis.
-/// Fork epochs then read as zero, whatever the preset's configuration file says.
-#[must_use]
-pub fn config_of<P: Preset>() -> ChainConfig {
-    let mut config = if P::NAME == "mainnet" {
-        ChainConfig::mainnet()
-    } else {
-        ChainConfig::minimal()
-    };
-    config.altair_fork_epoch = Epoch::GENESIS;
-    config.bellatrix_fork_epoch = Epoch::GENESIS;
-    config.capella_fork_epoch = Epoch::GENESIS;
-    config.deneb_fork_epoch = Epoch::GENESIS;
-    config.electra_fork_epoch = Epoch::GENESIS;
-    config.fulu_fork_epoch = Epoch::GENESIS;
-    config
-}
+]);

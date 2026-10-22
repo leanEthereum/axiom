@@ -1,4 +1,4 @@
-//! The Miller loop of the optimal ate pairing, over many pairs at once.
+//! The Miller loop of the optimal ate pairing, over many pairs at once, and its final exponentiation.
 //!
 //! # Overview
 //!
@@ -20,8 +20,8 @@
 //! Many pairs share the squaring of f, which is the expensive part.
 //! A product of pairings therefore costs one loop with one squaring chain, plus one line per pair and step.
 
-use super::BLS_X;
-use crate::{Fp2, Fp12, G1Affine, G2Affine};
+use super::Gt;
+use crate::{BLS_X, Fp2, Fp12, G1Affine, G2Affine};
 
 /// The running point R of one pair, in Jacobian coordinates on the twist.
 ///
@@ -158,36 +158,95 @@ impl MillerPoint {
     }
 }
 
-/// Runs one Miller loop over every pair and returns the product of their values.
-///
-/// Pairs with a point at infinity contribute the factor one and are skipped.
-pub(super) fn multi_miller_loop(terms: &[(G1Affine, G2Affine)]) -> Fp12 {
-    // Each live pair carries its G1 point, its fixed Q, and its running R.
-    let mut pairs: Vec<(G1Affine, G2Affine, MillerPoint)> = terms
-        .iter()
-        .filter(|(p, q)| !p.is_identity() && !q.is_identity())
-        .map(|(p, q)| (*p, *q, MillerPoint::from_affine(q)))
-        .collect();
+/// The value of a shared Miller loop, defined only up to r-th powers until finally exponentiated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct MillerLoopResult(pub(super) Fp12);
 
-    // The top bit 63 of |x| is the initial R = Q.
-    // The loop covers bits 62 down to 0.
-    let mut f = Fp12::ONE;
-    for bit in (0..63).rev() {
-        // f starts at one, so the first squaring is skipped.
-        if bit != 62 {
-            f = f.square();
-        }
-        for (p, _, r) in &mut pairs {
-            f = r.double_step().evaluate(&f, p);
-        }
-        if (BLS_X >> bit) & 1 == 1 {
-            for (p, q, r) in &mut pairs {
-                f = r.add_step(q).evaluate(&f, p);
+impl MillerLoopResult {
+    /// Runs one Miller loop over every pair and returns the product of their values.
+    ///
+    /// Pairs with a point at infinity contribute the factor one and are skipped.
+    pub(super) fn new(terms: &[(G1Affine, G2Affine)]) -> Self {
+        // Each live pair carries its G1 point, its fixed Q, and its running R.
+        let mut pairs: Vec<(G1Affine, G2Affine, MillerPoint)> = terms
+            .iter()
+            .filter(|(p, q)| !p.is_identity() && !q.is_identity())
+            .map(|(p, q)| (*p, *q, MillerPoint::from_affine(q)))
+            .collect();
+
+        // The top bit 63 of |x| is the initial R = Q.
+        // The loop covers bits 62 down to 0.
+        let mut f = Fp12::ONE;
+        for bit in (0..63).rev() {
+            // f starts at one, so the first squaring is skipped.
+            if bit != 62 {
+                f = f.square();
+            }
+            for (p, _, r) in &mut pairs {
+                f = r.double_step().evaluate(&f, p);
+            }
+            if (BLS_X >> bit) & 1 == 1 {
+                for (p, q, r) in &mut pairs {
+                    f = r.add_step(q).evaluate(&f, p);
+                }
             }
         }
+
+        // x is negative: f_{-|x|,Q} = 1 / f_{|x|,Q} up to factors the final exponentiation kills.
+        // After that exponentiation, conjugation equals inversion, and it is free.
+        Self(f.conjugate())
     }
 
-    // x is negative: f_{-|x|,Q} = 1 / f_{|x|,Q} up to factors the final exponentiation kills.
-    // After that exponentiation, conjugation equals inversion, and it is free.
-    f.conjugate()
+    /// Raises the loop value to 3 (p^12 - 1) / r, its unique representative in GT.
+    ///
+    /// # Overview
+    ///
+    /// The Miller loop value is only defined up to r-th powers.
+    /// Raising it to (p^12 - 1) / r removes that ambiguity and lands in the order-r group GT.
+    /// The exponent factors into an easy part and a hard part:
+    ///
+    /// ```text
+    ///     (p^12 - 1) / r = (p^6 - 1) (p^2 + 1) * (p^4 - p^2 + 1) / r
+    ///                      \_______ easy ____/   \______ hard ______/
+    /// ```
+    ///
+    /// The easy part costs one inversion and Frobenius maps.
+    /// Its output lies in the cyclotomic subgroup, where squaring is cheap and inversion is conjugation.
+    ///
+    /// The extra factor 3 is coprime to r, so the map stays a bijection onto GT.
+    /// Every pairing in this crate carries it, so equalities between pairings are unaffected.
+    ///
+    /// # Returns
+    ///
+    /// The power, or zero when the loop value is zero.
+    /// Zero never equals one, so a degenerate input can never pass a pairing check.
+    pub(super) fn final_exponentiation(&self) -> Gt {
+        let f = &self.0;
+
+        // Phase 1, easy part: g = f^{(p^6 - 1)(p^2 + 1)}.
+        //
+        //     f^{p^6 - 1} = conj(f) / f
+        let Some(inverse) = f.invert() else {
+            return Gt(Fp12::ZERO);
+        };
+        let easy = f.conjugate() * inverse;
+        //     g = easy^{p^2 + 1} = frob^2(easy) * easy
+        let g = easy.frobenius_map().frobenius_map() * easy;
+
+        // Phase 2, hard part, after Hayashida, Hayasaka, and Teruya, eprint 2020/875:
+        //
+        //     3 (p^4 - p^2 + 1) / r = (x - 1)^2 (x + p) (x^2 + p^2 - 1) + 3
+        //
+        // g^{(x - 1)^2}
+        let step = g.cyclotomic_exp_by_x() * g.conjugate();
+        let step = step.cyclotomic_exp_by_x() * step.conjugate();
+        // Then raise to x + p.
+        let step = step.cyclotomic_exp_by_x() * step.frobenius_map();
+        // Then raise to x^2 + p^2 - 1.
+        let step = step.cyclotomic_exp_by_x().cyclotomic_exp_by_x()
+            * step.frobenius_map().frobenius_map()
+            * step.conjugate();
+        // Finally multiply in g^3.
+        Gt(step * g.cyclotomic_square() * g)
+    }
 }

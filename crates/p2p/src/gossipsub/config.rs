@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::{MessageId, Topic};
-use crate::eth::{gossip_message_id, max_message_size};
+use crate::eth::GossipEncoding;
 
 /// Derives a message identifier from a topic and the raw data.
 pub type MessageIdFn = fn(&Topic, &[u8]) -> MessageId;
@@ -119,8 +119,8 @@ impl GossipsubConfig {
             max_idontwant_messages: 1000,
             idontwant_heartbeats: 3,
             validation_timeout: Duration::from_secs(30),
-            max_transmit_size: max_message_size(max_payload_size),
-            message_id: gossip_message_id,
+            max_transmit_size: GossipEncoding::new(max_payload_size).max_message_size(),
+            message_id: GossipEncoding::message_id,
         }
     }
 }

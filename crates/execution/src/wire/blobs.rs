@@ -15,7 +15,7 @@ use axiom_json::Json;
 use axiom_ssz::{Length, List, Vector};
 use axiom_types::{Blob, BlobKzgCommitments, KzgProof, Preset};
 
-use super::{Fields, JsonCodec, object};
+use super::{Fields, JsonCodec};
 use crate::{WireError, WireErrorKind};
 
 /// Cell proofs of every blob in a block, blob by blob.
@@ -41,7 +41,7 @@ pub struct BlobsBundle<P: Preset> {
 
 impl<P: Preset> JsonCodec for BlobsBundle<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("commitments", self.commitments.to_json()),
             ("proofs", self.proofs.to_json()),
             ("blobs", self.blobs.to_json()),
@@ -91,7 +91,7 @@ pub struct BlobAndProof<P: Preset> {
 
 impl<P: Preset> JsonCodec for BlobAndProof<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("blob", self.blob.to_json()),
             ("proofs", self.proofs.to_json()),
         ])

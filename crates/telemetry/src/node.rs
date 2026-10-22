@@ -71,11 +71,11 @@ impl NodeMetrics {
         // Block import and state transition run from milliseconds to seconds.
         //
         //     5 ms, 10 ms, ..., 10.24 s
-        let slow = latency_buckets(0.005);
+        let slow = Self::latency_buckets(0.005);
         // Fork choice works in memory, so its scale starts ten times lower.
         //
         //     0.5 ms, 1 ms, ..., 1.024 s
-        let fast = latency_buckets(0.0005);
+        let fast = Self::latency_buckets(0.0005);
 
         Ok(Self {
             // Standard set: every dashboard built on the shared specification reads these.
@@ -140,13 +140,13 @@ impl NodeMetrics {
         // Registration can only fail on a taken name, so it cannot fail here.
         Self::register(&Registry::new()).expect("a fresh registry takes every node metric")
     }
-}
 
-/// Twelve doubling bucket bounds from a starting latency in seconds.
-fn latency_buckets(start: f64) -> Buckets {
-    // Invariant: the start is a positive finite literal, the factor is 2, and the count is 12.
-    // The largest bound is start times 2^11, far below the float range, so the series is valid.
-    Buckets::exponential(start, 2.0, LATENCY_BUCKETS).expect("valid doubling series")
+    /// Twelve doubling bucket bounds from a starting latency in seconds.
+    fn latency_buckets(start: f64) -> Buckets {
+        // Invariant: the start is a positive finite literal, the factor is 2, and the count is 12.
+        // The largest bound is start times 2^11, far below the float range, so the series is valid.
+        Buckets::exponential(start, 2.0, LATENCY_BUCKETS).expect("valid doubling series")
+    }
 }
 
 #[cfg(test)]

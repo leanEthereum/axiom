@@ -28,11 +28,10 @@
 //!
 //! The first 64 cells carry the blob itself, because rev_13 of an index below 4096 is even.
 
-use axiom_bls12_381::Scalar;
+use axiom_bls12_381::{SCALAR_BYTES, Scalar};
 
 use crate::{
-    BYTES_PER_CELL, Bytes48, CELLS_PER_EXT_BLOB, FIELD_ELEMENTS_PER_CELL, KzgError,
-    bytes::{decode_field_elements, encode_field_elements},
+    BYTES_PER_CELL, Bytes32, Bytes48, CELLS_PER_EXT_BLOB, FIELD_ELEMENTS_PER_CELL, KzgError,
 };
 
 /// All 128 cells of an extended blob with their proofs, both in cell order.
@@ -59,17 +58,21 @@ impl Cell {
         if bytes.len() != BYTES_PER_CELL {
             return Err(KzgError::InvalidCellLength(bytes.len()));
         }
-        let elements = decode_field_elements(bytes)?;
-        // The length check above guarantees exactly 64 elements.
+        // The length check above leaves exactly 64 chunks of 32 bytes, one per element.
+        let (chunks, _) = bytes.as_chunks::<SCALAR_BYTES>();
         let mut evaluations = [Scalar::ZERO; FIELD_ELEMENTS_PER_CELL];
-        evaluations.copy_from_slice(&elements);
+        for (index, (evaluation, chunk)) in evaluations.iter_mut().zip(chunks).enumerate() {
+            *evaluation = Bytes32(*chunk)
+                .to_scalar()
+                .ok_or(KzgError::NonCanonicalCellElement { index })?;
+        }
         Ok(Self(evaluations))
     }
 
     /// Encodes the cell back into its 2048 bytes.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
-        encode_field_elements(&self.0)
+        self.0.iter().flat_map(Scalar::to_bytes_be).collect()
     }
 
     /// Wraps evaluations that are canonical by construction.
@@ -113,10 +116,16 @@ impl CellIndex {
     pub(crate) const fn position(self) -> usize {
         self.0 as usize
     }
+
+    /// Every cell index of an extended blob, in ascending order.
+    pub(crate) fn all() -> impl Iterator<Item = Self> {
+        // CELLS_PER_EXT_BLOB = 128 fits a byte, so every position is a valid index.
+        (0..CELLS_PER_EXT_BLOB as u8).map(Self)
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -141,6 +150,17 @@ mod tests {
     }
 
     #[test]
+    fn non_canonical_cell_element_is_named() {
+        // Fixture state: element 7 is all 0xff bytes, far above the modulus.
+        let mut bytes = vec![0; BYTES_PER_CELL];
+        bytes[7 * 32..8 * 32].fill(0xff);
+        assert_eq!(
+            Cell::from_bytes(&bytes),
+            Err(KzgError::NonCanonicalCellElement { index: 7 })
+        );
+    }
+
+    #[test]
     fn cell_bytes_round_trip() {
         // Element 63 holds 0x0102, every other element zero.
         let mut bytes = vec![0; BYTES_PER_CELL];
@@ -148,5 +168,12 @@ mod tests {
         let cell = Cell::from_bytes(&bytes).unwrap();
         assert_eq!(cell.evaluations()[63], Scalar::from_u64(0x0102));
         assert_eq!(cell.to_bytes(), bytes);
+    }
+
+    /// Every cell index.
+    pub(crate) fn all_indices() -> Vec<CellIndex> {
+        (0..CELLS_PER_EXT_BLOB as u64)
+            .map(|index| CellIndex::new(index).expect("index below 128"))
+            .collect()
     }
 }

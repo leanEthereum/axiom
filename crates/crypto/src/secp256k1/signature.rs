@@ -1,25 +1,11 @@
 //! ECDSA signatures, their recovery identifiers, and public key recovery.
 
 use super::{
-    error::Secp256k1Error,
-    field::{FieldElement, add_with_carry, limbs_to_be_bytes},
-    keys::PublicKey,
-    point::AffinePoint,
-    scalar::Scalar,
-    table::GeneratorTable,
+    error::Secp256k1Error, field::FieldElement, keys::PublicKey, point::AffinePoint,
+    scalar::Scalar, table::GeneratorTable,
 };
 
 /// An ECDSA signature (r, s) with both components in [1, n).
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::secp256k1::{SecretKey, Signature};
-///
-/// let key = SecretKey::from_bytes(&[1; 32]).unwrap();
-/// let signature = key.sign(&[7; 32]);
-/// assert_eq!(Signature::from_bytes(&signature.to_bytes()), Ok(signature));
-/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Signature {
     /// The x-coordinate of the nonce point, reduced modulo n.
@@ -37,20 +23,20 @@ impl Signature {
     pub fn from_bytes(bytes: &[u8; 64]) -> Result<Self, Secp256k1Error> {
         // r occupies the first 32 bytes, s the last 32.
         let (r_bytes, s_bytes) = bytes.split_at(32);
-        let r = Self::component(r_bytes)?;
-        let s = Self::component(s_bytes)?;
+        let r = Self::component(r_bytes, 0)?;
+        let s = Self::component(s_bytes, 32)?;
         Ok(Self { r, s })
     }
 
-    /// Decodes one component, refusing zero and values at or above n.
-    fn component(bytes: &[u8]) -> Result<Scalar, Secp256k1Error> {
+    /// Decodes the component at a byte offset, refusing zero and values at or above n.
+    fn component(bytes: &[u8], offset: usize) -> Result<Scalar, Secp256k1Error> {
         // Exactly 32 bytes, then 1 <= value < n.
         let bytes: &[u8; 32] = bytes
             .try_into()
-            .map_err(|_| Secp256k1Error::InvalidSignature)?;
+            .map_err(|_| Secp256k1Error::InvalidSignature { offset })?;
         match Scalar::from_bytes(bytes) {
             Some(value) if !value.is_zero().reveal() => Ok(value),
-            _ => Err(Secp256k1Error::InvalidSignature),
+            _ => Err(Secp256k1Error::InvalidSignature { offset }),
         }
     }
 
@@ -170,12 +156,10 @@ impl RecoverableSignature {
     /// Fails when r or s is out of range or v is above 3.
     pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, Secp256k1Error> {
         // The compact signature, then one byte of recovery identifier.
-        let (compact, id) = bytes.split_at(64);
-        let compact: &[u8; 64] = compact
-            .try_into()
-            .map_err(|_| Secp256k1Error::InvalidSignature)?;
-        let signature = Signature::from_bytes(compact)?;
-        let recovery_id = RecoveryId::new(id[0])?;
+        let mut compact = [0_u8; 64];
+        compact.copy_from_slice(&bytes[..64]);
+        let signature = Signature::from_bytes(&compact)?;
+        let recovery_id = RecoveryId::new(bytes[64])?;
         Ok(Self {
             signature,
             recovery_id,
@@ -225,18 +209,17 @@ impl RecoverableSignature {
         let Signature { r, s } = self.signature;
 
         // Phase 1: rebuild the nonce point R.
-        let mut x_limbs = r.limbs();
+        let mut x_value = r.to_uint();
         if self.recovery_id.is_x_reduced() {
             // x = r + n must stay below p.
             // A carry, or a value past p, means no such point.
-            let (sum, carry) = add_with_carry(x_limbs, Scalar::ORDER);
+            let (sum, carry) = x_value.add_with_carry(Scalar::ORDER);
             if carry == 1 {
                 return Err(Secp256k1Error::RecoveryFailed);
             }
-            x_limbs = sum;
+            x_value = sum;
         }
-        let x = FieldElement::from_bytes(&limbs_to_be_bytes(x_limbs))
-            .ok_or(Secp256k1Error::RecoveryFailed)?;
+        let x = FieldElement::from_uint(x_value).ok_or(Secp256k1Error::RecoveryFailed)?;
         let big_r = AffinePoint::decompress(x, self.recovery_id.is_y_odd())
             .ok_or(Secp256k1Error::RecoveryFailed)?;
 

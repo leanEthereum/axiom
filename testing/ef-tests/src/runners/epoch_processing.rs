@@ -3,10 +3,10 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::{EpochProcessor, EpochStep, State, Verification};
-use axiom_types::{BeaconState, Preset};
+use axiom_types::{BeaconState, ChainConfig, Preset};
 
-use super::{BEACON_STATE_FIELDS, config_of};
-use crate::{Case, Failure, Runner, assert_container_eq};
+use super::BEACON_STATE_FIELDS;
+use crate::{Case, Failure, Runner};
 
 /// Runs the handler's sub-transition, then the full transition when the case provides one.
 #[derive(Debug, Default)]
@@ -20,7 +20,7 @@ impl<P: Preset> Runner for EpochProcessing<P> {
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
         let step = EpochStep::from_name(handler)
             .ok_or_else(|| Failure(format!("unsupported epoch step {handler}")))?;
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let verification = if case.meta()?.bls_ignored() {
             Verification::Skip
         } else {
@@ -33,7 +33,7 @@ impl<P: Preset> Runner for EpochProcessing<P> {
         let outcome = EpochProcessor::new(&mut state, &config).run(step);
         match (outcome, case.ssz_if_present::<BeaconState<P>>("post")?) {
             (Ok(()), Some(expected)) => {
-                assert_container_eq(&expected, state.beacon(), &BEACON_STATE_FIELDS)?;
+                BEACON_STATE_FIELDS.check(&expected, state.beacon())?;
             }
             (Err(_), None) => {}
             (Ok(()), None) => return Err(Failure::new("step succeeded, the vector rejects it")),
@@ -50,7 +50,8 @@ impl<P: Preset> Runner for EpochProcessing<P> {
                 case.ssz_if_present::<BeaconState<P>>("post_epoch")?,
             ) {
                 (Ok(()), Some(expected)) => {
-                    assert_container_eq(&expected, state.beacon(), &BEACON_STATE_FIELDS)
+                    BEACON_STATE_FIELDS
+                        .check(&expected, state.beacon())
                         .map_err(|failure| Failure(format!("full epoch: {failure}")))?;
                 }
                 (Err(_), None) => {}

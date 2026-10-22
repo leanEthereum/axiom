@@ -2,10 +2,7 @@
 
 use std::io::{self, Read};
 
-use super::{
-    HEADER_LEN, LAST_UNSKIPPABLE, TYPE_STREAM_IDENTIFIER, check_body_len, decode_chunk,
-    parse_header,
-};
+use super::{ChunkDecoder, ChunkHeader, chunk::ChunkType};
 use crate::SnappyError;
 
 /// Decompresses a framed stream read from an inner reader.
@@ -22,18 +19,14 @@ use crate::SnappyError;
 pub struct FrameDecoder<R: Read> {
     /// Source of the framed stream.
     inner: R,
-    /// Largest total of decompressed bytes accepted.
-    max_len: usize,
-    /// Decompressed bytes produced so far.
-    produced: usize,
+    /// Decoding state across chunks, with the bound on the total.
+    chunks: ChunkDecoder,
     /// Decompressed bytes of the current chunk.
     chunk: Vec<u8>,
     /// Bytes of the current chunk already handed to the caller.
     position: usize,
     /// Scratch space for one chunk body.
     body: Vec<u8>,
-    /// Whether the stream identifier was read.
-    started: bool,
 }
 
 impl<R: Read> FrameDecoder<R> {
@@ -41,12 +34,10 @@ impl<R: Read> FrameDecoder<R> {
     pub const fn new(inner: R, max_len: usize) -> Self {
         Self {
             inner,
-            max_len,
-            produced: 0,
+            chunks: ChunkDecoder::new(max_len),
             chunk: Vec::new(),
             position: 0,
             body: Vec::new(),
-            started: false,
         }
     }
 
@@ -64,48 +55,68 @@ impl<R: Read> FrameDecoder<R> {
     ///
     /// Returns false at a clean end of stream, between chunks.
     fn next_chunk(&mut self) -> io::Result<bool> {
-        let mut header = [0; HEADER_LEN];
-        match read_full(&mut self.inner, &mut header)? {
+        let mut header = [0; ChunkHeader::LEN];
+        match Self::read_full(&mut self.inner, &mut header)? {
             // End of stream between chunks: clean, once the identifier was seen.
-            0 if self.started => return Ok(false),
-            0 => return Err(to_io(SnappyError::MissingStreamIdentifier)),
-            HEADER_LEN => {}
-            _ => return Err(to_io(SnappyError::UnexpectedEnd)),
+            0 if self.chunks.started() => return Ok(false),
+            0 => return Err(SnappyError::MissingStreamIdentifier.into()),
+            ChunkHeader::LEN => {}
+            read => {
+                return Err(SnappyError::UnexpectedEnd {
+                    needed: ChunkHeader::LEN,
+                    available: read,
+                }
+                .into());
+            }
         }
-
-        let (chunk_type, len) = parse_header(header);
-        if !self.started && chunk_type != TYPE_STREAM_IDENTIFIER {
-            return Err(to_io(SnappyError::MissingStreamIdentifier));
-        }
-        self.started = true;
-        check_body_len(chunk_type, len).map_err(to_io)?;
+        let header = self.chunks.header(header)?;
+        let len = header.len;
 
         // Skippable chunks are streamed past, never buffered, whatever their length.
-        if chunk_type > LAST_UNSKIPPABLE && chunk_type != TYPE_STREAM_IDENTIFIER {
+        if header.chunk_type == ChunkType::Skippable {
             let skipped = io::copy(&mut (&mut self.inner).take(len as u64), &mut io::sink())?;
             if skipped != len as u64 {
-                return Err(to_io(SnappyError::UnexpectedEnd));
+                // Invariant: the reader stops at len bytes, so the count fits a usize.
+                return Err(SnappyError::UnexpectedEnd {
+                    needed: len,
+                    available: skipped as usize,
+                }
+                .into());
             }
             return Ok(true);
         }
 
-        // Data and identifier bodies are bounded by the length check above.
+        // Data and identifier bodies are bounded by the header check above.
         self.body.resize(len, 0);
-        if read_full(&mut self.inner, &mut self.body)? != len {
-            return Err(to_io(SnappyError::UnexpectedEnd));
+        let read = Self::read_full(&mut self.inner, &mut self.body)?;
+        if read != len {
+            return Err(SnappyError::UnexpectedEnd {
+                needed: len,
+                available: read,
+            }
+            .into());
         }
         self.chunk.clear();
         self.position = 0;
-        decode_chunk(
-            chunk_type,
-            &self.body,
-            &mut self.chunk,
-            self.produced,
-            self.max_len,
-        )
-        .map_err(to_io)?;
-        self.produced += self.chunk.len();
+        self.chunks.body(header, &self.body, &mut self.chunk)?;
         Ok(true)
+    }
+
+    /// Reads until the buffer is full or the source ends, and returns the count read.
+    ///
+    /// Unlike the standard exact read, a short count is not an error.
+    /// The caller then tells a clean end between chunks from a cut inside one.
+    fn read_full(reader: &mut R, buf: &mut [u8]) -> io::Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match reader.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(filled)
     }
 }
 
@@ -123,30 +134,6 @@ impl<R: Read> Read for FrameDecoder<R> {
         self.position += n;
         Ok(n)
     }
-}
-
-/// Reads until the buffer is full or the source ends, and returns the count read.
-fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(filled)
-}
-
-/// Wraps a decoding error as an I/O error of the matching kind.
-fn to_io(err: SnappyError) -> io::Error {
-    let kind = if err == SnappyError::UnexpectedEnd {
-        io::ErrorKind::UnexpectedEof
-    } else {
-        io::ErrorKind::InvalidData
-    };
-    io::Error::new(kind, err)
 }
 
 #[cfg(test)]
@@ -218,7 +205,13 @@ mod tests {
             .read_to_end(&mut Vec::new())
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        assert_eq!(inner_error(&err), Some(&SnappyError::UnexpectedEnd));
+        assert_eq!(
+            inner_error(&err),
+            Some(&SnappyError::UnexpectedEnd {
+                needed: 7,
+                available: 6
+            })
+        );
 
         // The total bound is invalid data.
         let err = FrameDecoder::new(&framed[..], 2)

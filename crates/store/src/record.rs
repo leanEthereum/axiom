@@ -1,7 +1,7 @@
 //! Entry metadata recovered from a segment, without the value.
 
 use crate::{
-    format::{Kind, entry_len},
+    format::{EntryHeader, Kind},
     slot::Location,
 };
 
@@ -25,7 +25,7 @@ pub(crate) struct Record {
 impl Record {
     /// Returns the bytes the entry occupies on disk.
     pub(crate) const fn entry_len(&self) -> u64 {
-        entry_len(self.key.len(), self.value_len)
+        EntryHeader::len_for(self.key.len(), self.value_len)
     }
 
     /// Returns where a put entry's value lives, given the segment holding it.

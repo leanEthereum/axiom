@@ -13,7 +13,7 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::arithmetic::{adc, limbs_from_be_bytes, limbs_to_be_bytes, mac, mask, sbb};
+use crate::arithmetic::{Uint, mac, mask};
 
 /// The group order r, as little-endian 64-bit limbs.
 ///
@@ -106,14 +106,14 @@ impl Scalar {
     /// The scalar, or nothing when the integer is not below r.
     #[must_use]
     pub fn from_bytes_be(bytes: &[u8; SCALAR_BYTES]) -> Option<Self> {
-        let limbs: [u64; 4] = limbs_from_be_bytes(bytes);
+        let limbs = Uint::<4>::from_be_bytes(bytes).0;
 
         // A borrow out of limbs - r means limbs < r, the only canonical case.
-        let mut borrow = 0;
+        let mut borrow = false;
         for (limb, modulus) in limbs.iter().zip(MODULUS) {
-            (_, borrow) = sbb(*limb, modulus, borrow);
+            (_, borrow) = limb.borrowing_sub(modulus, borrow);
         }
-        if borrow == 0 {
+        if !borrow {
             return None;
         }
         Some(Self(Self::montgomery_mul(&limbs, &R2)))
@@ -124,7 +124,7 @@ impl Scalar {
     /// This is the reduction of the consensus specs' hash-to-scalar step, as in hash_to_bls_field.
     #[must_use]
     pub fn from_bytes_be_reduced(bytes: &[u8; SCALAR_BYTES]) -> Self {
-        let mut limbs: [u64; 4] = limbs_from_be_bytes(bytes);
+        let mut limbs = Uint::<4>::from_be_bytes(bytes).0;
 
         // Bound: 2^256 < 3r, so at most two subtractions of r bring the value below r.
         limbs = Self::subtract_modulus_if_needed(limbs);
@@ -136,7 +136,7 @@ impl Scalar {
     #[must_use]
     pub fn to_bytes_be(&self) -> [u8; SCALAR_BYTES] {
         let mut out = [0; SCALAR_BYTES];
-        limbs_to_be_bytes(&self.to_canonical(), &mut out);
+        Uint(self.to_canonical()).write_be_bytes(&mut out);
         out
     }
 
@@ -286,14 +286,12 @@ impl Scalar {
 
     /// Maps a value in [0, 2r) to [0, r) without branching.
     fn subtract_modulus_if_needed(value: [u64; 4]) -> [u64; 4] {
-        let mut reduced = [0; 4];
-        let mut borrow = 0;
-        for ((out, limb), modulus) in reduced.iter_mut().zip(value).zip(MODULUS) {
-            (*out, borrow) = sbb(limb, modulus, borrow);
-        }
-        // Keep the original when the subtraction borrowed.
+        // Tentatively subtract r.
+        let (reduced, borrow) = Uint(value).sub_with_borrow_mask(Uint(MODULUS));
+
+        // A borrow means value < r already, so keep the original.
         let mut out = [0; 4];
-        for ((out, reduced), original) in out.iter_mut().zip(reduced).zip(value) {
+        for ((out, reduced), original) in out.iter_mut().zip(reduced.0).zip(value) {
             *out = (reduced & !borrow) | (original & borrow);
         }
         out
@@ -304,9 +302,9 @@ impl Scalar {
     fn add_impl(&self, rhs: &Self) -> Self {
         // r < 2^255, so the sum of two reduced values fits in four limbs.
         let mut sum = [0; 4];
-        let mut carry = 0;
+        let mut carry = false;
         for ((out, a), b) in sum.iter_mut().zip(self.0).zip(rhs.0) {
-            (*out, carry) = adc(a, b, carry);
+            (*out, carry) = a.carrying_add(b, carry);
         }
         Self(Self::subtract_modulus_if_needed(sum))
     }
@@ -314,15 +312,14 @@ impl Scalar {
     /// Returns self - rhs mod r.
     #[inline]
     fn sub_impl(&self, rhs: &Self) -> Self {
-        let mut difference = [0; 4];
-        let mut borrow = 0;
-        for ((out, a), b) in difference.iter_mut().zip(self.0).zip(rhs.0) {
-            (*out, borrow) = sbb(a, b, borrow);
-        }
-        // Add r back on underflow, masked to keep constant time.
-        let mut carry = 0;
+        // Subtract limb by limb, keeping the final borrow mask.
+        let (difference, borrow) = Uint(self.0).sub_with_borrow_mask(Uint(rhs.0));
+        let mut difference = difference.0;
+
+        // On underflow add r back, masked so both paths cost the same.
+        let mut carry = false;
         for (out, modulus) in difference.iter_mut().zip(MODULUS) {
-            (*out, carry) = adc(*out, modulus & borrow, carry);
+            (*out, carry) = out.carrying_add(modulus & borrow, carry);
         }
         Self(difference)
     }
@@ -337,9 +334,9 @@ impl Scalar {
     #[inline]
     fn neg_impl(&self) -> Self {
         let mut negated = [0; 4];
-        let mut borrow = 0;
+        let mut borrow = false;
         for ((out, modulus), a) in negated.iter_mut().zip(MODULUS).zip(self.0) {
-            (*out, borrow) = sbb(modulus, a, borrow);
+            (*out, borrow) = modulus.borrowing_sub(a, borrow);
         }
         // Zero maps to zero, not to r.
         let keep = mask(!self.is_zero());
@@ -546,7 +543,7 @@ pub(crate) mod tests {
     fn decoding_rejects_the_modulus() {
         // Fixture state: r itself, which is congruent to zero but not canonical.
         let mut bytes = [0_u8; 32];
-        limbs_to_be_bytes(&MODULUS, &mut bytes);
+        Uint(MODULUS).write_be_bytes(&mut bytes);
         assert_eq!(Scalar::from_bytes_be(&bytes), None);
 
         // The reducing decoder maps the same bytes to zero instead.

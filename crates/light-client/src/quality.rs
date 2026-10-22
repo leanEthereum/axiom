@@ -47,38 +47,26 @@ impl UpdateQuality {
         let participants = bits.count_ones();
         // Threshold: participants * 3 >= committee * 2.
         let supermajority = participants * 3 >= bits.len() * 2;
-        let period = |slot: Slot| slot.epoch::<P>().0 / P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
         let attested_slot = update.attested_header.beacon.slot;
-        let finality = Self::is_finality_update(update);
+        let finality = update.is_finality_update();
 
         Self {
             supermajority,
             participants_below_supermajority: if supermajority { 0 } else { participants },
-            relevant_sync_committee: Self::is_sync_committee_update(update)
-                && period(attested_slot) == period(update.signature_slot),
+            relevant_sync_committee: update.is_sync_committee_update()
+                && attested_slot.sync_committee_period::<P>()
+                    == update.signature_slot.sync_committee_period::<P>(),
             finality,
             sync_committee_finality: finality
-                && period(update.finalized_header.beacon.slot) == period(attested_slot),
+                && update
+                    .finalized_header
+                    .beacon
+                    .slot
+                    .sync_committee_period::<P>()
+                    == attested_slot.sync_committee_period::<P>(),
             participants,
             attested_slot: Reverse(attested_slot),
             signature_slot: Reverse(update.signature_slot),
         }
-    }
-
-    /// Whether an update carries a next sync committee.
-    ///
-    /// An all-zero branch marks its absence.
-    #[must_use]
-    pub fn is_sync_committee_update<P: Preset>(update: &LightClientUpdate<P>) -> bool {
-        update
-            .next_sync_committee_branch
-            .iter()
-            .any(|node| node.0 != [0; 32])
-    }
-
-    /// Whether an update proves a finalized header.
-    #[must_use]
-    pub fn is_finality_update<P: Preset>(update: &LightClientUpdate<P>) -> bool {
-        update.finality_branch.iter().any(|node| node.0 != [0; 32])
     }
 }

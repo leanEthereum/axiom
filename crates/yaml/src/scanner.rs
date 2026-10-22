@@ -2,7 +2,7 @@
 
 use std::iter;
 
-use crate::{ErrorKind, ParseError};
+use crate::{ErrorKind, ParseError, char_class::CharClass};
 
 /// A position in the text, with the bookkeeping to report lines and columns.
 ///
@@ -17,29 +17,6 @@ pub(crate) struct Scanner<'a> {
     line: usize,
     /// Byte offset where the current line starts.
     line_start: usize,
-}
-
-/// Whether a byte ends a line.
-const fn is_break(byte: u8) -> bool {
-    matches!(byte, b'\n' | b'\r')
-}
-
-/// Whether a byte separates tokens within a line.
-const fn is_blank(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t')
-}
-
-/// Whether a byte delimits entries of a flow collection.
-const fn is_flow_indicator(byte: u8) -> bool {
-    matches!(byte, b',' | b'[' | b']' | b'{' | b'}')
-}
-
-/// Whether an optional byte is whitespace, a line break, or the end of the text.
-const fn is_blank_or_end(byte: Option<u8>) -> bool {
-    match byte {
-        Some(b) => is_blank(b) || is_break(b),
-        None => true,
-    }
 }
 
 impl<'a> Scanner<'a> {
@@ -77,14 +54,15 @@ impl<'a> Scanner<'a> {
 
     /// Whether the next byte is whitespace, a line break, or the end, after a given distance.
     pub(crate) fn blank_or_end_at(&self, distance: usize) -> bool {
-        is_blank_or_end(self.peek_at(distance))
+        self.peek_at(distance)
+            .is_none_or(|byte| CharClass::of(byte).is_space())
     }
 
     /// Whether the next bytes end the line, possibly after a comment.
     pub(crate) fn at_line_end(&self) -> bool {
         match self.peek() {
             Some(b'#') => self.preceded_by_blank(),
-            Some(byte) => is_break(byte),
+            Some(byte) => CharClass::of(byte).is_break(),
             None => true,
         }
     }
@@ -93,7 +71,7 @@ impl<'a> Scanner<'a> {
     ///
     /// A `#` starts a comment only in that position.
     const fn preceded_by_blank(&self) -> bool {
-        self.pos == self.line_start || is_blank(self.src.as_bytes()[self.pos - 1])
+        self.pos == self.line_start || CharClass::of(self.src.as_bytes()[self.pos - 1]).is_white()
     }
 
     /// Byte distance from the start of the line, which is the indentation at a line's content.
@@ -154,7 +132,10 @@ impl<'a> Scanner<'a> {
 
     /// Skips spaces and tabs within the line.
     pub(crate) fn skip_blanks(&mut self) {
-        while self.peek().is_some_and(is_blank) {
+        while self
+            .peek()
+            .is_some_and(|byte| CharClass::of(byte).is_white())
+        {
             self.pos += 1;
         }
     }
@@ -184,7 +165,7 @@ impl<'a> Scanner<'a> {
             match self.peek() {
                 None => return Ok(()),
                 Some(b'#') if self.preceded_by_blank() => self.skip_comment(),
-                Some(byte) if is_break(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => {
                     self.consume_break();
                 }
                 Some(_) => {
@@ -194,7 +175,7 @@ impl<'a> Scanner<'a> {
                     //     "- \tvalue"   ->  tab after an indicator      ->  fine
                     let prefix = &self.src.as_bytes()[self.line_start..self.pos];
                     if let Some(tab) = prefix.iter().position(|&b| b == b'\t')
-                        && prefix.iter().all(|&b| is_blank(b))
+                        && prefix.iter().all(|&b| CharClass::of(b).is_white())
                     {
                         let mut at_tab = *self;
                         at_tab.pos = self.line_start + tab;
@@ -208,7 +189,7 @@ impl<'a> Scanner<'a> {
 
     /// Skips a comment up to, not including, the line break.
     fn skip_comment(&mut self) {
-        while self.peek().is_some_and(|b| !is_break(b)) {
+        while self.peek().is_some_and(|b| !CharClass::of(b).is_break()) {
             self.pos += 1;
         }
     }
@@ -234,12 +215,12 @@ impl<'a> Scanner<'a> {
             Some(b'-' | b'?' | b':') => match self.peek_at(1) {
                 None => false,
                 Some(next) => {
-                    !(is_blank(next) || is_break(next) || (flow && is_flow_indicator(next)))
+                    let class = CharClass::of(next);
+                    !(class.is_space() || (flow && class.is_flow_indicator()))
                 }
             },
             Some(byte) => {
-                !is_blank(byte)
-                    && !is_break(byte)
+                !CharClass::of(byte).is_space()
                     && !matches!(
                         byte,
                         b',' | b'['
@@ -268,7 +249,11 @@ impl<'a> Scanner<'a> {
     /// In flow context a flow indicator after it also counts.
     pub(crate) fn at_value_colon(&self, flow: bool) -> bool {
         self.peek() == Some(b':')
-            && (self.blank_or_end_at(1) || (flow && self.peek_at(1).is_some_and(is_flow_indicator)))
+            && (self.blank_or_end_at(1)
+                || (flow
+                    && self
+                        .peek_at(1)
+                        .is_some_and(|byte| CharClass::of(byte).is_flow_indicator())))
     }
 
     /// Reads the part of a plain scalar that lies on the current line.
@@ -280,8 +265,8 @@ impl<'a> Scanner<'a> {
         loop {
             match self.peek() {
                 None => break,
-                Some(byte) if is_break(byte) => break,
-                Some(byte) if is_blank(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => break,
+                Some(byte) if CharClass::of(byte).is_white() => {
                     // Whitespace belongs to the scalar only when content follows it.
                     //
                     //     "a b"     ->  "a b"
@@ -293,7 +278,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Some(b':') if self.at_value_colon(flow) => break,
-                Some(byte) if flow && is_flow_indicator(byte) => break,
+                Some(byte) if flow && CharClass::of(byte).is_flow_indicator() => break,
                 Some(_) => {
                     self.bump_char();
                     end = self.pos;
@@ -324,7 +309,10 @@ impl<'a> Scanner<'a> {
             // Lookahead: keep the position after the last content in case the scalar ends.
             let end = *self;
             self.skip_blanks();
-            if !self.peek().is_some_and(is_break) {
+            if !self
+                .peek()
+                .is_some_and(|byte| CharClass::of(byte).is_break())
+            {
                 *self = end;
                 return Ok(out);
             }
@@ -344,7 +332,10 @@ impl<'a> Scanner<'a> {
                 || self.at_line_end()
                 || self.at_document_marker()
                 || (self.indent().cast_signed() <= parent)
-                || (flow && self.peek().is_some_and(is_flow_indicator))
+                || (flow
+                    && self
+                        .peek()
+                        .is_some_and(|byte| CharClass::of(byte).is_flow_indicator()))
                 || self.at_value_colon(flow);
             if ends_scalar {
                 *self = end;
@@ -385,7 +376,9 @@ impl<'a> Scanner<'a> {
                     self.bump();
                     return Ok(out);
                 }
-                Some(byte) if is_break(byte) => self.fold_quoted(&mut out, 0, parent, open)?,
+                Some(byte) if CharClass::of(byte).is_break() => {
+                    self.fold_quoted(&mut out, 0, parent, open)?;
+                }
                 Some(_) => out.extend(self.bump_char()),
             }
         }
@@ -407,7 +400,11 @@ impl<'a> Scanner<'a> {
                     self.bump();
                     return Ok(out);
                 }
-                Some(b'\\') if self.peek_at(1).is_some_and(is_break) => {
+                Some(b'\\')
+                    if self
+                        .peek_at(1)
+                        .is_some_and(|byte| CharClass::of(byte).is_break()) =>
+                {
                     // An escaped line break joins the lines with nothing between them.
                     //
                     //     "ab\        ->  "abcd"
@@ -421,7 +418,9 @@ impl<'a> Scanner<'a> {
                     self.escape(&mut out)?;
                     kept = out.len();
                 }
-                Some(byte) if is_break(byte) => self.fold_quoted(&mut out, kept, parent, open)?,
+                Some(byte) if CharClass::of(byte).is_break() => {
+                    self.fold_quoted(&mut out, kept, parent, open)?;
+                }
                 Some(_) => out.extend(self.bump_char()),
             }
         }
@@ -554,7 +553,7 @@ impl<'a> Scanner<'a> {
             self.skip_blanks();
             match self.peek() {
                 Some(b'#') if self.preceded_by_blank() => self.skip_comment(),
-                Some(byte) if is_break(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => {
                     self.consume_break();
                 }
                 _ => break,
@@ -572,5 +571,176 @@ impl<'a> Scanner<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use crate::{
+        ErrorKind, Yaml,
+        parser::tests::{fail, map, parse, s, seq},
+    };
+
+    #[test]
+    fn colon_without_space_stays_inside_a_plain_scalar() {
+        // "a:1" is one scalar in flow context, and "http://x" one in block context.
+        assert_eq!(parse("{ a:1 }"), map(vec![("a:1", Yaml::Null)]));
+        assert_eq!(parse("url: http://x"), map(vec![("url", s("http://x"))]));
+    }
+
+    #[test]
+    fn plain_scalars_fold_across_lines() {
+        // The light-client update shape: the value starts on the next, deeper line.
+        //
+        //     one break   ->  space
+        //     empty line  ->  newline
+        let text = "\
+update:
+  part_one
+  part two
+
+  part three
+next: 1
+";
+        let expected = map(vec![
+            ("update", s("part_one part two\npart three")),
+            ("next", s("1")),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn single_quotes_escape_by_doubling_and_fold() {
+        // '' is one quote; a break folds to a space and leading spaces drop.
+        let text = "a: 'it''s\n  here'\nb: ''\n";
+        let expected = map(vec![("a", s("it's here")), ("b", s(""))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn double_quotes_decode_every_escape_family() {
+        // Named escapes, hex escapes of three widths, and an escaped line break.
+        let text = r#"a: "\"q\" \\ \t\n\0 \x41\u00e9\U0001F600 \N\_\L\P \/ \e""#;
+        let expected = map(vec![(
+            "a",
+            s("\"q\" \\ \t\n\0 A\u{e9}\u{1f600} \u{85}\u{a0}\u{2028}\u{2029} / \u{1b}"),
+        )]);
+        assert_eq!(parse(text), expected);
+
+        // An escaped break joins lines with no space; an escaped tab survives folding.
+        let text = "a: \"ab\\\n  cd \\t\n  ef\"";
+        assert_eq!(parse(text), map(vec![("a", s("abcd \t ef"))]));
+    }
+
+    #[test]
+    fn comments_are_ignored_but_hashes_inside_words_are_content() {
+        // Full-line, trailing, and in-flow comments, next to a hash that is not one.
+        let text = "\
+# header
+a: 1  # trailing
+b: x#y
+c: [1, # inside
+  2]
+";
+        let expected = map(vec![
+            ("a", s("1")),
+            ("b", s("x#y")),
+            ("c", seq(vec![s("1"), s("2")])),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn quoted_keys_and_quoted_core_words() {
+        // Quoted text never resolves: 'true' and "null" stay strings.
+        let text = "'k 1': 'true'\n\"k2\": \"null\"\n";
+        let expected = map(vec![("k 1", s("true")), ("k2", s("null"))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn crlf_line_breaks_and_byte_order_mark() {
+        // Windows line breaks and a leading BOM read like plain newlines.
+        let text = "\u{feff}a: 1\r\nb:\r\n- 2\r\n";
+        let expected = map(vec![("a", s("1")), ("b", seq(vec![s("2")]))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn tabs_separate_tokens_after_the_indentation() {
+        // A tab after the colon is whitespace, not indentation.
+        assert_eq!(parse("a:\t1\n"), map(vec![("a", s("1"))]));
+    }
+
+    #[test]
+    fn tab_in_indentation() {
+        // The tab sits where the nested key's indentation should be.
+        //
+        //     a:
+        //     \tb: 1    <- line 2, column 1
+        assert_eq!(fail("a:\n\tb: 1\n"), (ErrorKind::TabIndentation, 2, 1));
+    }
+
+    #[test]
+    fn unterminated_quotes_point_at_the_opening_quote() {
+        assert_eq!(fail("a: 'abc\n"), (ErrorKind::UnterminatedQuote, 1, 4));
+        assert_eq!(fail("a: \"abc"), (ErrorKind::UnterminatedQuote, 1, 4));
+    }
+
+    #[test]
+    fn bad_escapes() {
+        // An unknown letter, a short hex escape, and a surrogate.
+        assert_eq!(fail(r#""\q""#), (ErrorKind::InvalidEscape('q'), 1, 2));
+        assert_eq!(fail(r#""\x4""#), (ErrorKind::InvalidEscape('x'), 1, 2));
+        assert_eq!(
+            fail(r#""\ud800""#),
+            (ErrorKind::InvalidCodePoint(0xd800), 1, 2)
+        );
+    }
+
+    #[test]
+    fn unexpected_characters_in_flow_and_block() {
+        // A closing brace where a sequence item should start.
+        assert_eq!(fail("a: [1, }]"), (ErrorKind::UnexpectedChar('}'), 1, 8));
+
+        // Two flow items without a comma.
+        assert_eq!(fail("[[1] [2]]"), (ErrorKind::UnexpectedChar('['), 1, 6));
+
+        // Reserved indicators cannot start a scalar.
+        assert_eq!(fail("a: @b"), (ErrorKind::UnexpectedChar('@'), 1, 4));
+    }
+
+    #[test]
+    fn content_after_a_complete_value() {
+        // The quoted scalar ends the value; "y" is left over.
+        assert_eq!(fail("a: 'x' y\n"), (ErrorKind::TrailingContent, 1, 8));
+
+        // A flow collection followed by a colon would be a collection key.
+        assert_eq!(fail("[a]: b\n"), (ErrorKind::TrailingContent, 1, 4));
+    }
+
+    #[test]
+    fn document_marker_inside_quotes_or_flow() {
+        // A marker at column 0 cannot hide inside a scalar or a collection.
+        assert_eq!(
+            fail("'a\n--- b'"),
+            (ErrorKind::UnexpectedDocumentMarker, 2, 1)
+        );
+        assert_eq!(
+            fail("[a,\n--- ]"),
+            (ErrorKind::UnexpectedDocumentMarker, 2, 1)
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+        #[test]
+        fn arbitrary_unicode_never_panics(text in any::<String>()) {
+            // Law: multi-byte characters never split a slice inside the scanner.
+            let _ = Yaml::parse(&text);
+        }
     }
 }

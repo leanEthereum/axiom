@@ -3,6 +3,15 @@
 use super::{field::FieldElement, scalar::Scalar};
 use crate::ct::Mask;
 
+/// SEC 1 prefix of a compressed point with even y, per section 2.3.3.
+const TAG_EVEN: u8 = 0x02;
+
+/// SEC 1 prefix of a compressed point with odd y.
+const TAG_ODD: u8 = 0x03;
+
+/// SEC 1 prefix of an uncompressed point.
+const TAG_UNCOMPRESSED: u8 = 0x04;
+
 /// A finite curve point in affine coordinates.
 ///
 /// # Invariants
@@ -55,6 +64,55 @@ impl AffinePoint {
             x,
             y: FieldElement::select(flip, y.neg(), y),
         })
+    }
+
+    /// Decodes the 33-byte SEC 1 compressed form, prefix 0x02 or 0x03 then x.
+    ///
+    /// Refuses a wrong prefix, x not below p, or x with no point on the curve.
+    pub(super) fn from_compressed(bytes: &[u8; 33]) -> Option<Self> {
+        // The prefix byte carries the parity of y.
+        let (&tag, x) = bytes.split_first_chunk::<1>()?;
+        let y_is_odd = match tag {
+            [TAG_EVEN] => false,
+            [TAG_ODD] => true,
+            _ => return None,
+        };
+        let x = FieldElement::from_bytes(x.try_into().ok()?)?;
+        Self::decompress(x, y_is_odd)
+    }
+
+    /// Decodes the 65-byte SEC 1 uncompressed form, prefix 0x04 then x then y.
+    ///
+    /// Refuses a wrong prefix, a coordinate not below p, or a point off the curve.
+    pub(super) fn from_uncompressed(bytes: &[u8; 65]) -> Option<Self> {
+        // Only the plain uncompressed prefix is accepted.
+        let ([TAG_UNCOMPRESSED], coordinates) = bytes.split_first_chunk::<1>()? else {
+            return None;
+        };
+        let (coordinates, _) = coordinates.as_chunks::<32>();
+        let x = FieldElement::from_bytes(&coordinates[0])?;
+        let y = FieldElement::from_bytes(&coordinates[1])?;
+        Self::new(x, y)
+    }
+
+    /// The 33-byte SEC 1 compressed form, per section 2.3.3.
+    pub(super) fn to_compressed(self) -> [u8; 33] {
+        // Prefix 0x02 or 0x03 by parity of y, then x big-endian.
+        let mut out = [0_u8; 33];
+        // Timing: the parity bit is added, not branched on, since a shared point is secret.
+        out[0] = TAG_EVEN + self.y.is_odd().bit() as u8;
+        out[1..].copy_from_slice(&self.x.to_bytes());
+        out
+    }
+
+    /// The 65-byte SEC 1 uncompressed form.
+    pub(super) fn to_uncompressed(self) -> [u8; 65] {
+        // Prefix 0x04, then x and y big-endian.
+        let mut out = [0_u8; 65];
+        out[0] = TAG_UNCOMPRESSED;
+        out[1..33].copy_from_slice(&self.x.to_bytes());
+        out[33..].copy_from_slice(&self.y.to_bytes());
+        out
     }
 
     /// The right-hand side x^3 + 7.

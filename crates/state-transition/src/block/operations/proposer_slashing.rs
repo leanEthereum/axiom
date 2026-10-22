@@ -11,21 +11,29 @@ impl<P: Preset> Operation<P> for ProposerSlashing {
     fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError> {
         let header_1 = &self.signed_header_1.message;
         let header_2 = &self.signed_header_2.message;
-        if header_1.slot != header_2.slot
-            || header_1.proposer_index != header_2.proposer_index
-            || header_1 == header_2
-        {
-            return Err(BlockError::InvalidProposerSlashing);
+        let proposer = header_1.proposer_index;
+        let invalid = |reason| BlockError::InvalidProposerSlashing { proposer, reason };
+        if header_1.slot != header_2.slot {
+            return Err(invalid("headers are from different slots"));
+        }
+        if header_1.proposer_index != header_2.proposer_index {
+            return Err(invalid("headers name different proposers"));
+        }
+        if header_1 == header_2 {
+            return Err(invalid("headers are equal"));
         }
 
         let state = &processor.state.beacon;
-        let proposer = header_1.proposer_index;
-        let validator = state
-            .validators
-            .get(proposer.as_usize())
-            .ok_or(StateError::UnknownValidator(proposer))?;
+        let validator =
+            state
+                .validators
+                .get(proposer.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index: proposer,
+                    registry_size: state.validators.len(),
+                })?;
         if !validator.is_slashable_at(state.current_epoch()) {
-            return Err(BlockError::InvalidProposerSlashing);
+            return Err(invalid("proposer is not slashable"));
         }
 
         for signed in [&self.signed_header_1, &self.signed_header_2] {
@@ -36,10 +44,7 @@ impl<P: Preset> Operation<P> for ProposerSlashing {
             processor.verify_signature(proposer, &signed.message, domain, &signed.signature)?;
         }
 
-        let total_active_balance = processor.total_active_balance;
-        processor
-            .state
-            .slash_validator(processor.config, proposer, None, total_active_balance)?;
+        processor.registry().slash(proposer, None)?;
         Ok(())
     }
 }

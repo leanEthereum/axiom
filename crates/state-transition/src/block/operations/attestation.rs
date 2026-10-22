@@ -1,14 +1,14 @@
 //! Attestations: crediting the votes a block includes.
 
 use axiom_types::{
-    Attestation, AttestationData, Gwei, IndexedAttestation, Preset,
+    Attestation, AttestationData, BeaconState, Gwei, IndexedAttestation, Preset,
     constants::{
         PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, TIMELY_HEAD_FLAG_INDEX,
         TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
     },
 };
 
-use crate::{BlockError, BlockProcessor, Operation, State, StateError};
+use crate::{BlockError, BlockProcessor, Operation, StateError};
 
 impl<P: Preset> Operation<P> for Attestation<P> {
     /// Records an aggregate's votes in the participation flags, and pays the proposer.
@@ -31,40 +31,58 @@ impl<P: Preset> Operation<P> for Attestation<P> {
         // Phase 1: timing.
         let target_epoch = data.target.epoch;
         if target_epoch != state.previous_epoch() && target_epoch != current_epoch {
-            return Err(BlockError::AttestationTargetEpochOutOfRange(target_epoch));
+            return Err(BlockError::AttestationTargetEpochOutOfRange {
+                target: target_epoch,
+                current: current_epoch,
+            });
         }
         if target_epoch != data.slot.epoch::<P>() {
-            return Err(BlockError::AttestationTargetSlotMismatch);
+            return Err(BlockError::AttestationTargetSlotMismatch {
+                target: target_epoch,
+                slot: data.slot,
+            });
         }
         let included_after = data.slot.checked_add(P::MIN_ATTESTATION_INCLUSION_DELAY);
         if included_after.is_none_or(|earliest| earliest > state.slot) {
-            return Err(BlockError::AttestationTooEarly);
+            return Err(BlockError::AttestationTooEarly {
+                slot: data.slot,
+                state_slot: state.slot,
+            });
         }
 
         // Phase 2: committees.
         if data.index.0 != 0 {
-            return Err(BlockError::AttestationIndexNotZero);
+            return Err(BlockError::AttestationIndexNotZero(data.index));
         }
         let committees = processor.state.committees(target_epoch)?;
         let mut offset = 0;
         for index in self.committee_indices() {
-            let committee = committees
-                .committee(data.slot, index)
-                .ok_or(BlockError::UnknownCommittee(index))?;
+            let committee = committees.committee(data.slot, index).ok_or_else(|| {
+                BlockError::UnknownCommittee {
+                    slot: data.slot,
+                    index,
+                    committees_per_slot: committees.committees_per_slot(),
+                }
+            })?;
             let any_participant = (offset..offset + committee.len())
                 .any(|bit| self.aggregation_bits.get(bit) == Some(true));
             if !any_participant {
-                return Err(BlockError::EmptyCommittee(index));
+                return Err(BlockError::EmptyCommittee {
+                    slot: data.slot,
+                    index,
+                });
             }
             offset += committee.len();
         }
         if self.aggregation_bits.len() != offset {
-            return Err(BlockError::AggregationBitsLengthMismatch);
+            return Err(BlockError::AggregationBitsLengthMismatch {
+                expected: offset,
+                actual: self.aggregation_bits.len(),
+            });
         }
 
         // Phase 3: flags earned, and the signature.
-        let inclusion_delay = processor.state.beacon.slot - data.slot;
-        let flags = processor.participation_flag_indices(data, inclusion_delay)?;
+        let flags = Inclusion::new(&processor.state.beacon, data).flags()?;
         let attesters = processor.state.attesting_indices(self)?;
         processor.verify_indexed_attestation(&IndexedAttestation {
             attesting_indices: attesters
@@ -72,14 +90,18 @@ impl<P: Preset> Operation<P> for Attestation<P> {
                 .copied()
                 .collect::<Vec<_>>()
                 .try_into()
-                .map_err(|_| BlockError::AggregationBitsLengthMismatch)?,
+                .map_err(|source| StateError::Capacity {
+                    list: "attesting indices",
+                    source,
+                })?,
             data: data.clone(),
             signature: self.signature,
         })?;
 
         // Phase 4: flags and the proposer reward.
-        let base_reward_per_increment =
-            State::<P>::base_reward_per_increment(processor.total_active_balance);
+        let base_reward_per_increment = processor
+            .total_active_balance
+            .base_reward_per_increment::<P>();
         let state = &mut processor.state.beacon;
         let is_current = target_epoch == current_epoch;
         let mut proposer_reward_numerator = 0_u64;
@@ -110,8 +132,28 @@ impl<P: Preset> Operation<P> for Attestation<P> {
     }
 }
 
-impl<P: Preset> BlockProcessor<'_, P> {
-    /// The participation flags a vote earns at an inclusion delay.
+/// A vote included in a block, with the state that judges it.
+#[derive(Debug)]
+struct Inclusion<'a, P: Preset> {
+    /// The state at the including block.
+    state: &'a BeaconState<P>,
+    /// The vote.
+    data: &'a AttestationData,
+    /// Slots between the vote and the including block.
+    delay: u64,
+}
+
+impl<'a, P: Preset> Inclusion<'a, P> {
+    /// A vote included at a state's slot.
+    fn new(state: &'a BeaconState<P>, data: &'a AttestationData) -> Self {
+        Self {
+            state,
+            data,
+            delay: state.slot - data.slot,
+        }
+    }
+
+    /// The participation flags the vote earns at its inclusion delay.
     ///
     /// | flag   | requires                         | inclusion delay       |
     /// |--------|----------------------------------|-----------------------|
@@ -124,19 +166,20 @@ impl<P: Preset> BlockProcessor<'_, P> {
     /// # Errors
     ///
     /// Fails when the source does not match, since such a vote cannot be included at all.
-    pub fn participation_flag_indices(
-        &self,
-        data: &AttestationData,
-        inclusion_delay: u64,
-    ) -> Result<Vec<usize>, BlockError> {
-        let state = &self.state.beacon;
+    fn flags(&self) -> Result<Vec<usize>, BlockError> {
+        let state = self.state;
+        let data = self.data;
+        let inclusion_delay = self.delay;
         let justified = if data.target.epoch == state.current_epoch() {
             &state.current_justified_checkpoint
         } else {
             &state.previous_justified_checkpoint
         };
         if data.source != *justified {
-            return Err(BlockError::AttestationSourceMismatch);
+            return Err(BlockError::AttestationSourceMismatch {
+                claimed: data.source,
+                justified: *justified,
+            });
         }
 
         let target_root =

@@ -22,7 +22,7 @@
 use crate::{
     identity::PublicKey,
     multiaddr::Multiaddr,
-    protobuf::{FieldReader, ProtoMessage, ProtobufError, encode_bytes_field},
+    protobuf::{FieldReader, FieldWriter, ProtoMessage, ProtobufError},
 };
 
 /// The multistream-select name.
@@ -58,18 +58,19 @@ pub struct IdentifyInfo {
 
 impl ProtoMessage for IdentifyInfo {
     fn encode_to(&self, out: &mut Vec<u8>) {
-        encode_bytes_field(1, &self.public_key.encode(), out);
+        let mut fields = FieldWriter::new(out);
+        fields.message(1, &self.public_key);
         for addr in &self.listen_addrs {
-            encode_bytes_field(2, &addr.to_bytes(), out);
+            fields.bytes(2, &addr.to_bytes());
         }
         for protocol in &self.protocols {
-            encode_bytes_field(3, protocol.as_bytes(), out);
+            fields.bytes(3, protocol.as_bytes());
         }
         if let Some(addr) = &self.observed_addr {
-            encode_bytes_field(4, &addr.to_bytes(), out);
+            fields.bytes(4, &addr.to_bytes());
         }
-        encode_bytes_field(5, self.protocol_version.as_bytes(), out);
-        encode_bytes_field(6, self.agent_version.as_bytes(), out);
+        fields.bytes(5, self.protocol_version.as_bytes());
+        fields.bytes(6, self.agent_version.as_bytes());
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, ProtobufError> {
@@ -147,8 +148,9 @@ mod tests {
     fn skips_unsupported_addresses() {
         // A dns4 address (code 0x36) is dropped; the message still decodes.
         let mut bytes = Vec::new();
-        encode_bytes_field(1, &PublicKey::secp256k1([2; 33]).encode(), &mut bytes);
-        encode_bytes_field(2, &[0x36, 0x01, b'a'], &mut bytes);
+        let mut fields = FieldWriter::new(&mut bytes);
+        fields.message(1, &PublicKey::secp256k1([2; 33]));
+        fields.bytes(2, &[0x36, 0x01, b'a']);
         let info = IdentifyInfo::decode(&bytes).unwrap();
         assert_eq!(info.listen_addrs, Vec::<Multiaddr>::new());
     }

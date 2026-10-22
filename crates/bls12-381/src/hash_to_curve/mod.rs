@@ -17,45 +17,12 @@ mod expand_message;
 mod map_to_curve;
 
 pub(crate) use expand_message::expand_message_xmd;
-
-use crate::{Fp, Fp2, G2Projective};
-
-/// Bytes drawn per base-field element, L = ceil((ceil(log2(p)) + k) / 8) with k = 128.
-///
-/// The 128 extra bits make the reduction modulo p statistically close to uniform.
-const L: usize = 64;
-
-/// Bytes drawn per hash: two F_{p^2} elements of two base-field elements each.
-const UNIFORM_BYTES: usize = 2 * 2 * L;
-
-/// Hashes a message to G2, RFC 9380 section 3 with the parameters of section 8.8.2.
-pub(crate) fn hash_to_g2(message: &[u8], dst: &[u8]) -> G2Projective {
-    // Two field elements, mapped independently and added, give a random-oracle output.
-    let [u0, u1] = hash_to_field(message, dst);
-    let q0 = map_to_curve::map_to_curve(&u0);
-    let q1 = map_to_curve::map_to_curve(&u1);
-    // The sum lies on the twist.
-    // Clearing the cofactor moves it into G2.
-    (q0 + q1).clear_cofactor()
-}
-
-/// Hashes a message to two elements of F_{p^2}, RFC 9380 section 5.2 with m = 2 and count = 2.
-fn hash_to_field(message: &[u8], dst: &[u8]) -> [Fp2; 2] {
-    let mut uniform = [0_u8; UNIFORM_BYTES];
-    expand_message_xmd(message, dst, &mut uniform);
-
-    // Element i, coefficient j reads the 64 bytes at offset L * (j + 2 i).
-    //
-    //     [ u0.c0 | u0.c1 | u1.c0 | u1.c1 ]   each 64 bytes, reduced mod p
-    let (chunks, _) = uniform.as_chunks::<L>();
-    let [u0_c0, u0_c1, u1_c0, u1_c1] = [0, 1, 2, 3].map(|i| Fp::from_bytes_wide_be(&chunks[i]));
-    [Fp2::new(u0_c0, u0_c1), Fp2::new(u1_c0, u1_c1)]
-}
+pub(crate) use map_to_curve::IsoPoint;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::G2Affine;
+    use crate::{Fp, Fp2, G2Affine, G2Projective};
 
     /// One RFC 9380 appendix J.10.1 test vector, coordinates as hex in the order c0, c1.
     struct Vector {
@@ -252,7 +219,7 @@ mod tests {
             let message = rfc_message(vector.message);
 
             // Step 1: hash_to_field gives the two published field elements.
-            let [u0, u1] = hash_to_field(&message, dst);
+            let [u0, u1] = Fp2::hash_to_field(&message, dst);
             let (expected_u0, expected_u1) = point(&vector.u);
             assert_eq!(
                 (u0, u1),
@@ -262,8 +229,8 @@ mod tests {
             );
 
             // Step 2: each element maps to the published twist point.
-            let q0 = map_to_curve::map_to_curve(&u0);
-            let q1 = map_to_curve::map_to_curve(&u1);
+            let q0 = IsoPoint::from_field(&u0).to_twist();
+            let q1 = IsoPoint::from_field(&u1).to_twist();
             assert_eq!(
                 affine(&q0),
                 point(&vector.q0),

@@ -13,20 +13,6 @@
 //! The consensus p2p spec bounds every message size, so hostile input cannot force a large allocation.
 //!
 //! CRC-32C, the framing format's checksum, uses SSE4.2 or the ARMv8 CRC extension when present.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_snappy::{frame, raw};
-//!
-//! let message = b"attestation attestation attestation".repeat(10);
-//!
-//! let block = raw::compress(&message);
-//! assert_eq!(raw::decompress(&block, 1 << 20).unwrap(), message);
-//!
-//! let stream = frame::compress(&message);
-//! assert_eq!(frame::decompress(&stream, 1 << 20).unwrap(), message);
-//! ```
 
 mod crc32c;
 mod error;

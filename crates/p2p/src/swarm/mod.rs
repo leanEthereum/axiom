@@ -65,7 +65,7 @@ use tokio::{
 use crate::{
     eth::{
         MAX_PAYLOAD_SIZE,
-        reqresp::{Protocol, RateLimiter, ResponseChunk},
+        reqresp::{Protocol, RateLimiter, ReqRespError, ResponseChunk},
     },
     gossipsub::{
         GossipsubConfig, MessageId, PeerScoreParams, PeerScoreThresholds, PublishError, Topic,
@@ -162,18 +162,41 @@ pub enum RequestError {
     /// The peer is not connected.
     #[error("peer not connected")]
     NotConnected,
-    /// The peer does not support the protocol.
-    #[error("protocol not supported by the peer")]
-    Unsupported,
+    /// The peer refused the protocol.
+    #[error("peer does not support {protocol}")]
+    Unsupported {
+        /// The protocol requested.
+        protocol: Protocol,
+    },
+    /// The protocol negotiation broke before the peer accepted or refused.
+    #[error("negotiating {protocol} failed: {error}")]
+    Negotiation {
+        /// The protocol requested.
+        protocol: Protocol,
+        /// The negotiation failure.
+        #[source]
+        error: NegotiationError,
+    },
     /// The response was malformed.
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
+    #[error("invalid {protocol} response: {error}")]
+    InvalidResponse {
+        /// The protocol requested.
+        protocol: Protocol,
+        /// The decoding failure.
+        #[source]
+        error: ReqRespError,
+    },
     /// The stream was reset or the connection dropped.
+    ///
+    /// The failure event already names the request and the peer, and some sites know nothing more.
     #[error("stream closed before the response completed")]
     StreamClosed,
     /// The response did not complete in time.
-    #[error("response timed out")]
-    Timeout,
+    #[error("response did not complete within {timeout:?}")]
+    Timeout {
+        /// The time allowed for the whole response.
+        timeout: Duration,
+    },
 }
 
 /// Something that happened on the network.
@@ -459,14 +482,13 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
     let local_peer = config.identity.peer_id();
     let (input_tx, input_rx) = mpsc::channel(config.swarm_queue.max(1));
     let queue = events::EventQueue::new(config.event_limits);
-    driver::spawn_swarm(
+    driver::Swarm::new(
         config,
-        listener,
         listen_addr.clone(),
         input_tx.clone(),
-        input_rx,
         Arc::clone(&queue),
-    );
+    )
+    .spawn(listener, input_rx);
     let handle = NetworkHandle {
         commands: input_tx,
         local_peer,

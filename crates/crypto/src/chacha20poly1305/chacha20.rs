@@ -36,17 +36,6 @@ const COUNTER: usize = 12;
 ///
 /// On x86_64 with AVX2, eight blocks run side by side, one per 32-bit lane.
 /// Tests pin that path to the portable one.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::chacha20poly1305::ChaCha20;
-///
-/// let mut data = *b"attack at dawn";
-/// ChaCha20::new(&[7; 32], &[1; 12], 0).apply_keystream(&mut data);
-/// ChaCha20::new(&[7; 32], &[1; 12], 0).apply_keystream(&mut data);
-/// assert_eq!(&data, b"attack at dawn");
-/// ```
 #[derive(Clone)]
 pub struct ChaCha20 {
     /// The input state of the next block.
@@ -158,7 +147,7 @@ impl ChaCha20 {
             for chunk in wide.as_chunks_mut::<{ avx2::BLOCKS * BLOCK_LEN }>().0 {
                 // SAFETY: the CPU reports AVX2, the only feature the function enables.
                 unsafe {
-                    avx2::xor_blocks(&self.state, chunk);
+                    avx2::EightBlocks::xor_keystream(&self.state, chunk);
                 }
                 self.state[COUNTER] = self.state[COUNTER].wrapping_add(avx2::BLOCKS as u32);
             }

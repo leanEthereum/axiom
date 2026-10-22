@@ -15,20 +15,23 @@
 mod api;
 mod chain;
 mod clock;
+mod config;
 mod engine;
 mod error;
 pub(crate) mod network;
 mod publish;
 mod race;
 mod service;
+mod tasks;
 
 pub use api::BeaconApi;
 pub use chain::{
     Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Head, Submission,
 };
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use network::{DiscoverySettings, NodeKey};
 pub use publish::{PublishError, Published, Publisher};
-pub use service::{AnchorSource, EngineConfig, NetworkSettings, Node, NodeConfig};
+pub use service::Node;

@@ -4,10 +4,10 @@ use std::marker::PhantomData;
 
 use axiom_das::{CustodyGroup, NodeId};
 use axiom_ssz::U256;
-use axiom_types::Preset;
+use axiom_types::{ChainConfig, Preset};
 use axiom_yaml::Yaml;
 
-use super::{config_of, gossip::GossipCase};
+use super::gossip::GossipCase;
 use crate::{Case, Failure, Runner};
 
 /// Checks custody assignment against the vectors.
@@ -36,7 +36,7 @@ impl<P: Preset> Runner for Networking<P> {
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let meta = case.yaml("meta.yaml")?;
         match handler {
             "get_custody_groups" => {

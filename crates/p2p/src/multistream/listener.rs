@@ -1,10 +1,8 @@
 //! The listener side: accepting the first supported proposal.
 
-use std::mem;
-
 use super::{
-    LIST, MAX_PROPOSALS, NOT_AVAILABLE, Negotiated, NegotiationError, PROTOCOL_HEADER,
-    decode_message, encode_list, encode_message, encode_raw_message,
+    LIST, MAX_PROPOSALS, NOT_AVAILABLE, Negotiated, NegotiationError,
+    message::{MessageReader, MessageWriter},
 };
 
 /// Answers proposals, echoing the first supported one.
@@ -12,14 +10,12 @@ use super::{
 pub struct Listener {
     /// Protocols this side speaks.
     supported: Vec<String>,
-    /// Whether the dialer's header has arrived.
-    header_received: bool,
     /// Proposals answered so far.
     proposals: usize,
-    /// Bytes waiting to be written.
-    outbound: Vec<u8>,
-    /// Bytes received but not yet parsed.
-    inbound: Vec<u8>,
+    /// Messages waiting to be written.
+    outbound: MessageWriter,
+    /// Messages received, header first.
+    inbound: MessageReader,
 }
 
 impl Listener {
@@ -29,20 +25,17 @@ impl Listener {
         I: IntoIterator,
         I::Item: Into<String>,
     {
-        let mut outbound = Vec::new();
-        encode_message(PROTOCOL_HEADER, &mut outbound);
         Self {
             supported: supported.into_iter().map(Into::into).collect(),
-            header_received: false,
             proposals: 0,
-            outbound,
-            inbound: Vec::new(),
+            outbound: MessageWriter::with_header(),
+            inbound: MessageReader::new(),
         }
     }
 
     /// Takes the bytes to write to the stream.
     pub fn take_output(&mut self) -> Vec<u8> {
-        mem::take(&mut self.outbound)
+        self.outbound.take()
     }
 
     /// Feeds bytes read from the stream.
@@ -52,39 +45,35 @@ impl Listener {
     /// The agreement once a supported proposal arrives, or nothing while none has.
     /// The echo that confirms it is already queued as output.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<Option<Negotiated>, NegotiationError> {
-        self.inbound.extend_from_slice(bytes);
-        while let Some((text, consumed)) = decode_message(&self.inbound)? {
-            // Phase 1: the dialer's header must come first.
-            if !self.header_received {
-                if text != PROTOCOL_HEADER {
-                    return Err(NegotiationError::InvalidHeader(text.to_owned()));
-                }
-                self.header_received = true;
+        self.inbound.feed(bytes);
+        // Process every complete message after the dialer's header.
+        while let Some(text) = self.inbound.next_text()? {
+            // Phase 1: a listing request gets every supported name.
+            if text == LIST {
+                self.outbound
+                    .push_list(self.supported.iter().map(String::as_str));
             }
-            // Phase 2: a listing request gets every supported name.
-            else if text == LIST {
-                let body = encode_list(self.supported.iter().map(String::as_str));
-                encode_raw_message(&body, &mut self.outbound);
-            }
-            // Phase 3: a supported proposal is echoed and settles the negotiation.
+            // Phase 2: a supported proposal is echoed and settles the negotiation.
             else if self.supported.iter().any(|protocol| protocol == text) {
                 let protocol = text.to_owned();
-                encode_message(&protocol, &mut self.outbound);
-                let remainder = self.inbound.split_off(consumed);
+                self.outbound.push(&protocol);
+                let remainder = self.inbound.take_remainder();
                 return Ok(Some(Negotiated {
                     protocol,
                     remainder,
                 }));
             }
-            // Phase 4: anything else is refused, within a bounded patience.
+            // Phase 3: anything else is refused, within a bounded patience.
             else {
                 self.proposals += 1;
                 if self.proposals > MAX_PROPOSALS {
-                    return Err(NegotiationError::TooManyProposals);
+                    return Err(NegotiationError::TooManyProposals {
+                        max: MAX_PROPOSALS,
+                        last: text.to_owned(),
+                    });
                 }
-                encode_message(NOT_AVAILABLE, &mut self.outbound);
+                self.outbound.push(NOT_AVAILABLE);
             }
-            self.inbound.drain(..consumed);
         }
         Ok(None)
     }
@@ -95,13 +84,13 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::multistream::{Dialer, Lister};
+    use crate::multistream::{Dialer, Lister, PROTOCOL_HEADER};
 
     /// The wire form of one message.
     fn message(text: &str) -> Vec<u8> {
-        let mut out = Vec::new();
-        encode_message(text, &mut out);
-        out
+        let mut writer = MessageWriter::default();
+        writer.push(text);
+        writer.take()
     }
 
     #[test]
@@ -185,7 +174,10 @@ mod tests {
         // The only proposal is refused, leaving nothing to try.
         assert_eq!(
             dialer.receive(&listener.take_output()),
-            Err(NegotiationError::NoCommonProtocol)
+            Err(NegotiationError::NoCommonProtocol {
+                refused: 1,
+                last: "/a".into()
+            })
         );
     }
 
@@ -224,7 +216,7 @@ mod tests {
         let mut dialer = Dialer::new(["/a"]).unwrap();
         assert_eq!(
             dialer.receive(&[0x02, b'n', b'a']),
-            Err(NegotiationError::MissingNewline)
+            Err(NegotiationError::MissingNewline { len: 2 })
         );
         // An answer that is neither echo nor refusal.
         let mut dialer = Dialer::new(["/a"]).unwrap();
@@ -232,7 +224,10 @@ mod tests {
         flight.extend(message("/b"));
         assert_eq!(
             dialer.receive(&flight),
-            Err(NegotiationError::UnexpectedResponse("/b".into()))
+            Err(NegotiationError::UnexpectedResponse {
+                proposed: "/a".into(),
+                response: "/b".into()
+            })
         );
         // An empty proposal list.
         assert_eq!(
@@ -251,7 +246,10 @@ mod tests {
         }
         assert_eq!(
             listener.receive(&flight),
-            Err(NegotiationError::TooManyProposals)
+            Err(NegotiationError::TooManyProposals {
+                max: 32,
+                last: "/nope".into()
+            })
         );
     }
 
@@ -285,7 +283,13 @@ mod tests {
             }
             match expected {
                 Some(protocol) => prop_assert_eq!(outcome, Some(Ok(protocol))),
-                None => prop_assert_eq!(outcome, Some(Err(NegotiationError::NoCommonProtocol))),
+                None => prop_assert_eq!(
+                    outcome,
+                    Some(Err(NegotiationError::NoCommonProtocol {
+                        refused: dialer_set.len(),
+                        last: dialer_set[dialer_set.len() - 1].clone(),
+                    }))
+                ),
             }
         }
     }

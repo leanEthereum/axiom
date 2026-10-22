@@ -30,8 +30,9 @@ use std::{
     io::{self, ErrorKind, Write},
 };
 
+use axiom_snappy::Crc32c;
+
 use crate::{
-    crc::Crc32c,
     directory::Directory,
     format::{FILE_HEADER_LEN, FileHeader, Kind},
     record::Record,

@@ -14,7 +14,7 @@ use axiom_json::Json;
 use axiom_ssz::U256;
 use axiom_types::{ExecutionPayload, ExecutionRequests, Preset};
 
-use super::{BlobsBundle, Fields, JsonCodec, object};
+use super::{BlobsBundle, Fields, JsonCodec};
 use crate::WireError;
 
 /// A payload the engine built, with everything a proposer needs to publish it.
@@ -38,7 +38,7 @@ pub struct GetPayloadResponse<P: Preset> {
 
 impl<P: Preset> JsonCodec for GetPayloadResponse<P> {
     fn to_json(&self) -> Json {
-        object([
+        Json::from([
             ("executionPayload", self.execution_payload.to_json()),
             ("blockValue", self.block_value.to_json()),
             ("blobsBundle", self.blobs_bundle.to_json()),

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::format::entry_len;
+use crate::format::EntryHeader;
 
 /// The position of one put entry inside a segment file.
 ///
@@ -20,7 +20,7 @@ pub(crate) struct Location {
 impl Location {
     /// Returns the bytes the entry occupies on disk, given its key length.
     pub(crate) const fn entry_len(self, key_len: usize) -> u64 {
-        entry_len(key_len, self.value_len)
+        EntryHeader::len_for(key_len, self.value_len)
     }
 }
 

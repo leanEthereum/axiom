@@ -15,7 +15,6 @@ use axiom_types::{
 };
 use axiom_yaml::Yaml;
 
-use super::case_config;
 use crate::{Case, Failure};
 
 /// Builds the chain a gossip case describes, then checks each message's verdict.
@@ -49,7 +48,7 @@ impl<'c, P: Preset> GossipCase<'c, P> {
     ///
     /// Fails when a verdict differs from the expected one.
     pub(super) fn run(&self) -> Result<(), Failure> {
-        let config = case_config::<P>(self.case)?;
+        let config = self.case.config::<P>()?;
         let blocks = self
             .meta
             .get("blocks")
@@ -119,8 +118,8 @@ impl<'c, P: Preset> GossipCase<'c, P> {
             let verdict = self.validate(&mut validator, &topic, message)?;
             let actual = match verdict {
                 Ok(()) => "valid",
-                Err(GossipError::Ignore(_)) => "ignore",
-                Err(GossipError::Reject(_)) => "reject",
+                Err(GossipError::Ignore { .. }) => "ignore",
+                Err(GossipError::Reject { .. }) => "reject",
             };
             let expected = message
                 .get("expected")

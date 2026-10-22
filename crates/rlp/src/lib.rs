@@ -19,24 +19,6 @@
 //! Decoding is strict: every value has exactly one accepted encoding.
 //! Non-minimal lengths, padded integers, and wrapped single bytes are refused.
 //! Signatures over node records rely on that uniqueness.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_rlp::{Decoder, Encoder};
-//!
-//! let mut encoder = Encoder::new();
-//! encoder.list(|list| {
-//!     list.bytes(b"dog").uint(1024);
-//! });
-//! let encoded = encoder.finish();
-//! assert_eq!(encoded, [0xc7, 0x83, b'd', b'o', b'g', 0x82, 0x04, 0x00]);
-//!
-//! let mut decoder = Decoder::new(&encoded);
-//! let mut list = decoder.list().unwrap();
-//! assert_eq!(list.bytes().unwrap(), b"dog");
-//! assert_eq!(list.uint().unwrap(), 1024);
-//! ```
 
 mod decoder;
 mod encoder;

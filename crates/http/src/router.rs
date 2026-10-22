@@ -66,7 +66,7 @@ impl Router {
         Fut: Future<Output = Response> + Send + 'static,
     {
         // Split the pattern the same way paths are split, so the counts line up.
-        let segments = split(pattern)
+        let segments = Route::segments(pattern)
             .map(
                 |segment| match segment.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
                     Some(name) => Segment::Param(name.to_owned()),
@@ -122,10 +122,21 @@ impl Router {
 }
 
 impl Route {
+    /// Splits a path on slashes, dropping the leading one.
+    ///
+    /// ```text
+    ///     "/"      -> [""]
+    ///     "/a/b"   -> ["a", "b"]
+    ///     "/a/"    -> ["a", ""]
+    /// ```
+    fn segments(path: &str) -> impl Iterator<Item = &str> {
+        path.strip_prefix('/').unwrap_or(path).split('/')
+    }
+
     /// The captured parameters, when a path matches the pattern.
     fn capture(&self, path: &str) -> Option<Vec<(String, String)>> {
         let mut params = Vec::new();
-        let mut parts = split(path);
+        let mut parts = Self::segments(path);
         // Walk pattern and path in step; every segment must pair up.
         for segment in &self.segments {
             let part = parts.next()?;
@@ -138,17 +149,6 @@ impl Route {
         // A path with segments left over is longer than the pattern.
         parts.next().is_none().then_some(params)
     }
-}
-
-/// Splits a path on slashes, dropping the leading one.
-///
-/// ```text
-///     "/"      -> [""]
-///     "/a/b"   -> ["a", "b"]
-///     "/a/"    -> ["a", ""]
-/// ```
-fn split(path: &str) -> impl Iterator<Item = &str> {
-    path.strip_prefix('/').unwrap_or(path).split('/')
 }
 
 impl fmt::Debug for Router {

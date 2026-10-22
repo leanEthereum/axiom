@@ -88,6 +88,18 @@ impl BlsSignature {
     pub const fn as_bytes(&self) -> &[u8; 96] {
         &self.0
     }
+
+    /// Whether this selection proof's hash selects its signer, one in every modulo.
+    ///
+    /// Aggregators are picked this way, unpredictably to anyone without the signer's key.
+    /// See `is_aggregator` in the phase0 validator spec.
+    #[must_use]
+    pub fn selects(&self, modulo: u64) -> bool {
+        let digest = Root::sha256(&self.0);
+        let mut word = [0; 8];
+        word.copy_from_slice(&digest.0[..8]);
+        u64::from_le_bytes(word).is_multiple_of(modulo)
+    }
 }
 
 impl Default for BlsSignature {

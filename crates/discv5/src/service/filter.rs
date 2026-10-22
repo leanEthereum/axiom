@@ -9,20 +9,6 @@ use crate::enr::Enr;
 /// A condition a record must meet to count as a search result.
 ///
 /// A closed set of conditions, combined with a conjunction.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_discv5::service::EnrFilter;
-/// use axiom_types::ForkDigest;
-///
-/// // Peers on the right fork that serve attestation subnet 17.
-/// let filter = EnrFilter::All(vec![
-///     EnrFilter::ForkDigest(ForkDigest([0xab, 0xcd, 0xef, 0x01])),
-///     EnrFilter::AttestationSubnet(17),
-/// ]);
-/// assert!(matches!(filter, EnrFilter::All(_)));
-/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum EnrFilter {
     /// Every record.

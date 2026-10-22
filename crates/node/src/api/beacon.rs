@@ -4,10 +4,7 @@ use axiom_http::{Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
-use axiom_types::{
-    BeaconBlockHeader, BeaconState, Checkpoint, Preset, Root, SignedBeaconBlock,
-    SignedBlockContents,
-};
+use axiom_types::{BeaconState, Preset, Root, SignedBlockContents};
 use tracing::warn;
 
 use super::{
@@ -55,7 +52,7 @@ impl BeaconRoutes {
                     .ok_or_else(|| ApiError::not_found("no head state"))?;
                 let beacon = state.beacon();
                 Ok(Reply::data(
-                    Reply::object([
+                    Json::from([
                         ("genesis_time", Reply::number(beacon.genesis_time)),
                         (
                             "genesis_validators_root",
@@ -74,26 +71,20 @@ impl BeaconRoutes {
 
     /// A block's header and whether it is canonical.
     async fn header<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = Self::block_id(&request)?;
+        let id = BlockId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (root, block) = Self::find_block(chain, id)?;
+                let (root, block) = id.find(chain)?;
                 let message = &block.message;
                 let canonical = chain.canonical_root(message.slot)? == Some(root);
-                let header = BeaconBlockHeader {
-                    slot: message.slot,
-                    proposer_index: message.proposer_index,
-                    parent_root: message.parent_root,
-                    state_root: message.state_root,
-                    body_root: message.body.hash_tree_root(),
-                };
-                let data = Reply::object([
+                let header = message.header();
+                let data = Json::from([
                     ("root", Reply::text(&root)),
                     ("canonical", canonical.into()),
                     (
                         "header",
-                        Reply::object([
-                            ("message", Self::header_json(&header)),
+                        Json::from([
+                            ("message", Reply::header(&header)),
                             ("signature", Reply::text(&block.signature)),
                         ]),
                     ),
@@ -108,11 +99,11 @@ impl BeaconRoutes {
 
     /// The root of a block.
     async fn block_root<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = Self::block_id(&request)?;
+        let id = BlockId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (root, block) = Self::find_block(chain, id)?;
-                let data = Reply::object([("root", Reply::text(&root))]);
+                let (root, block) = id.find(chain)?;
+                let data = Json::from([("root", Reply::text(&root))]);
                 Ok(Reply::data(
                     data,
                     Some(ApiContext::freshness(chain, root, block.message.slot)),
@@ -126,10 +117,10 @@ impl BeaconRoutes {
         if !Reply::accepts_ssz(&request) {
             return Err(ApiError::not_acceptable());
         }
-        let id = Self::block_id(&request)?;
+        let id = BlockId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (_, block) = Self::find_block(chain, id)?;
+                let (_, block) = id.find(chain)?;
                 let fork = chain.config().fork_at(block.message.slot.epoch::<P>());
                 Ok(Reply::ssz(block.encode(), fork))
             })
@@ -165,11 +156,11 @@ impl BeaconRoutes {
 
     /// The root of a state.
     async fn state_root<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = Self::state_id(&request)?;
+        let id = StateId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (root, block) = Self::find_state_block(chain, id)?;
-                let data = Reply::object([("root", Reply::text(&block.message.state_root))]);
+                let (root, block) = id.find_block(chain)?;
+                let data = Json::from([("root", Reply::text(&block.message.state_root))]);
                 Ok(Reply::data(
                     data,
                     Some(ApiContext::freshness(chain, root, block.message.slot)),
@@ -180,12 +171,12 @@ impl BeaconRoutes {
 
     /// The fork a state is in.
     async fn fork<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = Self::state_id(&request)?;
+        let id = StateId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (root, block) = Self::find_state_block(chain, id)?;
+                let (root, block) = id.find_block(chain)?;
                 let fork = &Self::held_state(chain, root)?.fork;
-                let data = Reply::object([
+                let data = Json::from([
                     ("previous_version", Reply::text(&fork.previous_version)),
                     ("current_version", Reply::text(&fork.current_version)),
                     ("epoch", Reply::number(fork.epoch.0)),
@@ -203,24 +194,21 @@ impl BeaconRoutes {
         context: ApiContext<P>,
         request: Request,
     ) -> ApiResult {
-        let id = Self::state_id(&request)?;
+        let id = StateId::from_request(&request)?;
         context
             .query(move |chain| {
-                let (root, block) = Self::find_state_block(chain, id)?;
+                let (root, block) = id.find_block(chain)?;
                 let state = Self::held_state(chain, root)?;
-                let data = Reply::object([
+                let data = Json::from([
                     (
                         "previous_justified",
-                        Self::checkpoint_json(state.previous_justified_checkpoint),
+                        Reply::checkpoint(state.previous_justified_checkpoint),
                     ),
                     (
                         "current_justified",
-                        Self::checkpoint_json(state.current_justified_checkpoint),
+                        Reply::checkpoint(state.current_justified_checkpoint),
                     ),
-                    (
-                        "finalized",
-                        Self::checkpoint_json(state.finalized_checkpoint),
-                    ),
+                    ("finalized", Reply::checkpoint(state.finalized_checkpoint)),
                 ]);
                 Ok(Reply::data(
                     data,
@@ -230,74 +218,11 @@ impl BeaconRoutes {
             .await
     }
 
-    /// The block identifier in the path.
-    fn block_id(request: &Request) -> Result<BlockId, ApiError> {
-        request
-            .param("block_id")
-            .ok_or_else(|| ApiError::bad_request("missing block id"))?
-            .parse()
-    }
-
-    /// The state identifier in the path.
-    fn state_id(request: &Request) -> Result<StateId, ApiError> {
-        request
-            .param("state_id")
-            .ok_or_else(|| ApiError::bad_request("missing state id"))?
-            .parse()
-    }
-
-    /// A block and its root, or a 404.
-    fn find_block<P: Preset>(
-        chain: &Chain<P>,
-        id: BlockId,
-    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
-        let root = id
-            .resolve(chain)?
-            .ok_or_else(|| ApiError::not_found("block not found"))?;
-        let block = chain
-            .block(root)?
-            .ok_or_else(|| ApiError::not_found("block not found"))?;
-        Ok((root, block))
-    }
-
-    /// The block whose post-state a state identifier names, or a 404.
-    fn find_state_block<P: Preset>(
-        chain: &Chain<P>,
-        id: StateId,
-    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
-        let root = id
-            .resolve(chain)?
-            .ok_or_else(|| ApiError::not_found("state not found"))?;
-        let block = chain
-            .block(root)?
-            .ok_or_else(|| ApiError::not_found("state not found"))?;
-        Ok((root, block))
-    }
-
     /// A post-state the fork choice still holds, or a 404 for one pruned at finality.
     fn held_state<P: Preset>(chain: &Chain<P>, root: Root) -> Result<&BeaconState<P>, ApiError> {
         chain
             .state(&root)
             .map(State::beacon)
             .ok_or_else(|| ApiError::not_found("state is older than finality and not held"))
-    }
-
-    /// A header in the beacon API's JSON form.
-    fn header_json(header: &BeaconBlockHeader) -> Json {
-        Reply::object([
-            ("slot", Reply::number(header.slot.0)),
-            ("proposer_index", Reply::number(header.proposer_index.0)),
-            ("parent_root", Reply::text(&header.parent_root)),
-            ("state_root", Reply::text(&header.state_root)),
-            ("body_root", Reply::text(&header.body_root)),
-        ])
-    }
-
-    /// A checkpoint in the beacon API's JSON form.
-    fn checkpoint_json(checkpoint: Checkpoint) -> Json {
-        Reply::object([
-            ("epoch", Reply::number(checkpoint.epoch.0)),
-            ("root", Reply::text(&checkpoint.root)),
-        ])
     }
 }

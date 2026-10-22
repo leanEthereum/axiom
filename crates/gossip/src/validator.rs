@@ -1,29 +1,25 @@
 //! The gossip rules, one method per topic, in the spec's order.
 
-use std::{collections::HashSet, sync::Arc};
-
-use axiom_bls::{PublicKey, Signature};
 use axiom_das::ColumnSidecar;
-use axiom_fork_choice::ExecutionStatus;
+use axiom_fork_choice::{ExecutionStatus, ForkChoiceError};
 use axiom_kzg::Kzg;
 use axiom_ssz::Ssz;
-use axiom_state_transition::{EpochCommittees, State};
+use axiom_state_transition::State;
 use axiom_types::{
-    AttestationData, AttesterSlashing, BeaconBlockHeader, BlsPubkey, BlsSignature, CommitteeIndex,
-    DataColumnSidecar, Domain, Epoch, IndexedAttestation, Preset, ProposerSlashing, Root,
-    SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedVoluntaryExit, SigningData, SingleAttestation, Slot,
-    SubnetId, SyncAggregatorSelectionData, SyncCommitteeMessage, ValidatorIndex,
+    Attestation, AttestationData, AttesterSlashing, BeaconState, BlsPubkey, CommitteeIndex,
+    DataColumnSidecar, Domain, Epoch, Preset, ProposerSlashing, Root, SignedAggregateAndProof,
+    SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof, SignedVoluntaryExit,
+    SingleAttestation, Slot, SubnetId, SyncCommitteeContribution, SyncCommitteeMessage, Validator,
+    ValidatorIndex,
     constants::{
-        BLS_WITHDRAWAL_PREFIX, DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER,
-        DOMAIN_BEACON_PROPOSER, DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_CONTRIBUTION_AND_PROOF,
-        DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF,
-        DOMAIN_VOLUNTARY_EXIT, SYNC_COMMITTEE_SUBNET_COUNT, TARGET_AGGREGATORS_PER_COMMITTEE,
+        BLS_WITHDRAWAL_PREFIX, DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER,
+        DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_SYNC_COMMITTEE, DOMAIN_VOLUNTARY_EXIT,
+        SYNC_COMMITTEE_SUBNET_COUNT, TARGET_AGGREGATORS_PER_COMMITTEE,
         TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE,
     },
 };
 
-use crate::{ChainView, GossipError, Seen};
+use crate::{ChainView, Detail, GossipError, Seen, signers::Signers, signing_claim::SigningClaim};
 
 /// Shorthand for a rule's outcome.
 type Verdict = Result<(), GossipError>;
@@ -56,61 +52,74 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     pub fn beacon_block(&mut self, signed: &SignedBeaconBlock<P>, now_ms: u64) -> Verdict {
         let block = &signed.message;
         let key = (block.slot, block.proposer_index);
+        let proposer_detail = Detail::Validator(block.proposer_index);
         if self.seen.proposer_slots.contains(&key) {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "block is not the first valid block for this slot and proposer",
-            ));
+            )
+            .with(proposer_detail));
         }
-        if self.view.is_future_slot(block.slot, now_ms) {
-            return Err(GossipError::Ignore("block is from a future slot"));
-        }
-        if block.slot <= self.view.finalized.epoch.start_slot::<P>() {
-            return Err(GossipError::Ignore(
-                "block is not from a slot greater than the latest finalized slot",
-            ));
-        }
+        self.header_slot_is_timely(
+            block.slot,
+            now_ms,
+            "block is from a future slot",
+            "block is not from a slot greater than the latest finalized slot",
+        )?;
+        let parent_detail = Detail::Block(block.parent_root);
         let Some(parent) = self.view.block(&block.parent_root) else {
-            return Err(GossipError::Ignore("block's parent has not been seen"));
+            return Err(GossipError::ignore("block's parent has not been seen").with(parent_detail));
         };
         let parent_status = self.view.payload_status(&block.parent_root);
         if !self.view.is_imported(&block.parent_root) {
             // A parent that failed with an unvalidated payload failed for consensus reasons.
-            return Err(
+            let verdict =
                 if parent_status.is_none_or(|status| status == ExecutionStatus::Optimistic) {
-                    GossipError::Reject("block's parent is invalid and its payload is optimistic")
+                    GossipError::reject("block's parent is invalid and its payload is optimistic")
                 } else {
-                    GossipError::Ignore("block's parent is invalid and its payload is processed")
-                },
-            );
+                    GossipError::ignore("block's parent is invalid and its payload is processed")
+                };
+            return Err(verdict.with(parent_detail));
         }
         if parent_status == Some(ExecutionStatus::Invalid) {
-            return Err(GossipError::Ignore(
-                "block's parent is valid and its payload is invalid",
-            ));
+            return Err(
+                GossipError::ignore("block's parent is valid and its payload is invalid")
+                    .with(parent_detail),
+            );
         }
 
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let proposer = beacon
-            .validators
-            .get(block.proposer_index.as_usize())
-            .ok_or(GossipError::Reject("proposer index out of range"))?;
+        let proposer =
+            Self::registered(beacon, block.proposer_index, "proposer index out of range")?;
         let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, block.slot.epoch::<P>());
-        if !Self::verify(&proposer.pubkey, block, domain, &signed.signature) {
-            return Err(GossipError::Reject("invalid proposer signature"));
+        if !SigningClaim::new(block, domain, &signed.signature).is_signed_by(&proposer.pubkey) {
+            return Err(GossipError::reject("invalid proposer signature").with(proposer_detail));
         }
         let expected_timestamp =
             beacon.genesis_time + block.slot.0 * self.view.config().slot_duration_ms / 1000;
-        if block.body.execution_payload.timestamp != expected_timestamp {
-            return Err(GossipError::Reject("incorrect execution payload timestamp"));
+        let timestamp = block.body.execution_payload.timestamp;
+        if timestamp != expected_timestamp {
+            return Err(
+                GossipError::reject("incorrect execution payload timestamp").with(
+                    Detail::Mismatch {
+                        actual: timestamp,
+                        expected: expected_timestamp,
+                    },
+                ),
+            );
         }
         if block.slot <= parent.slot {
-            return Err(GossipError::Reject(
-                "block is not from a higher slot than its parent",
-            ));
+            return Err(
+                GossipError::reject("block is not from a higher slot than its parent").with(
+                    Detail::Slot {
+                        slot: block.slot,
+                        reference: parent.slot,
+                    },
+                ),
+            );
         }
         if !self.view.descends_from_finalized(block.parent_root) {
-            return Err(GossipError::Reject(
+            return Err(GossipError::reject(
                 "finalized checkpoint is not an ancestor of block",
             ));
         }
@@ -119,14 +128,25 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .config()
             .blob_parameters(block.slot.epoch::<P>())
             .max_blobs_per_block;
-        if block.body.blob_kzg_commitments.len() as u64 > max_blobs {
-            return Err(GossipError::Reject("too many blob kzg commitments"));
+        let blobs = block.body.blob_kzg_commitments.len() as u64;
+        if blobs > max_blobs {
+            return Err(
+                GossipError::reject("too many blob kzg commitments").with(Detail::Bound {
+                    value: blobs,
+                    bound: max_blobs,
+                }),
+            );
         }
         let parent_state = self.parent_state(&block.parent_root, block.slot)?;
-        if block.proposer_index != parent_state.beacon().beacon_proposer_index() {
-            return Err(GossipError::Reject(
+        let expected_proposer = parent_state.beacon().beacon_proposer_index();
+        if block.proposer_index != expected_proposer {
+            return Err(GossipError::reject(
                 "block proposer_index does not match expected proposer",
-            ));
+            )
+            .with(Detail::Mismatch {
+                actual: block.proposer_index.0,
+                expected: expected_proposer.0,
+            }));
         }
 
         self.seen.proposer_slots.insert(key);
@@ -148,15 +168,8 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let message = &signed.message;
         let aggregate = &message.aggregate;
         let data = &aggregate.data;
-        if data.index.0 != 0 {
-            return Err(GossipError::Reject("aggregate data index is non-zero"));
-        }
-        let committees: Vec<CommitteeIndex> = aggregate.committee_indices().collect();
-        let [index] = committees[..] else {
-            return Err(GossipError::Reject(
-                "aggregate committee bits must specify exactly one committee",
-            ));
-        };
+        let index = Self::aggregate_committee(aggregate)?;
+        let aggregator_detail = Detail::Validator(message.aggregator_index);
 
         let bits: Vec<bool> = aggregate.aggregation_bits.iter().collect();
         let data_key = (data.target.epoch, data.hash_tree_root(), index);
@@ -166,45 +179,45 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .get(&data_key)
             .is_some_and(|seen| Seen::is_covered(seen, &bits))
         {
-            return Err(GossipError::Ignore("already seen aggregate for this data"));
+            return Err(GossipError::ignore("already seen aggregate for this data"));
         }
         let aggregator_key = (data.target.epoch, message.aggregator_index);
         if self.seen.aggregator_epochs.contains(&aggregator_key) {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen aggregate for this epoch and aggregator",
-            ));
+            )
+            .with(aggregator_detail));
         }
         self.voted_block_is_valid(data.beacon_block_root)?;
 
         let mut state = self.head_state()?;
-        let committees = Self::committees(&mut state, data.target.epoch);
+        let committees = state.compute_committees(data.target.epoch);
+        let index_out_of_range =
+            GossipError::reject("committee index out of range").with(Detail::Bound {
+                value: index.0,
+                bound: committees.committees_per_slot(),
+            });
         if index.0 >= committees.committees_per_slot() {
-            return Err(GossipError::Reject("committee index out of range"));
+            return Err(index_out_of_range);
         }
-        if self.view.is_future_slot(data.slot, now_ms) {
-            return Err(GossipError::Ignore("aggregate slot is from a future slot"));
-        }
-        if !self
-            .view
-            .is_current_or_previous_epoch(data.slot.epoch::<P>(), now_ms)
-        {
-            return Err(GossipError::Ignore(
-                "aggregate epoch is not current or previous epoch",
-            ));
-        }
-        if data.target.epoch != data.slot.epoch::<P>() {
-            return Err(GossipError::Reject(
-                "attestation epoch does not match target epoch",
-            ));
-        }
+        self.vote_is_timely(
+            data,
+            now_ms,
+            "aggregate slot is from a future slot",
+            "aggregate epoch is not current or previous epoch",
+        )?;
         let committee = committees
             .committee(data.slot, index)
-            .ok_or(GossipError::Reject("committee index out of range"))?
+            .ok_or(index_out_of_range)?
             .to_vec();
         if bits.len() != committee.len() {
-            return Err(GossipError::Reject(
+            return Err(GossipError::reject(
                 "aggregation bits length does not match committee size",
-            ));
+            )
+            .with(Detail::Mismatch {
+                actual: bits.len() as u64,
+                expected: committee.len() as u64,
+            }));
         }
         let attesters: Vec<ValidatorIndex> = committee
             .iter()
@@ -213,32 +226,25 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .map(|(validator, _)| *validator)
             .collect();
         if attesters.is_empty() {
-            return Err(GossipError::Reject("aggregate has no participants"));
+            return Err(GossipError::reject("aggregate has no participants"));
         }
         // Threshold: about 16 aggregators per committee, picked by the hash of a slot signature.
         let modulo = (committee.len() as u64 / TARGET_AGGREGATORS_PER_COMMITTEE).max(1);
-        if !Self::selects(&message.selection_proof, modulo) {
-            return Err(GossipError::Reject(
-                "validator is not selected as aggregator",
-            ));
+        if !message.selection_proof.selects(modulo) {
+            return Err(
+                GossipError::reject("validator is not selected as aggregator")
+                    .with(aggregator_detail),
+            );
         }
         if !committee.contains(&message.aggregator_index) {
-            return Err(GossipError::Reject(
-                "aggregator is not a member of the committee",
-            ));
+            return Err(
+                GossipError::reject("aggregator is not a member of the committee")
+                    .with(aggregator_detail),
+            );
         }
-        Self::verify_aggregator(&state, signed)?;
-        let beacon = state.beacon();
-        let mut sorted = attesters;
-        sorted.sort_unstable();
-        sorted.dedup();
-        let attester_keys: Vec<BlsPubkey> = sorted
-            .iter()
-            .map(|index| beacon.validators[index.as_usize()].pubkey)
-            .collect();
-        let attester_domain = beacon.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
-        if !Self::verify_aggregate(&attester_keys, data, attester_domain, &aggregate.signature) {
-            return Err(GossipError::Reject("invalid aggregate signature"));
+        Signers::of(state.beacon()).verify_aggregator(signed)?;
+        if !Signers::of(state.beacon()).attested(attesters, aggregate) {
+            return Err(GossipError::reject("invalid aggregate signature"));
         }
         self.vote_is_on_chain(data)?;
 
@@ -266,60 +272,66 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     ) -> Verdict {
         let data = &attestation.data;
         let key = (data.target.epoch, attestation.attester_index);
+        let attester_detail = Detail::Validator(attestation.attester_index);
         if self.seen.attestation_validator_epochs.contains(&key) {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen attestation for this epoch and validator",
-            ));
+            )
+            .with(attester_detail));
         }
         if data.index.0 != 0 {
-            return Err(GossipError::Reject("attestation data index is non-zero"));
+            return Err(
+                GossipError::reject("attestation data index is non-zero").with(Detail::Mismatch {
+                    actual: data.index.0,
+                    expected: 0,
+                }),
+            );
         }
         self.voted_block_is_valid(data.beacon_block_root)?;
 
         let mut state = self.head_state()?;
-        let committees = Self::committees(&mut state, data.target.epoch);
+        let committees = state.compute_committees(data.target.epoch);
         let per_slot = committees.committees_per_slot();
         if attestation.committee_index.0 >= per_slot {
-            return Err(GossipError::Reject("committee index out of range"));
+            return Err(
+                GossipError::reject("committee index out of range").with(Detail::Bound {
+                    value: attestation.committee_index.0,
+                    bound: per_slot,
+                }),
+            );
         }
         // Subnets count committees from the start of the epoch, wrapping at the subnet count.
         let expected_subnet = (per_slot * data.slot.index_in_epoch::<P>()
             + attestation.committee_index.0)
             % self.view.config().attestation_subnet_count;
         if expected_subnet != subnet.0 {
-            return Err(GossipError::Reject("attestation is for wrong subnet"));
-        }
-        if self.view.is_future_slot(data.slot, now_ms) {
-            return Err(GossipError::Ignore(
-                "attestation slot is from a future slot",
+            return Err(GossipError::reject("attestation is for wrong subnet").with(
+                Detail::Mismatch {
+                    actual: subnet.0,
+                    expected: expected_subnet,
+                },
             ));
         }
-        if !self
-            .view
-            .is_current_or_previous_epoch(data.slot.epoch::<P>(), now_ms)
-        {
-            return Err(GossipError::Ignore(
-                "attestation epoch is not current or previous epoch",
-            ));
-        }
-        if data.target.epoch != data.slot.epoch::<P>() {
-            return Err(GossipError::Reject(
-                "attestation epoch does not match target epoch",
-            ));
-        }
+        self.vote_is_timely(
+            data,
+            now_ms,
+            "attestation slot is from a future slot",
+            "attestation epoch is not current or previous epoch",
+        )?;
         let in_committee = committees
             .committee(data.slot, attestation.committee_index)
             .is_some_and(|committee| committee.contains(&attestation.attester_index));
         if !in_committee {
-            return Err(GossipError::Reject(
-                "attester is not a member of the committee",
-            ));
+            return Err(
+                GossipError::reject("attester is not a member of the committee")
+                    .with(attester_detail),
+            );
         }
         let beacon = state.beacon();
         let attester = &beacon.validators[attestation.attester_index.as_usize()];
         let domain = beacon.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
-        if !Self::verify(&attester.pubkey, data, domain, &attestation.signature) {
-            return Err(GossipError::Reject("invalid attestation signature"));
+        if !SigningClaim::new(data, domain, &attestation.signature).is_signed_by(&attester.pubkey) {
+            return Err(GossipError::reject("invalid attestation signature").with(attester_detail));
         }
         self.vote_is_on_chain(data)?;
 
@@ -336,48 +348,63 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     /// Ignores or rejects as the spec's rules say.
     pub fn voluntary_exit(&mut self, signed: &SignedVoluntaryExit, now_ms: u64) -> Verdict {
         let exit = &signed.message;
+        let validator_detail = Detail::Validator(exit.validator_index);
         if self
             .seen
             .voluntary_exit_indices
             .contains(&exit.validator_index)
         {
-            return Err(GossipError::Ignore(
-                "already seen voluntary exit for this validator",
-            ));
+            return Err(
+                GossipError::ignore("already seen voluntary exit for this validator")
+                    .with(validator_detail),
+            );
         }
         if self.view.is_future_epoch(exit.epoch, now_ms) {
-            return Err(GossipError::Ignore("voluntary exit epoch is in the future"));
+            return Err(
+                GossipError::ignore("voluntary exit epoch is in the future").with(Detail::Epoch {
+                    epoch: exit.epoch,
+                    reference: self.view.current_slot(now_ms).epoch::<P>(),
+                }),
+            );
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let validator = beacon
-            .validators
-            .get(exit.validator_index.as_usize())
-            .ok_or(GossipError::Reject("validator index out of range"))?;
+        let validator =
+            Self::registered(beacon, exit.validator_index, "validator index out of range")?;
         let epoch = beacon.current_epoch();
         if validator.exit_epoch != Epoch::FAR_FUTURE {
-            return Err(GossipError::Ignore("validator has already initiated exit"));
+            return Err(
+                GossipError::ignore("validator has already initiated exit").with(validator_detail)
+            );
         }
         if !validator.is_active_at(epoch) {
-            return Err(GossipError::Reject("validator is not active"));
+            return Err(GossipError::reject("validator is not active").with(validator_detail));
         }
-        if epoch.0
-            < validator
+        let eligible = Epoch(
+            validator
                 .activation_epoch
                 .0
-                .saturating_add(self.view.config().shard_committee_period)
-        {
-            return Err(GossipError::Reject(
-                "validator has not been active long enough",
-            ));
+                .saturating_add(self.view.config().shard_committee_period),
+        );
+        if epoch < eligible {
+            return Err(
+                GossipError::reject("validator has not been active long enough").with(
+                    Detail::Epoch {
+                        epoch,
+                        reference: eligible,
+                    },
+                ),
+            );
         }
         let domain = Domain::compute(
             DOMAIN_VOLUNTARY_EXIT,
             self.view.config().capella_fork_version,
             beacon.genesis_validators_root,
         );
-        if !Self::verify(&validator.pubkey, exit, domain, &signed.signature) {
-            return Err(GossipError::Reject("invalid voluntary exit signature"));
+        if !SigningClaim::new(exit, domain, &signed.signature).is_signed_by(&validator.pubkey) {
+            return Err(
+                GossipError::reject("invalid voluntary exit signature").with(validator_detail)
+            );
         }
         self.seen
             .voluntary_exit_indices
@@ -396,42 +423,51 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let header_1 = &slashing.signed_header_1.message;
         let header_2 = &slashing.signed_header_2.message;
         let proposer_index = header_1.proposer_index;
+        let proposer_detail = Detail::Validator(proposer_index);
         if self
             .seen
             .proposer_slashing_indices
             .contains(&proposer_index)
         {
-            return Err(GossipError::Ignore(
-                "already seen proposer slashing for this proposer",
-            ));
+            return Err(
+                GossipError::ignore("already seen proposer slashing for this proposer")
+                    .with(proposer_detail),
+            );
         }
         if header_1.slot != header_2.slot {
-            return Err(GossipError::Reject("header slots do not match"));
+            return Err(
+                GossipError::reject("header slots do not match").with(Detail::Slot {
+                    slot: header_2.slot,
+                    reference: header_1.slot,
+                }),
+            );
         }
         if header_1.proposer_index != header_2.proposer_index {
-            return Err(GossipError::Reject("header proposer indices do not match"));
+            return Err(
+                GossipError::reject("header proposer indices do not match").with(
+                    Detail::Mismatch {
+                        actual: header_2.proposer_index.0,
+                        expected: proposer_index.0,
+                    },
+                ),
+            );
         }
         if header_1 == header_2 {
-            return Err(GossipError::Reject("headers are not different"));
+            return Err(GossipError::reject("headers are not different").with(proposer_detail));
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let proposer = beacon
-            .validators
-            .get(proposer_index.as_usize())
-            .ok_or(GossipError::Reject("proposer index out of range"))?;
+        let proposer = Self::registered(beacon, proposer_index, "proposer index out of range")?;
         if !proposer.is_slashable_at(beacon.current_epoch()) {
-            return Err(GossipError::Reject("proposer is not slashable"));
+            return Err(GossipError::reject("proposer is not slashable").with(proposer_detail));
         }
         for signed in [&slashing.signed_header_1, &slashing.signed_header_2] {
             let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, signed.message.slot.epoch::<P>());
-            if !Self::verify::<BeaconBlockHeader>(
-                &proposer.pubkey,
-                &signed.message,
-                domain,
-                &signed.signature,
-            ) {
-                return Err(GossipError::Reject("invalid proposer slashing signature"));
+            if !SigningClaim::new(&signed.message, domain, &signed.signature)
+                .is_signed_by(&proposer.pubkey)
+            {
+                return Err(GossipError::reject("invalid proposer slashing signature")
+                    .with(proposer_detail));
             }
         }
         self.seen.proposer_slashing_indices.insert(proposer_index);
@@ -446,24 +482,12 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     ///
     /// Ignores or rejects as the spec's rules say.
     pub fn attester_slashing(&mut self, slashing: &AttesterSlashing<P>) -> Verdict {
-        let first: HashSet<ValidatorIndex> = slashing
-            .attestation_1
-            .attesting_indices
-            .iter()
-            .copied()
-            .collect();
-        let both: Vec<ValidatorIndex> = slashing
-            .attestation_2
-            .attesting_indices
-            .iter()
-            .copied()
-            .filter(|index| first.contains(index))
-            .collect();
+        let both = slashing.common_signers();
         if both
             .iter()
             .all(|index| self.seen.attester_slashing_indices.contains(index))
         {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "all attester slashing indices already seen",
             ));
         }
@@ -472,7 +496,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .data
             .is_slashable_with(&slashing.attestation_2.data)
         {
-            return Err(GossipError::Reject("attestation data is not slashable"));
+            return Err(GossipError::reject("attestation data is not slashable"));
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
@@ -489,15 +513,18 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             ),
         ] {
             let count = beacon.validators.len() as u64;
-            if attestation
+            if let Some(index) = attestation
                 .attesting_indices
                 .iter()
-                .any(|index| index.0 >= count)
+                .find(|index| index.0 >= count)
             {
-                return Err(GossipError::Reject(out_of_range));
+                return Err(GossipError::reject(out_of_range).with(Detail::Bound {
+                    value: index.0,
+                    bound: count,
+                }));
             }
-            if !Self::is_valid_indexed_attestation(&state, attestation) {
-                return Err(GossipError::Reject(invalid));
+            if !Signers::of(state.beacon()).is_valid_indexed_attestation(attestation) {
+                return Err(GossipError::reject(invalid));
             }
         }
         let epoch = beacon.current_epoch();
@@ -505,7 +532,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .iter()
             .any(|index| beacon.validators[index.as_usize()].is_slashable_at(epoch))
         {
-            return Err(GossipError::Reject(
+            return Err(GossipError::reject(
                 "no slashable validators in intersection",
             ));
         }
@@ -539,7 +566,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .get(&data_key)
             .is_some_and(|seen| Seen::is_covered(seen, &bits))
         {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen contribution for this data",
             ));
         }
@@ -548,49 +575,45 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             message.aggregator_index,
             contribution.subcommittee_index,
         );
+        let aggregator_detail = Detail::Validator(message.aggregator_index);
         if self
             .seen
             .sync_contribution_aggregator_slots
             .contains(&aggregator_key)
         {
-            return Err(GossipError::Ignore(
-                "already seen contribution from this aggregator",
-            ));
+            return Err(
+                GossipError::ignore("already seen contribution from this aggregator")
+                    .with(aggregator_detail),
+            );
         }
-        if !self.view.is_within_slot_range(contribution.slot, 0, now_ms) {
-            return Err(GossipError::Ignore(
-                "contribution is not for the current slot",
-            ));
-        }
-        if contribution.subcommittee_index >= SYNC_COMMITTEE_SUBNET_COUNT {
-            return Err(GossipError::Reject("subcommittee index out of range"));
-        }
-        if !bits.iter().any(|bit| *bit) {
-            return Err(GossipError::Reject("contribution has no participants"));
-        }
+        self.contribution_is_well_formed(contribution, &bits, now_ms)?;
         // Threshold: about 16 aggregators per subcommittee.
         let modulo = (P::SYNC_COMMITTEE_SIZE
             / SYNC_COMMITTEE_SUBNET_COUNT
             / TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE)
             .max(1);
-        if !Self::selects(&message.selection_proof, modulo) {
-            return Err(GossipError::Reject(
-                "validator is not selected as aggregator",
-            ));
+        if !message.selection_proof.selects(modulo) {
+            return Err(
+                GossipError::reject("validator is not selected as aggregator")
+                    .with(aggregator_detail),
+            );
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let aggregator = beacon
-            .validators
-            .get(message.aggregator_index.as_usize())
-            .ok_or(GossipError::Reject("aggregator index out of range"))?;
-        let subcommittee = Self::sync_subcommittee(&state, contribution.subcommittee_index);
+        let aggregator = Self::registered(
+            beacon,
+            message.aggregator_index,
+            "aggregator index out of range",
+        )?;
+        let subcommittee =
+            Signers::of(state.beacon()).sync_subcommittee(contribution.subcommittee_index);
         if !subcommittee.contains(&aggregator.pubkey) {
-            return Err(GossipError::Reject(
-                "aggregator is not a member of the committee",
-            ));
+            return Err(
+                GossipError::reject("aggregator is not a member of the committee")
+                    .with(aggregator_detail),
+            );
         }
-        Self::verify_contributor(&state, &aggregator.pubkey, signed)?;
+        Signers::of(state.beacon()).verify_contributor(&aggregator.pubkey, signed)?;
         let epoch = contribution.slot.epoch::<P>();
         let participants: Vec<BlsPubkey> = subcommittee
             .iter()
@@ -599,13 +622,14 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .map(|(pubkey, _)| *pubkey)
             .collect();
         let sync_domain = beacon.domain(DOMAIN_SYNC_COMMITTEE, epoch);
-        if !Self::verify_aggregate(
-            &participants,
+        if !SigningClaim::new(
             &contribution.beacon_block_root,
             sync_domain,
             &contribution.signature,
-        ) {
-            return Err(GossipError::Reject("invalid aggregate signature"));
+        )
+        .is_signed_by_all(&participants)
+        {
+            return Err(GossipError::reject("invalid aggregate signature"));
         }
         self.seen
             .sync_contribution_aggregator_slots
@@ -632,43 +656,51 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         subnet: SubnetId,
     ) -> Verdict {
         let key = (message.slot, message.validator_index, subnet);
+        let validator_detail = Detail::Validator(message.validator_index);
         if self.seen.sync_message_validator_slots.contains(&key) {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen message from this validator for this slot and subnet",
-            ));
+            )
+            .with(validator_detail));
         }
         if !self.view.is_within_slot_range(message.slot, 0, now_ms) {
-            return Err(GossipError::Ignore("message is not for the current slot"));
+            return Err(
+                GossipError::ignore("message is not for the current slot").with(Detail::Slot {
+                    slot: message.slot,
+                    reference: self.view.current_slot(now_ms),
+                }),
+            );
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let validator = beacon
-            .validators
-            .get(message.validator_index.as_usize())
-            .ok_or(GossipError::Reject("validator index out of range"))?;
+        let validator = Self::registered(
+            beacon,
+            message.validator_index,
+            "validator index out of range",
+        )?;
         // The subnet holds the subcommittees the validator sits in, by position in the committee.
         let size = (P::SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT) as usize;
-        let in_subnet = Self::sync_committee_for_next_slot(&state)
+        let in_subnet = Signers::of(state.beacon())
+            .sync_committee_for_next_slot()
             .iter()
             .enumerate()
             .any(|(position, pubkey)| {
                 *pubkey == validator.pubkey && (position / size) as u64 == subnet.0
             });
         if !in_subnet {
-            return Err(GossipError::Reject(
-                "subnet_id is not valid for the validator",
-            ));
+            return Err(
+                GossipError::reject("subnet_id is not valid for the validator")
+                    .with(validator_detail),
+            );
         }
         let domain = beacon.domain(DOMAIN_SYNC_COMMITTEE, message.slot.epoch::<P>());
-        if !Self::verify(
-            &validator.pubkey,
-            &message.beacon_block_root,
-            domain,
-            &message.signature,
-        ) {
-            return Err(GossipError::Reject(
-                "invalid sync committee message signature",
-            ));
+        if !SigningClaim::new(&message.beacon_block_root, domain, &message.signature)
+            .is_signed_by(&validator.pubkey)
+        {
+            return Err(
+                GossipError::reject("invalid sync committee message signature")
+                    .with(validator_detail),
+            );
         }
         self.seen.sync_message_validator_slots.insert(key);
         Ok(())
@@ -687,47 +719,58 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         now_ms: u64,
     ) -> Verdict {
         let change = &signed.message;
+        let validator_detail = Detail::Validator(change.validator_index);
         if self
             .seen
             .bls_to_execution_change_indices
             .contains(&change.validator_index)
         {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen BLS to execution change for this validator",
-            ));
+            )
+            .with(validator_detail));
         }
-        if self
-            .view
-            .is_future_epoch(self.view.config().capella_fork_epoch, now_ms)
-        {
-            return Err(GossipError::Ignore("current epoch is pre-capella"));
+        let capella = self.view.config().capella_fork_epoch;
+        if self.view.is_future_epoch(capella, now_ms) {
+            return Err(
+                GossipError::ignore("current epoch is pre-capella").with(Detail::Epoch {
+                    epoch: self.view.current_slot(now_ms).epoch::<P>(),
+                    reference: capella,
+                }),
+            );
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let validator = beacon
-            .validators
-            .get(change.validator_index.as_usize())
-            .ok_or(GossipError::Reject("validator index out of range"))?;
+        let validator = Self::registered(
+            beacon,
+            change.validator_index,
+            "validator index out of range",
+        )?;
         let credentials = validator.withdrawal_credentials.0;
         if credentials[0] != BLS_WITHDRAWAL_PREFIX {
-            return Err(GossipError::Reject(
-                "validator does not have BLS withdrawal credentials",
-            ));
+            return Err(
+                GossipError::reject("validator does not have BLS withdrawal credentials")
+                    .with(validator_detail),
+            );
         }
         if credentials[1..] != Root::sha256(&change.from_bls_pubkey.0).0[1..] {
-            return Err(GossipError::Reject(
+            return Err(GossipError::reject(
                 "pubkey does not match validator withdrawal credentials",
-            ));
+            )
+            .with(validator_detail));
         }
         let domain = Domain::compute(
             DOMAIN_BLS_TO_EXECUTION_CHANGE,
             self.view.config().genesis_fork_version,
             beacon.genesis_validators_root,
         );
-        if !Self::verify(&change.from_bls_pubkey, change, domain, &signed.signature) {
-            return Err(GossipError::Reject(
-                "invalid BLS to execution change signature",
-            ));
+        if !SigningClaim::new(change, domain, &signed.signature)
+            .is_signed_by(&change.from_bls_pubkey)
+        {
+            return Err(
+                GossipError::reject("invalid BLS to execution change signature")
+                    .with(validator_detail),
+            );
         }
         self.seen
             .bls_to_execution_change_indices
@@ -751,82 +794,227 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     ) -> Verdict {
         let header = &sidecar.signed_block_header.message;
         let key = (header.slot, header.proposer_index, sidecar.index);
+        let proposer_detail = Detail::Validator(header.proposer_index);
         if self.seen.data_column_sidecar_tuples.contains(&key) {
-            return Err(GossipError::Ignore(
+            return Err(GossipError::ignore(
                 "already seen sidecar from this proposer for this slot and index",
-            ));
+            )
+            .with(proposer_detail));
         }
         let checked = ColumnSidecar(sidecar);
-        if checked.verify_structure(self.view.config()).is_err() {
-            return Err(GossipError::Reject("invalid sidecar"));
+        if let Err(error) = checked.verify_structure(self.view.config()) {
+            return Err(GossipError::reject("invalid sidecar").with(Detail::Column(error)));
         }
-        if sidecar.index.0 % self.view.config().data_column_sidecar_subnet_count != subnet.0 {
-            return Err(GossipError::Reject("sidecar is for wrong subnet"));
-        }
-        if self.view.is_future_slot(header.slot, now_ms) {
-            return Err(GossipError::Ignore("sidecar is from a future slot"));
-        }
-        if header.slot <= self.view.finalized.epoch.start_slot::<P>() {
-            return Err(GossipError::Ignore(
-                "sidecar is not from a slot greater than the latest finalized slot",
+        let expected_subnet = sidecar.index.0 % self.view.config().data_column_sidecar_subnet_count;
+        if expected_subnet != subnet.0 {
+            return Err(GossipError::reject("sidecar is for wrong subnet").with(
+                Detail::Mismatch {
+                    actual: subnet.0,
+                    expected: expected_subnet,
+                },
             ));
         }
+        self.header_slot_is_timely(
+            header.slot,
+            now_ms,
+            "sidecar is from a future slot",
+            "sidecar is not from a slot greater than the latest finalized slot",
+        )?;
+        let parent_detail = Detail::Block(header.parent_root);
         let Some(parent) = self.view.block(&header.parent_root) else {
-            return Err(GossipError::Ignore("sidecar's parent has not been seen"));
+            return Err(
+                GossipError::ignore("sidecar's parent has not been seen").with(parent_detail)
+            );
         };
         if !self.view.is_imported(&header.parent_root) {
-            return Err(GossipError::Reject("sidecar's parent failed validation"));
+            return Err(
+                GossipError::reject("sidecar's parent failed validation").with(parent_detail)
+            );
         }
         let state = self.head_state()?;
         let beacon = state.beacon();
-        let proposer = beacon
-            .validators
-            .get(header.proposer_index.as_usize())
-            .ok_or(GossipError::Reject("proposer index out of range"))?;
+        let proposer =
+            Self::registered(beacon, header.proposer_index, "proposer index out of range")?;
         let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
-        if !Self::verify(
-            &proposer.pubkey,
-            header,
-            domain,
-            &sidecar.signed_block_header.signature,
-        ) {
-            return Err(GossipError::Reject(
-                "invalid proposer signature on sidecar block header",
-            ));
+        if !SigningClaim::new(header, domain, &sidecar.signed_block_header.signature)
+            .is_signed_by(&proposer.pubkey)
+        {
+            return Err(
+                GossipError::reject("invalid proposer signature on sidecar block header")
+                    .with(proposer_detail),
+            );
         }
         if header.slot <= parent.slot {
-            return Err(GossipError::Reject(
-                "sidecar is not from a higher slot than its parent",
-            ));
+            return Err(
+                GossipError::reject("sidecar is not from a higher slot than its parent").with(
+                    Detail::Slot {
+                        slot: header.slot,
+                        reference: parent.slot,
+                    },
+                ),
+            );
         }
         if !self.view.descends_from_finalized(header.parent_root) {
-            return Err(GossipError::Reject(
+            return Err(GossipError::reject(
                 "finalized checkpoint is not an ancestor of sidecar's block",
-            ));
+            )
+            .with(parent_detail));
         }
-        if checked.verify_inclusion_proof().is_err() {
-            return Err(GossipError::Reject("invalid sidecar inclusion proof"));
+        if let Err(error) = checked.verify_inclusion_proof() {
+            return Err(
+                GossipError::reject("invalid sidecar inclusion proof").with(Detail::Column(error))
+            );
         }
-        if ColumnSidecar(sidecar).verify_kzg_proofs(kzg).is_err() {
-            return Err(GossipError::Reject("invalid sidecar kzg proofs"));
+        if let Err(error) = checked.verify_kzg_proofs(kzg) {
+            return Err(
+                GossipError::reject("invalid sidecar kzg proofs").with(Detail::Column(error))
+            );
         }
         let parent_state = self.parent_state(&header.parent_root, header.slot)?;
-        if header.proposer_index != parent_state.beacon().beacon_proposer_index() {
-            return Err(GossipError::Reject(
+        let expected_proposer = parent_state.beacon().beacon_proposer_index();
+        if header.proposer_index != expected_proposer {
+            return Err(GossipError::reject(
                 "sidecar proposer_index does not match expected proposer",
-            ));
+            )
+            .with(Detail::Mismatch {
+                actual: header.proposer_index.0,
+                expected: expected_proposer.0,
+            }));
         }
         self.seen.data_column_sidecar_tuples.insert(key);
         Ok(())
     }
 
-    /// Committees of an epoch in a state, computed directly when the state does not cache them.
+    /// The one committee an aggregate's data and bits select.
+    fn aggregate_committee(aggregate: &Attestation<P>) -> Result<CommitteeIndex, GossipError> {
+        if aggregate.data.index.0 != 0 {
+            return Err(
+                GossipError::reject("aggregate data index is non-zero").with(Detail::Mismatch {
+                    actual: aggregate.data.index.0,
+                    expected: 0,
+                }),
+            );
+        }
+        let committees: Vec<CommitteeIndex> = aggregate.committee_indices().collect();
+        let [index] = committees[..] else {
+            return Err(GossipError::reject(
+                "aggregate committee bits must specify exactly one committee",
+            )
+            .with(Detail::Mismatch {
+                actual: committees.len() as u64,
+                expected: 1,
+            }));
+        };
+        Ok(index)
+    }
+
+    /// Checks that a block header's slot has started and comes after finality.
     ///
-    /// The head state answers for any epoch whose randomness it holds, as the spec's accessors do.
-    fn committees(state: &mut State<P>, epoch: Epoch) -> Arc<EpochCommittees> {
-        state
-            .committees(epoch)
-            .unwrap_or_else(|_| Arc::new(EpochCommittees::compute(state.beacon(), epoch)))
+    /// The reasons word the two rules for the message, a block or a sidecar.
+    fn header_slot_is_timely(
+        &self,
+        slot: Slot,
+        now_ms: u64,
+        future_reason: &'static str,
+        finalized_reason: &'static str,
+    ) -> Verdict {
+        if self.view.is_future_slot(slot, now_ms) {
+            return Err(GossipError::ignore(future_reason).with(Detail::Slot {
+                slot,
+                reference: self.view.current_slot(now_ms),
+            }));
+        }
+        let finalized_slot = self.view.finalized.epoch.start_slot::<P>();
+        if slot <= finalized_slot {
+            return Err(GossipError::ignore(finalized_reason).with(Detail::Slot {
+                slot,
+                reference: finalized_slot,
+            }));
+        }
+        Ok(())
+    }
+
+    /// Checks that a vote's slot has started, is recent, and lies in its target epoch.
+    ///
+    /// The reasons word the first two rules for the message, an aggregate or an attestation.
+    fn vote_is_timely(
+        &self,
+        data: &AttestationData,
+        now_ms: u64,
+        future_reason: &'static str,
+        epoch_reason: &'static str,
+    ) -> Verdict {
+        if self.view.is_future_slot(data.slot, now_ms) {
+            return Err(GossipError::ignore(future_reason).with(Detail::Slot {
+                slot: data.slot,
+                reference: self.view.current_slot(now_ms),
+            }));
+        }
+        let epoch = data.slot.epoch::<P>();
+        if !self.view.is_current_or_previous_epoch(epoch, now_ms) {
+            return Err(GossipError::ignore(epoch_reason).with(Detail::Epoch {
+                epoch,
+                reference: self.view.current_slot(now_ms).epoch::<P>(),
+            }));
+        }
+        if data.target.epoch != epoch {
+            return Err(
+                GossipError::reject("attestation epoch does not match target epoch").with(
+                    Detail::Epoch {
+                        epoch: data.target.epoch,
+                        reference: epoch,
+                    },
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks that a contribution is for the current slot, an existing subcommittee, and someone.
+    fn contribution_is_well_formed(
+        &self,
+        contribution: &SyncCommitteeContribution<P>,
+        bits: &[bool],
+        now_ms: u64,
+    ) -> Verdict {
+        if !self.view.is_within_slot_range(contribution.slot, 0, now_ms) {
+            return Err(
+                GossipError::ignore("contribution is not for the current slot").with(
+                    Detail::Slot {
+                        slot: contribution.slot,
+                        reference: self.view.current_slot(now_ms),
+                    },
+                ),
+            );
+        }
+        if contribution.subcommittee_index >= SYNC_COMMITTEE_SUBNET_COUNT {
+            return Err(GossipError::reject("subcommittee index out of range").with(
+                Detail::Bound {
+                    value: contribution.subcommittee_index,
+                    bound: SYNC_COMMITTEE_SUBNET_COUNT,
+                },
+            ));
+        }
+        if !bits.iter().any(|bit| *bit) {
+            return Err(GossipError::reject("contribution has no participants"));
+        }
+        Ok(())
+    }
+
+    /// The validator at an index of a state's registry.
+    ///
+    /// The reason words the rule for the message's role, such as proposer or aggregator.
+    fn registered<'s>(
+        beacon: &'s BeaconState<P>,
+        index: ValidatorIndex,
+        reason: &'static str,
+    ) -> Result<&'s Validator, GossipError> {
+        beacon.validators.get(index.as_usize()).ok_or_else(|| {
+            GossipError::reject(reason).with(Detail::Bound {
+                value: index.0,
+                bound: beacon.validators.len() as u64,
+            })
+        })
     }
 
     /// Checks that a vote's target is on its head block's chain, which descends from finality.
@@ -837,82 +1025,17 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .checkpoint_block(data.beacon_block_root, data.target.epoch)
             != Some(data.target.root)
         {
-            return Err(GossipError::Reject(
-                "target block is not an ancestor of LMD vote block",
-            ));
+            return Err(
+                GossipError::reject("target block is not an ancestor of LMD vote block")
+                    .with(Detail::Block(data.target.root)),
+            );
         }
         // A vote off the finalized chain is useless but may come from an honest lagging peer.
         if !self.view.descends_from_finalized(data.beacon_block_root) {
-            return Err(GossipError::Ignore(
-                "finalized checkpoint is not an ancestor of block",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Checks an attestation aggregator's slot signature and its signature over the message.
-    fn verify_aggregator(state: &State<P>, signed: &SignedAggregateAndProof<P>) -> Verdict {
-        let message = &signed.message;
-        let data = &message.aggregate.data;
-        let beacon = state.beacon();
-        // Committee membership was checked, so the index is in range for an honest message.
-        let aggregator = beacon
-            .validators
-            .get(message.aggregator_index.as_usize())
-            .ok_or(GossipError::Reject(
-                "aggregator is not a member of the committee",
-            ))?;
-        // The selection proof signs the slot, and its hash decides who aggregates.
-        let selection_domain = beacon.domain(DOMAIN_SELECTION_PROOF, data.target.epoch);
-        if !Self::verify(
-            &aggregator.pubkey,
-            &data.slot,
-            selection_domain,
-            &message.selection_proof,
-        ) {
-            return Err(GossipError::Reject("invalid selection proof signature"));
-        }
-        // The outer signature binds the aggregate to the aggregator.
-        let aggregate_domain = beacon.domain(DOMAIN_AGGREGATE_AND_PROOF, data.target.epoch);
-        if !Self::verify(
-            &aggregator.pubkey,
-            message,
-            aggregate_domain,
-            &signed.signature,
-        ) {
-            return Err(GossipError::Reject("invalid aggregator signature"));
-        }
-        Ok(())
-    }
-
-    /// Checks a sync contribution aggregator's selection proof and its signature over the message.
-    fn verify_contributor(
-        state: &State<P>,
-        pubkey: &BlsPubkey,
-        signed: &SignedContributionAndProof<P>,
-    ) -> Verdict {
-        let message = &signed.message;
-        let contribution = &message.contribution;
-        let beacon = state.beacon();
-        let epoch = contribution.slot.epoch::<P>();
-        // The selection proof signs the slot and subcommittee, and its hash decides who aggregates.
-        let selection = SyncAggregatorSelectionData {
-            slot: contribution.slot,
-            subcommittee_index: contribution.subcommittee_index,
-        };
-        let selection_domain = beacon.domain(DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, epoch);
-        if !Self::verify(
-            pubkey,
-            &selection,
-            selection_domain,
-            &message.selection_proof,
-        ) {
-            return Err(GossipError::Reject("invalid selection proof signature"));
-        }
-        // The outer signature binds the contribution to the aggregator.
-        let contribution_domain = beacon.domain(DOMAIN_CONTRIBUTION_AND_PROOF, epoch);
-        if !Self::verify(pubkey, message, contribution_domain, &signed.signature) {
-            return Err(GossipError::Reject("invalid aggregator signature"));
+            return Err(
+                GossipError::ignore("finalized checkpoint is not an ancestor of block")
+                    .with(Detail::Block(data.beacon_block_root)),
+            );
         }
         Ok(())
     }
@@ -920,127 +1043,42 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     /// Checks that the block a vote names is known and valid.
     fn voted_block_is_valid(&self, root: Root) -> Verdict {
         if self.view.block(&root).is_none() {
-            return Err(GossipError::Ignore(
-                "block being voted for has not been seen",
-            ));
+            return Err(
+                GossipError::ignore("block being voted for has not been seen")
+                    .with(Detail::Block(root)),
+            );
         }
         if !self.view.is_imported(&root) {
-            return Err(GossipError::Reject(
-                "block being voted for failed validation",
-            ));
+            return Err(
+                GossipError::reject("block being voted for failed validation")
+                    .with(Detail::Block(root)),
+            );
         }
         Ok(())
     }
 
     /// The head's post-state, which most rules read.
     fn head_state(&mut self) -> Result<State<P>, GossipError> {
-        self.view
-            .head_state()
-            .map_err(|_| GossipError::Ignore("head state is unavailable"))
+        self.view.head_state().map_err(|error| {
+            GossipError::ignore("head state is unavailable").with(Self::missing_block(&error))
+        })
     }
 
     /// A parent's post-state advanced to a slot, to find that slot's proposer.
     ///
     /// When the shuffling cannot be computed, the spec says to ignore rather than reject.
     fn parent_state(&self, parent: &Root, slot: Slot) -> Result<State<P>, GossipError> {
-        self.view
-            .state_at(parent, slot)
-            .map_err(|_| GossipError::Ignore("proposer shuffling is unavailable"))
+        self.view.state_at(parent, slot).map_err(|error| {
+            GossipError::ignore("proposer shuffling is unavailable")
+                .with(Self::missing_block(&error))
+        })
     }
 
-    /// Whether a signature's hash selects its signer, one in every modulo.
-    ///
-    /// See `is_aggregator` in the phase0 validator spec.
-    fn selects(signature: &BlsSignature, modulo: u64) -> bool {
-        let digest = Root::sha256(&signature.0);
-        let mut word = [0; 8];
-        word.copy_from_slice(&digest.0[..8]);
-        u64::from_le_bytes(word).is_multiple_of(modulo)
-    }
-
-    /// The sync committee whose members sign for the slot after the state's.
-    ///
-    /// Members for a slot sign the previous slot's block.
-    /// At a period boundary that is the next committee.
-    fn sync_committee_for_next_slot(state: &State<P>) -> Vec<BlsPubkey> {
-        let beacon = state.beacon();
-        let period = |epoch: Epoch| epoch.0 / P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
-        let committee = if period(beacon.current_epoch()) == period((beacon.slot + 1).epoch::<P>())
-        {
-            &beacon.current_sync_committee
-        } else {
-            &beacon.next_sync_committee
-        };
-        committee.pubkeys.to_vec()
-    }
-
-    /// Members of one sync subcommittee.
-    ///
-    /// See `get_sync_subcommittee_pubkeys` in the Altair p2p spec.
-    fn sync_subcommittee(state: &State<P>, subcommittee: u64) -> Vec<BlsPubkey> {
-        let size = (P::SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT) as usize;
-        let start = subcommittee as usize * size;
-        Self::sync_committee_for_next_slot(state)
-            .into_iter()
-            .skip(start)
-            .take(size)
-            .collect()
-    }
-
-    /// Whether an indexed attestation has sorted unique indices and a valid signature.
-    fn is_valid_indexed_attestation(state: &State<P>, attestation: &IndexedAttestation<P>) -> bool {
-        let indices = &attestation.attesting_indices;
-        if indices.is_empty() || !indices.windows(2).all(|pair| pair[0] < pair[1]) {
-            return false;
+    /// The block whose state a fork choice lookup lacked, when that is why it failed.
+    const fn missing_block(error: &ForkChoiceError) -> Detail {
+        match error {
+            ForkChoiceError::MissingState(root) => Detail::Block(*root),
+            _ => Detail::None,
         }
-        let beacon = state.beacon();
-        let keys: Vec<BlsPubkey> = indices
-            .iter()
-            .map(|index| beacon.validators[index.as_usize()].pubkey)
-            .collect();
-        let domain = beacon.domain(DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch);
-        Self::verify_aggregate(&keys, &attestation.data, domain, &attestation.signature)
-    }
-
-    /// Whether a key signed an object in a domain.
-    fn verify<T: Ssz>(
-        pubkey: &BlsPubkey,
-        object: &T,
-        domain: Domain,
-        signature: &BlsSignature,
-    ) -> bool {
-        let (Ok(key), Ok(signature)) = (
-            PublicKey::from_bytes(&pubkey.0),
-            Signature::from_bytes(&signature.0),
-        ) else {
-            return false;
-        };
-        signature.verify(&key, &SigningData::signing_root(object, domain).0)
-    }
-
-    /// Whether keys signed an object together, with an empty set and the empty signature accepted.
-    ///
-    /// See `eth_fast_aggregate_verify` in the Altair BLS extensions.
-    fn verify_aggregate<T: Ssz>(
-        pubkeys: &[BlsPubkey],
-        object: &T,
-        domain: Domain,
-        signature: &BlsSignature,
-    ) -> bool {
-        let Ok(signature) = Signature::from_bytes(&signature.0) else {
-            return false;
-        };
-        if pubkeys.is_empty() {
-            return signature.is_infinity();
-        }
-        let Ok(keys) = pubkeys
-            .iter()
-            .map(|pubkey| PublicKey::from_bytes(&pubkey.0))
-            .collect::<Result<Vec<_>, _>>()
-        else {
-            return false;
-        };
-        let refs: Vec<&PublicKey> = keys.iter().collect();
-        signature.fast_aggregate_verify(&refs, &SigningData::signing_root(object, domain).0)
     }
 }

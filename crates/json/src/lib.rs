@@ -20,7 +20,7 @@
 //! A 256-bit wei amount or a 64-bit gas limit never passes through a float.
 //!
 //! Ethereum JSON-RPC carries integers and bytes as hex strings.
-//! The quantity and data modules encode and decode them.
+//! Two codec traits encode and decode them.
 //!
 //! ```text
 //!     QUANTITY  minimal hex of an integer    0      -> "0x0"
@@ -28,34 +28,23 @@
 //!     DATA      two hex digits per byte      []     -> "0x"
 //!                                            [0, 1] -> "0x0001"
 //! ```
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_json::{Json, quantity};
-//!
-//! let text = br#"{"jsonrpc":"2.0","id":1,"result":"0x400"}"#;
-//! let value = Json::parse(text).unwrap();
-//!
-//! let result = value.get("result").and_then(Json::as_str).unwrap();
-//! assert_eq!(quantity::decode(result), Ok(1024));
-//!
-//! assert_eq!(value.to_string().as_bytes(), text);
-//! ```
 
-pub mod data;
+mod data;
 mod error;
+mod frame;
 mod hex;
 mod number;
 mod object;
 mod parser;
-pub mod quantity;
+mod quantity;
 mod value;
 mod writer;
 
+pub use data::Data;
 pub use error::{ErrorKind, ParseError};
 pub use hex::HexError;
 pub use number::{Number, NumberError};
 pub use object::Object;
 pub use parser::Limits;
+pub use quantity::Quantity;
 pub use value::Json;

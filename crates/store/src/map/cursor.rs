@@ -2,7 +2,7 @@
 
 use std::{ops::Bound, sync::Arc};
 
-use super::Node;
+use super::{Node, range::KeyRange};
 
 /// A double-ended iterator over the nodes of a map whose keys fall within two bounds.
 ///
@@ -35,10 +35,8 @@ pub(crate) struct Cursor<V> {
     front: Vec<Arc<Node<V>>>,
     /// Unvisited nodes for the descending end, the next one on top.
     back: Vec<Arc<Node<V>>>,
-    /// Upper bound the ascending end must respect.
-    upper: Bound<Box<[u8]>>,
-    /// Lower bound the descending end must respect.
-    lower: Bound<Box<[u8]>>,
+    /// The bounds both ends must respect.
+    range: KeyRange,
     /// Last node yielded by the ascending end.
     last_front: Option<Arc<Node<V>>>,
     /// Last node yielded by the descending end.
@@ -52,10 +50,12 @@ impl<V> Cursor<V> {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Self {
+        let range = KeyRange::new(lower, upper);
+
         let mut front = Vec::new();
         let mut node = root;
         while let Some(current) = node {
-            if above(lower, &current.key) {
+            if range.above_lower(&current.key) {
                 // In range from below: visit it after everything on its left.
                 front.push(Arc::clone(current));
                 node = current.left.as_ref();
@@ -68,7 +68,7 @@ impl<V> Cursor<V> {
         let mut back = Vec::new();
         let mut node = root;
         while let Some(current) = node {
-            if below(upper, &current.key) {
+            if range.below_upper(&current.key) {
                 // Mirror image: visit it after everything on its right.
                 back.push(Arc::clone(current));
                 node = current.right.as_ref();
@@ -80,8 +80,7 @@ impl<V> Cursor<V> {
         Self {
             front,
             back,
-            upper: owned(upper),
-            lower: owned(lower),
+            range,
             last_front: None,
             last_back: None,
         }
@@ -119,7 +118,7 @@ impl<V> Iterator for Cursor<V> {
         self.push_left_spine(node.right.as_ref());
 
         // Stop past the upper bound, or where the descending end already went.
-        let past_upper = !below(as_ref(&self.upper), &node.key);
+        let past_upper = !self.range.below_upper(&node.key);
         let met_back = self
             .last_back
             .as_ref()
@@ -139,7 +138,7 @@ impl<V> DoubleEndedIterator for Cursor<V> {
         // The in-order predecessor is the largest key of the left subtree.
         self.push_right_spine(node.left.as_ref());
 
-        let past_lower = !above(as_ref(&self.lower), &node.key);
+        let past_lower = !self.range.above_lower(&node.key);
         let met_front = self
             .last_front
             .as_ref()
@@ -151,34 +150,6 @@ impl<V> DoubleEndedIterator for Cursor<V> {
         self.last_back = Some(Arc::clone(&node));
         Some(node)
     }
-}
-
-/// Returns whether a key respects a lower bound.
-fn above(lower: Bound<&[u8]>, key: &[u8]) -> bool {
-    match lower {
-        Bound::Included(bound) => key >= bound,
-        Bound::Excluded(bound) => key > bound,
-        Bound::Unbounded => true,
-    }
-}
-
-/// Returns whether a key respects an upper bound.
-fn below(upper: Bound<&[u8]>, key: &[u8]) -> bool {
-    match upper {
-        Bound::Included(bound) => key <= bound,
-        Bound::Excluded(bound) => key < bound,
-        Bound::Unbounded => true,
-    }
-}
-
-/// Copies a borrowed bound into an owned one.
-fn owned(bound: Bound<&[u8]>) -> Bound<Box<[u8]>> {
-    bound.map(Box::from)
-}
-
-/// Borrows an owned bound.
-fn as_ref(bound: &Bound<Box<[u8]>>) -> Bound<&[u8]> {
-    bound.as_ref().map(AsRef::as_ref)
 }
 
 #[cfg(test)]

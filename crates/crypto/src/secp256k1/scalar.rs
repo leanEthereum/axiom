@@ -2,7 +2,7 @@
 
 use std::array;
 
-use super::field::{add_with_carry, limbs_from_be_bytes, limbs_to_be_bytes, sub_with_borrow};
+use super::uint::{U256, U320};
 use crate::ct::Mask;
 
 /// The group order n in four little-endian 64-bit limbs, per SEC 2, section 2.4.1.
@@ -93,17 +93,17 @@ impl Scalar {
     #[cfg(test)]
     pub(super) const ONE: Self = Self([1, 0, 0, 0]);
 
-    /// The order n itself as raw limbs, for comparisons against field values.
-    pub(super) const ORDER: [u64; 4] = N;
+    /// The order n itself as an integer, for comparisons against field values.
+    pub(super) const ORDER: U256 = U256(N);
 
     /// Decodes 32 big-endian bytes, refusing values at or above n.
     ///
     /// The check runs in constant time and reveals only its outcome.
     pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
         // Big-endian bytes to little-endian limbs, then the range check.
-        let limbs = limbs_from_be_bytes(bytes);
-        let (_, borrow) = sub_with_borrow(limbs, N);
-        Mask::from_bit(borrow).reveal().then_some(Self(limbs))
+        let value = U256::from_be_bytes(bytes);
+        let (_, borrow) = value.sub_with_borrow(Self::ORDER);
+        Mask::from_bit(borrow).reveal().then_some(Self(value.0))
     }
 
     /// Decodes 32 big-endian bytes and reduces modulo n.
@@ -111,23 +111,25 @@ impl Scalar {
     /// The second value holds when a reduction happened, that is when the input was at least n.
     pub(super) fn from_bytes_reduced(bytes: &[u8; 32]) -> (Self, Mask) {
         // Any 256-bit value is below 2n, so one conditional subtraction suffices.
-        let limbs = limbs_from_be_bytes(bytes);
-        let (reduced, borrow) = sub_with_borrow(limbs, N);
+        let value = U256::from_be_bytes(bytes);
+        let (reduced, borrow) = value.sub_with_borrow(Self::ORDER);
         let overflowed = Mask::from_bit(borrow).not();
         (
-            Self(array::from_fn(|i| overflowed.select(reduced[i], limbs[i]))),
+            Self(array::from_fn(|i| {
+                overflowed.select(reduced.0[i], value.0[i])
+            })),
             overflowed,
         )
     }
 
     /// Encodes as 32 big-endian bytes.
     pub(super) fn to_bytes(self) -> [u8; 32] {
-        limbs_to_be_bytes(self.0)
+        self.to_uint().to_be_bytes()
     }
 
-    /// The raw little-endian limbs.
-    pub(super) const fn limbs(self) -> [u64; 4] {
-        self.0
+    /// The canonical value as an integer.
+    pub(super) const fn to_uint(self) -> U256 {
+        U256(self.0)
     }
 
     /// Holds when the scalar is zero.
@@ -139,7 +141,7 @@ impl Scalar {
     /// Holds when the scalar exceeds n / 2, the upper half that low-s signatures avoid.
     pub(super) fn is_high(self) -> Mask {
         // s > n/2 exactly when n/2 - s borrows.
-        let (_, borrow) = sub_with_borrow(HALF_N, self.0);
+        let (_, borrow) = U256(HALF_N).sub_with_borrow(self.to_uint());
         Mask::from_bit(borrow)
     }
 
@@ -170,26 +172,31 @@ impl Scalar {
     #[must_use]
     pub(super) fn add(self, other: Self) -> Self {
         // As in the field: subtract n once when the sum carried or reached n.
-        let (sum, carry) = add_with_carry(self.0, other.0);
-        let (reduced, borrow) = sub_with_borrow(sum, N);
+        let (sum, carry) = self.to_uint().add_with_carry(other.to_uint());
+        let (reduced, borrow) = sum.sub_with_borrow(Self::ORDER);
         let use_reduced = Mask::from_bit(carry).or(Mask::from_bit(borrow).not());
-        Self(array::from_fn(|i| use_reduced.select(reduced[i], sum[i])))
+        Self(array::from_fn(|i| {
+            use_reduced.select(reduced.0[i], sum.0[i])
+        }))
     }
 
     /// The additive inverse.
     #[must_use]
     pub(super) fn neg(self) -> Self {
         // n - a, except 0 stays 0 rather than becoming n.
-        let (difference, _) = sub_with_borrow(N, self.0);
+        let (difference, _) = Self::ORDER.sub_with_borrow(self.to_uint());
         let zero = self.is_zero();
-        Self(difference.map(|limb| zero.select(0, limb)))
+        Self(difference.0.map(|limb| zero.select(0, limb)))
     }
 
     /// The product.
     #[must_use]
     pub(super) fn mul(self, other: Self) -> Self {
         // mont(a, b) = a b / R, and mont(a b / R, R^2) = a b.
-        Self(montgomery_mul(montgomery_mul(self.0, other.0), R2))
+        Self(Self::montgomery_mul(
+            Self::montgomery_mul(self.0, other.0),
+            R2,
+        ))
     }
 
     /// The inverse, by Fermat: a^(n - 2), and zero for zero.
@@ -208,25 +215,25 @@ impl Scalar {
     pub(super) fn invert(self) -> Self {
         // Phase 1: powers of a in Montgomery form.
         // R mod n stands for 1.
-        let base = montgomery_mul(self.0, R2);
-        let one = montgomery_mul([1, 0, 0, 0], R2);
+        let base = Self::montgomery_mul(self.0, R2);
+        let one = Self::montgomery_mul([1, 0, 0, 0], R2);
         let mut table = [one; 16];
         for j in 1..16 {
-            table[j] = montgomery_mul(table[j - 1], base);
+            table[j] = Self::montgomery_mul(table[j - 1], base);
         }
 
         // Phase 2: 64 windows, high to low.
         let mut x = one;
         for window in (0..64).rev() {
             for _ in 0..4 {
-                x = montgomery_mul(x, x);
+                x = Self::montgomery_mul(x, x);
             }
             let digit = (N_MINUS_2[window / 16] >> ((window % 16) * 4)) & 0xf;
-            x = montgomery_mul(x, table[digit as usize]);
+            x = Self::montgomery_mul(x, table[digit as usize]);
         }
 
         // Phase 3: leave Montgomery form, x R / R = x.
-        Self(montgomery_mul(x, [1, 0, 0, 0]))
+        Self(Self::montgomery_mul(x, [1, 0, 0, 0]))
     }
 
     /// The signed-digit width-w NAF of the scalar, least significant digit first.
@@ -240,112 +247,81 @@ impl Scalar {
         let window = 1_u64 << width;
 
         // A five-limb copy holds the running value, which may reach 2^256 after adding a digit.
-        let mut k = [self.0[0], self.0[1], self.0[2], self.0[3], 0];
+        let mut k = U320::from_u256(self.to_uint());
         let mut position = 0;
-        while k.iter().any(|&limb| limb != 0) {
-            if k[0] & 1 == 1 {
+        while !k.is_zero() {
+            if k.low() & 1 == 1 {
                 // Take the low w bits as a signed digit, then clear them from k.
                 //
                 //     low = 0b10011 (19), w = 5 -> digit 19 - 32 = -13, k += 13
-                let low = k[0] & (window - 1);
+                let low = k.low() & (window - 1);
                 if low < window / 2 {
                     // A positive digit: subtract it.
                     digits[position] = (low as u8).cast_signed();
-                    sub_small(&mut k, low);
+                    k.sub_small(low);
                 } else {
                     // A negative digit low - 2^w: add its magnitude.
                     // The magnitude is below 2^(w-1), since low is odd.
                     let magnitude = window - low;
                     digits[position] = -(magnitude as u8).cast_signed();
-                    add_small(&mut k, magnitude);
+                    k.add_small(magnitude);
                 }
             }
-            shift_right_one(&mut k);
+            k.halve();
             position += 1;
         }
         digits
     }
-}
 
-/// The Montgomery product a b R^-1 mod n, for inputs below n.
-///
-/// # Algorithm
-///
-/// Coarsely integrated operand scanning (CIOS), word by word.
-///
-/// ```text
-/// for each limb b_i:
-///     t = t + a b_i              add one row
-///     m = t_0 * (-n^-1) mod 2^64 choose m so the low word cancels
-///     t = (t + m n) / 2^64       exact division by one word
-/// ```
-///
-/// The result lies in [0, 2n), and one masked subtraction brings it under n.
-fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    // Six words: four for t, one for its carry, one spare for the row's overflow.
-    let mut t = [0_u64; 6];
-    for &bi in &b {
-        // Row: t += a * b_i.
-        let mut carry = 0_u128;
-        for j in 0..4 {
-            let sum = u128::from(t[j]) + u128::from(a[j]) * u128::from(bi) + carry;
-            t[j] = sum as u64;
-            carry = sum >> 64;
+    /// The Montgomery product a b R^-1 mod n, for inputs below n.
+    ///
+    /// # Algorithm
+    ///
+    /// Coarsely integrated operand scanning (CIOS), word by word.
+    ///
+    /// ```text
+    /// for each limb b_i:
+    ///     t = t + a b_i              add one row
+    ///     m = t_0 * (-n^-1) mod 2^64 choose m so the low word cancels
+    ///     t = (t + m n) / 2^64       exact division by one word
+    /// ```
+    ///
+    /// The result lies in [0, 2n), and one masked subtraction brings it under n.
+    fn montgomery_mul(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
+        // Six words: four for t, one for its carry, one spare for the row's overflow.
+        let mut t = [0_u64; 6];
+        for &bi in &b {
+            // Row: t += a * b_i.
+            let mut carry = 0_u128;
+            for j in 0..4 {
+                let sum = u128::from(t[j]) + u128::from(a[j]) * u128::from(bi) + carry;
+                t[j] = sum as u64;
+                carry = sum >> 64;
+            }
+            let sum = u128::from(t[4]) + carry;
+            t[4] = sum as u64;
+            t[5] = (sum >> 64) as u64;
+
+            // Reduction: t += m n makes the low word zero.
+            // Then shift down one word.
+            let m = t[0].wrapping_mul(N0_INV);
+            let sum = u128::from(t[0]) + u128::from(m) * u128::from(N[0]);
+            let mut carry = sum >> 64;
+            for j in 1..4 {
+                let sum = u128::from(t[j]) + u128::from(m) * u128::from(N[j]) + carry;
+                t[j - 1] = sum as u64;
+                carry = sum >> 64;
+            }
+            let sum = u128::from(t[4]) + carry;
+            t[3] = sum as u64;
+            t[4] = t[5] + (sum >> 64) as u64;
         }
-        let sum = u128::from(t[4]) + carry;
-        t[4] = sum as u64;
-        t[5] = (sum >> 64) as u64;
 
-        // Reduction: t += m n makes the low word zero.
-        // Then shift down one word.
-        let m = t[0].wrapping_mul(N0_INV);
-        let sum = u128::from(t[0]) + u128::from(m) * u128::from(N[0]);
-        let mut carry = sum >> 64;
-        for j in 1..4 {
-            let sum = u128::from(t[j]) + u128::from(m) * u128::from(N[j]) + carry;
-            t[j - 1] = sum as u64;
-            carry = sum >> 64;
-        }
-        let sum = u128::from(t[4]) + carry;
-        t[3] = sum as u64;
-        t[4] = t[5] + (sum >> 64) as u64;
-    }
-
-    // Final: subtract n when t >= n, judged on the five-limb value.
-    let value = [t[0], t[1], t[2], t[3]];
-    let (reduced, borrow) = sub_with_borrow(value, N);
-    let use_reduced = Mask::from_bit(t[4]).or(Mask::from_bit(borrow).not());
-    array::from_fn(|i| use_reduced.select(reduced[i], value[i]))
-}
-
-/// Adds a small value to a five-limb integer.
-fn add_small(k: &mut [u64; 5], value: u64) {
-    // Ripple the carry upwards.
-    let mut carry = value;
-    for limb in k.iter_mut() {
-        let (sum, overflow) = limb.overflowing_add(carry);
-        *limb = sum;
-        carry = u64::from(overflow);
-    }
-}
-
-/// Subtracts a small value from a five-limb integer that is at least that value.
-fn sub_small(k: &mut [u64; 5], value: u64) {
-    // Ripple the borrow upwards.
-    let mut borrow = value;
-    for limb in k.iter_mut() {
-        let (difference, underflow) = limb.overflowing_sub(borrow);
-        *limb = difference;
-        borrow = u64::from(underflow);
-    }
-}
-
-/// Halves a five-limb integer, dropping the low bit.
-fn shift_right_one(k: &mut [u64; 5]) {
-    // Each limb takes the low bit of the limb above as its new top bit.
-    for i in 0..5 {
-        let next = if i < 4 { k[i + 1] } else { 0 };
-        k[i] = (k[i] >> 1) | (next << 63);
+        // Final: subtract n when t >= n, judged on the five-limb value.
+        let value = [t[0], t[1], t[2], t[3]];
+        let (reduced, borrow) = U256(value).sub_with_borrow(Self::ORDER);
+        let use_reduced = Mask::from_bit(t[4]).or(Mask::from_bit(borrow).not());
+        array::from_fn(|i| use_reduced.select(reduced.0[i], value[i]))
     }
 }
 
@@ -385,23 +361,23 @@ pub(super) mod tests {
 
         // R^2 in Montgomery form maps 1 to R, and R / R = 1.
         assert_eq!(
-            montgomery_mul(montgomery_mul([1, 0, 0, 0], R2), [1, 0, 0, 0]),
+            Scalar::montgomery_mul(Scalar::montgomery_mul([1, 0, 0, 0], R2), [1, 0, 0, 0]),
             [1, 0, 0, 0]
         );
 
         // Half of n: 2 * HALF_N + 1 = n.
-        let (doubled, _) = add_with_carry(HALF_N, HALF_N);
-        assert_eq!(add_with_carry(doubled, [1, 0, 0, 0]).0, N);
+        let (doubled, _) = U256(HALF_N).add_with_carry(U256(HALF_N));
+        assert_eq!(doubled.add_with_carry(U256([1, 0, 0, 0])).0, Scalar::ORDER);
     }
 
     #[test]
     fn decoding_bounds() {
         // n - 1 decodes, n does not, and n reduces to 0 with the overflow flag set.
-        let mut n_minus_one = limbs_to_be_bytes(N);
+        let mut n_minus_one = Scalar::ORDER.to_be_bytes();
         n_minus_one[31] -= 1;
         assert!(Scalar::from_bytes(&n_minus_one).is_some());
-        assert!(Scalar::from_bytes(&limbs_to_be_bytes(N)).is_none());
-        let (reduced, overflowed) = Scalar::from_bytes_reduced(&limbs_to_be_bytes(N));
+        assert!(Scalar::from_bytes(&Scalar::ORDER.to_be_bytes()).is_none());
+        let (reduced, overflowed) = Scalar::from_bytes_reduced(&Scalar::ORDER.to_be_bytes());
         assert_eq!(reduced, Scalar::ZERO);
         assert!(overflowed.reveal());
     }

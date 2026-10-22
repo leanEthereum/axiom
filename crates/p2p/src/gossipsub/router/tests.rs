@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, iter::from_fn, time::Duration};
 
 use super::*;
 use crate::{
-    eth::encode_gossip,
+    eth::GossipEncoding,
     gossipsub::{
         IDontWant, IHave, IWant, TopicScoreParams,
         rpc::{Graft, Prune},
@@ -67,7 +67,10 @@ fn controls(rpcs: &[Rpc]) -> Vec<&ControlMessage> {
 /// An RPC carrying one message on the test topic.
 fn message_rpc(data: &[u8]) -> Rpc {
     Rpc {
-        publish: vec![RawMessage::anonymous(topic(), encode_gossip(data))],
+        publish: vec![RawMessage::anonymous(
+            topic(),
+            GossipEncoding::default().encode(data),
+        )],
         ..Rpc::default()
     }
 }
@@ -197,7 +200,7 @@ fn idontwant_suppresses_forwarding() {
     let mut router = router_with_peers(2);
     let now = Duration::ZERO;
     let message = message_rpc(b"m");
-    let id = (router.config.message_id)(&topic(), &message.publish[0].data);
+    let id = (router.config().message_id)(&topic(), &message.publish[0].data);
     // Peer 2 says it does not want the message.
     let notice = Rpc {
         control: Some(ControlMessage {
@@ -244,7 +247,7 @@ fn ihave_is_answered_with_iwant_and_tracked_as_a_promise() {
     );
     // The peer never delivers: after the 3 s follow-up time, one behaviour penalty.
     router.heartbeat(Duration::from_secs(4));
-    assert_eq!(router.promises.len(), 0);
+    assert_eq!(router.gossip.promises.len(), 0);
     // A single penalty stays under the threshold of 6, so the score is unaffected.
     assert!(router.peer_score(&peer(1), Duration::from_secs(4)) >= 0.0);
 }
@@ -253,7 +256,11 @@ fn ihave_is_answered_with_iwant_and_tracked_as_a_promise() {
 fn iwant_is_served_from_the_cache_with_a_retransmission_limit() {
     let mut router = router_with_peers(1);
     let id = router
-        .publish(topic(), encode_gossip(b"own"), Duration::ZERO)
+        .publish(
+            topic(),
+            GossipEncoding::default().encode(b"own"),
+            Duration::ZERO,
+        )
         .unwrap();
     drain(&mut router);
     let iwant = Rpc {
@@ -326,7 +333,13 @@ fn heartbeat_prunes_an_oversized_mesh() {
     router.heartbeat(Duration::from_millis(700));
     let members: Vec<PeerId> = router.mesh_peers(&topic()).cloned().collect();
     assert_eq!(members.len(), 8);
-    assert!(members.iter().filter(|p| router.is_outbound(p)).count() >= 2);
+    assert!(
+        members
+            .iter()
+            .filter(|p| router.cx.peers.is_outbound(p))
+            .count()
+            >= 2
+    );
 }
 
 #[test]
@@ -334,7 +347,11 @@ fn heartbeat_emits_gossip_to_non_mesh_peers() {
     // 20 peers: 8 in the mesh, 12 outside.
     let mut router = router_with_peers(20);
     router
-        .publish(topic(), encode_gossip(b"gossip me"), Duration::ZERO)
+        .publish(
+            topic(),
+            GossipEncoding::default().encode(b"gossip me"),
+            Duration::ZERO,
+        )
         .unwrap();
     drain(&mut router);
     router.heartbeat(Duration::from_millis(700));
@@ -359,13 +376,24 @@ fn publish_errors() {
     // No peers at all.
     assert_eq!(
         router.publish(topic(), vec![1], Duration::ZERO),
-        Err(PublishError::InsufficientPeers)
+        Err(PublishError::InsufficientPeers { topic: topic() })
     );
     let mut router = router_with_peers(1);
-    router.publish(topic(), vec![1], Duration::ZERO).unwrap();
+    let id = router.publish(topic(), vec![1], Duration::ZERO).unwrap();
     // The same content again is a duplicate.
     assert_eq!(
         router.publish(topic(), vec![1], Duration::ZERO),
-        Err(PublishError::Duplicate)
+        Err(PublishError::Duplicate { id })
+    );
+    // A 100-byte payload under a 100-byte limit.
+    // Framed: data field 1 + 1 + 100, topic field 1 + 1 + 38, plus 16 of allowance → 158.
+    let config = GossipsubConfig {
+        max_transmit_size: 100,
+        ..GossipsubConfig::default()
+    };
+    let mut router = Router::new(config, None, 1);
+    assert_eq!(
+        router.publish(topic(), vec![0; 100], Duration::ZERO),
+        Err(PublishError::MessageTooLarge { len: 158, max: 100 })
     );
 }

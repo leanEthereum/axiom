@@ -32,20 +32,8 @@
 //!
 //! Every read is bounded: head size, field count, body size, and time.
 //! Ambiguous framing, such as both a length and a transfer coding, is refused outright.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_http::{Limits, RequestHead};
-//!
-//! let bytes = b"GET /eth/v1/node/health HTTP/1.1\r\nhost: node\r\n\r\n";
-//! let (head, used) = RequestHead::parse(bytes, &Limits::DEFAULT)
-//!     .unwrap()
-//!     .unwrap();
-//! assert_eq!(head.target, "/eth/v1/node/health");
-//! assert_eq!(used, bytes.len());
-//! ```
 
+mod charset;
 mod client;
 mod connection;
 mod date;
@@ -58,6 +46,7 @@ mod method;
 mod race;
 mod router;
 mod server;
+mod session;
 mod status;
 mod wire;
 

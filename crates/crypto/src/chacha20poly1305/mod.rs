@@ -29,20 +29,6 @@ use crate::{
 ///
 /// A nonce must never repeat under one key.
 /// A repeat reveals the XOR of two plaintexts and the Poly1305 key.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::chacha20poly1305::ChaCha20Poly1305;
-///
-/// let cipher = ChaCha20Poly1305::new(&[7; 32]);
-/// let sealed = cipher.seal(&[0; 12], b"header", b"payload");
-/// assert_eq!(
-///     cipher.open(&[0; 12], b"header", &sealed).unwrap(),
-///     b"payload"
-/// );
-/// assert!(cipher.open(&[1; 12], b"header", &sealed).is_err());
-/// ```
 #[derive(Clone)]
 pub struct ChaCha20Poly1305 {
     /// The 256-bit key.

@@ -24,20 +24,44 @@ pub enum RegistryError {
 }
 
 /// A list of histogram bucket bounds that cannot form a histogram.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+///
+/// The bounds are floats, so the error compares partially, never totally.
+#[derive(Clone, Copy, Debug, PartialEq, Error)]
 #[non_exhaustive]
 pub enum BucketsError {
-    /// The bound at this index is infinite or not a number.
+    /// A bound is infinite or not a number.
     ///
     /// The infinite bucket is implicit and always last.
-    #[error("bucket bound {0} is not finite")]
-    NotFinite(usize),
+    #[error("bucket bound {bound} at index {index} is not finite")]
+    NotFinite {
+        /// The bound's position in the list.
+        index: usize,
+        /// The offending bound.
+        bound: f64,
+    },
 
-    /// The bound at this index does not exceed the one before it.
-    #[error("bucket bound {0} does not exceed the previous bound")]
-    NotIncreasing(usize),
+    /// A bound does not exceed the one before it.
+    #[error("bucket bound {bound} at index {index} does not exceed the previous bound {previous}")]
+    NotIncreasing {
+        /// The bound's position in the list.
+        index: usize,
+        /// The offending bound.
+        bound: f64,
+        /// The bound right before it.
+        previous: f64,
+    },
 
     /// An exponential series needs a positive start, a factor above one, and one bucket.
-    #[error("exponential buckets need a positive start, a factor above one, and a count")]
-    InvalidSeries,
+    #[error(
+        "exponential buckets need a positive start, a factor above one, and a count, \
+         got start {start}, factor {factor}, count {count}"
+    )]
+    InvalidSeries {
+        /// The first bound requested.
+        start: f64,
+        /// The ratio between consecutive bounds.
+        factor: f64,
+        /// The number of bounds requested.
+        count: usize,
+    },
 }

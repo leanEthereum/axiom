@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axiom_types::{Hash32, Root, Slot, ValidatorIndex};
+use axiom_types::{Epoch, Hash32, Preset, Root, Slot, ValidatorIndex};
 
 /// What the execution engine said about a block's payload.
 ///
@@ -172,6 +172,89 @@ impl BlockTree {
         self.nodes
             .get(&ancestor)
             .is_some_and(|node| self.ancestor(descendant, node.slot) == Some(ancestor))
+    }
+
+    /// Slot of a block, or genesis for a block outside the tree.
+    #[must_use]
+    pub fn slot_of(&self, root: &Root) -> Slot {
+        self.nodes.get(root).map_or(Slot::GENESIS, |node| node.slot)
+    }
+
+    /// The chain from just after one block up to and including a descendant, oldest first.
+    ///
+    /// Returns nothing when the first is not a strict ancestor of the second.
+    /// See `get_ancestor_roots` in the phase0 fast confirmation spec.
+    #[must_use]
+    pub fn chain_after(&self, ancestor: Root, descendant: Root) -> Vec<Root> {
+        let ancestor_slot = self.slot_of(&ancestor);
+        let mut roots = Vec::new();
+        let mut current = descendant;
+        while let Some(node) = self.nodes.get(&current) {
+            if node.slot <= ancestor_slot {
+                break;
+            }
+            roots.push(current);
+            current = node.parent_root;
+            if current == ancestor {
+                roots.reverse();
+                return roots;
+            }
+        }
+        Vec::new()
+    }
+
+    /// The block whose randomness fixed an epoch's proposer shuffling, on a block's chain.
+    ///
+    /// See `get_shuffling_dependent_root` in the phase0 fork choice spec.
+    #[must_use]
+    pub fn shuffling_dependent_root<P: Preset>(&self, root: Root, epoch: Epoch) -> Option<Root> {
+        let lookahead_start = epoch
+            .saturating_sub(P::MIN_SEED_LOOKAHEAD)
+            .start_slot::<P>();
+        self.ancestor(root, lookahead_start.saturating_sub(1))
+    }
+
+    /// Whether a block's proposer signed another block for the same slot.
+    #[must_use]
+    pub fn has_proposer_equivocation(&self, root: Root) -> bool {
+        let Some(block) = self.nodes.get(&root) else {
+            return false;
+        };
+        self.iter()
+            .filter(|(_, other)| {
+                other.proposer_index == block.proposer_index && other.slot == block.slot
+            })
+            .count()
+            > 1
+    }
+
+    /// Invalidates the optimistic blocks an invalid payload condemns.
+    ///
+    /// The engine names the latest valid ancestor of the invalid payload.
+    /// Every block after it on the invalid payload's chain is invalid too.
+    ///
+    /// | latest valid hash | first invalid block                                    |
+    /// |-------------------|--------------------------------------------------------|
+    /// | a known hash      | the child of that block on the chain                    |
+    /// | unknown or absent | the block whose payload was judged, not yet in the tree |
+    ///
+    /// See "How to apply latestValidHash" in the Bellatrix optimistic sync spec.
+    pub fn invalidate_after(&mut self, parent: Root, latest_valid_hash: Option<Hash32>) {
+        let Some(latest_valid_hash) = latest_valid_hash else {
+            return;
+        };
+        let mut child: Option<Root> = None;
+        let mut current = parent;
+        while let Some(node) = self.nodes.get(&current) {
+            if node.execution_block_hash == latest_valid_hash {
+                if let Some(first_invalid) = child {
+                    self.mark_invalid(first_invalid);
+                }
+                return;
+            }
+            child = Some(current);
+            current = node.parent_root;
+        }
     }
 }
 

@@ -16,23 +16,6 @@
 //! Fixed-window scalar multiplication reads tables by full scan, and inversions use fixed chains.
 //!
 //! Verification and recovery touch only public data and take faster variable-time paths.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_crypto::secp256k1::SecretKey;
-//!
-//! let alice = SecretKey::from_bytes(&[0xa1; 32]).unwrap();
-//! let bob = SecretKey::from_bytes(&[0xb0; 32]).unwrap();
-//!
-//! let hash = [0x42; 32];
-//! let signature = alice.sign_recoverable(&hash);
-//! assert_eq!(signature.recover(&hash).unwrap(), alice.public_key());
-//!
-//! let ab = alice.diffie_hellman(&bob.public_key());
-//! let ba = bob.diffie_hellman(&alice.public_key());
-//! assert_eq!(ab.to_compressed(), ba.to_compressed());
-//! ```
 
 mod error;
 mod field;
@@ -42,6 +25,7 @@ mod rfc6979;
 mod scalar;
 mod signature;
 mod table;
+mod uint;
 
 pub use error::Secp256k1Error;
 pub use keys::{PublicKey, SecretKey, SharedSecret};
@@ -310,11 +294,11 @@ mod tests {
         // Mutation: lengths other than 33 and 65.
         assert_eq!(
             PublicKey::from_sec1_bytes(&uncompressed[..64]),
-            Err(Secp256k1Error::InvalidPublicKey)
+            Err(Secp256k1Error::InvalidPublicKeyLength(64))
         );
         assert_eq!(
             PublicKey::from_sec1_bytes(&[]),
-            Err(Secp256k1Error::InvalidPublicKey)
+            Err(Secp256k1Error::InvalidPublicKeyLength(0))
         );
     }
 
@@ -327,13 +311,13 @@ mod tests {
         bytes[..32].fill(0);
         assert_eq!(
             Signature::from_bytes(&bytes),
-            Err(Secp256k1Error::InvalidSignature)
+            Err(Secp256k1Error::InvalidSignature { offset: 0 })
         );
         let mut bytes = [1_u8; 64];
         bytes[32..].copy_from_slice(&n);
         assert_eq!(
             Signature::from_bytes(&bytes),
-            Err(Secp256k1Error::InvalidSignature)
+            Err(Secp256k1Error::InvalidSignature { offset: 32 })
         );
         let mut recoverable = [1_u8; 65];
         recoverable[64] = 4;

@@ -14,7 +14,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-snappy.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "throughput"
+harness = false

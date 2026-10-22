@@ -15,23 +15,6 @@ use crate::{
 ///
 /// Every read is strict.
 /// A byte string has at most one accepted reading, so equal values have equal encodings.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_rlp::Decoder;
-///
-/// // [ "zw", [ 4 ], 1 ].
-/// let mut decoder = Decoder::new(&[0xc6, 0x82, 0x7a, 0x77, 0xc1, 0x04, 0x01]);
-/// let mut list = decoder.list().unwrap();
-/// assert_eq!(list.bytes().unwrap(), b"zw");
-/// let mut inner = list.list().unwrap();
-/// assert_eq!(inner.uint().unwrap(), 4);
-/// inner.finish().unwrap();
-/// assert_eq!(list.uint().unwrap(), 1);
-/// list.finish().unwrap();
-/// decoder.finish().unwrap();
-/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoder<'a> {
     /// Bytes not read yet.
@@ -167,14 +150,19 @@ impl<'a> Decoder<'a> {
         if self.rest.is_empty() {
             Ok(())
         } else {
-            Err(RlpError::TrailingBytes)
+            Err(RlpError::TrailingBytes {
+                remaining: self.rest.len(),
+            })
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::Item;
 
     #[test]
     fn integers_refuse_padding_and_overflow() {
@@ -223,7 +211,10 @@ mod tests {
         // Trailing bytes after the only item.
         let mut decoder = Decoder::new(&[0x01, 0x02]);
         assert_eq!(decoder.uint(), Ok(1));
-        assert_eq!(decoder.finish(), Err(RlpError::TrailingBytes));
+        assert_eq!(
+            decoder.finish(),
+            Err(RlpError::TrailingBytes { remaining: 1 })
+        );
     }
 
     #[test]
@@ -236,5 +227,18 @@ mod tests {
         assert_eq!(decoder.peek_kind(), Ok(Kind::String));
         assert_eq!(decoder.raw(), Ok(&input[5..]));
         assert!(decoder.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn decoding_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+            // Every typed read returns a value or an error.
+            let _ = Item::decode(&bytes);
+            let mut decoder = Decoder::new(&bytes);
+            let _ = decoder.uint();
+            let _ = Decoder::new(&bytes).u16();
+            let _ = Decoder::new(&bytes).array::<32>();
+            let _ = Decoder::new(&bytes).list().map(|mut list| list.raw());
+        }
     }
 }

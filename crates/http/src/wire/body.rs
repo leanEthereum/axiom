@@ -154,7 +154,7 @@ impl ChunkedDecoder {
                     } else {
                         self.trailer += self.line.len();
                         if self.trailer > MAX_TRAILER {
-                            return Err(ProtocolError::HeadTooLarge);
+                            return Err(ProtocolError::HeadTooLarge { limit: MAX_TRAILER });
                         }
                     }
                     self.line.clear();
@@ -223,7 +223,10 @@ impl ChunkedDecoder {
         // Refuse a chunk that would push the body past its bound before copying any of it.
         let budget = (self.max_body - self.decoded) as u64;
         if value > budget {
-            return Err(ProtocolError::BodyTooLarge);
+            return Err(ProtocolError::BodyTooLarge {
+                size: (self.decoded as u64).saturating_add(value),
+                limit: self.max_body,
+            });
         }
         self.decoded += value as usize;
         Ok(State::Data(value))
@@ -232,6 +235,8 @@ impl ChunkedDecoder {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     /// Decodes a complete body in one piece.
@@ -283,14 +288,94 @@ mod tests {
     #[test]
     fn bound_applies_before_copying() {
         // A 0x10 = 16 byte chunk against a 15-byte bound fails on the size line alone.
-        assert_eq!(decode(b"10\r\n", 15), Err(ProtocolError::BodyTooLarge));
+        assert_eq!(
+            decode(b"10\r\n", 15),
+            Err(ProtocolError::BodyTooLarge {
+                size: 16,
+                limit: 15
+            })
+        );
 
-        // Two chunks of 8 against the same bound: the second one breaks it.
+        // Two chunks of 8 against the same bound: the second one brings the body to 16.
         let mut decoder = ChunkedDecoder::new(15);
         let input = b"8\r\n12345678\r\n8\r\n";
         assert_eq!(
             decoder.decode(input, &mut Vec::new()),
-            Err(ProtocolError::BodyTooLarge)
+            Err(ProtocolError::BodyTooLarge {
+                size: 16,
+                limit: 15
+            })
         );
+    }
+
+    /// Encodes a body with the chunked coding, cutting it at the given sizes.
+    ///
+    /// ```text
+    ///     body "hello", sizes [2, 9]  ->  "2\r\nhe\r\n3\r\nllo\r\n0\r\n\r\n"
+    /// ```
+    fn chunked(body: &[u8], sizes: &[usize]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut rest = body;
+        let mut sizes = sizes.iter().cycle();
+        while !rest.is_empty() {
+            // Sizes cycle; zero would end the body early, so it becomes one.
+            let size = sizes.next().copied().unwrap_or(1).clamp(1, rest.len());
+            out.extend_from_slice(format!("{size:x}\r\n").as_bytes());
+            out.extend_from_slice(&rest[..size]);
+            out.extend_from_slice(b"\r\n");
+            rest = &rest[size..];
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn chunked_decode_any_split(
+            body in proptest::collection::vec(any::<u8>(), 0..2000),
+            sizes in proptest::collection::vec(1_usize..300, 1..10),
+            cuts in proptest::collection::vec(1_usize..64, 1..20),
+            next in proptest::collection::vec(any::<u8>(), 0..20),
+        ) {
+            // A chunked body followed by the start of another message.
+            let mut stream = chunked(&body, &sizes);
+            let end = stream.len();
+            stream.extend_from_slice(&next);
+
+            // Feed it in pieces of arbitrary sizes, as socket reads would arrive.
+            let mut decoder = ChunkedDecoder::new(body.len());
+            let mut decoded = Vec::new();
+            let mut at = 0;
+            let mut cuts = cuts.iter().cycle();
+            while !decoder.is_done() && at < stream.len() {
+                let piece = (*cuts.next().unwrap()).min(stream.len() - at);
+                let used = decoder.decode(&stream[at..at + piece], &mut decoded).unwrap();
+                at += used;
+                // The decoder consumes the whole piece unless the body ended inside it.
+                if used < piece {
+                    prop_assert!(decoder.is_done());
+                }
+            }
+
+            // The whole body comes back, and the next message's bytes are untouched.
+            prop_assert!(decoder.is_done());
+            prop_assert_eq!(decoded, body);
+            prop_assert_eq!(at, end);
+        }
+
+        #[test]
+        fn chunked_bound_is_exact(body in proptest::collection::vec(any::<u8>(), 1..500)) {
+            // A bound one byte short of the body rejects it.
+            // Every chunk before the last fits, so the last one reports the whole body size.
+            let stream = chunked(&body, &[7]);
+            let mut decoder = ChunkedDecoder::new(body.len() - 1);
+            prop_assert_eq!(
+                decoder.decode(&stream, &mut Vec::new()),
+                Err(ProtocolError::BodyTooLarge {
+                    size: body.len() as u64,
+                    limit: body.len() - 1
+                })
+            );
+        }
     }
 }

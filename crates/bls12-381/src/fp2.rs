@@ -8,7 +8,15 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::Fp;
+use crate::{Fp, hash_to_curve::expand_message_xmd};
+
+/// Bytes drawn per base-field element, L = ceil((ceil(log2(p)) + k) / 8) with k = 128, RFC 9380 section 5.
+///
+/// The 128 extra bits make the reduction modulo p statistically close to uniform.
+const L: usize = 64;
+
+/// Bytes drawn when hashing to two elements of two base-field coefficients each.
+const UNIFORM_BYTES: usize = 2 * 2 * L;
 
 /// The element 1 / 2 = (p + 1) / 2, in Montgomery form.
 const HALF: Fp = Fp::from_montgomery([
@@ -52,6 +60,19 @@ impl Fp2 {
     #[must_use]
     pub const fn new(c0: Fp, c1: Fp) -> Self {
         Self { c0, c1 }
+    }
+
+    /// Hashes a message to two elements, RFC 9380 section 5.2 with m = 2 and count = 2.
+    pub(crate) fn hash_to_field(message: &[u8], dst: &[u8]) -> [Self; 2] {
+        let mut uniform = [0_u8; UNIFORM_BYTES];
+        expand_message_xmd(message, dst, &mut uniform);
+
+        // Element i, coefficient j reads the 64 bytes at offset L * (j + 2 i).
+        //
+        //     [ u0.c0 | u0.c1 | u1.c0 | u1.c1 ]   each 64 bytes, reduced mod p
+        let (chunks, _) = uniform.as_chunks::<L>();
+        let [u0_c0, u0_c1, u1_c0, u1_c1] = [0, 1, 2, 3].map(|i| Fp::from_bytes_wide_be(&chunks[i]));
+        [Self::new(u0_c0, u0_c1), Self::new(u1_c0, u1_c1)]
     }
 
     /// Whether the element is zero.

@@ -10,6 +10,7 @@
 //!
 //! See the Altair `light-client/sync-protocol.md`, as amended by Capella, Deneb, and Electra.
 
+mod branch;
 mod error;
 mod quality;
 mod store;

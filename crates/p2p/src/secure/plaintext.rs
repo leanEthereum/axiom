@@ -22,10 +22,7 @@ use std::mem;
 use super::{Handshake, Open, Role, Seal, SecureError, SecureSession, SecurityUpgrade};
 use crate::{
     identity::{PeerId, PublicKey},
-    protobuf::{
-        FieldReader, ProtoMessage, ProtobufError, encode_bytes_field, encode_length_prefixed,
-        encode_message_field, split_length_prefixed,
-    },
+    protobuf::{FieldReader, FieldWriter, LengthPrefixedDecoder, ProtoMessage, ProtobufError},
 };
 
 /// The multistream-select name.
@@ -45,8 +42,9 @@ pub struct Exchange {
 
 impl ProtoMessage for Exchange {
     fn encode_to(&self, out: &mut Vec<u8>) {
-        encode_bytes_field(1, self.id.as_bytes(), out);
-        encode_message_field(2, &self.pubkey, out);
+        let mut fields = FieldWriter::new(out);
+        fields.bytes(1, self.id.as_bytes());
+        fields.message(2, &self.pubkey);
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, ProtobufError> {
@@ -62,7 +60,10 @@ impl ProtoMessage for Exchange {
         }
         // The schema marks both optional, but the protocol is meaningless without them.
         let id = id.ok_or(ProtobufError::MissingField(1))?;
-        let id = PeerId::from_bytes(id).map_err(|_| ProtobufError::MissingField(1))?;
+        let id = PeerId::from_bytes(id).map_err(|_| ProtobufError::InvalidValue {
+            field: 1,
+            expected: "peer id",
+        })?;
         Ok(Self {
             id,
             pubkey: pubkey.ok_or(ProtobufError::MissingField(2))?,
@@ -97,11 +98,11 @@ impl SecurityUpgrade for PlaintextConfig {
             pubkey: self.local_key.clone(),
         };
         let mut outbound = Vec::new();
-        encode_length_prefixed(&exchange, &mut outbound);
+        exchange.encode_length_prefixed(&mut outbound);
         Box::new(PlaintextHandshake {
             expected,
             outbound,
-            inbound: Vec::new(),
+            inbound: LengthPrefixedDecoder::new(MAX_EXCHANGE_LEN),
         })
     }
 }
@@ -113,8 +114,8 @@ struct PlaintextHandshake {
     expected: Option<PeerId>,
     /// Bytes waiting to be written.
     outbound: Vec<u8>,
-    /// Bytes received but not yet parsed.
-    inbound: Vec<u8>,
+    /// Splits the peer's exchange off the bytes received.
+    inbound: LengthPrefixedDecoder,
 }
 
 impl Handshake for PlaintextHandshake {
@@ -123,14 +124,18 @@ impl Handshake for PlaintextHandshake {
     }
 
     fn receive(&mut self, bytes: &[u8]) -> Result<Option<SecureSession>, SecureError> {
-        self.inbound.extend_from_slice(bytes);
-        let Some((body, consumed)) = split_length_prefixed(&self.inbound, MAX_EXCHANGE_LEN)? else {
+        self.inbound.feed(bytes);
+        let Some(body) = self.inbound.next_frame()? else {
             return Ok(None);
         };
         let exchange = Exchange::decode(body)?;
         // The identifier must be derived from the announced key.
-        if !exchange.id.matches(&exchange.pubkey) {
-            return Err(SecureError::IdentifierMismatch);
+        let derived = PeerId::from_public_key(&exchange.pubkey);
+        if exchange.id != derived {
+            return Err(SecureError::IdentifierMismatch {
+                claimed: exchange.id,
+                derived,
+            });
         }
         // The dialer also checks it reached the peer it asked for.
         if let Some(expected) = self.expected.take()
@@ -142,7 +147,7 @@ impl Handshake for PlaintextHandshake {
             });
         }
         // Bytes after the exchange are already application data.
-        let early_plaintext = self.inbound.split_off(consumed);
+        let early_plaintext = self.inbound.take_remainder();
         Ok(Some(SecureSession {
             remote_peer: exchange.id,
             remote_key: exchange.pubkey,
@@ -240,12 +245,36 @@ mod tests {
             pubkey: PublicKey::secp256k1([3; 33]),
         };
         let mut wire = Vec::new();
-        encode_length_prefixed(&exchange, &mut wire);
+        exchange.encode_length_prefixed(&mut wire);
         let mut listener =
             PlaintextConfig::new(PublicKey::secp256k1([2; 33])).handshake(Role::Responder, None);
         assert_eq!(
             listener.receive(&wire).unwrap_err(),
-            SecureError::IdentifierMismatch
+            SecureError::IdentifierMismatch {
+                claimed: PeerId::from_public_key(&PublicKey::secp256k1([4; 33])),
+                derived: PeerId::from_public_key(&PublicKey::secp256k1([3; 33])),
+            }
+        );
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_a_peer_id_is_named_as_such() {
+        // Mutation: field 1 holds two bytes that are no multihash, beside a valid key.
+        //
+        //     field 1 = 0xff 0xff     (truncated varint, not a peer id)
+        //     field 2 = a secp256k1 public key
+        let mut bytes = Vec::new();
+        let mut fields = FieldWriter::new(&mut bytes);
+        fields.bytes(1, &[0xff, 0xff]);
+        fields.message(2, &PublicKey::secp256k1([3; 33]));
+
+        // The error points at the field and what it should hold, not at a missing field.
+        assert_eq!(
+            Exchange::decode(&bytes),
+            Err(ProtobufError::InvalidValue {
+                field: 1,
+                expected: "peer id",
+            })
         );
     }
 

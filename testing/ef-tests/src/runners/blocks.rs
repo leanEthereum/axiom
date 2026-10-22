@@ -3,10 +3,10 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::{KnownVerdict, State, Verification};
-use axiom_types::{BeaconState, Preset, SignedBeaconBlock, Slot};
+use axiom_types::{BeaconState, ChainConfig, Preset, SignedBeaconBlock, Slot};
 
-use super::{BEACON_STATE_FIELDS, config_of};
-use crate::{Case, Failure, Runner, assert_container_eq};
+use super::BEACON_STATE_FIELDS;
+use crate::{Case, Failure, Runner};
 
 /// Applies a chain of blocks through the full state transition.
 ///
@@ -48,7 +48,7 @@ impl<P: Preset> Blocks<P> {
 
     /// Applies every block in order, and checks the outcome.
     fn run_blocks(case: &Case) -> Result<(), Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let meta = case.meta()?;
         let verification = if meta.bls_ignored() {
             Verification::Skip
@@ -76,9 +76,7 @@ impl<P: Preset> Blocks<P> {
         }
 
         match (outcome, expected) {
-            (Ok(()), Some(expected)) => {
-                assert_container_eq(&expected, state.beacon(), &BEACON_STATE_FIELDS)
-            }
+            (Ok(()), Some(expected)) => BEACON_STATE_FIELDS.check(&expected, state.beacon()),
             (Err(_), None) => Ok(()),
             (Ok(()), None) => Err(Failure::new("blocks accepted, the vector rejects them")),
             (Err(error), Some(_)) => Err(Failure(error)),
@@ -87,7 +85,7 @@ impl<P: Preset> Blocks<P> {
 
     /// Advances through empty slots, and checks the post-state.
     fn run_slots(case: &Case) -> Result<(), Failure> {
-        let config = config_of::<P>();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
         let slots = case
             .yaml("slots.yaml")?
             .as_u64()
@@ -98,7 +96,7 @@ impl<P: Preset> Blocks<P> {
             .process_slots(&config, target)
             .map_err(|error| Failure(format!("slot processing failed: {error}")))?;
         let expected = case.ssz::<BeaconState<P>>("post")?;
-        assert_container_eq(&expected, state.beacon(), &BEACON_STATE_FIELDS)
+        BEACON_STATE_FIELDS.check(&expected, state.beacon())
     }
 }
 

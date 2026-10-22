@@ -2,15 +2,16 @@
 
 use std::array;
 
+use super::uint::U256;
 use crate::ct::Mask;
 
 /// The prime p in four little-endian 64-bit limbs, per SEC 2, section 2.4.1.
-const P: [u64; 4] = [
+const P: U256 = U256([
     0xffff_fffe_ffff_fc2f,
     0xffff_ffff_ffff_ffff,
     0xffff_ffff_ffff_ffff,
     0xffff_ffff_ffff_ffff,
-];
+]);
 
 /// The fold constant 2^256 - p = 2^32 + 977.
 ///
@@ -45,17 +46,21 @@ impl FieldElement {
     ///
     /// The check runs in constant time and reveals only its outcome.
     pub(super) fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        // Big-endian bytes to little-endian limbs.
-        let limbs = limbs_from_be_bytes(bytes);
+        Self::from_uint(U256::from_be_bytes(bytes))
+    }
 
+    /// The element equal to an integer, refusing values at or above p.
+    ///
+    /// The check runs in constant time and reveals only its outcome.
+    pub(super) fn from_uint(value: U256) -> Option<Self> {
         // The value is canonical exactly when subtracting p borrows.
-        let (_, borrow) = sub_with_borrow(limbs, P);
-        Mask::from_bit(borrow).reveal().then_some(Self(limbs))
+        let (_, borrow) = value.sub_with_borrow(P);
+        Mask::from_bit(borrow).reveal().then_some(Self(value.0))
     }
 
     /// Encodes as 32 big-endian bytes.
     pub(super) fn to_bytes(self) -> [u8; 32] {
-        limbs_to_be_bytes(self.0)
+        U256(self.0).to_be_bytes()
     }
 
     /// Holds when the element is zero.
@@ -90,25 +95,28 @@ impl FieldElement {
     #[must_use]
     pub(super) fn add(self, other: Self) -> Self {
         // The true sum s may reach 2p - 2 < 2^257.
-        let (sum, carry) = add_with_carry(self.0, other.0);
+        let (sum, carry) = U256(self.0).add_with_carry(U256(other.0));
 
         // Subtract p once and keep that result when s >= p.
         //
         //     carry out of the add        -> s >= 2^256 > p
         //     no borrow out of s - p      -> s >= p
-        let (reduced, borrow) = sub_with_borrow(sum, P);
+        let (reduced, borrow) = sum.sub_with_borrow(P);
         let use_reduced = Mask::from_bit(carry).or(Mask::from_bit(borrow).not());
-        Self(array::from_fn(|i| use_reduced.select(reduced[i], sum[i])))
+        Self(array::from_fn(|i| {
+            use_reduced.select(reduced.0[i], sum.0[i])
+        }))
     }
 
     /// The difference.
     #[must_use]
     pub(super) fn sub(self, other: Self) -> Self {
         // A borrow means the result wrapped to a - b + 2^256: add p back modulo 2^256.
-        let (difference, borrow) = sub_with_borrow(self.0, other.0);
+        let (difference, borrow) = U256(self.0).sub_with_borrow(U256(other.0));
         let wrapped = Mask::from_bit(borrow);
-        let correction = P.map(|limb| wrapped.select(limb, 0));
-        Self(add_with_carry(difference, correction).0)
+        let correction = U256(P.0.map(|limb| wrapped.select(limb, 0)));
+        let (corrected, _) = difference.add_with_carry(correction);
+        Self(corrected.0)
     }
 
     /// The additive inverse.
@@ -241,12 +249,12 @@ impl FieldElement {
         //
         // When it happens, r is below 2^67, so adding C cannot carry again.
         let extra = Mask::from_bit(carry as u64).select(C, 0);
-        let (r, _) = add_with_carry(r, [extra, 0, 0, 0]);
+        let (r, _) = U256(r).add_with_carry(U256([extra, 0, 0, 0]));
 
         // Final: r < 2^256 < 2p, so one conditional subtraction lands in [0, p).
-        let (reduced, borrow) = sub_with_borrow(r, P);
+        let (reduced, borrow) = r.sub_with_borrow(P);
         let keep = Mask::from_bit(borrow);
-        Self(array::from_fn(|i| keep.select(r[i], reduced[i])))
+        Self(array::from_fn(|i| keep.select(r.0[i], reduced.0[i])))
     }
 
     /// The inverse, by Fermat: a^(p - 2), and zero for zero.
@@ -306,51 +314,6 @@ impl FieldElement {
     }
 }
 
-/// Little-endian limbs of a 32-byte big-endian integer.
-pub(super) fn limbs_from_be_bytes(bytes: &[u8; 32]) -> [u64; 4] {
-    // Limb 0 is the least significant, so it comes from the last eight bytes.
-    let (words, _) = bytes.as_chunks::<8>();
-    array::from_fn(|i| u64::from_be_bytes(words[3 - i]))
-}
-
-/// The 32-byte big-endian encoding of little-endian limbs.
-pub(super) fn limbs_to_be_bytes(limbs: [u64; 4]) -> [u8; 32] {
-    // Limb 3 is the most significant, so it goes first.
-    let mut out = [0_u8; 32];
-    let (words, _) = out.as_chunks_mut::<8>();
-    for (word, limb) in words.iter_mut().zip(limbs.iter().rev()) {
-        *word = limb.to_be_bytes();
-    }
-    out
-}
-
-/// The 256-bit sum and its carry bit.
-pub(super) fn add_with_carry(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
-    // A 128-bit sum per limb lets the compiler emit one add-with-carry chain.
-    let mut out = [0_u64; 4];
-    let mut carry = 0_u128;
-    for i in 0..4 {
-        let t = u128::from(a[i]) + u128::from(b[i]) + carry;
-        out[i] = t as u64;
-        carry = t >> 64;
-    }
-    (out, carry as u64)
-}
-
-/// The 256-bit difference and its borrow bit.
-pub(super) fn sub_with_borrow(a: [u64; 4], b: [u64; 4]) -> ([u64; 4], u64) {
-    // A 128-bit difference per limb lets the compiler emit one subtract-with-borrow chain.
-    // A borrow leaves the top half all ones, so its top bit is the borrow.
-    let mut out = [0_u64; 4];
-    let mut borrow = 0_u128;
-    for i in 0..4 {
-        let t = u128::from(a[i]).wrapping_sub(u128::from(b[i]) + borrow);
-        out[i] = t as u64;
-        borrow = t >> 127;
-    }
-    (out, borrow as u64)
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use proptest::prelude::*;
@@ -360,11 +323,10 @@ pub(super) mod tests {
     /// Any field element, with the edges near 0 and p over-represented.
     pub(crate) fn arb_field() -> impl Strategy<Value = FieldElement> {
         prop_oneof![
-            any::<[u64; 4]>().prop_filter_map("below p", |limbs| {
-                FieldElement::from_bytes(&limbs_to_be_bytes(limbs))
-            }),
+            any::<[u64; 4]>()
+                .prop_filter_map("below p", |limbs| { FieldElement::from_uint(U256(limbs)) }),
             (0_u64..4).prop_map(|k| FieldElement([k, 0, 0, 0])),
-            (1_u64..4).prop_map(|k| FieldElement([P[0] - k, P[1], P[2], P[3]])),
+            (1_u64..4).prop_map(|k| FieldElement([P.0[0] - k, P.0[1], P.0[2], P.0[3]])),
         ]
     }
 
@@ -386,19 +348,19 @@ pub(super) mod tests {
     #[test]
     fn encoding_refuses_p_and_above() {
         // p - 1 is the largest canonical value.
-        let mut bytes = limbs_to_be_bytes(P);
+        let mut bytes = P.to_be_bytes();
         bytes[31] -= 1;
         assert!(FieldElement::from_bytes(&bytes).is_some());
 
         // p and 2^256 - 1 are refused.
-        assert!(FieldElement::from_bytes(&limbs_to_be_bytes(P)).is_none());
+        assert!(FieldElement::from_bytes(&P.to_be_bytes()).is_none());
         assert!(FieldElement::from_bytes(&[0xff; 32]).is_none());
     }
 
     #[test]
     fn wrap_around_edges() {
         // (p - 1) + 1 = 0, and 0 - 1 = p - 1.
-        let minus_one = FieldElement([P[0] - 1, P[1], P[2], P[3]]);
+        let minus_one = FieldElement([P.0[0] - 1, P.0[1], P.0[2], P.0[3]]);
         assert_eq!(minus_one.add(FieldElement::ONE), FieldElement::ZERO);
         assert_eq!(FieldElement::ZERO.sub(FieldElement::ONE), minus_one);
 

@@ -153,9 +153,16 @@ impl<N: Length> Ssz for BitVector<N> {
         }
 
         // Invariant: padding bits are zero, so each value has exactly one encoding.
+        // A length that fills whole bytes leaves no padding to check.
         let used_bits = N::LEN % 8;
-        if used_bits != 0 && bytes[Self::BYTES - 1] >> used_bits != 0 {
-            return Err(DecodeError::ExcessBits);
+        if used_bits != 0 {
+            let last_byte = bytes[Self::BYTES - 1];
+            if last_byte >> used_bits != 0 {
+                return Err(DecodeError::ExcessBits {
+                    length: N::LEN,
+                    last_byte,
+                });
+            }
         }
 
         Ok(Self {
@@ -191,7 +198,10 @@ mod tests {
         // Bit 10 lies past the 10-bit length, in the padding of the second byte.
         assert_eq!(
             BitVector::<Const<10>>::decode(&[0, 0b0000_0100]),
-            Err(DecodeError::ExcessBits)
+            Err(DecodeError::ExcessBits {
+                length: 10,
+                last_byte: 0b0000_0100
+            })
         );
     }
 

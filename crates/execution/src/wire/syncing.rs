@@ -9,7 +9,7 @@
 
 use axiom_json::Json;
 
-use super::{Fields, JsonCodec, object, wrong_type};
+use super::{Fields, JsonCodec};
 use crate::WireError;
 
 /// Whether the execution client is still catching up with the chain.
@@ -37,7 +37,7 @@ impl JsonCodec for SyncStatus {
                 starting_block,
                 current_block,
                 highest_block,
-            } => object([
+            } => Json::from([
                 ("startingBlock", starting_block.to_json()),
                 ("currentBlock", current_block.to_json()),
                 ("highestBlock", highest_block.to_json()),
@@ -58,7 +58,7 @@ impl JsonCodec for SyncStatus {
                     highest_block: fields.required("highestBlock")?,
                 })
             }
-            other => Err(wrong_type("false or object", other)),
+            other => Err(WireError::wrong_type("false or object", other)),
         }
     }
 }

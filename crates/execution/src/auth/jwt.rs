@@ -13,15 +13,15 @@
 //! Each HTTP request carries a fresh token in its authorization field.
 //! The execution client accepts an issued-at within 60 seconds of its own clock.
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use axiom_json::{Json, Object, data};
+use axiom_json::{Data, HexError, Json};
 use thiserror::Error;
 
-use super::{
-    base64url,
-    hmac::{constant_time_eq, hmac_sha256},
-};
+use super::{base64url::Base64Url, hmac::HmacSha256};
 
 /// The encoded header every token carries: `{"alg":"HS256","typ":"JWT"}`.
 const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
@@ -59,23 +59,21 @@ impl JwtSecret {
         } else {
             format!("0x{text}")
         };
-        data::decode_array::<32>(&prefixed)
+        <[u8; 32]>::from_data(&prefixed)
             .map(Self)
-            .map_err(|_| JwtError::InvalidSecret)
+            .map_err(JwtError::InvalidSecret)
     }
 
-    /// Issues a token stamped with a time in seconds since the epoch.
+    /// Issues a token carrying claims.
     #[must_use]
-    pub fn token(&self, issued_at: u64) -> String {
+    pub fn token(&self, claims: Claims) -> String {
         // The claims are a single member object, serialized compactly.
-        let mut claims = Object::new();
-        claims.insert("iat", Json::from(issued_at));
-        let claims = base64url::encode(Json::Object(claims).to_string().as_bytes());
+        let claims = Json::from([("iat", Json::from(claims.issued_at))]).to_string();
 
         // Sign the ASCII of "header.claims" and append the signature as a third segment.
-        let signing_input = format!("{HEADER}.{claims}");
-        let signature = hmac_sha256(&self.0, signing_input.as_bytes());
-        format!("{signing_input}.{}", base64url::encode(&signature))
+        let signing_input = format!("{HEADER}.{}", Base64Url(claims.as_bytes()));
+        let signature = HmacSha256::new(&self.0).mac(signing_input.as_bytes());
+        format!("{signing_input}.{}", Base64Url(&signature))
     }
 
     /// Checks a token's signature and freshness against a clock reading.
@@ -86,37 +84,26 @@ impl JwtSecret {
     ///
     /// Fails on a malformed token, any algorithm but HS256, a bad signature, or a stale issued-at.
     pub fn verify(&self, token: &str, now: u64) -> Result<Claims, JwtError> {
-        // Exactly three dot-separated segments.
-        let mut segments = token.split('.');
-        let (Some(header), Some(claims), Some(signature), None) = (
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next(),
-        ) else {
-            return Err(JwtError::Malformed);
-        };
+        let token = Token::split(token)?;
 
         // The header must name HS256.
         // "none" in particular is refused, as the authentication spec requires.
-        let header = decode_segment(header)?;
+        let header = token.header.json()?;
         match header.get("alg").and_then(Json::as_str) {
             Some("HS256") => {}
             Some(other) => return Err(JwtError::UnsupportedAlgorithm(other.to_owned())),
-            None => return Err(JwtError::Malformed),
+            None => return Err(token.header.malformed()),
         }
 
         // Recompute the MAC over the first two segments as sent, then compare in constant time.
-        let signing_input = &token[..token.len() - signature.len() - 1];
-        let expected = hmac_sha256(&self.0, signing_input.as_bytes());
-        let signature = base64url::decode(signature).ok_or(JwtError::Malformed)?;
-        if !constant_time_eq(&signature, &expected) {
+        let signature = token.signature.bytes()?;
+        if !HmacSha256::new(&self.0).verify(token.signing_input.as_bytes(), &signature) {
             return Err(JwtError::BadSignature);
         }
 
         // Only an authentic token's claims are read.
         // Unknown claims, such as "id" and "clv", are ignored as the spec requires.
-        let claims = decode_segment(claims)?;
+        let claims = token.claims.json()?;
         let issued_at = claims
             .get("iat")
             .and_then(Json::as_u64)
@@ -134,17 +121,93 @@ impl fmt::Debug for JwtSecret {
     }
 }
 
-/// Decodes one JSON segment of a token.
-fn decode_segment(segment: &str) -> Result<Json, JwtError> {
-    let bytes = base64url::decode(segment).ok_or(JwtError::Malformed)?;
-    Json::parse(bytes).map_err(|_| JwtError::Malformed)
+/// A token cut into its three segments, none of them checked yet.
+#[derive(Clone, Copy, Debug)]
+struct Token<'a> {
+    /// The header and claims segments with the dot between them, as signed.
+    signing_input: &'a str,
+    /// The encoded header.
+    header: Segment<'a>,
+    /// The encoded claims.
+    claims: Segment<'a>,
+    /// The encoded signature.
+    signature: Segment<'a>,
 }
 
-/// The claims of a verified token.
+impl<'a> Token<'a> {
+    /// Splits a token at its dots.
+    fn split(token: &'a str) -> Result<Self, JwtError> {
+        // Exactly three dot-separated segments.
+        let mut segments = token.split('.');
+        let (Some(header), Some(claims), Some(signature), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
+            return Err(JwtError::SegmentCount {
+                found: token.split('.').count(),
+            });
+        };
+        Ok(Self {
+            signing_input: &token[..token.len() - signature.len() - 1],
+            header: Segment::new("header", header),
+            claims: Segment::new("claims", claims),
+            signature: Segment::new("signature", signature),
+        })
+    }
+}
+
+/// One base64url segment of a token.
+#[derive(Clone, Copy, Debug)]
+struct Segment<'a> {
+    /// The segment's role, named in errors.
+    name: &'static str,
+    /// The encoded text.
+    text: &'a str,
+}
+
+impl<'a> Segment<'a> {
+    /// A segment with its role.
+    const fn new(name: &'static str, text: &'a str) -> Self {
+        Self { name, text }
+    }
+
+    /// The bytes the segment encodes.
+    fn bytes(self) -> Result<Vec<u8>, JwtError> {
+        Base64Url::decode(self.text).ok_or_else(|| self.malformed())
+    }
+
+    /// The JSON value the segment encodes.
+    fn json(self) -> Result<Json, JwtError> {
+        Json::parse(self.bytes()?).map_err(|_| self.malformed())
+    }
+
+    /// The error naming this segment as malformed.
+    const fn malformed(self) -> JwtError {
+        JwtError::Malformed { segment: self.name }
+    }
+}
+
+/// The claims of a token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Claims {
     /// When the token was issued, in seconds since the epoch.
     pub issued_at: u64,
+}
+
+impl Claims {
+    /// Claims issued now, on the local clock.
+    ///
+    /// The engine compares the issue time to its own clock, so both hosts need sane time.
+    #[must_use]
+    pub fn issued_now() -> Self {
+        // A clock set before 1970 reads as the epoch itself rather than failing.
+        let issued_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        Self { issued_at }
+    }
 }
 
 /// A secret or token that fails the authentication rules.
@@ -152,12 +215,24 @@ pub struct Claims {
 #[non_exhaustive]
 pub enum JwtError {
     /// The secret is not 32 bytes of hex.
-    #[error("JWT secret is not 32 bytes of hex")]
-    InvalidSecret,
+    ///
+    /// The hex error never echoes a digit, so the key stays out of logs.
+    #[error("JWT secret is not 32 bytes of hex: {0}")]
+    InvalidSecret(#[source] HexError),
 
-    /// The token is not three base64url segments of JSON.
-    #[error("malformed JWT")]
-    Malformed,
+    /// The token does not split into exactly three dot-separated segments.
+    #[error("JWT has {found} dot-separated segments, expected 3")]
+    SegmentCount {
+        /// The number of segments found.
+        found: usize,
+    },
+
+    /// A segment is not base64url, not JSON, or lacks a required member.
+    #[error("JWT {segment} segment is malformed")]
+    Malformed {
+        /// The segment's role: header, claims, or signature.
+        segment: &'static str,
+    },
 
     /// The header names an algorithm other than HS256.
     #[error("unsupported JWT algorithm {0:?}")]
@@ -172,7 +247,7 @@ pub enum JwtError {
     MissingIssuedAt,
 
     /// The issued-at is too far from the verifier's clock.
-    #[error("JWT issued at {issued_at} is stale at {now}")]
+    #[error("JWT issued at {issued_at} is more than {MAX_CLOCK_SKEW} seconds from {now}")]
     Stale {
         /// The token's issued-at.
         issued_at: u64,
@@ -185,6 +260,8 @@ pub enum JwtError {
 mod tests {
     use std::array;
 
+    use proptest::prelude::*;
+
     use super::*;
 
     /// The secret 0x00 0x01 ... 0x1f.
@@ -195,14 +272,14 @@ mod tests {
     #[test]
     fn header_constant_encodes_hs256() {
         // The precomputed header decodes to the exact JSON the scheme prescribes.
-        let header = base64url::decode(HEADER).unwrap();
+        let header = Base64Url::decode(HEADER).unwrap();
         assert_eq!(header, br#"{"alg":"HS256","typ":"JWT"}"#);
     }
 
     #[test]
     fn issued_token_verifies_within_skew() {
         // Issued at t = 1000, checked at 1000, 1060, and 940: all within 60 seconds.
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
         for now in [1000, 1060, 940] {
             assert_eq!(secret().verify(&token, now), Ok(Claims { issued_at: 1000 }));
         }
@@ -215,20 +292,36 @@ mod tests {
                 now: 1061
             })
         );
-        assert!(secret().verify(&token, 939).is_err());
+        assert_eq!(
+            secret().verify(&token, 939),
+            Err(JwtError::Stale {
+                issued_at: 1000,
+                now: 939
+            })
+        );
+
+        // The log line carries both times and the allowed skew.
+        assert_eq!(
+            JwtError::Stale {
+                issued_at: 1000,
+                now: 939
+            }
+            .to_string(),
+            "JWT issued at 1000 is more than 60 seconds from 939"
+        );
     }
 
     #[test]
     fn token_matches_an_independent_computation() {
         // Claims {"iat":1000} encode to "eyJpYXQiOjEwMDB9".
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
         let (signing_input, _) = token.rsplit_once('.').unwrap();
         assert_eq!(signing_input, format!("{HEADER}.eyJpYXQiOjEwMDB9"));
     }
 
     #[test]
     fn tampering_is_detected() {
-        let token = secret().token(1000);
+        let token = secret().token(Claims { issued_at: 1000 });
 
         // Another secret, one byte different, rejects the signature.
         let mut other = [0_u8; 32];
@@ -239,13 +332,13 @@ mod tests {
         );
 
         // Swapping in claims with a later iat breaks the signature.
-        let forged_claims = base64url::encode(br#"{"iat":1050}"#);
+        let forged_claims = Base64Url(br#"{"iat":1050}"#);
         let parts: Vec<&str> = token.split('.').collect();
         let forged = format!("{}.{forged_claims}.{}", parts[0], parts[2]);
         assert_eq!(secret().verify(&forged, 1000), Err(JwtError::BadSignature));
 
         // An unsigned token with alg "none" is refused before any MAC is computed.
-        let none_header = base64url::encode(br#"{"alg":"none"}"#);
+        let none_header = Base64Url(br#"{"alg":"none"}"#);
         let unsigned = format!("{none_header}.{}.", parts[1]);
         assert_eq!(
             secret().verify(&unsigned, 1000),
@@ -253,7 +346,37 @@ mod tests {
         );
 
         // Two segments only.
-        assert_eq!(secret().verify("a.b", 1000), Err(JwtError::Malformed));
+        assert_eq!(
+            secret().verify("a.b", 1000),
+            Err(JwtError::SegmentCount { found: 2 })
+        );
+    }
+
+    #[test]
+    fn malformed_segments_are_named() {
+        let token = secret().token(Claims { issued_at: 1000 });
+        let parts: Vec<&str> = token.split('.').collect();
+
+        // "!" is outside the base64url alphabet, so the header fails to decode.
+        assert_eq!(
+            secret().verify(&format!("!.{}.{}", parts[1], parts[2]), 1000),
+            Err(JwtError::Malformed { segment: "header" })
+        );
+
+        // A header of {"typ":"JWT"} decodes but names no algorithm.
+        let no_alg = Base64Url(br#"{"typ":"JWT"}"#);
+        assert_eq!(
+            secret().verify(&format!("{no_alg}.{}.{}", parts[1], parts[2]), 1000),
+            Err(JwtError::Malformed { segment: "header" })
+        );
+
+        // A good header and claims, then a signature of "!".
+        assert_eq!(
+            secret().verify(&format!("{}.{}.!", parts[0], parts[1]), 1000),
+            Err(JwtError::Malformed {
+                segment: "signature"
+            })
+        );
     }
 
     #[test]
@@ -266,10 +389,33 @@ mod tests {
         assert!(JwtSecret::from_hex(&"cd".repeat(32)).is_ok());
         assert_eq!(
             JwtSecret::from_hex(&"cd".repeat(31)),
-            Err(JwtError::InvalidSecret)
+            Err(JwtError::InvalidSecret(HexError::WrongLength {
+                expected: 32,
+                actual: 31
+            }))
         );
 
         // Debug output never shows key material.
         assert_eq!(format!("{:?}", secret()), "JwtSecret(..)");
+    }
+
+    proptest! {
+        #[test]
+        fn jwt_round_trip_and_tamper_detection(
+            key in any::<[u8; 32]>(),
+            issued_at in 0_u64..4_000_000_000,
+            position in any::<prop::sample::Index>(),
+        ) {
+            let secret = JwtSecret::new(key);
+            let token = secret.token(Claims { issued_at });
+            prop_assert_eq!(secret.verify(&token, issued_at).map(|claims| claims.issued_at), Ok(issued_at));
+
+            // Replacing any one character with a different symbol breaks the token.
+            let mut bytes = token.into_bytes();
+            let at = position.index(bytes.len());
+            bytes[at] = if bytes[at] == b'A' { b'B' } else { b'A' };
+            let tampered = String::from_utf8(bytes).unwrap();
+            prop_assert!(secret.verify(&tampered, issued_at).is_err());
+        }
     }
 }

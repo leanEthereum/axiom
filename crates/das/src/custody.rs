@@ -26,8 +26,13 @@ pub enum CustodyError {
         available: u64,
     },
     /// A group index is out of range.
-    #[error("custody group {} does not exist", .0.0)]
-    UnknownGroup(CustodyGroup),
+    #[error("custody group {} is not below the group count {available}", .group.0)]
+    UnknownGroup {
+        /// The group asked for.
+        group: CustodyGroup,
+        /// Groups that exist.
+        available: u64,
+    },
 }
 
 impl NodeId {
@@ -98,7 +103,10 @@ impl CustodyGroup {
     ) -> Result<Vec<ColumnIndex>, CustodyError> {
         let groups = config.number_of_custody_groups;
         if self.0 >= groups {
-            return Err(CustodyError::UnknownGroup(self));
+            return Err(CustodyError::UnknownGroup {
+                group: self,
+                available: groups,
+            });
         }
         let per_group = P::NUMBER_OF_COLUMNS / groups;
         Ok((0..per_group)
@@ -119,6 +127,18 @@ mod tests {
         let groups = NodeId(U256::ZERO).custody_groups(128, &config).unwrap();
 
         assert_eq!(groups, (0..128).map(CustodyGroup).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_group_past_the_count_is_unknown() {
+        // Mainnet has 128 groups, numbered 0 to 127.
+        assert_eq!(
+            CustodyGroup(128).columns::<Mainnet>(&ChainConfig::mainnet()),
+            Err(CustodyError::UnknownGroup {
+                group: CustodyGroup(128),
+                available: 128,
+            })
+        );
     }
 
     #[test]

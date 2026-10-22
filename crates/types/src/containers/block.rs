@@ -3,9 +3,10 @@
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz};
 
 use crate::{
-    Attestation, AttesterSlashing, BlsSignature, Bytes32, Deposit, Eth1Data, ExecutionPayload,
-    ExecutionRequests, KzgCommitment, NewPayloadRequest, Preset, ProposerSlashing, Root,
-    SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate, ValidatorIndex,
+    Attestation, AttesterSlashing, BeaconBlockHeader, BlsSignature, Bytes32, Deposit, Eth1Data,
+    ExecutionPayload, ExecutionRequests, KzgCommitment, NewPayloadRequest, Preset,
+    ProposerSlashing, Root, SignedBlsToExecutionChange, SignedVoluntaryExit, Slot, SyncAggregate,
+    ValidatorIndex,
 };
 
 /// Commitments to a block's blobs.
@@ -154,6 +155,20 @@ impl<P: Preset> Container for BeaconBlock<P> {
 }
 
 impl<P: Preset> BeaconBlock<P> {
+    /// The header of this block, which hashes to the same root.
+    ///
+    /// The body is replaced by its root, so the header proves the block without carrying it.
+    #[must_use]
+    pub fn header(&self) -> BeaconBlockHeader {
+        BeaconBlockHeader {
+            slot: self.slot,
+            proposer_index: self.proposer_index,
+            parent_root: self.parent_root,
+            state_root: self.state_root,
+            body_root: self.body.hash_tree_root(),
+        }
+    }
+
     /// The request the execution engine judges for this block's payload.
     ///
     /// Everything it holds comes from the block alone, so it can be sent before the transition runs.

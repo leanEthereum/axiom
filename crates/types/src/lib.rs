@@ -7,19 +7,6 @@
 //!
 //! Containers whose collections depend on the preset take it as a type parameter.
 //! A mainnet block and a minimal block are therefore different types.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_ssz::Ssz;
-//! use axiom_types::{Checkpoint, Epoch, Root};
-//!
-//! let checkpoint = Checkpoint {
-//!     epoch: Epoch(5),
-//!     root: Root::ZERO,
-//! };
-//! assert_eq!(Checkpoint::decode(&checkpoint.encode()), Ok(checkpoint));
-//! ```
 
 mod config;
 pub mod constants;

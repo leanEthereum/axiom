@@ -29,50 +29,20 @@
 //! - Kate, Zaverucha, Goldberg, "Constant-Size Commitments to Polynomials and Their Applications", ASIACRYPT 2010.
 //! - Feist, Khovratovich, "Fast amortized KZG proofs", eprint 2023/033, for all cell proofs at once.
 //! - EIP-4844, shard blob transactions, and EIP-7594, peer data availability sampling.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_kzg::{BYTES_PER_BLOB, Blob, CellIndex, Kzg};
-//!
-//! let kzg = Kzg::mainnet();
-//!
-//! // A blob of 4096 small field elements.
-//! let mut bytes = vec![0; BYTES_PER_BLOB];
-//! bytes[31] = 7;
-//! let blob = Blob::from_bytes(&bytes).unwrap();
-//!
-//! // EIP-4844: commit, prove, verify.
-//! let commitment = kzg.blob_to_kzg_commitment(&blob);
-//! let proof = kzg.compute_blob_kzg_proof(&blob, &commitment).unwrap();
-//! assert_eq!(
-//!     kzg.verify_blob_kzg_proof(&blob, &commitment, &proof),
-//!     Ok(true)
-//! );
-//!
-//! // EIP-7594: cells with their proofs, then a check of two of them.
-//! let (cells, proofs) = kzg.compute_cells_and_kzg_proofs(&blob);
-//! let indices = [CellIndex::new(0).unwrap(), CellIndex::new(127).unwrap()];
-//! assert_eq!(
-//!     kzg.verify_cell_kzg_proof_batch(
-//!         &[commitment, commitment],
-//!         &indices,
-//!         &[cells[0].clone(), cells[127].clone()],
-//!         &[proofs[0], proofs[127]],
-//!     ),
-//!     Ok(true)
-//! );
-//! ```
 
+mod basis;
+mod bit_reversal;
 mod blob;
 mod bytes;
 mod cell;
 mod error;
 mod fft;
-mod fk20;
 mod kzg;
 mod parallel;
+mod powers;
 mod setup;
+#[cfg(test)]
+mod test_vectors;
 mod transcript;
 
 pub use blob::Blob;

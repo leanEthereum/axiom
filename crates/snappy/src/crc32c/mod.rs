@@ -44,9 +44,49 @@ impl Crc32c {
         crc.finish()
     }
 
-    /// Feeds more bytes.
+    /// The checksum of bytes, masked as the snappy framing format stores it.
+    ///
+    /// Masking keeps checksums of data that itself holds checksums well distributed.
+    #[must_use]
+    pub fn masked(bytes: &[u8]) -> u32 {
+        Self::mask(Self::checksum(bytes))
+    }
+
+    /// Masks a checksum.
+    ///
+    /// ```text
+    ///     masked = rotate_right(crc, 15) + 0xa282ead8   (mod 2^32)
+    /// ```
+    pub(crate) const fn mask(crc: u32) -> u32 {
+        crc.rotate_right(15).wrapping_add(0xa282_ead8)
+    }
+
+    /// Feeds more bytes, with the fastest path the CPU supports.
+    #[cfg(target_arch = "x86_64")]
     pub fn update(&mut self, bytes: &[u8]) {
-        self.state = update(self.state, bytes);
+        self.state = if is_x86_feature_detected!("sse4.2") {
+            // SAFETY: the CPU reports SSE4.2, the only feature the function enables.
+            unsafe { x86::update(self.state, bytes) }
+        } else {
+            table::update(self.state, bytes)
+        };
+    }
+
+    /// Feeds more bytes, with the fastest path the CPU supports.
+    #[cfg(target_arch = "aarch64")]
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.state = if is_aarch64_feature_detected!("crc") {
+            // SAFETY: the CPU reports the CRC extension, the only feature the function enables.
+            unsafe { arm::update(self.state, bytes) }
+        } else {
+            table::update(self.state, bytes)
+        };
+    }
+
+    /// Feeds more bytes, with the portable table path.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.state = table::update(self.state, bytes);
     }
 
     /// The checksum of all bytes fed so far.
@@ -62,34 +102,6 @@ impl Default for Crc32c {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Advances a raw state with the fastest path the CPU supports.
-#[cfg(target_arch = "x86_64")]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    if is_x86_feature_detected!("sse4.2") {
-        // SAFETY: the CPU reports SSE4.2, the only feature the function enables.
-        unsafe { x86::update(crc, bytes) }
-    } else {
-        table::update(crc, bytes)
-    }
-}
-
-/// Advances a raw state with the fastest path the CPU supports.
-#[cfg(target_arch = "aarch64")]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    if is_aarch64_feature_detected!("crc") {
-        // SAFETY: the CPU reports the CRC extension, the only feature the function enables.
-        unsafe { arm::update(crc, bytes) }
-    } else {
-        table::update(crc, bytes)
-    }
-}
-
-/// Advances a raw state with the portable table path.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    table::update(crc, bytes)
 }
 
 #[cfg(test)]
@@ -178,6 +190,18 @@ mod tests {
             crc.update(&bytes[..at]);
             crc.update(&bytes[at..]);
             prop_assert_eq!(crc.finish(), Crc32c::checksum(&bytes));
+        }
+
+        #[test]
+        fn single_bit_flips_are_detected(
+            bytes in prop::collection::vec(any::<u8>(), 1..300),
+            bit in 0usize..2400,
+        ) {
+            // A CRC detects every single-bit error, at every position.
+            let bit = bit % (bytes.len() * 8);
+            let mut flipped = bytes.clone();
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            prop_assert_ne!(Crc32c::checksum(&flipped), Crc32c::checksum(&bytes));
         }
     }
 }

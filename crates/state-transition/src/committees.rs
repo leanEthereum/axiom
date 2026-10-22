@@ -1,11 +1,13 @@
 //! The beacon committees of one epoch.
 
+use std::collections::BTreeSet;
+
 use axiom_types::{
-    BeaconState, CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
+    Attestation, BeaconState, CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
     constants::DOMAIN_BEACON_ATTESTER,
 };
 
-use crate::SwapOrNot;
+use crate::{BlockError, SwapOrNot};
 
 /// Every beacon committee of one epoch, computed with one shuffle.
 ///
@@ -86,5 +88,50 @@ impl EpochCommittees {
         let start = (total * position / count) as usize;
         let end = (total * (position + 1) / count) as usize;
         Some(&self.shuffled[start..end])
+    }
+
+    /// Validators an attestation counts, sorted and unique.
+    ///
+    /// The aggregation bits run across the selected committees, back to back.
+    ///
+    /// ```text
+    /// committee bits:    0 1 0 1          committees 1 and 3 are aggregated
+    /// aggregation bits:  [c1 members][c3 members]
+    /// ```
+    ///
+    /// See `get_attesting_indices` in the Electra beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a committee does not exist or the bits run short.
+    pub fn attesting_indices<P: Preset>(
+        &self,
+        attestation: &Attestation<P>,
+    ) -> Result<BTreeSet<ValidatorIndex>, BlockError> {
+        let slot = attestation.data.slot;
+        let committees = attestation
+            .committee_indices()
+            .map(|index| {
+                self.committee(slot, index)
+                    .ok_or(BlockError::UnknownCommittee {
+                        slot,
+                        index,
+                        committees_per_slot: self.committees_per_slot,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Bits past the committees are ignored here, as in the spec; only a short bitfield fails.
+        let expected = committees.iter().map(|committee| committee.len()).sum();
+        let actual = attestation.aggregation_bits.len();
+        if actual < expected {
+            return Err(BlockError::AggregationBitsLengthMismatch { expected, actual });
+        }
+        let attesters = committees
+            .into_iter()
+            .flatten()
+            .zip(attestation.aggregation_bits.iter())
+            .filter_map(|(validator, bit)| bit.then_some(*validator))
+            .collect();
+        Ok(attesters)
     }
 }

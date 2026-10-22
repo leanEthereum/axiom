@@ -4,7 +4,7 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use crate::Table;
+use crate::{Options, Table};
 
 /// A storage operation that could not complete.
 ///
@@ -44,8 +44,11 @@ pub enum Error {
     BatchTooLarge,
 
     /// A table name is empty or longer than the limit.
-    #[error("table name must be 1 to 64 bytes")]
-    InvalidTableName,
+    #[error("table name of {length} bytes is outside 1 to 64 bytes")]
+    InvalidTableName {
+        /// The name's length in bytes.
+        length: usize,
+    },
 
     /// Every one of the 255 table identifiers is taken.
     #[error("all 255 table identifiers are taken")]
@@ -55,9 +58,22 @@ pub enum Error {
     #[error("{0:?} does not belong to this store")]
     UnknownTable(Table),
 
-    /// The options break a documented bound.
-    #[error("invalid options: {0}")]
-    InvalidOptions(&'static str),
+    /// The segment size cannot hold a file header and one frame header.
+    #[error(
+        "segment size of {size} bytes is below the minimum of {} bytes",
+        Options::MIN_SEGMENT_SIZE
+    )]
+    SegmentSizeTooSmall {
+        /// The configured segment size in bytes.
+        size: u64,
+    },
+
+    /// The compaction threshold is a percentage above one hundred.
+    #[error("compaction threshold of {threshold} percent exceeds 100 percent")]
+    CompactionThresholdTooHigh {
+        /// The configured threshold in percent.
+        threshold: u8,
+    },
 
     /// An earlier write or sync failed, so the tail of the log is in an unknown state.
     ///

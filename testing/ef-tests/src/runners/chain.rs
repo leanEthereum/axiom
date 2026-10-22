@@ -13,12 +13,12 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, BlsSignature, CommitteeIndex, Hash32,
-    Preset, SignedBeaconBlock, SingleAttestation,
+    Attestation, AttesterSlashing, BeaconBlock, BeaconState, BlsSignature, ChainConfig,
+    CommitteeIndex, Hash32, Preset, SignedBeaconBlock, SingleAttestation,
 };
 use axiom_yaml::Yaml;
 
-use super::{StoreReplay, config_of};
+use super::StoreReplay;
 use crate::{Case, Failure, Meta, Runner};
 
 /// Distinguishes the database directories of cases running in parallel.
@@ -205,7 +205,7 @@ impl<P: Preset> Runner for ChainReplay<P> {
         let database = ChainDatabase::open(&directory.0)
             .map_err(|error| Failure(format!("database: {error}")))?;
         let chain = Chain::from_anchor(
-            config_of::<P>(),
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
             anchor_state,
             &SignedBeaconBlock {
                 message: anchor_block,
@@ -222,8 +222,11 @@ impl<P: Preset> Runner for ChainReplay<P> {
         // A restart resumes from the last finalized block, whatever came after it.
         let database = ChainDatabase::<P>::open(&directory.0)
             .map_err(|error| Failure(format!("reopening the database: {error}")))?;
-        let resumed = Chain::resume(config_of::<P>(), database)
-            .map_err(|error| Failure(format!("resume failed: {error}")))?;
+        let resumed = Chain::resume(
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
+            database,
+        )
+        .map_err(|error| Failure(format!("resume failed: {error}")))?;
         StoreReplay::<P>::expect_eq("resumed anchor", &finalized.root, &resumed.head().root)
     }
 }

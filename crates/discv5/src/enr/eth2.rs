@@ -7,6 +7,8 @@ use axiom_rlp::Decoder;
 use axiom_ssz::{BitVector, Const, Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
 use axiom_types::{Epoch, ForkDigest, Version};
 
+use super::raw_value::RawValue;
+
 /// Key of the fork identifier, an SSZ container in a 16-byte string.
 pub(crate) const KEY_ETH2: &[u8] = b"eth2";
 
@@ -87,16 +89,16 @@ impl Eth2Fields {
     pub(crate) fn read<'a>(value: impl Fn(&[u8]) -> Option<&'a [u8]>) -> Self {
         // SSZ values sit inside RLP strings; the custody count is a plain RLP integer.
         Self {
-            fork_id: value(KEY_ETH2).and_then(Self::ssz),
-            attnets: value(KEY_ATTNETS).and_then(Self::ssz),
-            syncnets: value(KEY_SYNCNETS).and_then(Self::ssz),
+            fork_id: value(KEY_ETH2).and_then(|raw| RawValue(raw).ssz()),
+            attnets: value(KEY_ATTNETS).and_then(|raw| RawValue(raw).ssz()),
+            syncnets: value(KEY_SYNCNETS).and_then(|raw| RawValue(raw).ssz()),
             custody_group_count: value(KEY_CGC).and_then(|raw| {
                 let mut decoder = Decoder::new(raw);
                 let count = decoder.uint().ok()?;
                 decoder.finish().ok()?;
                 Some(count)
             }),
-            next_fork_digest: value(KEY_NFD).and_then(Self::ssz),
+            next_fork_digest: value(KEY_NFD).and_then(|raw| RawValue(raw).ssz()),
         }
     }
 
@@ -118,15 +120,6 @@ impl Eth2Fields {
             .as_ref()
             .and_then(|bits| bits.get(subnet))
             .unwrap_or(false)
-    }
-
-    /// An SSZ value held in an RLP string.
-    fn ssz<T: Ssz>(raw: &[u8]) -> Option<T> {
-        // Exactly one RLP string, whose payload must be a strict SSZ encoding.
-        let mut decoder = Decoder::new(raw);
-        let bytes = decoder.bytes().ok()?;
-        decoder.finish().ok()?;
-        T::decode(bytes).ok()
     }
 }
 

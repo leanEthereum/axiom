@@ -1,4 +1,4 @@
-//! EIP-7594: erasure recovery of all cells and proofs from any half of the cells.
+//! EIP-7594: erasure recovery of a blob's polynomial from any half of its cells.
 //!
 //! See recover_cells_and_kzg_proofs in `specs/fulu/polynomial-commitments-sampling.md`.
 
@@ -6,20 +6,31 @@ use std::mem;
 
 use axiom_bls12_381::Scalar;
 
-use super::{Kzg, blob_proofs::check_lengths};
+use super::cosets::Cosets;
 use crate::{
-    CELLS_PER_EXT_BLOB, Cell, CellIndex, CellsAndProofs, FIELD_ELEMENTS_PER_BLOB,
-    FIELD_ELEMENTS_PER_CELL, FIELD_ELEMENTS_PER_EXT_BLOB, KzgError, fft::bit_reverse_permute,
+    CELLS_PER_EXT_BLOB, Cell, CellIndex, FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL,
+    FIELD_ELEMENTS_PER_EXT_BLOB, KzgError, fft::Domain,
 };
 
-impl Kzg {
-    /// Recovers all 128 cells and their proofs from at least 64 distinct cells.
-    ///
-    /// Cell indices must be strictly ascending.
-    /// The cells are not checked against any commitment, so callers verify them first.
-    /// Cells off the code still recover to some codeword, the one the spec's truncation picks.
-    ///
-    /// See recover_cells_and_kzg_proofs in the Fulu spec.
+/// The EIP-7594 erasure decoder: the coefficients behind any 64 of the 128 cells.
+#[derive(Clone, Debug)]
+pub(super) struct CellRecovery {
+    /// The 8192-th roots of unity, the extended blob's evaluation domain.
+    extended_domain: Domain,
+    /// The per-cell coset constants.
+    cosets: Cosets,
+}
+
+impl CellRecovery {
+    /// Builds the decoder over the extended domain and its coset table.
+    pub(super) const fn new(extended_domain: Domain, cosets: Cosets) -> Self {
+        Self {
+            extended_domain,
+            cosets,
+        }
+    }
+
+    /// Recovers the 4096 coefficients of the polynomial behind the cells.
     ///
     /// # Algorithm
     ///
@@ -45,19 +56,19 @@ impl Kzg {
     ///
     /// # Errors
     ///
-    /// Fails when:
-    ///
-    /// - the indices and cells differ in number,
-    /// - there are fewer than 64 or more than 128 cells,
-    /// - an index repeats,
-    /// - the indices are not ascending.
-    pub fn recover_cells_and_kzg_proofs(
+    /// Fails when the indices and cells differ in number, number fewer than 64 or more than 128, repeat, or descend.
+    pub(super) fn recover(
         &self,
         cell_indices: &[CellIndex],
         cells: &[Cell],
-    ) -> Result<CellsAndProofs, KzgError> {
+    ) -> Result<Vec<Scalar>, KzgError> {
         // Phase 1: the spec's input checks, in its order.
-        check_lengths(cell_indices.len(), &[cells.len()])?;
+        if cell_indices.len() != cells.len() {
+            return Err(KzgError::RecoveryLengthMismatch {
+                cell_indices: cell_indices.len(),
+                cells: cells.len(),
+            });
+        }
         if !(CELLS_PER_EXT_BLOB / 2..=CELLS_PER_EXT_BLOB).contains(&cells.len()) {
             return Err(KzgError::InvalidCellCount(cells.len()));
         }
@@ -67,21 +78,23 @@ impl Kzg {
                 return Err(KzgError::DuplicateCellIndex(index.get()));
             }
         }
-        if !cell_indices.is_sorted() {
-            return Err(KzgError::UnsortedCellIndices);
+        if let Some(pair) = cell_indices.windows(2).find(|pair| pair[0] > pair[1]) {
+            return Err(KzgError::UnsortedCellIndices {
+                previous: pair[0].get(),
+                next: pair[1].get(),
+            });
         }
 
-        // Phase 2: recover the coefficients, then recompute everything from them.
-        let coefficients = self.recover_coefficients(cell_indices, cells, &present);
-        Ok(self.cells_and_proofs(&coefficients))
+        // Phase 2: the coefficients, recover_polynomialcoeff in the Fulu spec.
+        Ok(self.coefficients(cell_indices, cells, &present))
     }
 
-    /// Recovers the 4096 coefficients of the polynomial behind the cells, recover_polynomialcoeff in the Fulu spec.
-    fn recover_coefficients(
+    /// Interpolates the coefficients from validated cells, recover_polynomialcoeff in the Fulu spec.
+    fn coefficients(
         &self,
         cell_indices: &[CellIndex],
         cells: &[Cell],
-        present: &[bool],
+        present: &[bool; CELLS_PER_EXT_BLOB],
     ) -> Vec<Scalar> {
         let domain = &self.extended_domain;
 
@@ -94,7 +107,7 @@ impl Kzg {
             let start = index.position() * FIELD_ELEMENTS_PER_CELL;
             extended[start..start + FIELD_ELEMENTS_PER_CELL].copy_from_slice(cell.evaluations());
         }
-        bit_reverse_permute(&mut extended);
+        domain.bit_reversal().permute(&mut extended);
 
         // Phase 2: Z in coefficient form, and its evaluations over the domain.
         let vanishing = self.vanishing_polynomial(present);
@@ -129,13 +142,13 @@ impl Kzg {
     /// ```text
     ///     z(Y) = prod_{k missing} (Y - h_k^64)        Z(X) = z(X^64)
     /// ```
-    fn vanishing_polynomial(&self, present: &[bool]) -> Vec<Scalar> {
+    fn vanishing_polynomial(&self, present: &[bool; CELLS_PER_EXT_BLOB]) -> Vec<Scalar> {
         // Phase 1: multiply out z one linear factor at a time.
         //
         //     (c_0 + c_1 Y + ...)(Y - a) = -a c_0 + (c_0 - a c_1) Y + ...
         let mut small = vec![Scalar::ONE];
-        for cell in (0..CELLS_PER_EXT_BLOB).filter(|cell| !present[*cell]) {
-            let root = self.coset_vanishing_constant(cell);
+        for cell in CellIndex::all().filter(|cell| !present[cell.position()]) {
+            let root = self.cosets.vanishing_constant(cell);
             small.push(Scalar::ZERO);
             for i in (0..small.len()).rev() {
                 let lower = if i == 0 { Scalar::ZERO } else { small[i - 1] };
@@ -154,8 +167,13 @@ impl Kzg {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{prelude::*, sample::subsequence};
+
     use super::*;
-    use crate::fft::{reverse_bits, tests::horner};
+    use crate::{
+        Kzg, bit_reversal::BitReversal, blob::tests::arb_blob, cell::tests::all_indices,
+        fft::tests::horner,
+    };
 
     /// Cell indices from integers known to be in range.
     fn indices(values: impl IntoIterator<Item = u64>) -> Vec<CellIndex> {
@@ -175,9 +193,9 @@ mod tests {
         assert_eq!(
             kzg.recover_cells_and_kzg_proofs(&indices(0..64), &cells)
                 .unwrap_err(),
-            KzgError::LengthMismatch {
-                expected: 64,
-                actual: 63
+            KzgError::RecoveryLengthMismatch {
+                cell_indices: 64,
+                cells: 63
             }
         );
 
@@ -202,18 +220,21 @@ mod tests {
         assert_eq!(
             kzg.recover_cells_and_kzg_proofs(&swapped, &cells)
                 .unwrap_err(),
-            KzgError::UnsortedCellIndices
+            KzgError::UnsortedCellIndices {
+                previous: 1,
+                next: 0
+            }
         );
     }
 
     #[test]
     fn vanishing_polynomial_vanishes_exactly_on_missing_cells() {
         // Fixture state: cells 0 and 77 missing, the other 126 present.
-        let kzg = Kzg::mainnet();
+        let recovery = &Kzg::mainnet().recovery;
         let mut present = [true; CELLS_PER_EXT_BLOB];
         present[0] = false;
         present[77] = false;
-        let vanishing = kzg.vanishing_polynomial(&present);
+        let vanishing = recovery.vanishing_polynomial(&present);
 
         // Degree 2 * 64 = 128, monic.
         assert_eq!(vanishing[128], Scalar::ONE);
@@ -222,11 +243,29 @@ mod tests {
         // Zero on every point of cell 77, nonzero on a point of cell 1.
         //
         //     cell k, position j  ->  w^{128 rev_6(j) + rev_7(k)}
-        let w = kzg.extended_domain.roots();
+        let w = recovery.extended_domain.roots();
         for j in 0..FIELD_ELEMENTS_PER_CELL {
-            let point = w[128 * reverse_bits(j, 6) + reverse_bits(77, 7)];
+            let point = w[128 * BitReversal::new(6).index(j) + BitReversal::new(7).index(77)];
             assert!(horner(&vanishing, &point).is_zero());
         }
-        assert!(!horner(&vanishing, &w[reverse_bits(1, 7)]).is_zero());
+        assert!(!horner(&vanishing, &w[BitReversal::new(7).index(1)]).is_zero());
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4))]
+
+        #[test]
+        fn recovery_from_any_half(blob in arb_blob(), kept in subsequence(all_indices(), 64..=128)) {
+            let kzg = Kzg::mainnet();
+            let (cells, proofs) = kzg.compute_cells_and_kzg_proofs(&blob);
+
+            // Fixture state: a random ascending subset of at least 64 of the 128 cells.
+            let available: Vec<Cell> = kept.iter().map(|index| cells[index.get() as usize].clone()).collect();
+
+            // Recovery returns every cell and every proof of the original.
+            let (recovered_cells, recovered_proofs) = kzg.recover_cells_and_kzg_proofs(&kept, &available).unwrap();
+            prop_assert_eq!(recovered_cells, cells);
+            prop_assert_eq!(recovered_proofs, proofs);
+        }
     }
 }

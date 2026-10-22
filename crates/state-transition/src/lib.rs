@@ -16,20 +16,24 @@
 //! The code follows the consensus specs for the Fulu fork, step by step.
 //! Each item cites the spec function it implements.
 
+mod active_balance;
 mod block;
+mod churn;
 mod committees;
 mod epoch;
 mod error;
 mod execution;
 mod pubkeys;
+mod registry;
+mod sampling;
 mod shuffle;
 mod signatures;
 mod state;
-mod upgrade;
 
-pub use block::{BlockProcessor, ExpectedWithdrawals, Operation};
+pub use active_balance::ActiveBalance;
+pub use block::{BlockProcessor, ExpectedWithdrawals, Operation, PayloadExecution};
 pub use committees::EpochCommittees;
-pub use epoch::{Deltas, EpochProcessor, EpochStep};
+pub use epoch::{Deltas, EpochProcessor, EpochStep, Participation};
 pub use error::{BlockError, StateError, TransitionError};
 pub use execution::{ExecutionEngine, KnownVerdict};
 pub use pubkeys::PubkeyCache;

@@ -32,20 +32,29 @@ pub enum EnrError {
     /// The keys are not in strictly increasing order.
     ///
     /// Sorted keys make the encoding unique, and strictness rules out duplicates.
-    #[error("record keys are not strictly increasing")]
-    UnsortedKeys,
+    #[error("record key {position} does not exceed the key before it")]
+    UnsortedKeys {
+        /// Position of the first key out of order, counting pairs from zero.
+        position: usize,
+    },
 
     /// The record names no identity scheme.
     #[error("record names no identity scheme")]
     MissingScheme,
 
     /// The record names an identity scheme other than "v4".
+    ///
+    /// The scheme name is free-form bytes, so the error does not carry it.
     #[error("record identity scheme is not v4")]
     UnsupportedScheme,
 
-    /// The record carries no valid compressed secp256k1 key.
-    #[error("record has no valid secp256k1 key")]
-    InvalidPublicKey,
+    /// The record carries no secp256k1 key.
+    #[error("record has no secp256k1 key")]
+    MissingPublicKey,
+
+    /// The record's secp256k1 key is not a point on the curve.
+    #[error("record secp256k1 key: {0}")]
+    InvalidPublicKey(#[source] Secp256k1Error),
 
     /// The signature is malformed or does not verify under the record's key.
     #[error("record signature: {0}")]

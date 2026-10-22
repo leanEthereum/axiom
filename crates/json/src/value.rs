@@ -1,6 +1,8 @@
 //! A parsed JSON value and its typed views.
 
-use crate::{Limits, Number, Object, ParseError, parser::Parser};
+use std::fmt;
+
+use crate::{Limits, Number, Object, ParseError, parser::Parser, writer::Writer};
 
 /// One JSON value.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -178,9 +180,23 @@ impl From<Object> for Json {
     }
 }
 
+impl<K: Into<String>, const N: usize> From<[(K, Self); N]> for Json {
+    /// An object of named members, in order.
+    fn from(members: [(K, Self); N]) -> Self {
+        Self::Object(members.into_iter().collect())
+    }
+}
+
 impl<T: Into<Self>> From<Option<T>> for Json {
     /// Maps an absent value to null, as JSON-RPC does for optional fields.
     fn from(value: Option<T>) -> Self {
         value.map_or(Self::Null, Into::into)
+    }
+}
+
+impl fmt::Display for Json {
+    /// Writes the compact text of the value.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Writer::new(f).value(self)
     }
 }

@@ -23,6 +23,7 @@
 //! See `libp2p/specs/yamux/README.md`, a copy of the hashicorp specification.
 
 mod frame;
+mod reader;
 mod session;
 
 pub use frame::{Flags, FrameType, HEADER_LEN, Header, StreamId};
@@ -147,8 +148,15 @@ pub enum YamuxError {
     },
 
     /// A window update pushes the send window past 2^32 - 1.
-    #[error("window of stream {0} overflows")]
-    WindowOverflow(StreamId),
+    #[error("credit of {credit} on stream {stream} overflows its window of {window}")]
+    WindowOverflow {
+        /// The stream.
+        stream: StreamId,
+        /// Send window before the update.
+        window: u32,
+        /// Credit the update grants.
+        credit: u32,
+    },
 
     /// The stream is not open on this session.
     #[error("stream {0} is not open")]
@@ -163,14 +171,30 @@ pub enum YamuxError {
     SessionClosing,
 
     /// Too many outbound streams await the peer's acknowledgement.
-    #[error("too many unacknowledged streams")]
-    AckBacklogFull,
+    #[error("{backlog} outbound streams await acknowledgement, at the limit of {max}")]
+    AckBacklogFull {
+        /// Outbound streams not yet acknowledged.
+        backlog: usize,
+        /// Most unacknowledged streams allowed.
+        max: usize,
+    },
 
     /// Stream identifiers of this side are exhausted.
     #[error("stream identifiers exhausted")]
     StreamIdsExhausted,
 
     /// The stream already holds back as many bytes as the send buffer allows.
-    #[error("send buffer of stream {0} is full")]
-    SendBufferFull(StreamId),
+    #[error(
+        "{len} bytes do not fit stream {stream}, which holds {pending} of {max} buffered bytes"
+    )]
+    SendBufferFull {
+        /// The stream.
+        stream: StreamId,
+        /// Bytes the write offers.
+        len: usize,
+        /// Bytes already held back.
+        pending: usize,
+        /// Most bytes a stream holds back.
+        max: usize,
+    },
 }

@@ -6,10 +6,7 @@ mod auth_data;
 mod error;
 mod nonce;
 
-use std::array;
-
 pub use auth_data::AuthData;
-use axiom_crypto::aes::Aes128Ctr;
 pub use error::PacketError;
 pub use nonce::{IdNonce, MaskingIv, Nonce};
 
@@ -105,7 +102,7 @@ impl Packet {
     pub fn encode(&self, dest: &NodeId) -> Vec<u8> {
         // Mask the header under the destination's id, then append the message.
         let mut header = self.header.encode();
-        Self::masking(dest, &self.masking_iv).apply_keystream(&mut header);
+        self.masking_iv.cipher(dest).apply_keystream(&mut header);
         let mut out = Vec::with_capacity(IV_LEN + header.len() + self.message.len());
         out.extend_from_slice(&self.masking_iv.0);
         out.extend_from_slice(&header);
@@ -139,7 +136,7 @@ impl Packet {
             });
         };
         let masking_iv = MaskingIv(*iv);
-        let mut cipher = Self::masking(local, &masking_iv);
+        let mut cipher = masking_iv.cipher(local);
         let mut fixed = [0_u8; STATIC_HEADER_LEN];
         fixed.copy_from_slice(&rest[..STATIC_HEADER_LEN]);
         cipher.apply_keystream(&mut fixed);
@@ -167,10 +164,10 @@ impl Packet {
         // Phase 3: a challenge carries no message; other packets carry at least a tag.
         match auth {
             AuthData::WhoAreYou { .. } if !message.is_empty() => {
-                return Err(PacketError::UnexpectedMessage);
+                return Err(PacketError::UnexpectedMessage { len: message.len() });
             }
             AuthData::Message { .. } | AuthData::Handshake { .. } if message.len() < TAG_LEN => {
-                return Err(PacketError::MessageTooShort);
+                return Err(PacketError::MessageTooShort { len: message.len() });
             }
             _ => {}
         }
@@ -182,13 +179,6 @@ impl Packet {
             },
             message: message.to_vec(),
         })
-    }
-
-    /// The masking cipher: AES-128-CTR keyed by the first half of the destination id.
-    fn masking(dest: &NodeId, iv: &MaskingIv) -> Aes128Ctr {
-        // The key is the first 16 of the 32 id bytes.
-        let key: [u8; 16] = array::from_fn(|i| dest.0[i]);
-        Aes128Ctr::new(&key, &iv.0)
     }
 }
 
@@ -250,7 +240,7 @@ mod tests {
         bytes.push(0);
         assert_eq!(
             Packet::decode(&dest, &bytes),
-            Err(PacketError::UnexpectedMessage)
+            Err(PacketError::UnexpectedMessage { len: 1 })
         );
         // A message packet whose message is 15 bytes, one short of a tag.
         let packet = Packet {
@@ -265,7 +255,7 @@ mod tests {
         };
         assert_eq!(
             Packet::decode(&dest, &packet.encode(&dest)),
-            Err(PacketError::MessageTooShort)
+            Err(PacketError::MessageTooShort { len: 15 })
         );
     }
 
@@ -314,7 +304,7 @@ mod tests {
             header.extend_from_slice(&[0; 12]);
             header.extend_from_slice(&size.to_be_bytes());
             header.extend_from_slice(&tail);
-            Packet::masking(&dest, &MaskingIv(iv)).apply_keystream(&mut header);
+            MaskingIv(iv).cipher(&dest).apply_keystream(&mut header);
             let mut bytes = iv.to_vec();
             bytes.extend_from_slice(&header);
             if let Ok(packet) = Packet::decode(&dest, &bytes) {

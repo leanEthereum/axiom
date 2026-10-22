@@ -2,6 +2,8 @@
 
 use std::slice;
 
+use crate::{BodyLength, ProtocolError};
+
 /// Header fields in arrival order, names stored in lowercase.
 ///
 /// Field names are case-insensitive per RFC 9110 section 5.1.
@@ -88,6 +90,66 @@ impl Headers {
     pub fn iter(&self) -> slice::Iter<'_, (String, String)> {
         self.entries.iter()
     }
+
+    /// The framing the fields declare, if any.
+    ///
+    /// Both declarations at once are refused rather than resolved.
+    /// RFC 9112 section 6.3 allows that, and it shuts the door on request smuggling.
+    pub(crate) fn body_framing(&self) -> Result<Option<BodyLength>, ProtocolError> {
+        let length = self.content_length()?;
+        let mut codings = self.get_all("transfer-encoding").peekable();
+
+        if codings.peek().is_none() {
+            // No transfer coding: the content length frames the body, if present.
+            return Ok(length.map(BodyLength::Fixed));
+        }
+        if let Some(content_length) = length {
+            return Err(ProtocolError::CodingWithLength { content_length });
+        }
+
+        // Exactly one coding, chunked, across all transfer-encoding fields.
+        let mut list = codings
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .filter(|item| !item.is_empty());
+        match (list.next(), list.next()) {
+            (Some(coding), None) if coding.eq_ignore_ascii_case("chunked") => {
+                Ok(Some(BodyLength::Chunked))
+            }
+            _ => Err(ProtocolError::UnsupportedTransferEncoding),
+        }
+    }
+
+    /// The declared content length, when present.
+    ///
+    /// Repeated values are allowed only when identical, per RFC 9112 section 6.3 rule 5.
+    fn content_length(&self) -> Result<Option<u64>, ProtocolError> {
+        let mut length = None;
+        // A field may repeat, and one field may hold a comma-separated list.
+        for item in self
+            .get_all("content-length")
+            .flat_map(|value| value.split(','))
+        {
+            let item = item.trim();
+            // Digits only; a sign, a space, or hex is malformed.
+            if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(ProtocolError::InvalidContentLength);
+            }
+            let value: u64 = item
+                .parse()
+                .map_err(|_| ProtocolError::InvalidContentLength)?;
+            match length {
+                Some(first) if first != value => {
+                    return Err(ProtocolError::ConflictingLength {
+                        first,
+                        second: value,
+                    });
+                }
+                _ => length = Some(value),
+            }
+        }
+        Ok(length)
+    }
 }
 
 impl<'a> IntoIterator for &'a Headers {
@@ -97,28 +159,6 @@ impl<'a> IntoIterator for &'a Headers {
     fn into_iter(self) -> Self::IntoIter {
         self.entries.iter()
     }
-}
-
-/// Whether a byte may appear in a token, such as a field name or a method.
-///
-/// RFC 9110 section 5.6.2: any visible ASCII except the delimiters.
-pub(crate) const fn is_token_byte(byte: u8) -> bool {
-    matches!(
-        byte,
-        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`'
-            | b'|' | b'~'
-            | b'0'..=b'9'
-            | b'a'..=b'z'
-            | b'A'..=b'Z'
-    )
-}
-
-/// Whether a byte may appear in a field value.
-///
-/// RFC 9110 section 5.5: visible ASCII, space, tab, and bytes from 0x80 up.
-/// Carriage return, line feed, and NUL are excluded, which blocks header injection.
-pub(crate) const fn is_value_byte(byte: u8) -> bool {
-    matches!(byte, b'\t' | b' '..=b'~' | 0x80..=0xff)
 }
 
 #[cfg(test)]

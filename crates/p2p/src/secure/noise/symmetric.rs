@@ -73,10 +73,15 @@ impl CipherState {
             return Ok(());
         };
         // The tag is the last 16 bytes.
-        let (body, tag) = ciphertext
-            .split_last_chunk::<TAG_LEN>()
-            .ok_or(SecureError::MessageTooShort)?;
-        let nonce = Self::encode_nonce(Self::advance(&mut self.nonce)?);
+        let (body, tag) =
+            ciphertext
+                .split_last_chunk::<TAG_LEN>()
+                .ok_or(SecureError::MessageTooShort {
+                    needed: TAG_LEN,
+                    len: ciphertext.len(),
+                })?;
+        let counter = Self::advance(&mut self.nonce)?;
+        let nonce = Self::encode_nonce(counter);
         let start = out.len();
         out.extend_from_slice(body);
         // On failure the unauthenticated bytes are removed before returning.
@@ -85,7 +90,7 @@ impl CipherState {
             .is_err()
         {
             out.truncate(start);
-            return Err(SecureError::DecryptionFailed);
+            return Err(SecureError::DecryptionFailed { nonce: counter });
         }
         Ok(())
     }
@@ -283,7 +288,7 @@ mod tests {
         let mut out = b"kept".to_vec();
         assert_eq!(
             receiver.decrypt(b"ad", &sealed, &mut out),
-            Err(SecureError::DecryptionFailed)
+            Err(SecureError::DecryptionFailed { nonce: 0 })
         );
         assert_eq!(out, b"kept");
     }
