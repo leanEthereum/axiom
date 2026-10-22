@@ -1,0 +1,22 @@
+[package]
+name = "axiom-kzg"
+description = "KZG polynomial commitments for EIP-4844 blobs and EIP-7594 cells"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls12-381.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+axiom-yaml.workspace = true
+proptest.workspace = true

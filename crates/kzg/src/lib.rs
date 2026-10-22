@@ -1,0 +1,112 @@
+//! KZG polynomial commitments for EIP-4844 blobs and EIP-7594 cells.
+//!
+//! # Overview
+//!
+//! A blob is a polynomial f of degree below 4096, given by its evaluations.
+//! A commitment is the single G1 point [f(s)], for a secret s of the trusted setup.
+//! An opening at z proves f(z) = y with the quotient q(X) = (f(X) - y) / (X - z):
+//!
+//! ```text
+//!     e([f(s)] - [y], [1]_2)  =  e([q(s)], [s - z]_2)
+//! ```
+//!
+//! The quotient exists exactly when f(z) = y, and s is unknown, so the check is binding.
+//! This is the scheme of Kate, Zaverucha, and Goldberg, "Constant-Size Commitments to Polynomials
+//! and Their Applications", ASIACRYPT 2010.
+//!
+//! EIP-4844 opens a blob at a Fiat-Shamir challenge, to tie the blob to its commitment.
+//! EIP-7594 extends each blob to 8192 evaluations and opens 64 of them at a time, one cell each.
+//! Any 64 of the 128 cells recover the rest, so peers sample cells instead of downloading blobs.
+//!
+//! The crate implements, method for method:
+//!
+//! - `specs/deneb/polynomial-commitments.md` of the consensus specs,
+//! - `specs/fulu/polynomial-commitments-sampling.md` of the consensus specs.
+//!
+//! Every input is public, so no operation here needs constant time.
+//!
+//! # Examples
+//!
+//! ```
+//! use axiom_kzg::{BYTES_PER_BLOB, Blob, CellIndex, Kzg};
+//!
+//! let kzg = Kzg::mainnet();
+//!
+//! // A blob of 4096 small field elements.
+//! let mut bytes = vec![0; BYTES_PER_BLOB];
+//! bytes[31] = 7;
+//! let blob = Blob::from_bytes(&bytes).unwrap();
+//!
+//! // EIP-4844: commit, prove, verify.
+//! let commitment = kzg.blob_to_kzg_commitment(&blob);
+//! let proof = kzg.compute_blob_kzg_proof(&blob, &commitment).unwrap();
+//! assert_eq!(
+//!     kzg.verify_blob_kzg_proof(&blob, &commitment, &proof),
+//!     Ok(true)
+//! );
+//!
+//! // EIP-7594: cells with their proofs, then a check of two of them.
+//! let (cells, proofs) = kzg.compute_cells_and_kzg_proofs(&blob);
+//! let indices = [CellIndex::new(0).unwrap(), CellIndex::new(127).unwrap()];
+//! assert_eq!(
+//!     kzg.verify_cell_kzg_proof_batch(
+//!         &[commitment, commitment],
+//!         &indices,
+//!         &[cells[0].clone(), cells[127].clone()],
+//!         &[proofs[0], proofs[127]],
+//!     ),
+//!     Ok(true)
+//! );
+//! ```
+
+mod blob;
+mod bytes;
+mod cell;
+mod error;
+mod fft;
+mod fk20;
+mod kzg;
+mod parallel;
+mod setup;
+mod transcript;
+
+pub use blob::Blob;
+pub use bytes::{Bytes32, Bytes48};
+pub use cell::{Cell, CellIndex, CellsAndProofs};
+pub use error::KzgError;
+pub use kzg::Kzg;
+
+/// Number of bytes of a field element, BYTES_PER_FIELD_ELEMENT in the Deneb spec.
+///
+/// Scalars are below r < 2^255, so 32 bytes hold any of them.
+pub const BYTES_PER_FIELD_ELEMENT: usize = 32;
+
+/// Number of field elements in a blob, FIELD_ELEMENTS_PER_BLOB in the Deneb spec.
+///
+/// A power of two, so the evaluation domain is a group of roots of unity.
+pub const FIELD_ELEMENTS_PER_BLOB: usize = 4096;
+
+/// Number of bytes in a blob, BYTES_PER_BLOB in the Deneb spec.
+pub const BYTES_PER_BLOB: usize = BYTES_PER_FIELD_ELEMENT * FIELD_ELEMENTS_PER_BLOB;
+
+/// Number of bytes in a commitment, a compressed G1 point.
+pub const BYTES_PER_COMMITMENT: usize = 48;
+
+/// Number of bytes in a proof, a compressed G1 point.
+pub const BYTES_PER_PROOF: usize = 48;
+
+/// Number of field elements in an extended blob, FIELD_ELEMENTS_PER_EXT_BLOB in the Fulu spec.
+///
+/// The Reed-Solomon extension doubles the blob, so any half recovers the whole.
+pub const FIELD_ELEMENTS_PER_EXT_BLOB: usize = 2 * FIELD_ELEMENTS_PER_BLOB;
+
+/// Number of field elements in a cell, FIELD_ELEMENTS_PER_CELL in the Fulu spec.
+///
+/// It must divide the extended blob and stay below the 65 G2 points of the setup.
+pub const FIELD_ELEMENTS_PER_CELL: usize = 64;
+
+/// Number of bytes in a cell, BYTES_PER_CELL in the Fulu spec.
+pub const BYTES_PER_CELL: usize = BYTES_PER_FIELD_ELEMENT * FIELD_ELEMENTS_PER_CELL;
+
+/// Number of cells in an extended blob, CELLS_PER_EXT_BLOB in the Fulu spec.
+pub const CELLS_PER_EXT_BLOB: usize = FIELD_ELEMENTS_PER_EXT_BLOB / FIELD_ELEMENTS_PER_CELL;
