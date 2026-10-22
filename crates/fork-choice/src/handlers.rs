@@ -111,6 +111,37 @@ impl<P: Preset> Store<P> {
         self.compute_pulled_up_tip(root)
     }
 
+    /// Accepts a block, then the votes and attester slashings it carries.
+    ///
+    /// A vote or slashing a block carries may be stale or already known.
+    /// Rejecting one of them never rejects the block, so their errors are dropped.
+    ///
+    /// This is how the spec's test harness and every client feed a block in.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the block itself is refused, as the block handler alone would.
+    pub fn import_block(
+        &mut self,
+        signed_block: &SignedBeaconBlock<P>,
+        availability: DataAvailability,
+        verification: Verification,
+        payload: PayloadStatus,
+    ) -> Result<(), ForkChoiceError> {
+        self.on_block(signed_block, availability, verification, payload)?;
+
+        // Votes inside a block skip the timing rule, since a block may carry old votes.
+        let body = &signed_block.message.body;
+        for attestation in &body.attestations {
+            let _ignored = self.on_attestation(attestation, true, verification);
+        }
+        // Equivocation evidence removes the offenders' weight from every branch.
+        for slashing in &body.attester_slashings {
+            let _ignored = self.on_attester_slashing(slashing, verification);
+        }
+        Ok(())
+    }
+
     /// Records a block and its post-state, skipping the timing, finality, and boost rules.
     ///
     /// This replays a chain whose blocks were already validated elsewhere, such as a

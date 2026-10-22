@@ -157,26 +157,13 @@ impl<P: Preset> StoreReplay<P> {
             }
         };
 
+        let payload = payload_statuses
+            .get(&block.message.body.execution_payload.block_hash)
+            .copied()
+            .unwrap_or(PayloadStatus::Valid);
         let outcome = store
-            .on_block(
-                &block,
-                availability,
-                verification,
-                payload_statuses
-                    .get(&block.message.body.execution_payload.block_hash)
-                    .copied()
-                    .unwrap_or(PayloadStatus::Valid),
-            )
+            .import_block(&block, availability, verification, payload)
             .map_err(|error| error.to_string());
-        if outcome.is_ok() {
-            // Votes and slashings inside the block feed the fork choice too.
-            for attestation in &block.message.body.attestations {
-                let _ = store.on_attestation(attestation, true, verification);
-            }
-            for slashing in &block.message.body.attester_slashings {
-                let _ = store.on_attester_slashing(slashing, verification);
-            }
-        }
         Ok(outcome)
     }
 
