@@ -2,17 +2,13 @@
 
 use std::time::Duration;
 
-use super::{MessageId, Topic};
-use crate::eth::GossipEncoding;
-
-/// Derives a message identifier from a topic and the raw data.
-pub type MessageIdFn = fn(&Topic, &[u8]) -> MessageId;
+use crate::eth::{GossipEncoding, MessageIds};
 
 /// Gossipsub parameters.
 ///
 /// Defaults follow the phase0 p2p-interface gossipsub section.
 /// The v1.1 and v1.2 extras follow the libp2p reference implementations.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GossipsubConfig {
     /// D: the target mesh degree.
     pub mesh_n: usize,
@@ -75,8 +71,8 @@ pub struct GossipsubConfig {
 
     /// Largest encoded RPC accepted or sent.
     pub max_transmit_size: usize,
-    /// The message identifier function.
-    pub message_id: MessageIdFn,
+    /// How message identifiers derive from topics and data.
+    pub message_id: MessageIds,
 }
 
 impl GossipsubConfig {
@@ -120,7 +116,7 @@ impl GossipsubConfig {
             idontwant_heartbeats: 3,
             validation_timeout: Duration::from_secs(30),
             max_transmit_size: GossipEncoding::new(max_payload_size).max_message_size(),
-            message_id: GossipEncoding::message_id,
+            message_id: MessageIds::default(),
         }
     }
 }

@@ -7,6 +7,7 @@
 mod aggregate;
 mod attestation;
 mod block;
+mod block_contents;
 mod consolidation;
 mod deposit;
 mod execution;
@@ -21,6 +22,7 @@ pub use attestation::{
     SingleAttestation,
 };
 pub use block::{BeaconBlock, BeaconBlockBody, SignedBeaconBlock};
+pub use block_contents::SignedBlockContents;
 pub use consolidation::{ConsolidationRequest, PendingConsolidation};
 pub use deposit::{DepositRequest, PendingDeposit};
 pub use execution::{

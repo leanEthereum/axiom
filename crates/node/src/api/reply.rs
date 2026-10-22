@@ -6,7 +6,7 @@ use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
 use axiom_types::{
     ForkName,
-    fulu::{BeaconBlockHeader, Checkpoint},
+    phase0::{BeaconBlockHeader, Checkpoint},
 };
 
 use crate::{ChainError, ChainStopped};

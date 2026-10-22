@@ -6,7 +6,8 @@ use crate::{
     BlsSignature, Bytes32, Preset, Root, Slot, ValidatorIndex,
     capella::{
         Attestation, AttesterSlashing, BeaconBlockHeader, Deposit, Eth1Data, ExecutionPayload,
-        ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate,
+        NewPayloadRequest, ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit,
+        SyncAggregate,
     },
 };
 
@@ -154,6 +155,16 @@ impl<P: Preset> BeaconBlock<P> {
             parent_root: self.parent_root,
             state_root: self.state_root,
             body_root: self.body.hash_tree_root(),
+        }
+    }
+
+    /// The request the execution engine judges for this block's payload.
+    ///
+    /// See `process_execution_payload` in the Capella beacon chain spec.
+    #[must_use]
+    pub fn new_payload_request(&self) -> NewPayloadRequest<P> {
+        NewPayloadRequest {
+            execution_payload: self.body.execution_payload.clone(),
         }
     }
 }

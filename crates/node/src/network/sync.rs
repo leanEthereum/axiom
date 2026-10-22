@@ -1,19 +1,21 @@
-//! Catching up: fetching blocks and their columns from peers that are ahead.
+//! Catching up: fetching blocks, their data, and their payloads from peers that are ahead.
 
 use std::{collections::HashMap, sync::Arc};
 
-use axiom_das::ColumnSidecar;
+use axiom_das::{ColumnSidecar, PayloadColumnSidecar};
 use axiom_fork_choice::ForkChoiceError;
+use axiom_gossip::CheckedBlob;
 use axiom_kzg::Kzg;
 use axiom_p2p::{
     PeerId,
     eth::reqresp::{Protocol, ResponseChunk, ResponseCode, Status},
     swarm::{NetworkError, NetworkHandle, RequestId},
 };
-use axiom_ssz::{List, Ssz};
+use axiom_ssz::{List, Root, Ssz};
 use axiom_types::{
-    ChainConfig, ColumnIndex, Preset, Slot,
-    fulu::{DataColumnSidecar, SignedBeaconBlock},
+    BlobData, ChainConfig, ColumnIndex, ForkDigest, Preset, Slot, combined,
+    deneb::BlobSidecar,
+    gloas::{ExecutionPayloadBid, SignedExecutionPayloadEnvelope},
 };
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -21,7 +23,10 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use super::requests::{BlocksByRangeRequest, ColumnsByRangeRequest};
+use super::{
+    forks::ForkDigests,
+    requests::{BlocksByRangeRequest, ColumnsByRangeRequest, SlotRangeRequest},
+};
 use crate::{ChainError, ChainHandle, ExecutionLayer};
 
 /// Slots fetched per batch.
@@ -34,7 +39,111 @@ const BATCH_SLOTS: u64 = 32;
 /// A peer that times out or answers with errors this often is useless for sync, if not hostile.
 const MAX_STRIKES: u32 = 3;
 
-/// One range being fetched from one peer.
+/// What one request of a batch fetches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fetch {
+    /// Blocks by range.
+    Blocks,
+    /// Blob sidecars by range, Deneb and Electra.
+    Blobs,
+    /// Sampled columns by range, from Fulu on.
+    Columns,
+    /// Payload envelopes by range, from Gloas on.
+    Envelopes,
+}
+
+impl Fetch {
+    /// The method that fetches it.
+    const fn protocol(self) -> Protocol {
+        match self {
+            Self::Blocks => Protocol::BeaconBlocksByRangeV2,
+            Self::Blobs => Protocol::BlobSidecarsByRangeV1,
+            Self::Columns => Protocol::DataColumnSidecarsByRangeV1,
+            Self::Envelopes => Protocol::ExecutionPayloadEnvelopesByRangeV1,
+        }
+    }
+}
+
+/// What a batch received, item by item.
+#[derive(Debug)]
+struct Received<P: Preset> {
+    /// Blocks, oldest first.
+    blocks: Vec<combined::SignedBeaconBlock<P>>,
+    /// Blob sidecars.
+    blobs: Vec<BlobSidecar<P>>,
+    /// Columns.
+    columns: Vec<combined::DataColumnSidecar<P>>,
+    /// Payload envelopes.
+    envelopes: Vec<SignedExecutionPayloadEnvelope<P>>,
+}
+
+impl<P: Preset> Default for Received<P> {
+    fn default() -> Self {
+        Self {
+            blocks: Vec::new(),
+            blobs: Vec::new(),
+            columns: Vec::new(),
+            envelopes: Vec::new(),
+        }
+    }
+}
+
+impl<P: Preset> Received<P> {
+    /// Checks the batch's blob data: blobs against their blocks, columns against their commitments.
+    ///
+    /// Every blob must open its commitment and be included in its block.
+    /// Every Fulu column must be well formed, included, and open its commitments.
+    /// Every Gloas column must open the commitments of its block's bid, a block of the batch.
+    fn verify(&self, config: &ChainConfig) -> Result<(), String> {
+        let kzg = Kzg::mainnet();
+        for blob in &self.blobs {
+            let checked = CheckedBlob(blob);
+            if !checked.has_valid_inclusion_proof() || !checked.has_valid_kzg_proof(kzg) {
+                return Err(format!(
+                    "blob {} of the block at slot {} does not verify",
+                    blob.index.0, blob.signed_block_header.message.slot
+                ));
+            }
+        }
+        for column in &self.columns {
+            let checked = match column {
+                combined::DataColumnSidecar::Fulu(sidecar) => {
+                    let sidecar = ColumnSidecar(sidecar);
+                    sidecar
+                        .verify_structure(config)
+                        .and_then(|()| sidecar.verify_inclusion_proof())
+                        .and_then(|()| sidecar.verify_kzg_proofs(kzg))
+                }
+                combined::DataColumnSidecar::Gloas(sidecar) => {
+                    let root = sidecar.beacon_block_root;
+                    let Some(bid) = self.bid(&root) else {
+                        return Err(format!(
+                            "column {} names block {root} outside the batch",
+                            sidecar.index.0
+                        ));
+                    };
+                    PayloadColumnSidecar(sidecar).verify(&bid.blob_kzg_commitments, kzg)
+                }
+            };
+            checked.map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// The bid of the batch's Gloas block with a root.
+    fn bid(&self, root: &Root) -> Option<&ExecutionPayloadBid> {
+        self.blocks.iter().find_map(|block| match block {
+            combined::SignedBeaconBlock::Gloas(signed)
+                if signed.message.hash_tree_root() == *root =>
+            {
+                Some(&signed.message.body.signed_execution_payload_bid.message)
+            }
+            _ => None,
+        })
+    }
+}
+
+/// One range of one fork, being fetched from one peer.
 #[derive(Debug)]
 struct Batch<P: Preset> {
     /// The peer serving it.
@@ -43,24 +152,22 @@ struct Batch<P: Preset> {
     start: Slot,
     /// Slots in the range.
     count: u64,
-    /// The blocks request.
-    blocks_request: RequestId,
-    /// The columns request, when the node samples any column.
-    columns_request: Option<RequestId>,
+    /// The batch's requests, and what each fetches.
+    requests: Vec<(RequestId, Fetch)>,
     /// Requests still streaming.
     open: usize,
+    /// Why the peer's answer is unusable, if it is.
+    fault: Option<String>,
     /// Whether the peer answered with an error.
     failed: bool,
-    /// Blocks received so far.
-    blocks: Vec<SignedBeaconBlock<P>>,
-    /// Columns received so far.
-    columns: Vec<DataColumnSidecar<P>>,
+    /// What arrived so far.
+    received: Received<P>,
 }
 
 /// What processing a batch led to.
 #[derive(Debug)]
 enum Verdict {
-    /// Every block imported or waits for columns; the range is done.
+    /// Every block imported or waits for data; the range is done.
     Done,
     /// The first block's parent is unknown: the head is on a fork the peer does not share.
     UnknownParent,
@@ -84,9 +191,12 @@ pub(crate) struct BatchOutcome {
 /// # Overview
 ///
 /// 1. Check the peer's status: a wrong fork digest or a head in the future disconnects it.
-/// 2. Request blocks by range [cursor, cursor + 32), and the sampled columns by range.
-/// 3. A background task checks columns for structure, inclusion, and KZG.
-/// 4. It then runs the blocks through the engine and imports them.
+/// 2. Request a range of one fork: its blocks, and the data and payloads that fork has.
+/// 3. A background task checks the data: blob proofs, or column proofs.
+/// 4. It then runs the blocks through the engine and imports them, each payload after its block.
+///
+/// A batch never spans a fork boundary.
+/// So every item in it decodes as one fork's container, and one data form applies.
 ///
 /// The batch ends in one of three ways:
 ///
@@ -104,6 +214,10 @@ pub(crate) struct RangeSync<P: Preset> {
     execution: Arc<ExecutionLayer>,
     /// The network, for requests.
     network: NetworkHandle,
+    /// The fork schedule, which bounds batches and picks what they fetch.
+    config: ChainConfig,
+    /// The digest each item's context bytes must carry.
+    forks: Arc<ForkDigests>,
     /// Latest status of every connected peer that passed the checks.
     peers: HashMap<PeerId, Status>,
     /// Failed batches per peer.
@@ -126,12 +240,16 @@ impl<P: Preset> RangeSync<P> {
         chain: ChainHandle<P>,
         execution: Arc<ExecutionLayer>,
         network: NetworkHandle,
+        config: ChainConfig,
+        forks: Arc<ForkDigests>,
     ) -> (Self, UnboundedReceiver<BatchOutcome>) {
         let (outcomes, receiver) = unbounded_channel();
         let sync = Self {
             chain,
             execution,
             network,
+            config,
+            forks,
             peers: HashMap::new(),
             strikes: HashMap::new(),
             batch: None,
@@ -148,16 +266,10 @@ impl<P: Preset> RangeSync<P> {
     /// A peer on another fork, or claiming a head past the clock, is disconnected.
     /// See the status handshake in the phase0 p2p spec.
     pub(crate) async fn on_status(&mut self, peer: PeerId, status: Status) {
-        let Ok((digest, current)) = self
-            .chain
-            .run(|chain| {
-                let current = chain.store().current_slot();
-                (chain.fork_digest(current.epoch::<P>()), current)
-            })
-            .await
-        else {
+        let Ok(current) = self.chain.run(|chain| chain.store().current_slot()).await else {
             return;
         };
+        let digest = self.forks.digest_at(current.epoch::<P>());
         // One slot of slack covers the clock disparity at a slot boundary.
         if status.fork_digest != digest || status.head_slot > Slot(current.0 + 1) {
             debug!(%peer, "peer status is on another fork or from the future");
@@ -180,12 +292,15 @@ impl<P: Preset> RangeSync<P> {
 
     /// Whether a request belongs to the batch being fetched.
     pub(crate) fn owns(&self, request: RequestId) -> bool {
-        self.batch.as_ref().is_some_and(|batch| {
-            batch.blocks_request == request || batch.columns_request == Some(request)
-        })
+        self.batch
+            .as_ref()
+            .is_some_and(|batch| batch.requests.iter().any(|(id, _)| *id == request))
     }
 
     /// Takes one response chunk of the batch.
+    ///
+    /// Each item must decode as the fork its slot falls in, under that fork's context bytes.
+    /// An item that does not condemns the whole batch, and the peer with it.
     pub(crate) fn on_chunk(&mut self, request: RequestId, chunk: &ResponseChunk) {
         let Some(batch) = &mut self.batch else {
             return;
@@ -195,22 +310,85 @@ impl<P: Preset> RangeSync<P> {
             batch.failed = true;
             return;
         }
-        // An undecodable chunk is dropped here; the batch then fails its checks and the peer goes.
-        if request == batch.blocks_request {
-            if let Ok(block) = SignedBeaconBlock::decode(&chunk.payload) {
-                batch.blocks.push(block);
-            }
-        } else if let Ok(column) = DataColumnSidecar::decode(&chunk.payload) {
-            batch.columns.push(column);
+        let Some(fetch) = batch
+            .requests
+            .iter()
+            .find(|(id, _)| *id == request)
+            .map(|(_, fetch)| *fetch)
+        else {
+            return;
+        };
+        let context = chunk.context.unwrap_or(ForkDigest([0; 4]));
+        if let Err(fault) = Self::take(
+            &self.config,
+            &self.forks,
+            fetch,
+            context,
+            &chunk.payload,
+            &mut batch.received,
+        ) {
+            batch.fault.get_or_insert(fault);
         }
     }
 
-    /// Marks one of the batch's requests finished, starting processing once both are.
+    /// Decodes one item in its fork and files it with what the batch received.
+    fn take(
+        config: &ChainConfig,
+        forks: &ForkDigests,
+        fetch: Fetch,
+        context: ForkDigest,
+        payload: &[u8],
+        received: &mut Received<P>,
+    ) -> Result<(), String> {
+        let undecodable = |error| format!("undecodable {fetch:?} item: {error}");
+        let slot = match fetch {
+            Fetch::Blocks => {
+                let block =
+                    combined::SignedBeaconBlock::decode_at(payload, config).map_err(undecodable)?;
+                let slot = block.slot();
+                received.blocks.push(block);
+                slot
+            }
+            Fetch::Blobs => {
+                let blob = BlobSidecar::decode(payload).map_err(undecodable)?;
+                let slot = blob.signed_block_header.message.slot;
+                received.blobs.push(blob);
+                slot
+            }
+            Fetch::Columns => {
+                // The context names the column's format; the column's own slot then confirms it.
+                let fork = forks
+                    .fork_of(context)
+                    .ok_or_else(|| format!("unknown context bytes {context:?}"))?;
+                let column =
+                    combined::DataColumnSidecar::decode(payload, fork).map_err(undecodable)?;
+                let slot = column.slot();
+                received.columns.push(column);
+                slot
+            }
+            Fetch::Envelopes => {
+                let envelope =
+                    SignedExecutionPayloadEnvelope::decode(payload).map_err(undecodable)?;
+                let slot = Slot(envelope.message.payload.slot_number);
+                received.envelopes.push(envelope);
+                slot
+            }
+        };
+        let expected = forks.digest_at(slot.epoch::<P>());
+        if context != expected {
+            return Err(format!(
+                "{fetch:?} item at slot {slot} has context {context:?}, expected {expected:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Marks one of the batch's requests finished, starting processing once all are.
     pub(crate) async fn on_end(&mut self, request: RequestId) {
         let Some(batch) = &mut self.batch else {
             return;
         };
-        if batch.blocks_request == request || batch.columns_request == Some(request) {
+        if batch.requests.iter().any(|(id, _)| *id == request) {
             batch.open -= 1;
         }
         if batch.open > 0 {
@@ -221,6 +399,12 @@ impl<P: Preset> RangeSync<P> {
         };
         if batch.failed {
             self.strike(&batch.peer);
+            self.advance().await;
+            return;
+        }
+        if let Some(reason) = batch.fault {
+            warn!(peer = %batch.peer, %reason, "disconnecting peer for a bad batch");
+            self.drop_peer(&batch.peer).await;
             self.advance().await;
             return;
         }
@@ -284,11 +468,12 @@ impl<P: Preset> RangeSync<P> {
         if self.batch.is_some() || self.processing {
             return;
         }
-        let Ok((head, sampled)) = self
+        let Ok((head, current, sampled)) = self
             .chain
             .run(|chain| {
                 (
                     chain.head().slot,
+                    chain.store().current_slot(),
                     chain.custody().iter().copied().collect::<Vec<_>>(),
                 )
             })
@@ -318,10 +503,37 @@ impl<P: Preset> RangeSync<P> {
         if status.head_slot < start {
             return;
         }
-        let count = BATCH_SLOTS.min(status.head_slot.0 - start.0 + 1);
-        if let Err(error) = self.request(peer, start, count, sampled).await {
+        // A batch stops at the next fork, so all of it decodes and checks under one fork.
+        let epoch = start.epoch::<P>();
+        let boundary = self.config.next_fork_epoch(epoch).start_slot::<P>();
+        let count = BATCH_SLOTS
+            .min(status.head_slot.0 - start.0 + 1)
+            .min(boundary.0.saturating_sub(start.0).max(1));
+        let fetches = self.fetches(start, current, &sampled);
+        if let Err(error) = self.request(peer, start, count, &fetches, sampled).await {
             warn!(%error, "could not request a batch");
         }
+    }
+
+    /// What a batch starting at a slot fetches, besides its blocks.
+    ///
+    /// Data older than the retention window is not asked for: peers may have dropped it.
+    fn fetches(&self, start: Slot, current: Slot, sampled: &[ColumnIndex]) -> Vec<Fetch> {
+        let data = self.config.fork_at(start.epoch::<P>()).blob_data();
+        let window = self.config.blob_retention_epochs(data);
+        let retained = start.epoch::<P>().0.saturating_add(window) >= current.epoch::<P>().0;
+        let mut fetches = vec![Fetch::Blocks];
+        if retained && data == BlobData::BlobSidecars {
+            fetches.push(Fetch::Blobs);
+        }
+        if retained && data.is_columns() && !sampled.is_empty() {
+            fetches.push(Fetch::Columns);
+        }
+        // Payloads come apart from their blocks from Gloas on, whatever their age.
+        if data == BlobData::PayloadColumns {
+            fetches.push(Fetch::Envelopes);
+        }
+        fetches
     }
 
     /// Sends the requests of a batch.
@@ -330,51 +542,47 @@ impl<P: Preset> RangeSync<P> {
         peer: PeerId,
         start: Slot,
         count: u64,
+        fetches: &[Fetch],
         sampled: Vec<ColumnIndex>,
     ) -> Result<(), NetworkError> {
-        let blocks = BlocksByRangeRequest {
-            start_slot: start,
-            count,
-            step: 1,
-        };
-        let blocks_request = self
-            .network
-            .send_request(
-                peer.clone(),
-                Protocol::BeaconBlocksByRangeV2,
-                blocks.encode(),
-            )
-            .await?;
-        let columns_request = if sampled.is_empty() {
-            None
-        } else {
-            let columns = ColumnsByRangeRequest::<P> {
-                start_slot: start,
-                count,
-                // Sampled columns never exceed the column count, so the list always fits.
-                columns: List::try_from(sampled).unwrap_or_default(),
+        let mut requests = Vec::new();
+        for fetch in fetches {
+            let body = match fetch {
+                Fetch::Blocks => BlocksByRangeRequest {
+                    start_slot: start,
+                    count,
+                    step: 1,
+                }
+                .encode(),
+                Fetch::Blobs | Fetch::Envelopes => SlotRangeRequest {
+                    start_slot: start,
+                    count,
+                }
+                .encode(),
+                Fetch::Columns => ColumnsByRangeRequest::<P> {
+                    start_slot: start,
+                    count,
+                    // Sampled columns never exceed the column count, so the list always fits.
+                    columns: List::try_from(sampled.clone()).unwrap_or_default(),
+                }
+                .encode(),
             };
-            Some(
-                self.network
-                    .send_request(
-                        peer.clone(),
-                        Protocol::DataColumnSidecarsByRangeV1,
-                        columns.encode(),
-                    )
-                    .await?,
-            )
-        };
-        debug!(%peer, start = %start, count, "requested batch");
+            let id = self
+                .network
+                .send_request(peer.clone(), fetch.protocol(), body)
+                .await?;
+            requests.push((id, *fetch));
+        }
+        debug!(%peer, start = %start, count, ?fetches, "requested batch");
         self.batch = Some(Batch {
             peer,
             start,
             count,
-            blocks_request,
-            columns_request,
-            open: 1 + usize::from(columns_request.is_some()),
+            open: requests.len(),
+            requests,
+            fault: None,
             failed: false,
-            blocks: Vec::new(),
-            columns: Vec::new(),
+            received: Received::default(),
         });
         Ok(())
     }
@@ -403,38 +611,44 @@ struct BatchWorker<P: Preset> {
 }
 
 impl<P: Preset> BatchWorker<P> {
-    /// Columns first, so each block is available the moment it is submitted, then blocks in order.
+    /// Data first, so each block is available the moment it is submitted, then blocks in order.
     async fn process(self, batch: Batch<P>) -> BatchOutcome {
         let Batch {
             peer,
             start,
             count,
-            blocks,
-            columns,
+            received,
             ..
         } = batch;
         let end = Slot(start.0 + count);
-        let verdict = self.verdict(blocks, columns).await;
+        let verdict = self.verdict(received).await;
         BatchOutcome { peer, end, verdict }
     }
 
     /// Checks and imports the batch's contents.
-    async fn verdict(
-        &self,
-        blocks: Vec<SignedBeaconBlock<P>>,
-        columns: Vec<DataColumnSidecar<P>>,
-    ) -> Verdict {
+    async fn verdict(&self, received: Received<P>) -> Verdict {
         let Ok(config) = self.chain.run(|chain| chain.config().clone()).await else {
             return Verdict::Done;
         };
-
         // KZG checks are CPU-bound, so they run on the blocking pool.
-        let checked = task::spawn_blocking(move || Self::check_columns(&config, columns)).await;
-        let columns = match checked {
-            Ok(Ok(columns)) => columns,
-            Ok(Err(reason)) => return Verdict::Invalid(reason.to_owned()),
+        let checked =
+            task::spawn_blocking(move || received.verify(&config).map(|()| received)).await;
+        let Received {
+            blocks,
+            blobs,
+            columns,
+            envelopes,
+        } = match checked {
+            Ok(Ok(received)) => received,
+            Ok(Err(reason)) => return Verdict::Invalid(reason),
             Err(_) => return Verdict::Done,
         };
+        for blob in blobs {
+            let blob = Arc::new(blob);
+            if let Ok(Err(error)) = self.chain.run(move |chain| chain.submit_blob(blob)).await {
+                return Verdict::Invalid(error.to_string());
+            }
+        }
         for column in columns {
             let column = Arc::new(column);
             if let Ok(Err(error)) = self
@@ -446,10 +660,16 @@ impl<P: Preset> BatchWorker<P> {
             }
         }
 
+        // Each payload follows its block, since the next block may build on it.
+        let mut envelopes: HashMap<Root, SignedExecutionPayloadEnvelope<P>> = envelopes
+            .into_iter()
+            .map(|envelope| (envelope.message.beacon_block_root, envelope))
+            .collect();
         let count = blocks.len();
         for (position, block) in blocks.into_iter().enumerate() {
+            let root = block.block_root();
             let block = Arc::new(block);
-            let payload = self.execution.verdict(&block.message).await;
+            let payload = self.execution.verdict(&self.chain, &block).await;
             match self
                 .chain
                 .run(move |chain| chain.submit_block(block, payload))
@@ -464,27 +684,21 @@ impl<P: Preset> BatchWorker<P> {
                 }
                 Ok(Err(error)) => return Verdict::Invalid(error.to_string()),
             }
+            if let Some(envelope) = envelopes.remove(&root) {
+                let envelope = Arc::new(envelope);
+                let payload = self.execution.judge_envelope(&self.chain, &envelope).await;
+                if let Ok(Err(error)) = self
+                    .chain
+                    .run(move |chain| chain.submit_envelope(envelope, payload))
+                    .await
+                {
+                    return Verdict::Invalid(error.to_string());
+                }
+            }
         }
         if count > 0 {
             info!(blocks = count, "synced batch");
         }
         Verdict::Done
-    }
-
-    /// Every column must be well formed, included in its block, and open its commitments.
-    fn check_columns(
-        config: &ChainConfig,
-        columns: Vec<DataColumnSidecar<P>>,
-    ) -> Result<Vec<DataColumnSidecar<P>>, &'static str> {
-        for column in &columns {
-            let sidecar = ColumnSidecar(column);
-            let valid = sidecar.verify_structure(config).is_ok()
-                && sidecar.verify_inclusion_proof().is_ok()
-                && sidecar.verify_kzg_proofs(Kzg::mainnet()).is_ok();
-            if !valid {
-                return Err("invalid column in batch");
-            }
-        }
-        Ok(columns)
     }
 }

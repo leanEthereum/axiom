@@ -10,6 +10,7 @@ use axiom_types::{
         AggregateAndProof, Attestation, AttestationData, AttesterSlashing, BeaconBlock,
         BeaconState, SignedAggregateAndProof, SignedBeaconBlock, SingleAttestation,
     },
+    vote::{CommitteeVote, ConflictingVotes},
 };
 
 use super::{
@@ -30,6 +31,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 
     const VOTE_WINDOW: VoteWindow = VoteWindow::CurrentOrPreviousEpoch;
     const VOTE_INDEX: VoteIndex = VoteIndex::Zero;
+
+    fn into_any_block(signed: SignedBeaconBlock<P>) -> combined::SignedBeaconBlock<P> {
+        combined::SignedBeaconBlock::Electra(signed)
+    }
 
     fn split_block(signed: &SignedBeaconBlock<P>) -> (&BeaconBlock<P>, &BlsSignature) {
         (&signed.message, &signed.signature)
@@ -64,6 +69,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 }
 
 impl<P: Preset> Aggregate for Attestation<P> {
+    fn committee_vote(&self) -> CommitteeVote {
+        Self::committee_vote(self)
+    }
+
     fn data(&self) -> &AttestationData {
         &self.data
     }
@@ -158,6 +167,10 @@ impl SubnetVote for SingleAttestation {
 }
 
 impl<P: Preset> SlashingEvidence for AttesterSlashing<P> {
+    fn conflicting_votes(&self) -> ConflictingVotes {
+        Self::conflicting_votes(self)
+    }
+
     fn votes(&self) -> [IndexedVote<'_>; 2] {
         [&self.attestation_1, &self.attestation_2].map(|attestation| IndexedVote {
             indices: &attestation.attesting_indices,

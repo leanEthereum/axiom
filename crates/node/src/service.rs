@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 use crate::{
     ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey, Publisher,
     network::{
-        AttestationSubnets, Discovery, LocalRecord, NetworkIdentity, NetworkService, NetworkSetup,
-        NodeIdentity,
+        AttestationSubnets, Discovery, ForkDigests, NetworkIdentity, NetworkService, NetworkSetup,
+        NodeIdentity, RecordSetup,
     },
     race::Either,
     tasks::{EngineFollower, Ticker},
@@ -35,7 +35,8 @@ impl<P: Preset> StartedChain<'_, P> {
     ///
     /// # Returns
     ///
-    /// The network handle, for shutdown and publishing, the service's task, and the node's identity.
+    /// The network handle, for shutdown and publishing.
+    /// Then the service's task, and the node's identity.
     async fn start_network(
         self,
         key: NodeKey,
@@ -62,12 +63,13 @@ impl<P: Preset> StartedChain<'_, P> {
             .await
             .map_err(|_| NodeError::ChainStopped)?;
 
-        let (network, events) = settings.start_p2p(&key).await?;
+        // Phase0 topics identify messages by payload alone, later forks by topic too.
+        let message_ids = ForkDigests::new(&config, genesis_validators_root).message_ids();
+        let (network, events) = settings.start_p2p(&key, message_ids).await?;
         let discovery = match &settings.discovery {
             Some(discovery) => {
-                let record = LocalRecord {
+                let record = RecordSetup {
                     tcp_port: settings.listen_address.port(),
-                    fork_digest: config.fork_digest(genesis_validators_root, epoch),
                     epoch,
                     genesis_validators_root,
                     attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),
@@ -89,6 +91,7 @@ impl<P: Preset> StartedChain<'_, P> {
             self.handle.clone(),
             NetworkSetup {
                 config,
+                genesis_validators_root,
                 custody,
                 slots: self.slots,
                 execution,
@@ -165,6 +168,7 @@ impl<P: Preset> Node<P> {
             None => None,
         };
         let events = chain.subscribe();
+        let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.
         let store_slots = chain.store().slot_clock();
         let slots = SlotClock::new(
@@ -192,11 +196,9 @@ impl<P: Preset> Node<P> {
                     metrics,
                 };
                 let (key, identity) = identity;
-                Some(
-                    started
-                        .start_network(key, identity, settings, services)
-                        .await?,
-                )
+                // The network's start holds every service's state; boxing keeps this future small.
+                let starting = Box::pin(started.start_network(key, identity, settings, services));
+                Some(starting.await?)
             }
             _ => None,
         };
@@ -221,7 +223,8 @@ impl<P: Preset> Node<P> {
 
         // Background loops run until aborted.
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
-        let follower = task::spawn(EngineFollower::new(handle.clone(), events, execution).run());
+        let follower =
+            task::spawn(EngineFollower::new(handle.clone(), events, execution, schedule).run());
 
         // The ticker only ends when the chain thread is gone, such as after a panic.
         // The node then stops too, rather than serving from a dead chain.

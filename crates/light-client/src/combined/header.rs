@@ -76,6 +76,18 @@ impl<P: Preset> LightClientHeader<P> {
         }
     }
 
+    /// The empty header of a format, as data carries it in place of an absent header.
+    #[must_use]
+    pub fn empty(format: Format) -> Self {
+        match format {
+            Format::Altair => Self::Altair(altair::LightClientHeader::default()),
+            Format::Capella => Self::Capella(capella::LightClientHeader::default()),
+            Format::Deneb => Self::Deneb(deneb::LightClientHeader::default()),
+            Format::Electra => Self::Electra(deneb::LightClientHeader::default()),
+            Format::Gloas => Self::Gloas(gloas::LightClientHeader::default()),
+        }
+    }
+
     /// The light client header of a block, in the format of the block's fork.
     ///
     /// A phase0 block gets an Altair header, the earliest format.

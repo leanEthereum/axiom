@@ -249,7 +249,7 @@ fn messages_reach_every_node_and_meshes_stay_in_bounds() {
     // Every node accepted every message.
     let ids: BTreeSet<MessageId> = published
         .iter()
-        .map(|data| (GossipsubConfig::default().message_id)(&topic, data))
+        .map(|data| GossipsubConfig::default().message_id.id(&topic, data))
         .collect();
     for (node, delivered) in network.delivered.iter().enumerate() {
         let missing = ids.difference(delivered).count();

@@ -118,6 +118,7 @@ dependencies = [
  "axiom-bls",
  "axiom-das",
  "axiom-discv5",
+ "axiom-execution",
  "axiom-fork-choice",
  "axiom-gossip",
  "axiom-http",
@@ -165,6 +166,7 @@ name = "axiom-gossip"
 version = "0.1.0"
 dependencies = [
  "axiom-bls",
+ "axiom-bls12-381",
  "axiom-das",
  "axiom-fork-choice",
  "axiom-kzg",
@@ -227,6 +229,7 @@ dependencies = [
  "axiom-http",
  "axiom-json",
  "axiom-kzg",
+ "axiom-light-client",
  "axiom-p2p",
  "axiom-ssz",
  "axiom-state-transition",

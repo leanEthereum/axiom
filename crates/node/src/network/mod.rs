@@ -1,8 +1,11 @@
 //! The node on the network: gossip, requests, and sync over the libp2p stack.
 
 mod discovery;
+mod forks;
 mod gossip;
+mod handshake;
 mod identity;
+mod record;
 mod requests;
 mod responder;
 mod server;
@@ -24,26 +27,27 @@ use axiom_das::NodeId;
 use axiom_discv5::driver::Discv5Events;
 use axiom_p2p::{
     Multiaddr, PeerId,
-    eth::reqresp::{Protocol, ResponseCode, Status},
-    swarm::{NetworkEvent, NetworkEvents, NetworkHandle, RequestId},
+    eth::{GossipKind, GossipTopic, reqresp::StatusVersion},
+    swarm::{NetworkEvent, NetworkEvents, NetworkHandle},
 };
-use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Preset, SlotClock};
+use axiom_types::{ChainConfig, ColumnIndex, Preset, Root, SlotClock};
 use tokio::{
-    sync::{Semaphore, mpsc::UnboundedReceiver},
+    sync::{Semaphore, mpsc::UnboundedReceiver, watch},
     task, time,
 };
 use tracing::{debug, info, warn};
 
 pub use self::{discovery::DiscoverySettings, identity::NodeKey};
 pub(crate) use self::{
-    discovery::{Discovery, LocalRecord},
+    discovery::{Discovery, RecordSetup},
+    forks::ForkDigests,
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
 use self::{
     gossip::GossipHandler,
+    handshake::Handshakes,
     server::RequestServer,
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
@@ -128,8 +132,8 @@ pub(crate) struct NetworkService<P: Preset> {
     subscriptions: Subscriptions,
     /// What peers are told about this node.
     metadata: Arc<LocalMetadata>,
-    /// Peers with a status request in flight.
-    handshakes: Vec<(RequestId, PeerId)>,
+    /// Status requests in flight, and the version each peer speaks.
+    handshakes: Handshakes,
     /// Connected peers, for the peer count and status refreshes.
     peers: BTreeSet<PeerId>,
     /// Peer counts and gossip outcomes.
@@ -147,8 +151,8 @@ pub(crate) struct NetworkService<P: Preset> {
 pub(crate) struct NodeIdentity {
     /// The libp2p peer identifier.
     pub(crate) peer_id: String,
-    /// The discovery record, in text form.
-    pub(crate) enr: Option<String>,
+    /// The discovery record in text form, kept current as it changes.
+    pub(crate) enr: Option<watch::Receiver<String>>,
     /// The libp2p listen address.
     pub(crate) p2p_address: String,
     /// The discovery UDP address.
@@ -169,7 +173,8 @@ const MAX_CONCURRENT_VALIDATIONS: usize = 256;
 
 /// Peers the node keeps looking for until it has them.
 ///
-/// Enough to fill every gossip mesh with spares, as lighthouse aims for by default.
+/// A mesh wants 6 to 12 peers, per the phase0 gossipsub parameters.
+/// Sixty-four peers fill every topic's mesh and leave spares.
 const TARGET_PEERS: usize = 64;
 
 impl<P: Preset> NetworkService<P> {
@@ -189,6 +194,7 @@ impl<P: Preset> NetworkService<P> {
     ) -> Self {
         let NetworkSetup {
             config,
+            genesis_validators_root,
             custody,
             slots,
             execution,
@@ -196,12 +202,18 @@ impl<P: Preset> NetworkService<P> {
             metrics,
             discovery,
         } = setup;
+        let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
         let (discovery, discovery_events) = discovery
             .map_or((None, None), |(discovery, events)| {
                 (Some(discovery), Some(events))
             });
-        let (sync, sync_outcomes) =
-            RangeSync::new(chain.clone(), Arc::clone(&execution), network.clone());
+        let (sync, sync_outcomes) = RangeSync::new(
+            chain.clone(),
+            Arc::clone(&execution),
+            network.clone(),
+            config.clone(),
+            Arc::clone(&forks),
+        );
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
             attnets: AtomicU64::new(0),
@@ -214,6 +226,7 @@ impl<P: Preset> NetworkService<P> {
                 Arc::clone(&clock),
                 network.clone(),
                 metrics.clone(),
+                Arc::clone(&forks),
             ),
             server: Arc::new(RequestServer::new(
                 chain.clone(),
@@ -224,13 +237,18 @@ impl<P: Preset> NetworkService<P> {
             sync_outcomes: Some(sync_outcomes),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
-            subscriptions: Subscriptions::new(identity.node_id, config, &custody),
+            subscriptions: Subscriptions::new(
+                identity.node_id,
+                config,
+                genesis_validators_root,
+                &custody,
+            ),
             network,
             chain,
             clock,
             slots,
             metadata,
-            handshakes: Vec::new(),
+            handshakes: Handshakes::default(),
             peers: BTreeSet::new(),
             metrics,
             discovery,
@@ -253,10 +271,7 @@ impl<P: Preset> NetworkService<P> {
     pub(crate) fn identity(&self) -> NodeIdentity {
         NodeIdentity {
             peer_id: self.network.local_peer().to_string(),
-            enr: self
-                .discovery
-                .as_ref()
-                .map(|discovery| discovery.enr().to_string()),
+            enr: self.discovery.as_ref().map(Discovery::published),
             p2p_address: self.network.listen_addr().to_string(),
             discovery_address: self.discovery.as_ref().map(|discovery| {
                 // The multiaddr form of a UDP socket, as the identity route lists it.
@@ -336,7 +351,7 @@ impl<P: Preset> NetworkService<P> {
         };
 
         // Join and leave topics as forks and subnet rotations require.
-        let change = self.subscriptions.update::<P>(epoch, digest);
+        let change = self.subscriptions.update::<P>(epoch);
         for topic in &change.join {
             if let Err(error) = self.network.subscribe(topic.topic()).await {
                 warn!(%error, %topic, "could not subscribe");
@@ -356,6 +371,12 @@ impl<P: Preset> NetworkService<P> {
         {
             self.metadata.seq_number.fetch_add(1, Ordering::Relaxed);
         }
+        // The record states the same subnets, and the fork of the wall-clock epoch.
+        if let Some(discovery) = &mut self.discovery {
+            discovery.refresh(epoch, change.attnets).await;
+        }
+
+        self.publish_light_client().await;
 
         // Alone, the node dials its boot nodes again: they may have been down before.
         if self.peers.is_empty() {
@@ -383,6 +404,63 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
+    /// Gossips the light client updates this node derived, once each, when they are due.
+    ///
+    /// The checks a peer's update meets decide.
+    /// It must advance, and its block must have had time to spread.
+    async fn publish_light_client(&self) {
+        let now = self.clock.now_ms();
+        let Ok(updates) = self
+            .chain
+            .run(move |chain| {
+                let config = chain.config().clone();
+                let clock = chain.store().slot_clock();
+                let mut updates = Vec::new();
+                let server = chain.light_client();
+                let finality = server.latest_finality_update().cloned();
+                let optimistic = server.latest_optimistic_update().cloned();
+                let server = chain.light_client_mut();
+                if let Some(update) = finality
+                    && server
+                        .forward_finality_update(&update, &config, clock, now)
+                        .is_ok()
+                {
+                    updates.push((
+                        GossipKind::LightClientFinalityUpdate,
+                        update.context_slot(),
+                        update.encode(),
+                    ));
+                }
+                if let Some(update) = optimistic
+                    && server
+                        .forward_optimistic_update(&update, &config, clock, now)
+                        .is_ok()
+                {
+                    updates.push((
+                        GossipKind::LightClientOptimisticUpdate,
+                        update.context_slot(),
+                        update.encode(),
+                    ));
+                }
+                updates
+                    .into_iter()
+                    .map(|(kind, slot, bytes)| {
+                        let fork_digest = chain.fork_digest(slot.epoch::<P>());
+                        (GossipTopic { fork_digest, kind }, bytes)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+        else {
+            return;
+        };
+        for (topic, bytes) in updates {
+            if let Err(error) = self.network.publish(topic.topic(), bytes).await {
+                debug!(%error, %topic, "could not publish a light client update");
+            }
+        }
+    }
+
     /// Handles one event.
     async fn handle(&mut self, event: NetworkEvent) {
         match event {
@@ -396,13 +474,15 @@ impl<P: Preset> NetworkService<P> {
             }
             NetworkEvent::PeerDisconnected { peer } => {
                 self.peers.remove(&peer);
+                self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 self.sync.on_disconnect(&peer).await;
             }
             NetworkEvent::GossipMessage {
                 id, topic, data, ..
             } => {
-                // Validation is bounded: past the limit, the loop waits and the swarm's queue absorbs the rest.
+                // Validation is bounded.
+                // Past the limit, the loop waits and the swarm's queue absorbs the rest.
                 let Ok(permit) = Arc::clone(&self.validations).acquire_owned().await else {
                     return;
                 };
@@ -419,8 +499,8 @@ impl<P: Preset> NetworkService<P> {
                 payload,
             } => {
                 // An inbound status is also the peer's half of the handshake.
-                if protocol == Protocol::StatusV2
-                    && let Ok(status) = Status::decode(&payload)
+                if let Some(status) =
+                    StatusVersion::of(protocol).and_then(|version| version.decode(&payload).ok())
                 {
                     self.sync.on_status(peer.clone(), status).await;
                 }
@@ -434,18 +514,11 @@ impl<P: Preset> NetworkService<P> {
                     drop(permit);
                 });
             }
-            NetworkEvent::Response {
-                request,
-                peer,
-                chunk,
-            } => {
-                if let Some(position) = self.handshakes.iter().position(|(id, _)| *id == request) {
-                    self.handshakes.swap_remove(position);
-                    match Status::decode(&chunk.payload) {
-                        Ok(status) if chunk.code == ResponseCode::Success => {
-                            self.sync.on_status(peer, status).await;
-                        }
-                        _ => debug!(%peer, "peer sent no usable status"),
+            NetworkEvent::Response { request, chunk, .. } => {
+                if let Some((peer, status)) = self.handshakes.answered(request, &chunk) {
+                    match status {
+                        Some(status) => self.sync.on_status(peer, status).await,
+                        None => debug!(%peer, "peer sent no usable status"),
                     }
                 } else if self.sync.owns(request) {
                     self.sync.on_chunk(request, &chunk);
@@ -458,7 +531,10 @@ impl<P: Preset> NetworkService<P> {
                 error,
             } => {
                 debug!(%peer, %error, "request failed");
-                self.handshakes.retain(|(id, _)| *id != request);
+                // A peer that refused the newest status version gets the older one right away.
+                if let Some(peer) = self.handshakes.failed(request, &error) {
+                    self.send_status(peer).await;
+                }
                 self.sync.on_failure(request).await;
             }
             NetworkEvent::ConnectionFailed { address, error } => {
@@ -468,18 +544,19 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
-    /// Opens the status handshake with a peer.
+    /// Opens the status handshake with a peer, in the newest version it has not refused.
     async fn send_status(&mut self, peer: PeerId) {
         let status = match self.server.status().await {
             Ok(status) => status,
             Err(error) => return warn!(%error, "no status to send"),
         };
+        let version = self.handshakes.version_for(&peer);
         match self
             .network
-            .send_request(peer.clone(), Protocol::StatusV2, status.encode())
+            .send_request(peer.clone(), version.protocol(), version.encode(&status))
             .await
         {
-            Ok(request) => self.handshakes.push((request, peer)),
+            Ok(request) => self.handshakes.sent(request, peer, version),
             Err(error) => warn!(%error, "could not send status"),
         }
     }
@@ -490,6 +567,8 @@ impl<P: Preset> NetworkService<P> {
 pub(crate) struct NetworkSetup {
     /// The chain configuration.
     pub(crate) config: ChainConfig,
+    /// The root that, with each fork version, gives the fork digests.
+    pub(crate) genesis_validators_root: Root,
     /// The node's custody columns.
     pub(crate) custody: BTreeSet<ColumnIndex>,
     /// Genesis and the slot length, never zero.

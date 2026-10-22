@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use super::BlobData;
 use crate::{Gwei, Preset};
 
 /// A beacon chain fork, in activation order.
@@ -209,6 +210,35 @@ impl ForkName {
         }
     }
 
+    /// Whether a gossip message identifier on the fork's topics hashes the topic too.
+    ///
+    /// Altair added the topic, so one payload on two forks' topics gets two identifiers.
+    /// See "Topics and messages" in the phase0 and Altair p2p specs.
+    #[must_use]
+    pub const fn message_id_hashes_topic(self) -> bool {
+        match self {
+            Self::Phase0 => false,
+            Self::Altair
+            | Self::Bellatrix
+            | Self::Capella
+            | Self::Deneb
+            | Self::Electra
+            | Self::Fulu
+            | Self::Gloas => true,
+        }
+    }
+
+    /// The form the fork's blob data travels in.
+    #[must_use]
+    pub const fn blob_data(self) -> BlobData {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella => BlobData::None,
+            Self::Deneb | Self::Electra => BlobData::BlobSidecars,
+            Self::Fulu => BlobData::BlockColumns,
+            Self::Gloas => BlobData::PayloadColumns,
+        }
+    }
+
     /// Whether fork choice weighs a block's payload apart from the block itself.
     ///
     /// Gloas blocks commit to a builder's bid, and the payload follows in an envelope.
@@ -227,7 +257,7 @@ impl ForkName {
         }
     }
 
-    /// Whether fork choice checks a merge transition block against the terminal proof-of-work block.
+    /// Whether fork choice checks a merge block against the terminal proof-of-work block.
     ///
     /// Only Bellatrix checks it: Capella drops the check, since the merge is long done.
     /// See `validate_merge_block` in the Bellatrix fork choice spec.

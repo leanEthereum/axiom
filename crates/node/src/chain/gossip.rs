@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use axiom_fork_choice::{BlockNode, ExecutionStatus, PayloadArrival};
+use axiom_fork_choice::{BlockNode, ExecutionStatus};
 use axiom_gossip::Seen;
-use axiom_types::{Preset, Root, Slot, fulu::SignedBeaconBlock};
+use axiom_types::{Preset, Root, Slot, combined::SignedBeaconBlock};
 
 /// Memory of gossip validation that outlives a single message.
 ///
@@ -45,18 +45,9 @@ impl GossipMemory {
         block: &SignedBeaconBlock<P>,
         invalid_payload: bool,
     ) {
-        let message = &block.message;
         self.unimported.insert(
             root,
-            BlockNode {
-                slot: message.slot,
-                parent_root: message.parent_root,
-                proposer_index: message.proposer_index,
-                parent_block_hash: message.body.execution_payload.parent_hash,
-                execution_block_hash: message.body.execution_payload.block_hash,
-                status: ExecutionStatus::Invalid,
-                payload: PayloadArrival::Embedded,
-            },
+            BlockNode::of(&block.message(), ExecutionStatus::Invalid),
         );
         // A consensus failure leaves the payload unjudged; only the engine can condemn it.
         let status = if invalid_payload {
@@ -70,7 +61,7 @@ impl GossipMemory {
 
 #[cfg(test)]
 mod tests {
-    use axiom_types::Minimal;
+    use axiom_types::{Minimal, fulu};
 
     use super::*;
 
@@ -79,8 +70,9 @@ mod tests {
         // Fixture state: refused blocks at slots 4 and 9, finality at slot 8.
         let mut memory = GossipMemory::default();
         for slot in [4, 9] {
-            let mut block = SignedBeaconBlock::<Minimal>::default();
+            let mut block = fulu::SignedBeaconBlock::<Minimal>::default();
             block.message.slot = Slot(slot);
+            let block = SignedBeaconBlock::Fulu(block);
             memory.refuse(Root([u8::try_from(slot).unwrap(); 32]), &block, true);
         }
 

@@ -6,11 +6,12 @@ use axiom_fork_choice::ExecutionStatus;
 use axiom_state_transition::State;
 use axiom_types::{
     BlsSignature, ChainConfig, Hash32, Preset, Root, Slot,
-    accessors::{CoreState, ForkState},
+    accessors::CoreState,
     bellatrix::{
         Attestation, AttesterSlashing, BeaconBlock, BeaconState, ExecutionPayload,
-        ExecutionPayloadHeader, SignedAggregateAndProof, SignedBeaconBlock,
+        SignedAggregateAndProof, SignedBeaconBlock,
     },
+    combined,
 };
 
 use super::{GossipFork, Verdict, VoteIndex, VoteWindow};
@@ -24,6 +25,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 
     const VOTE_WINDOW: VoteWindow = VoteWindow::SlotRange;
     const VOTE_INDEX: VoteIndex = VoteIndex::Committee;
+
+    fn into_any_block(signed: SignedBeaconBlock<P>) -> combined::SignedBeaconBlock<P> {
+        combined::SignedBeaconBlock::Bellatrix(signed)
+    }
 
     fn split_block(signed: &SignedBeaconBlock<P>) -> (&BeaconBlock<P>, &BlsSignature) {
         (&signed.message, &signed.signature)
@@ -70,13 +75,12 @@ struct MergeBlock<'a, P: Preset>(&'a BeaconBlock<P>);
 impl<P: Preset> MergeBlock<'_, P> {
     /// Whether the block's payload counts: the merge happened, or this block makes it happen.
     ///
-    /// A state of a later fork has always merged.
+    /// The state may be of an earlier fork, when the head has not crossed into Bellatrix yet.
+    /// Such a state has not merged.
     /// See `is_execution_enabled` in the Bellatrix beacon chain spec.
     fn is_execution_enabled(self, state: &State<P>) -> bool {
-        let merged = BeaconState::from_any(state.beacon()).is_none_or(|state| {
-            state.latest_execution_payload_header != ExecutionPayloadHeader::default()
-        });
-        merged || self.0.body.execution_payload != ExecutionPayload::default()
+        state.beacon().is_merge_transition_complete()
+            || self.0.body.execution_payload != ExecutionPayload::default()
     }
 }
 

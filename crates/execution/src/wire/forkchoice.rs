@@ -1,14 +1,9 @@
-//! Fork choice updates: the state, the build attributes, and the reply.
+//! Fork choice updates: the state and the reply.
 //!
-//! ForkchoiceStateV1 is in `src/engine/paris.md`, PayloadAttributesV3 in `cancun.md`.
+//! Both are defined in `src/engine/paris.md`, and every later version keeps them.
 //!
 //! ```text
 //!     ForkchoiceStateV1     headBlockHash, safeBlockHash, finalizedBlockHash   DATA 32 each
-//!     PayloadAttributesV3   timestamp              QUANTITY 64
-//!                           prevRandao             DATA 32
-//!                           suggestedFeeRecipient  DATA 20
-//!                           withdrawals            array of WithdrawalV1
-//!                           parentBeaconBlockRoot  DATA 32
 //!     reply                 payloadStatus          PayloadStatusV1
 //!                           payloadId              DATA 8 or null
 //! ```
@@ -16,7 +11,7 @@
 use std::fmt;
 
 use axiom_json::{Data, Json};
-use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, fulu::Withdrawals};
+use axiom_types::Hash32;
 
 use super::{Fields, JsonCodec, PayloadStatus, Reader};
 use crate::WireError;
@@ -51,56 +46,6 @@ impl JsonCodec for ForkchoiceState {
             head_block_hash: fields.required("headBlockHash")?,
             safe_block_hash: fields.required("safeBlockHash")?,
             finalized_block_hash: fields.required("finalizedBlockHash")?,
-        })
-    }
-}
-
-/// What the engine should build on top of the head, for a proposer.
-///
-/// The consensus layer fills it from its state, as `prepare_execution_payload` does.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PayloadAttributes<P: Preset> {
-    /// Timestamp of the slot the payload is for.
-    pub timestamp: u64,
-
-    /// Randao mix of the current epoch.
-    pub prev_randao: Bytes32,
-
-    /// Address to receive the fees, a suggestion the builder may override.
-    pub suggested_fee_recipient: ExecutionAddress,
-
-    /// Withdrawals the payload must contain, from the expected withdrawals sweep.
-    pub withdrawals: Withdrawals<P>,
-
-    /// Root of the beacon block the new block will build on, see EIP-4788.
-    pub parent_beacon_block_root: Root,
-}
-
-impl<P: Preset> JsonCodec for PayloadAttributes<P> {
-    fn to_json(&self) -> Json {
-        Json::from([
-            ("timestamp", self.timestamp.to_json()),
-            ("prevRandao", self.prev_randao.to_json()),
-            (
-                "suggestedFeeRecipient",
-                self.suggested_fee_recipient.to_json(),
-            ),
-            ("withdrawals", self.withdrawals.to_json()),
-            (
-                "parentBeaconBlockRoot",
-                self.parent_beacon_block_root.to_json(),
-            ),
-        ])
-    }
-
-    fn from_json(value: &Json) -> Result<Self, WireError> {
-        let fields = Fields::of(value)?;
-        Ok(Self {
-            timestamp: fields.required("timestamp")?,
-            prev_randao: fields.required("prevRandao")?,
-            suggested_fee_recipient: fields.required("suggestedFeeRecipient")?,
-            withdrawals: fields.required("withdrawals")?,
-            parent_beacon_block_root: fields.required("parentBeaconBlockRoot")?,
         })
     }
 }
@@ -156,35 +101,30 @@ impl JsonCodec for ForkchoiceUpdated {
 
 #[cfg(test)]
 mod tests {
-    use axiom_ssz::List;
-    use axiom_types::Minimal;
     use proptest::prelude::*;
 
     use super::*;
-    use crate::wire::payload::tests::withdrawal;
+    use crate::PayloadStatusKind;
 
     proptest! {
         #[test]
-        fn attributes_and_state_round_trip(
-            withdrawals in proptest::collection::vec(withdrawal(), 0..=4),
-            timestamp in any::<u64>(),
-            hashes in any::<[[u8; 32]; 3]>(),
-        ) {
-            let attributes = PayloadAttributes::<Minimal> {
-                timestamp,
-                prev_randao: Bytes32(hashes[0]),
-                suggested_fee_recipient: ExecutionAddress([hashes[1][0]; 20]),
-                withdrawals: List::try_from(withdrawals).unwrap(),
-                parent_beacon_block_root: Root(hashes[2]),
-            };
-            prop_assert_eq!(PayloadAttributes::from_json(&attributes.to_json()), Ok(attributes));
-
+        fn state_and_reply_round_trip(hashes in any::<[[u8; 32]; 3]>(), id in any::<Option<[u8; 8]>>()) {
             let state = ForkchoiceState {
                 head_block_hash: Hash32(hashes[0]),
                 safe_block_hash: Hash32(hashes[1]),
                 finalized_block_hash: Hash32(hashes[2]),
             };
             prop_assert_eq!(ForkchoiceState::from_json(&state.to_json()), Ok(state));
+
+            let reply = ForkchoiceUpdated {
+                payload_status: PayloadStatus {
+                    status: PayloadStatusKind::Valid,
+                    latest_valid_hash: Some(state.head_block_hash),
+                    validation_error: None,
+                },
+                payload_id: id.map(PayloadId),
+            };
+            prop_assert_eq!(ForkchoiceUpdated::from_json(&reply.to_json()), Ok(reply));
         }
     }
 }

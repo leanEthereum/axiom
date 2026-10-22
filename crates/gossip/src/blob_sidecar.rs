@@ -3,7 +3,7 @@
 use axiom_kzg::{Blob, Bytes48, Kzg};
 use axiom_ssz::{Container, GeneralizedIndex, Length, MerkleProof, Root, Ssz};
 use axiom_types::{
-    BlobIndex, ChainConfig, Preset,
+    BlobIndex, ChainConfig, ForkName, Preset,
     deneb::{BeaconBlockBody, BlobSidecar},
 };
 
@@ -47,6 +47,21 @@ impl BlobSubnets {
         }
     }
 
+    /// The limits of a fork whose blobs travel as sidecars, or nothing for any other fork.
+    #[must_use]
+    pub const fn of(fork: ForkName, config: &ChainConfig) -> Option<Self> {
+        match fork {
+            ForkName::Deneb => Some(Self::deneb(config)),
+            ForkName::Electra => Some(Self::electra(config)),
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Fulu
+            | ForkName::Gloas => None,
+        }
+    }
+
     /// The subnet a blob's sidecar travels on.
     ///
     /// See `compute_subnet_for_blob_sidecar` in the Deneb p2p spec.
@@ -58,13 +73,14 @@ impl BlobSubnets {
 
 /// The proofs a blob sidecar carries, checked against its header and its blob.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CheckedBlob<'a, P: Preset>(pub(crate) &'a BlobSidecar<P>);
+pub struct CheckedBlob<'a, P: Preset>(pub &'a BlobSidecar<P>);
 
 impl<P: Preset> CheckedBlob<'_, P> {
     /// Whether the commitment sits at its index in the body the header commits to.
     ///
     /// See `verify_blob_sidecar_inclusion_proof` in the Deneb p2p spec.
-    pub(crate) fn has_valid_inclusion_proof(self) -> bool {
+    #[must_use]
+    pub fn has_valid_inclusion_proof(self) -> bool {
         let sidecar = self.0;
         // The list's data tree is the left child of its root, the length the right one.
         let depth = P::MaxBlobCommitmentsPerBlock::LEN
@@ -96,7 +112,8 @@ impl<P: Preset> CheckedBlob<'_, P> {
     ///
     /// A malformed blob, commitment, or proof never verifies.
     /// See `verify_blob_kzg_proof` in the Deneb polynomial commitments spec.
-    pub(crate) fn has_valid_kzg_proof(self, kzg: &Kzg) -> bool {
+    #[must_use]
+    pub fn has_valid_kzg_proof(self, kzg: &Kzg) -> bool {
         let sidecar = self.0;
         let Ok(blob) = Blob::from_bytes(&sidecar.blob) else {
             return false;

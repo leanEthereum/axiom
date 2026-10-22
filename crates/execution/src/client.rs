@@ -7,34 +7,18 @@ use std::{
 
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
 use axiom_json::{Json, Limits as JsonLimits};
-use axiom_types::{Preset, VersionedHash, fulu::NewPayloadRequest};
+use axiom_types::{ForkName, Hash32, Preset, VersionedHash, bellatrix::PowBlock};
 
 use crate::{
-    Claims, EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec,
-    JwtSecret, PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, WireError, WireErrorKind,
-    rpc::Call,
-    wire::{BlobAndProof, Items, Reader},
+    Claims, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState, ForkchoiceUpdated,
+    ForkchoiceVersion, GetBlobsResponse, GetPayloadResponse, JsonCodec, JwtSecret, NewPayload,
+    PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, rpc::Call, wire::Reader,
 };
-
-/// Timeout of engine_newPayload and engine_forkchoiceUpdated, from `src/engine/cancun.md`.
-///
-/// Both may execute a block, so the engine gets eight seconds, more than half a slot.
-pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Timeout of every lookup-style call, such as engine_getPayload and engine_getBlobs.
 ///
 /// These read data the engine holds already; the spec allows one second.
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Engine methods this client calls, as announced to the engine.
-///
-/// The list names exactly the Fulu-era versions the typed methods use.
-pub const CAPABILITIES: &[&str] = &[
-    "engine_newPayloadV4",
-    "engine_forkchoiceUpdatedV3",
-    "engine_getPayloadV5",
-    "engine_getBlobsV2",
-];
 
 /// Most bytes accepted in one response.
 ///
@@ -60,7 +44,7 @@ const MAX_RESPONSE_DEPTH: usize = 32;
 ///     {"jsonrpc":"2.0","id":N,"method":"engine_...","params":[...]}
 /// ```
 ///
-/// The typed methods map onto the Osaka engine API, which the Fulu consensus layer uses.
+/// The typed methods take the fork, and the engine methods table picks each version.
 /// Calls may run concurrently; each one takes its own pooled connection.
 #[derive(Debug)]
 pub struct EngineClient {
@@ -168,107 +152,130 @@ impl EngineClient {
         Ok(Reader::new(&result).items()?.decode()?)
     }
 
-    /// Hands a payload to the engine for validation: engine_newPayloadV4.
+    /// The methods a fork calls, or the error for a fork that calls none.
+    fn methods(fork: ForkName) -> Result<EngineMethods, EngineError> {
+        EngineMethods::of(fork).ok_or(EngineError::NoMethod {
+            fork,
+            family: "engine API",
+        })
+    }
+
+    /// Hands a payload to the engine for judgement: engine_newPayload.
     ///
-    /// The four parameters follow `src/engine/prague.md`.
+    /// The payload's fork picks the version, and its request container fixes the parameters.
     ///
     /// ```text
-    ///     [ExecutionPayloadV3, expectedBlobVersionedHashes, parentBeaconBlockRoot, executionRequests]
+    ///     V1, V2   [executionPayload]
+    ///     V3       [executionPayload, expectedBlobVersionedHashes, parentBeaconBlockRoot]
+    ///     V4, V5   [executionPayload, expectedBlobVersionedHashes, parentBeaconBlockRoot,
+    ///               executionRequests]
     /// ```
     ///
-    /// The requests list comes from `get_execution_requests_list` in the Electra beacon chain spec.
+    /// See `verify_and_notify_new_payload` in the Bellatrix through Gloas specs.
     ///
     /// # Errors
     ///
     /// Fails like any call, and when the status is malformed.
     pub async fn new_payload<P: Preset>(
         &self,
-        request: &NewPayloadRequest<P>,
+        request: &NewPayload<P>,
     ) -> Result<PayloadStatus, EngineError> {
-        let params = vec![
-            request.execution_payload.to_json(),
-            request.versioned_hashes.to_json(),
-            request.parent_beacon_block_root.to_json(),
-            request.execution_requests.to_json(),
-        ];
-        self.call_typed("engine_newPayloadV4", params, EXECUTION_TIMEOUT)
+        let version = Self::methods(request.fork())?.new_payload;
+        self.call_typed(version.method(), request.params(), version.timeout())
             .await
     }
 
-    /// Moves the engine's head, and optionally starts a build: engine_forkchoiceUpdatedV3.
+    /// Moves the engine's head, and optionally starts a build: engine_forkchoiceUpdated.
     ///
-    /// See `src/engine/cancun.md`; Prague and Osaka keep this version.
+    /// The fork picks the version, which the attributes must match.
+    /// Version 4 adds a third parameter, the custody columns; this client sends null.
+    /// A null tells the engine the consensus client offers no custody.
+    /// See `src/engine/amsterdam.md`.
     ///
     /// # Errors
     ///
     /// Fails like any call, and when the reply is malformed.
+    /// Fails before any call when the attributes are of another version than the fork's.
     pub async fn forkchoice_updated<P: Preset>(
         &self,
+        fork: ForkName,
         state: &ForkchoiceState,
         attributes: Option<&PayloadAttributes<P>>,
     ) -> Result<ForkchoiceUpdated, EngineError> {
+        let version = Self::methods(fork)?.forkchoice_updated;
+        if let Some(attributes) = attributes
+            && attributes.version() != version
+        {
+            return Err(EngineError::AttributesVersion {
+                fork,
+                expected: version,
+                actual: attributes.version(),
+            });
+        }
+
         // Without attributes the second parameter is an explicit null.
-        let attributes = attributes.map_or(Json::Null, JsonCodec::to_json);
-        let params = vec![state.to_json(), attributes];
-        self.call_typed("engine_forkchoiceUpdatedV3", params, EXECUTION_TIMEOUT)
+        let attributes = attributes.map_or(Json::Null, PayloadAttributes::to_json);
+        let mut params = vec![state.to_json(), attributes];
+        if version == ForkchoiceVersion::V4 {
+            params.push(Json::Null);
+        }
+        self.call_typed(version.method(), params, EXECUTION_TIMEOUT)
             .await
     }
 
-    /// Fetches a payload the engine built: engine_getPayloadV5.
+    /// Fetches a payload the engine built: engine_getPayload.
     ///
-    /// See `src/engine/osaka.md`; the blobs come with cell proofs for PeerDAS.
+    /// The fork picks the version, and the reply comes back in that version's shape.
     ///
     /// # Errors
     ///
-    /// Fails like any call; an unknown id is the engine error -38001.
+    /// Fails like any call, and when the reply lacks the version's shape.
+    /// An unknown id is the engine error -38001.
     pub async fn get_payload<P: Preset>(
         &self,
+        fork: ForkName,
         payload_id: PayloadId,
     ) -> Result<GetPayloadResponse<P>, EngineError> {
-        self.call_typed(
-            "engine_getPayloadV5",
-            vec![payload_id.to_json()],
-            LOOKUP_TIMEOUT,
-        )
-        .await
+        let version = Self::methods(fork)?.get_payload;
+        let result = self
+            .call(version.method(), vec![payload_id.to_json()], LOOKUP_TIMEOUT)
+            .await?;
+        Ok(GetPayloadResponse::decode(version, &result)?)
     }
 
-    /// Fetches blobs from the engine's pool: engine_getBlobsV2.
+    /// Fetches blobs from the engine's pool: engine_getBlobs.
     ///
-    /// See `src/engine/osaka.md`.
+    /// The fork picks the version: one proof per blob before Fulu, cell proofs from Fulu on.
     ///
     /// # Returns
     ///
-    /// Every blob in request order, or nothing when any one of them is missing.
+    /// The blobs in request order.
+    /// Version 1 leaves a gap for each missing blob; version 2 returns nothing when any is missing.
     ///
     /// # Errors
     ///
     /// Fails like any call, and when the reply's length differs from the request's.
+    /// Fails before any call when the fork predates blobs.
     pub async fn get_blobs<P: Preset>(
         &self,
+        fork: ForkName,
         versioned_hashes: &[VersionedHash],
-    ) -> Result<Option<Vec<BlobAndProof<P>>>, EngineError> {
+    ) -> Result<GetBlobsResponse<P>, EngineError> {
+        let version = Self::methods(fork)?
+            .get_blobs
+            .ok_or(EngineError::NoMethod {
+                fork,
+                family: "engine_getBlobs",
+            })?;
         let hashes = Json::Array(versioned_hashes.iter().map(JsonCodec::to_json).collect());
         let result = self
-            .call("engine_getBlobsV2", vec![hashes], LOOKUP_TIMEOUT)
+            .call(version.method(), vec![hashes], LOOKUP_TIMEOUT)
             .await?;
-        // Null is the all-or-nothing answer for any missing blob.
-        if result.is_null() {
-            return Ok(None);
-        }
-        let items = result
-            .as_array()
-            .ok_or_else(|| WireError::wrong_type("array or null", &result))?;
-        // One entry per requested hash, in request order.
-        if items.len() != versioned_hashes.len() {
-            return Err(WireError::new(WireErrorKind::LengthMismatch {
-                expected: versioned_hashes.len(),
-                actual: items.len(),
-            })
-            .into());
-        }
-        // A bad entry is located by its index.
-        Ok(Some(Items::new(items).decode()?))
+        Ok(GetBlobsResponse::decode(
+            version,
+            &result,
+            versioned_hashes.len(),
+        )?)
     }
 
     /// The chain id the engine runs: eth_chainId.
@@ -281,6 +288,34 @@ impl EngineClient {
     pub async fn chain_id(&self) -> Result<u64, EngineError> {
         self.call_typed("eth_chainId", Vec::new(), LOOKUP_TIMEOUT)
             .await
+    }
+
+    /// Looks up a proof-of-work block by hash: eth_getBlockByHash.
+    ///
+    /// The merge transition check reads the terminal block and its parent this way.
+    /// The engine port serves this method beside the engine methods.
+    /// See `get_pow_block` in the Bellatrix fork choice spec.
+    ///
+    /// # Returns
+    ///
+    /// The block, or nothing when the engine does not know the hash.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, when the block is malformed, and when it is another block.
+    pub async fn pow_block(&self, hash: Hash32) -> Result<Option<PowBlock>, EngineError> {
+        // The second parameter asks for transaction hashes rather than whole transactions.
+        let params = vec![hash.to_json(), Json::Bool(false)];
+        let block: Option<PowBlock> = self
+            .call_typed("eth_getBlockByHash", params, LOOKUP_TIMEOUT)
+            .await?;
+        match block {
+            Some(block) if block.block_hash != hash => Err(EngineError::BlockMismatch {
+                requested: hash,
+                returned: block.block_hash,
+            }),
+            found => Ok(found),
+        }
     }
 
     /// Whether the engine is still syncing: eth_syncing.

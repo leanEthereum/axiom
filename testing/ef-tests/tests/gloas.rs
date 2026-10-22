@@ -7,8 +7,8 @@
 use std::{collections::HashMap, fs};
 
 use axiom_ef_tests::{
-    Blocks, Case, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
-    StoreReplay, Suite, Transition, Vectors,
+    Blocks, Case, ChainReplay, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards,
+    SszStatic, StoreReplay, Suite, Transition, Vectors,
     forks::{Fulu, Gloas},
 };
 use axiom_ssz::Ssz;
@@ -93,6 +93,37 @@ const CONTAINERS: [&str; 73] = [
     "VoluntaryExit",
     "Withdrawal",
     "WithdrawalRequest",
+];
+
+/// Fork choice cases per handler, replayed by the store and by the node's chain.
+const FORK_CHOICE_MINIMAL: &[(&str, usize)] = &[
+    ("deposit_with_reorg", 1),
+    ("ex_ante", 3),
+    ("filter_node_tree_variants", 3),
+    ("get_head", 12),
+    ("get_parent_payload_status", 1),
+    ("on_attestation", 5),
+    ("on_block", 25),
+    ("on_execution_payload_envelope", 15),
+    ("on_payload_attestation_message", 7),
+    ("payload_data_availability", 3),
+    ("payload_timeliness", 3),
+    ("reorg", 8),
+    ("should_apply_proposer_boost", 4),
+    ("withholding", 2),
+];
+
+/// Fork choice cases per handler on the mainnet preset.
+const FORK_CHOICE_MAINNET: &[(&str, usize)] = &[
+    ("ex_ante", 5),
+    ("get_head", 8),
+    ("get_parent_payload_status", 1),
+    ("on_attestation", 5),
+    ("on_block", 8),
+    ("on_execution_payload_envelope", 15),
+    ("on_payload_attestation_message", 7),
+    ("payload_data_availability", 3),
+    ("payload_timeliness", 3),
 ];
 
 #[test]
@@ -519,40 +550,25 @@ fn light_client_mainnet() {
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Gloas>::fork_choice();
-    let expected = [
-        ("deposit_with_reorg", 1),
-        ("ex_ante", 3),
-        ("filter_node_tree_variants", 3),
-        ("get_head", 12),
-        ("get_parent_payload_status", 1),
-        ("on_attestation", 5),
-        ("on_block", 25),
-        ("on_execution_payload_envelope", 15),
-        ("on_payload_attestation_message", 7),
-        ("payload_data_availability", 3),
-        ("payload_timeliness", 3),
-        ("reorg", 8),
-        ("should_apply_proposer_boost", 4),
-        ("withholding", 2),
-    ];
-    Suite::check(&runner, "minimal", "gloas", &expected);
+    Suite::check(&runner, "minimal", "gloas", FORK_CHOICE_MINIMAL);
+}
+
+#[test]
+fn chain_replay_minimal() {
+    let runner = ChainReplay::<Minimal, Gloas>::new();
+    Suite::check(&runner, "minimal", "gloas", FORK_CHOICE_MINIMAL);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Gloas>::fork_choice();
-    let expected = [
-        ("ex_ante", 5),
-        ("get_head", 8),
-        ("get_parent_payload_status", 1),
-        ("on_attestation", 5),
-        ("on_block", 8),
-        ("on_execution_payload_envelope", 15),
-        ("on_payload_attestation_message", 7),
-        ("payload_data_availability", 3),
-        ("payload_timeliness", 3),
-    ];
-    Suite::check(&runner, "mainnet", "gloas", &expected);
+    Suite::check(&runner, "mainnet", "gloas", FORK_CHOICE_MAINNET);
+}
+
+#[test]
+fn chain_replay_mainnet() {
+    let runner = ChainReplay::<Mainnet, Gloas>::new();
+    Suite::check(&runner, "mainnet", "gloas", FORK_CHOICE_MAINNET);
 }
 
 #[test]

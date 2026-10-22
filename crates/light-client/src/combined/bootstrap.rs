@@ -1,12 +1,12 @@
 //! A light client bootstrap of any format.
 
 use axiom_ssz::Ssz;
-use axiom_types::{ChainConfig, ForkName, Preset, altair, capella, deneb, electra, gloas};
+use axiom_types::{ChainConfig, ForkName, Preset, Slot, altair, capella, deneb, electra, gloas};
 
 use super::{Format, LightClientHeader};
 use crate::{
     Altair, BootstrapData, Capella, Deneb, Electra, Gloas, LightClientError, LightClientFork,
-    Upgrade,
+    PostState, Upgrade,
 };
 
 /// A bootstrap in the format of one fork.
@@ -39,6 +39,55 @@ impl<P: Preset> LightClientBootstrap<P> {
             Format::Electra => Self::Electra(Ssz::decode(bytes).map_err(decode_error)?),
             Format::Gloas => Self::Gloas(Ssz::decode(bytes).map_err(decode_error)?),
         })
+    }
+
+    /// The bootstrap a full node serves for a block, from the block's post-state.
+    ///
+    /// The bootstrap takes the format of the block's fork.
+    /// See `create_light_client_bootstrap` in the Altair light client full node spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a phase0 block, which has no sync committee to prove.
+    pub fn create(post: &PostState<'_, P>) -> Result<Self, LightClientError> {
+        let block = post.block();
+        let fork = block.fork_name();
+        Format::of(fork)?;
+        let committees = post
+            .state()
+            .sync_committees()
+            .ok_or(LightClientError::NoLightClientData(fork))?;
+        Self::from_data(BootstrapData {
+            header: LightClientHeader::of_block(block),
+            current_sync_committee: committees.current_sync_committee().clone(),
+            current_sync_committee_branch: post.prove(post.layout().current_sync_committee)?,
+        })
+    }
+
+    /// The bootstrap's SSZ encoding, which does not record the format.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Altair(bootstrap) => bootstrap.encode(),
+            Self::Capella(bootstrap) => bootstrap.encode(),
+            Self::Deneb(bootstrap) => bootstrap.encode(),
+            Self::Electra(bootstrap) => bootstrap.encode(),
+            Self::Gloas(bootstrap) => bootstrap.encode(),
+        }
+    }
+
+    /// The slot whose fork digest tags the bootstrap on the wire: its header's.
+    ///
+    /// See `GetLightClientBootstrap` in the Altair light client networking spec.
+    #[must_use]
+    pub const fn context_slot(&self) -> Slot {
+        match self {
+            Self::Altair(bootstrap) => bootstrap.header.beacon.slot,
+            Self::Capella(bootstrap) => bootstrap.header.beacon.slot,
+            Self::Deneb(bootstrap) => bootstrap.header.beacon.slot,
+            Self::Electra(bootstrap) => bootstrap.header.beacon.slot,
+            Self::Gloas(bootstrap) => bootstrap.header.beacon.slot,
+        }
     }
 
     /// The bootstrap's format.
@@ -112,5 +161,75 @@ impl<P: Preset> LightClientBootstrap<P> {
             self = self.upgrade(config)?;
         }
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_ssz::Root;
+    use axiom_types::{Minimal, altair::SyncAggregate, phase0::Checkpoint};
+
+    use super::*;
+    use crate::{combined::LightClientStore, fixture::Chain};
+
+    #[test]
+    fn a_created_bootstrap_initializes_a_store_in_every_format() {
+        for fork in [
+            ForkName::Altair,
+            ForkName::Bellatrix,
+            ForkName::Capella,
+            ForkName::Deneb,
+            ForkName::Electra,
+            ForkName::Fulu,
+            ForkName::Gloas,
+        ] {
+            // Fixture state: every fork up to this one from genesis, and a block at slot 8.
+            let chain = Chain::new(fork);
+            let (state, block) = chain.block(
+                Slot(8),
+                Root::ZERO,
+                Checkpoint::default(),
+                SyncAggregate::default(),
+            );
+            let post = PostState::new(&state, &block).unwrap();
+            let bootstrap = LightClientBootstrap::<Minimal>::create(&post).unwrap();
+
+            // The bootstrap has the block's format, and its slot picks the fork digest.
+            let format = Format::of(fork).unwrap();
+            assert_eq!(bootstrap.format(), format, "{fork}");
+            assert_eq!(bootstrap.context_slot(), Slot(8), "{fork}");
+            assert_eq!(
+                LightClientBootstrap::decode(&bootstrap.encode(), fork),
+                Ok(bootstrap.clone()),
+                "{fork}"
+            );
+
+            // The store checks the header against the trusted root and the committee branch.
+            let store =
+                LightClientStore::initialize(format, &chain.config, block.block_root(), bootstrap)
+                    .unwrap();
+            assert_eq!(
+                store.finalized_header(),
+                LightClientHeader::of_block(&block),
+                "{fork}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_phase0_block_has_no_bootstrap() {
+        // Fixture state: no fork past phase0, so the state has no sync committee.
+        let chain = Chain::new(ForkName::Phase0);
+        let (state, block) = chain.block(
+            Slot(8),
+            Root::ZERO,
+            Checkpoint::default(),
+            SyncAggregate::default(),
+        );
+        let post = PostState::new(&state, &block).unwrap();
+        assert_eq!(
+            LightClientBootstrap::<Minimal>::create(&post),
+            Err(LightClientError::NoLightClientData(ForkName::Phase0))
+        );
     }
 }

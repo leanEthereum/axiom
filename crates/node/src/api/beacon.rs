@@ -5,7 +5,8 @@ use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
-    Preset, Root, accessors::CoreState, combined::BeaconState, fulu::SignedBlockContents,
+    ForkName, Preset, Root, accessors::CoreState, combined::BeaconState,
+    gloas::SignedExecutionPayloadEnvelope,
 };
 use tracing::warn;
 
@@ -14,7 +15,7 @@ use super::{
     ids::{BlockId, StateId},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::{Chain, ChainStopped, PublishError, Published};
+use crate::{Chain, ChainStopped, Proposal, PublishError, Published};
 
 /// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`.
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +33,10 @@ impl BeaconRoutes {
             )
             .get("/eth/v2/beacon/blocks/{block_id}", Self::block::<P>)
             .post("/eth/v2/beacon/blocks", Self::publish::<P>)
+            .post(
+                "/eth/v1/beacon/execution_payload_envelope",
+                Self::publish_envelope::<P>,
+            )
             .get(
                 "/eth/v1/beacon/states/{state_id}/root",
                 Self::state_root::<P>,
@@ -77,9 +82,8 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
-                let message = &block.message;
-                let canonical = chain.canonical_root(message.slot)? == Some(root);
-                let header = message.header();
+                let header = block.message().header();
+                let canonical = chain.canonical_root(header.slot)? == Some(root);
                 let data = Json::from([
                     ("root", Reply::text(&root)),
                     ("canonical", canonical.into()),
@@ -87,13 +91,13 @@ impl BeaconRoutes {
                         "header",
                         Json::from([
                             ("message", Reply::header(&header)),
-                            ("signature", Reply::text(&block.signature)),
+                            ("signature", Reply::text(block.signature())),
                         ]),
                     ),
                 ]);
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, message.slot)),
+                    Some(ApiContext::freshness(chain, root, header.slot)),
                 ))
             })
             .await
@@ -108,7 +112,7 @@ impl BeaconRoutes {
                 let data = Json::from([("root", Reply::text(&root))]);
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, block.message.slot)),
+                    Some(ApiContext::freshness(chain, root, block.slot())),
                 ))
             })
             .await
@@ -123,8 +127,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (_, block) = id.find(chain)?;
-                let fork = chain.config().fork_at(block.message.slot.epoch::<P>());
-                Ok(Reply::ssz(block.encode(), fork))
+                Ok(Reply::ssz(block.encode(), block.fork_name()))
             })
             .await
     }
@@ -143,9 +146,8 @@ impl BeaconRoutes {
         if !Reply::sends_ssz(&request) {
             return Err(ApiError::unsupported_media_type());
         }
-        let contents = SignedBlockContents::<P>::decode(&request.body)
-            .map_err(|error| ApiError::bad_request(format!("malformed block contents: {error}")))?;
-        match context.publisher.publish(contents).await {
+        let proposal = Self::proposal(&context, &request).await?;
+        match context.publisher.publish(proposal).await {
             Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
             Ok(Published::BroadcastOnly(error)) => {
                 warn!(%error, "published block was broadcast but not imported");
@@ -156,16 +158,70 @@ impl BeaconRoutes {
         }
     }
 
+    /// Publishes a Gloas payload envelope its block's builder revealed, as SSZ.
+    ///
+    /// Statuses follow the block route: 200 imported, 202 broadcast only, 400 invalid.
+    async fn publish_envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        if !Reply::sends_ssz(&request) {
+            return Err(ApiError::unsupported_media_type());
+        }
+        let envelope = SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
+            .map_err(|error| ApiError::bad_request(format!("malformed envelope: {error}")))?;
+        match context.publisher.publish_envelope(envelope).await {
+            Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
+            Ok(Published::BroadcastOnly(error)) => {
+                warn!(%error, "published envelope was broadcast but not imported");
+                Ok(Response::new(StatusCode::ACCEPTED))
+            }
+            Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
+            Err(error) => Err(ApiError::bad_request(error.to_string())),
+        }
+    }
+
+    /// The proposal in a publish request's body, decoded in the fork it names.
+    ///
+    /// The fork comes from the consensus version header, or else from the clock.
+    /// From Deneb to Fulu a block travels with its blobs; any other block travels alone.
+    async fn proposal<P: Preset>(
+        context: &ApiContext<P>,
+        request: &Request,
+    ) -> Result<Proposal<P>, ApiError> {
+        let named = request.headers.get("eth-consensus-version");
+        let fork = match named {
+            Some(name) => ForkName::from_name(name).ok_or_else(|| {
+                ApiError::bad_request(format!("unknown consensus version: {name}"))
+            })?,
+            None => {
+                context
+                    .query(|chain| Ok(chain.config().fork_at(chain.store().current_epoch())))
+                    .await?
+            }
+        };
+        let proposal = Proposal::<P>::decode(&request.body, fork)
+            .map_err(|error| ApiError::bad_request(format!("malformed {fork} block: {error}")))?;
+        // A block must belong to the fork its slot falls in, whatever the header says.
+        let slot = proposal.slot();
+        let expected = context
+            .query(move |chain| Ok(chain.config().fork_at(slot.epoch::<P>())))
+            .await?;
+        if expected != fork {
+            return Err(ApiError::bad_request(format!(
+                "block at slot {slot} is in fork {expected}, not {fork}"
+            )));
+        }
+        Ok(proposal)
+    }
+
     /// The root of a state.
     async fn state_root<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let id = StateId::from_request(&request)?;
         context
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
-                let data = Json::from([("root", Reply::text(&block.message.state_root))]);
+                let data = Json::from([("root", Reply::text(&block.message().state_root()))]);
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, block.message.slot)),
+                    Some(ApiContext::freshness(chain, root, block.slot())),
                 ))
             })
             .await
@@ -185,7 +241,7 @@ impl BeaconRoutes {
                 ]);
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, block.message.slot)),
+                    Some(ApiContext::freshness(chain, root, block.slot())),
                 ))
             })
             .await
@@ -214,7 +270,7 @@ impl BeaconRoutes {
                 ]);
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, block.message.slot)),
+                    Some(ApiContext::freshness(chain, root, block.slot())),
                 ))
             })
             .await

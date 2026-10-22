@@ -19,7 +19,7 @@ use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use axiom_crypto::secp256k1::SecretKey;
 use command::{Command, Input};
-pub use error::DriverStopped;
+pub use error::{DriverStopped, RecordUpdateError};
 pub use handle::{Discv5, Discv5Events};
 use tokio::{
     net::UdpSocket,
@@ -161,6 +161,9 @@ impl Driver {
                 reply,
             } => {
                 let _ = reply.send(self.service.lookup(now, target, filter, wanted));
+            }
+            Command::SetLocalEnr(enr, reply) => {
+                let _ = reply.send(self.service.set_local_enr(enr));
             }
             Command::TableEntries(reply) => {
                 let entries = self

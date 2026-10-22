@@ -1,6 +1,7 @@
 //! Two tokio nodes over real TCP sockets: gossip, req/resp, identify, and disconnection.
 //!
 //! The scenario runs twice: over real Noise, the production channel, and over plaintext.
+//! A second scenario pairs a node with one that speaks only the first status version.
 
 use std::{sync::Arc, time::Duration};
 
@@ -8,12 +9,12 @@ use axiom_p2p::{
     Keypair, PeerId,
     eth::{
         GossipKind, GossipTopic,
-        reqresp::{Protocol, ResponseChunk, ResponseCode, Status},
+        reqresp::{Protocol, ResponseChunk, ResponseCode, Status, StatusVersion},
     },
     gossipsub::{PublishError, ValidationOutcome},
     multiaddr::Protocol as Layer,
     secure::plaintext::PlaintextConfig,
-    swarm::{self, NetworkConfig, NetworkEvent, NetworkEvents, NetworkHandle},
+    swarm::{self, NetworkConfig, NetworkEvent, NetworkEvents, NetworkHandle, RequestError},
 };
 use axiom_ssz::Ssz;
 use axiom_types::{Epoch, ForkDigest, Root, Slot};
@@ -61,8 +62,8 @@ enum Channel {
     Plaintext,
 }
 
-/// Starts a node whose secp256k1 secret is 32 copies of a seed byte.
-async fn node(seed: u8, channel: Channel) -> (NetworkHandle, Inbox) {
+/// Starts a node whose secp256k1 secret is 32 copies of a seed byte, serving some methods.
+async fn node(seed: u8, channel: Channel, protocols: &[Protocol]) -> (NetworkHandle, Inbox) {
     let identity = Keypair::from_secret_bytes(&[seed; 32]).expect("seed is a valid scalar");
     let mut config = match channel {
         Channel::Noise => NetworkConfig::new(identity).expect("entropy available"),
@@ -72,6 +73,7 @@ async fn node(seed: u8, channel: Channel) -> (NetworkHandle, Inbox) {
         }
     };
     config.seed = u64::from(seed);
+    config.protocols = protocols.to_vec();
     let (handle, events) = swarm::start(config).await.expect("listener binds");
     (
         handle,
@@ -92,14 +94,24 @@ fn gossip_and_status_over_plaintext() {
     run(Channel::Plaintext);
 }
 
+#[test]
+fn status_falls_back_to_the_first_version() {
+    block_on(first_version_peer());
+}
+
 /// Runs the scenario on a single-threaded runtime, where every task interleaves on one thread.
 fn run(channel: Channel) {
+    block_on(scenario(channel));
+}
+
+/// Runs a future on a single-threaded runtime, with a time limit.
+fn block_on(future: impl Future<Output = ()>) {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime builds");
     runtime.block_on(async {
-        timeout(Duration::from_secs(20), scenario(channel))
+        timeout(Duration::from_secs(20), future)
             .await
             .expect("scenario completes in time");
     });
@@ -119,16 +131,16 @@ struct Pair {
 
 /// The whole exchange between two nodes, phase by phase.
 async fn scenario(channel: Channel) {
-    let mut pair = connect(channel).await;
+    let mut pair = connect(channel, &Protocol::ALL).await;
     gossip(&mut pair).await;
     status(&mut pair).await;
     identify_and_disconnect(&mut pair).await;
 }
 
 /// Phase 1: alice dials bob and both see the connection.
-async fn connect(channel: Channel) -> Pair {
-    let (alice, mut alice_events) = node(1, channel).await;
-    let (bob, mut bob_events) = node(2, channel).await;
+async fn connect(channel: Channel, bob_serves: &[Protocol]) -> Pair {
+    let (alice, mut alice_events) = node(1, channel, &Protocol::ALL).await;
+    let (bob, mut bob_events) = node(2, channel, bob_serves).await;
     let alice_id = alice.local_peer().clone();
     let bob_id = bob.local_peer().clone();
 
@@ -328,4 +340,148 @@ async fn identify_and_disconnect(pair: &mut Pair) {
     assert_eq!(gone, alice_id);
     alice.shutdown().await.expect("shutdown queued");
     bob.shutdown().await.expect("shutdown queued");
+}
+
+/// Bob serves every method but the second status version; alice falls back to the first.
+async fn first_version_peer() {
+    let bob_serves: Vec<Protocol> = Protocol::ALL
+        .into_iter()
+        .filter(|protocol| *protocol != Protocol::StatusV2)
+        .collect();
+    let mut pair = connect(Channel::Plaintext, &bob_serves).await;
+    // Alice's status names slot 64 as her earliest; bob's head is one slot ahead.
+    let alice_status = Status {
+        fork_digest: ForkDigest([0xde, 0xad, 0xbe, 0xef]),
+        finalized_root: Root::from([1; 32]),
+        finalized_epoch: Epoch(10),
+        head_root: Root::from([2; 32]),
+        head_slot: Slot(330),
+        earliest_available_slot: Slot(64),
+    };
+    let bob_status = Status {
+        head_slot: Slot(331),
+        earliest_available_slot: Slot::GENESIS,
+        ..alice_status
+    };
+    outbound_fallback(&mut pair, alice_status, bob_status).await;
+    inbound_first_version(&mut pair, bob_status).await;
+    pair.alice.shutdown().await.expect("shutdown queued");
+    pair.bob.shutdown().await.expect("shutdown queued");
+}
+
+/// Phases 1 and 2: alice's second version is refused, and her first version is answered.
+async fn outbound_fallback(pair: &mut Pair, alice_status: Status, bob_status: Status) {
+    let Pair {
+        alice,
+        alice_events,
+        bob,
+        bob_events,
+    } = pair;
+    let alice_id = alice.local_peer().clone();
+    let bob_id = bob.local_peer().clone();
+
+    // Phase 1: bob refuses the second version during negotiation.
+    let refused = alice
+        .send_request(
+            bob_id.clone(),
+            Protocol::StatusV2,
+            StatusVersion::V2.encode(&alice_status),
+        )
+        .await
+        .expect("request queued");
+    let error = alice_events
+        .wait_for(|event| match event {
+            NetworkEvent::RequestFailed { request, error, .. } if *request == refused => {
+                Some(error.clone())
+            }
+            _ => None,
+        })
+        .await;
+    assert_eq!(
+        error,
+        RequestError::Unsupported {
+            protocol: Protocol::StatusV2
+        }
+    );
+
+    // Phase 2: the first version goes through, as 84 bytes without the earliest slot.
+    let request = alice
+        .send_request(
+            bob_id.clone(),
+            Protocol::StatusV1,
+            StatusVersion::V1.encode(&alice_status),
+        )
+        .await
+        .expect("request queued");
+    let (inbound, payload) = bob_events
+        .wait_for(|event| match event {
+            NetworkEvent::Request {
+                peer,
+                id,
+                protocol: Protocol::StatusV1,
+                payload,
+            } if *peer == alice_id => Some((*id, payload.clone())),
+            _ => None,
+        })
+        .await;
+    assert_eq!(payload.len(), 84);
+    assert_eq!(
+        StatusVersion::V1.decode(&payload),
+        Ok(Status {
+            earliest_available_slot: Slot::GENESIS,
+            ..alice_status
+        })
+    );
+
+    // Bob answers in the first version's shape, and alice reads it so.
+    bob.respond(
+        inbound,
+        vec![ResponseChunk::success(
+            None,
+            StatusVersion::V1.encode(&bob_status),
+        )],
+    )
+    .await
+    .expect("response queued");
+    let chunk = alice_events
+        .wait_for(|event| match event {
+            NetworkEvent::Response {
+                request: r, chunk, ..
+            } if *r == request => Some(chunk.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(chunk.code, ResponseCode::Success);
+    assert_eq!(StatusVersion::V1.decode(&chunk.payload), Ok(bob_status));
+}
+
+/// Phase 3: bob's own first-version handshake reaches alice, who serves both versions.
+async fn inbound_first_version(pair: &mut Pair, bob_status: Status) {
+    let Pair {
+        alice,
+        alice_events,
+        bob,
+        ..
+    } = pair;
+    let alice_id = alice.local_peer().clone();
+    let bob_id = bob.local_peer().clone();
+    bob.send_request(
+        alice_id.clone(),
+        Protocol::StatusV1,
+        StatusVersion::V1.encode(&bob_status),
+    )
+    .await
+    .expect("request queued");
+    let payload = alice_events
+        .wait_for(|event| match event {
+            NetworkEvent::Request {
+                peer,
+                protocol: Protocol::StatusV1,
+                payload,
+                ..
+            } if *peer == bob_id => Some(payload.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(StatusVersion::V1.decode(&payload), Ok(bob_status));
 }

@@ -6,7 +6,8 @@ use crate::{
     BlsSignature, Bytes32, KzgCommitment, Preset, Root, Slot, ValidatorIndex,
     deneb::{
         Attestation, AttesterSlashing, BeaconBlockHeader, Deposit, Eth1Data, ExecutionPayload,
-        ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate,
+        NewPayloadRequest, ProposerSlashing, SignedBlsToExecutionChange, SignedVoluntaryExit,
+        SyncAggregate,
     },
 };
 
@@ -163,6 +164,25 @@ impl<P: Preset> BeaconBlock<P> {
             parent_root: self.parent_root,
             state_root: self.state_root,
             body_root: self.body.hash_tree_root(),
+        }
+    }
+
+    /// The request the execution engine judges for this block's payload.
+    ///
+    /// Everything it holds comes from the block alone.
+    /// So it can be sent before the transition runs.
+    /// See `process_execution_payload` in the Deneb beacon chain spec.
+    #[must_use]
+    pub fn new_payload_request(&self) -> NewPayloadRequest<P> {
+        NewPayloadRequest {
+            execution_payload: self.body.execution_payload.clone(),
+            // The engine checks these against the blob transactions in the payload.
+            versioned_hashes: self
+                .body
+                .blob_kzg_commitments
+                .map(KzgCommitment::versioned_hash),
+            // The block header the transition writes names this same parent.
+            parent_beacon_block_root: self.parent_root,
         }
     }
 }

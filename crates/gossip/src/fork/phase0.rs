@@ -3,11 +3,12 @@
 //! See the phase0 p2p spec.
 
 use axiom_types::{
-    BlsSignature, CommitteeIndex, Hash32, Preset, ValidatorIndex,
+    BlsSignature, CommitteeIndex, Hash32, Preset, ValidatorIndex, combined,
     phase0::{
         AggregateAndProof, Attestation, AttestationData, AttesterSlashing, BeaconBlock,
         BeaconState, SignedAggregateAndProof, SignedBeaconBlock,
     },
+    vote::{CommitteeVote, ConflictingVotes},
 };
 
 use super::{GossipFork, VoteIndex, VoteWindow};
@@ -25,6 +26,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
     const VOTE_WINDOW: VoteWindow = VoteWindow::SlotRange;
     const VOTE_INDEX: VoteIndex = VoteIndex::Committee;
 
+    fn into_any_block(signed: SignedBeaconBlock<P>) -> combined::SignedBeaconBlock<P> {
+        combined::SignedBeaconBlock::Phase0(signed)
+    }
+
     fn split_block(signed: &SignedBeaconBlock<P>) -> (&BeaconBlock<P>, &BlsSignature) {
         (&signed.message, &signed.signature)
     }
@@ -35,6 +40,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 }
 
 impl<P: Preset> Aggregate for Attestation<P> {
+    fn committee_vote(&self) -> CommitteeVote {
+        Self::committee_vote(self)
+    }
+
     fn data(&self) -> &AttestationData {
         &self.data
     }
@@ -122,6 +131,10 @@ impl<P: Preset> SignedAggregate for SignedAggregateAndProof<P> {
 }
 
 impl<P: Preset> SlashingEvidence for AttesterSlashing<P> {
+    fn conflicting_votes(&self) -> ConflictingVotes {
+        Self::conflicting_votes(self)
+    }
+
     fn votes(&self) -> [IndexedVote<'_>; 2] {
         [&self.attestation_1, &self.attestation_2].map(|attestation| IndexedVote {
             indices: &attestation.attesting_indices,

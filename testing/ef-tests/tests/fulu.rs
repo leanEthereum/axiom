@@ -75,6 +75,25 @@ const CONTAINERS: [&str; 60] = [
     "WithdrawalRequest",
 ];
 
+/// Fork choice cases per handler, replayed by the store and by the node's chain.
+const FORK_CHOICE_MINIMAL: &[(&str, usize)] = &[
+    ("deposit_with_reorg", 1),
+    ("ex_ante", 3),
+    ("get_head", 11),
+    ("get_proposer_head", 3),
+    ("on_block", 40),
+    ("reorg", 8),
+    ("withholding", 2),
+];
+
+/// Fork choice cases per handler on the mainnet preset.
+const FORK_CHOICE_MAINNET: &[(&str, usize)] = &[
+    ("ex_ante", 5),
+    ("get_head", 7),
+    ("get_proposer_head", 3),
+    ("on_block", 23),
+];
+
 #[test]
 fn ssz_static_minimal() {
     let runner = SszStatic::<Minimal, Fulu>::default();
@@ -271,57 +290,25 @@ fn transition_mainnet() {
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Fulu>::fork_choice();
-    let expected = [
-        ("deposit_with_reorg", 1),
-        ("ex_ante", 3),
-        ("get_head", 11),
-        ("get_proposer_head", 3),
-        ("on_block", 40),
-        ("reorg", 8),
-        ("withholding", 2),
-    ];
-    Suite::check(&runner, "minimal", "fulu", &expected);
+    Suite::check(&runner, "minimal", "fulu", FORK_CHOICE_MINIMAL);
+}
+
+#[test]
+fn chain_replay_minimal() {
+    let runner = ChainReplay::<Minimal, Fulu>::new();
+    Suite::check(&runner, "minimal", "fulu", FORK_CHOICE_MINIMAL);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Fulu>::fork_choice();
-    let expected = [
-        ("ex_ante", 5),
-        ("get_head", 7),
-        ("get_proposer_head", 3),
-        ("on_block", 23),
-    ];
-    Suite::check(&runner, "mainnet", "fulu", &expected);
-}
-
-#[test]
-fn chain_replay_minimal() {
-    // The fork choice vectors, replayed through the node's chain.
-    let runner = ChainReplay::<Minimal, Fulu>::new();
-    let expected = [
-        ("deposit_with_reorg", 1),
-        ("ex_ante", 3),
-        ("get_head", 11),
-        ("get_proposer_head", 3),
-        ("on_block", 40),
-        ("reorg", 8),
-        ("withholding", 2),
-    ];
-    Suite::check(&runner, "minimal", "fulu", &expected);
+    Suite::check(&runner, "mainnet", "fulu", FORK_CHOICE_MAINNET);
 }
 
 #[test]
 fn chain_replay_mainnet() {
-    // The fork choice vectors, replayed through the node's chain.
     let runner = ChainReplay::<Mainnet, Fulu>::new();
-    let expected = [
-        ("ex_ante", 5),
-        ("get_head", 7),
-        ("get_proposer_head", 3),
-        ("on_block", 23),
-    ];
-    Suite::check(&runner, "mainnet", "fulu", &expected);
+    Suite::check(&runner, "mainnet", "fulu", FORK_CHOICE_MAINNET);
 }
 
 #[test]

@@ -3,14 +3,14 @@
 //! ```text
 //!     u64, U256, Gwei, indices   QUANTITY   "0x0", "0x400"
 //!     hashes, roots, addresses   DATA       fixed length, checked
-//!     byte lists                 DATA       up to the list's limit
+//!     byte lists                 DATA       up to the list's limit, if any
 //!     lists and vectors          array      element by element
 //! ```
 
 use axiom_json::{Data, Json, Quantity};
-use axiom_ssz::{ByteList, ByteVector, Length, List, U256, Vector};
+use axiom_ssz::{ByteList, ByteVector, Length, List, ProgressiveList, U256, Vector};
 use axiom_types::{
-    Bytes32, ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, ValidatorIndex,
+    Bytes32, ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, Slot, ValidatorIndex,
     VersionedHash, WithdrawalIndex,
 };
 
@@ -80,6 +80,16 @@ impl JsonCodec for WithdrawalIndex {
 }
 
 impl JsonCodec for ValidatorIndex {
+    fn to_json(&self) -> Json {
+        self.0.to_json()
+    }
+
+    fn from_json(value: &Json) -> Result<Self, WireError> {
+        Reader::new(value).quantity().map(Self)
+    }
+}
+
+impl JsonCodec for Slot {
     fn to_json(&self) -> Json {
         self.0.to_json()
     }
@@ -249,6 +259,28 @@ impl<T: JsonCodec, N: Length> JsonCodec for List<T, N> {
                 actual: items.len(),
             })
         })
+    }
+}
+
+impl JsonCodec for ProgressiveList<u8> {
+    /// A DATA of any length, as an unbounded byte list is.
+    fn to_json(&self) -> Json {
+        Json::String(self.as_slice().to_data())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, WireError> {
+        Reader::new(value).bytes().map(Self::from)
+    }
+}
+
+impl<T: JsonCodec> JsonCodec for ProgressiveList<T> {
+    fn to_json(&self) -> Json {
+        Json::Array(self.iter().map(JsonCodec::to_json).collect())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, WireError> {
+        // No limit to check: the response size bounds the element count.
+        Reader::new(value).items()?.decode().map(Self::from)
     }
 }
 

@@ -3,8 +3,7 @@
 use axiom_kzg::{Bytes48, Cell, CellIndex, Kzg, KzgError};
 use axiom_ssz::{CapacityError, Container, GeneralizedIndex, MerkleProof, Root, Ssz};
 use axiom_types::{
-    ChainConfig, ColumnIndex, Preset,
-    fulu::{BeaconBlockBody, DataColumnSidecar},
+    ChainConfig, ColumnIndex, Preset, electra::BeaconBlockBody, fulu::DataColumnSidecar,
 };
 use thiserror::Error;
 
@@ -74,7 +73,8 @@ pub enum ColumnError {
     },
     /// A cell does not open its commitment at the column's points.
     ///
-    /// A malformed commitment or proof counts as a wrong proof, since either makes the column unusable.
+    /// A malformed commitment or proof counts as a wrong proof.
+    /// Either makes the column unusable.
     #[error("cell proofs of column {column} in block {block_root} do not verify")]
     InvalidKzgProofs {
         /// The column index.

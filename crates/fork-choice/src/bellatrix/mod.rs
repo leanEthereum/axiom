@@ -5,4 +5,4 @@
 
 mod pow_chain;
 
-pub use pow_chain::PowChain;
+pub use pow_chain::{PowChain, SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY};

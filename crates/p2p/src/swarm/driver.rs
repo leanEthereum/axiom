@@ -1,4 +1,5 @@
-//! The swarm task: owns the router and the request tables, and routes between connections and the node.
+//! The swarm task: it owns the router and the request tables.
+//! It routes messages between the connections and the node.
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -35,7 +36,7 @@ use crate::{
     yamux::{Mode, StreamId},
 };
 
-/// Result code for a rate-limited request, from the range the spec leaves to clients.
+/// Result code for a rate-limited request, from the client-specific range of the phase0 spec.
 const RATE_LIMITED: ResponseCode = ResponseCode::ClientSpecific(139);
 
 /// Inputs other than gossip that may wait for one full connection queue.
@@ -191,7 +192,12 @@ impl Swarm {
             protocols: ProtocolVersion::ALL
                 .iter()
                 .map(|version| version.protocol_id())
-                .chain(Protocol::ALL.iter().map(|protocol| protocol.protocol_id()))
+                .chain(
+                    config
+                        .protocols
+                        .iter()
+                        .map(|protocol| protocol.protocol_id()),
+                )
                 .chain([identify::PROTOCOL, ping::PROTOCOL])
                 .map(str::to_owned)
                 .collect(),
@@ -204,7 +210,11 @@ impl Swarm {
             connection_queue: config.connection_queue,
         });
         Self {
-            router: Router::new(config.gossipsub, config.scoring.clone(), config.seed),
+            router: Router::new(
+                config.gossipsub.clone(),
+                config.scoring.clone(),
+                config.seed,
+            ),
             limiter: config.rate_limiter.clone(),
             config,
             shared,
@@ -571,7 +581,8 @@ impl Swarm {
         entry.commands = Some(commands);
         let (address, outbound) = (entry.address.clone(), entry.outbound);
         self.peers.insert(peer.clone(), id);
-        // The gossip revision is refined once the gossip stream settles; v1.1 is the Ethereum floor.
+        // The gossip revision is refined once the gossip stream settles.
+        // Version 1.1 is the Ethereum floor.
         self.router.add_peer(&peer, ProtocolVersion::V1_1, outbound);
         if let Some(AddrProtocol::Ip4(ip)) = address.protocols().first() {
             self.router.set_peer_ip(&peer, (*ip).into());
@@ -659,7 +670,8 @@ impl Swarm {
 
     /// Applies the flooding policy to a peer whose traffic the queue refused.
     fn on_refused(&mut self, peer: &PeerId, admission: Admission) {
-        // A full queue is the node's fault and costs the peer nothing; flooding costs the connection.
+        // A full queue is the node's fault and costs the peer nothing.
+        // Flooding costs the connection.
         if admission == Admission::Flooding
             && let Some(&id) = self.peers.get(peer)
         {

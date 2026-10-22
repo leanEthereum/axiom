@@ -11,13 +11,15 @@ use axiom_execution::{EngineClient, JwtSecret};
 use axiom_http::{Server, ServerConfig};
 use axiom_p2p::{
     Multiaddr,
+    eth::MessageIds,
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
-use axiom_ssz::Ssz;
+use axiom_ssz::DecodeError;
 use axiom_telemetry::{MetricsServer, Registry};
 use axiom_types::{
     ChainConfig, Preset,
-    fulu::{BeaconState, SignedBeaconBlock},
+    accessors::CoreState,
+    combined::{BeaconState, SignedBeaconBlock},
 };
 use tokio::{
     sync::watch,
@@ -75,14 +77,16 @@ pub struct NetworkSettings {
 }
 
 impl NetworkSettings {
-    /// Starts the libp2p stack under the node's key.
+    /// Starts the libp2p stack under the node's key, with the chain's gossip message identifiers.
     pub(crate) async fn start_p2p(
         &self,
         key: &NodeKey,
+        message_ids: MessageIds,
     ) -> Result<(NetworkHandle, NetworkEvents), NodeError> {
         // Noise secures every connection under the node's secp256k1 identity.
         let mut p2p = NetworkConfig::new(key.keypair()).map_err(NodeError::Network)?;
         p2p.listen_addr = Multiaddr::from_tcp(self.listen_address);
+        p2p.gossipsub.message_id = message_ids;
         swarm::start(p2p).await.map_err(NodeError::Network)
     }
 }
@@ -110,21 +114,22 @@ impl AnchorSource {
     ) -> Result<Chain<P>, NodeError> {
         match self {
             Self::Genesis(path) => {
-                let genesis: BeaconState<P> =
-                    SszFile::new(path, "reading the genesis state").decode()?;
+                let genesis = SszFile::new(path, "reading the genesis state")
+                    .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
                 info!(
-                    validators = genesis.validators.len(),
+                    validators = genesis.validators().len(),
+                    fork = %genesis.fork_name(),
                     "starting from genesis"
                 );
                 Ok(Chain::from_genesis(chain_config, genesis, database)?)
             }
             Self::Checkpoint { state, block } => {
-                let state: BeaconState<P> =
-                    SszFile::new(state, "reading the checkpoint state").decode()?;
-                let block: SignedBeaconBlock<P> =
-                    SszFile::new(block, "reading the checkpoint block").decode()?;
+                let state = SszFile::new(state, "reading the checkpoint state")
+                    .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
+                let block = SszFile::new(block, "reading the checkpoint block")
+                    .decode(|bytes| SignedBeaconBlock::<P>::decode_at(bytes, &chain_config))?;
                 // The store refuses a block whose state root is not this state's.
-                info!(slot = %block.message.slot, "starting from a checkpoint");
+                info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
                 Ok(Chain::from_anchor(chain_config, state, &block, database)?)
             }
         }
@@ -146,14 +151,17 @@ impl<'a> SszFile<'a> {
         Self { path, context }
     }
 
-    /// Reads and decodes the file.
-    fn decode<T: Ssz>(self) -> Result<T, NodeError> {
+    /// Reads the file and decodes it in the fork its slot falls in.
+    fn decode<T>(
+        self,
+        decode: impl FnOnce(&[u8]) -> Result<T, DecodeError>,
+    ) -> Result<T, NodeError> {
         let bytes = fs::read(self.path).map_err(|error| NodeError::File {
             context: self.context,
             path: self.path.to_path_buf(),
             error,
         })?;
-        T::decode(&bytes).map_err(|source| NodeError::Genesis {
+        decode(&bytes).map_err(|source| NodeError::Genesis {
             path: self.path.to_path_buf(),
             source,
         })
@@ -184,8 +192,8 @@ impl NodeConfig {
         chain_config: ChainConfig,
     ) -> Result<Chain<P>, NodeError> {
         let database = match &self.data_dir {
-            Some(directory) => ChainDatabase::open(&directory.join("chain"))?,
-            None => ChainDatabase::in_memory()?,
+            Some(directory) => ChainDatabase::open(&directory.join("chain"), chain_config.clone())?,
+            None => ChainDatabase::in_memory(chain_config.clone())?,
         };
         if database.has_anchor()? {
             info!("resuming from the database");

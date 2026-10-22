@@ -29,6 +29,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
     const VOTE_WINDOW: VoteWindow = VoteWindow::CurrentOrPreviousEpoch;
     const VOTE_INDEX: VoteIndex = VoteIndex::Committee;
 
+    fn into_any_block(signed: SignedBeaconBlock<P>) -> combined::SignedBeaconBlock<P> {
+        combined::SignedBeaconBlock::Deneb(signed)
+    }
+
     fn split_block(signed: &SignedBeaconBlock<P>) -> (&BeaconBlock<P>, &BlsSignature) {
         (&signed.message, &signed.signature)
     }

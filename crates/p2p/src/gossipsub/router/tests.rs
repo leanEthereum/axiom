@@ -200,7 +200,10 @@ fn idontwant_suppresses_forwarding() {
     let mut router = router_with_peers(2);
     let now = Duration::ZERO;
     let message = message_rpc(b"m");
-    let id = (router.config().message_id)(&topic(), &message.publish[0].data);
+    let id = router
+        .config()
+        .message_id
+        .id(&topic(), &message.publish[0].data);
     // Peer 2 says it does not want the message.
     let notice = Rpc {
         control: Some(ControlMessage {

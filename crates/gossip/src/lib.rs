@@ -12,9 +12,13 @@
 //! Rejection is reserved for messages no honest node would send.
 //! Ignoring covers what an honest but slow or early node might send.
 //!
+//! The crate also builds the blob sidecars a proposer publishes.
+//! Building them beside their checks keeps both sides of each proof in one place.
+//!
 //! See the `p2p-interface.md` specs from phase0 to Gloas, which define each rule as a function.
 
 mod blob_sidecar;
+mod block_blobs;
 mod detail;
 mod error;
 mod fork;
@@ -26,7 +30,8 @@ mod validator;
 mod view;
 mod vote;
 
-pub use blob_sidecar::BlobSubnets;
+pub use blob_sidecar::{BlobSubnets, CheckedBlob};
+pub use block_blobs::{BlobError, BlockBlobs};
 pub use detail::Detail;
 pub use error::GossipError;
 pub use fork::{GossipFork, VoteIndex, VoteWindow};

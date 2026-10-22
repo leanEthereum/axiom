@@ -42,11 +42,23 @@ pub enum Protocol {
     MetaDataV2,
     /// Metadata with the custody group count, Fulu.
     MetaDataV3,
+    /// A light client bootstrap by block root, Altair.
+    LightClientBootstrapV1,
+    /// Light client updates by sync committee period, Altair.
+    LightClientUpdatesByRangeV1,
+    /// The latest light client finality update, Altair.
+    LightClientFinalityUpdateV1,
+    /// The latest light client optimistic update, Altair.
+    LightClientOptimisticUpdateV1,
+    /// Payload envelopes in a slot range, Gloas.
+    ExecutionPayloadEnvelopesByRangeV1,
+    /// Payload envelopes by block root, Gloas.
+    ExecutionPayloadEnvelopesByRootV1,
 }
 
 impl Protocol {
     /// Every supported protocol, newest versions of a method first.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 19] = [
         Self::StatusV2,
         Self::StatusV1,
         Self::GoodbyeV1,
@@ -60,6 +72,12 @@ impl Protocol {
         Self::PingV1,
         Self::MetaDataV3,
         Self::MetaDataV2,
+        Self::LightClientBootstrapV1,
+        Self::LightClientUpdatesByRangeV1,
+        Self::LightClientFinalityUpdateV1,
+        Self::LightClientOptimisticUpdateV1,
+        Self::ExecutionPayloadEnvelopesByRangeV1,
+        Self::ExecutionPayloadEnvelopesByRootV1,
     ];
 
     /// The full multistream-select name.
@@ -93,6 +111,24 @@ impl Protocol {
             Self::PingV1 => "/eth2/beacon_chain/req/ping/1/ssz_snappy",
             Self::MetaDataV2 => "/eth2/beacon_chain/req/metadata/2/ssz_snappy",
             Self::MetaDataV3 => "/eth2/beacon_chain/req/metadata/3/ssz_snappy",
+            Self::LightClientBootstrapV1 => {
+                "/eth2/beacon_chain/req/light_client_bootstrap/1/ssz_snappy"
+            }
+            Self::LightClientUpdatesByRangeV1 => {
+                "/eth2/beacon_chain/req/light_client_updates_by_range/1/ssz_snappy"
+            }
+            Self::LightClientFinalityUpdateV1 => {
+                "/eth2/beacon_chain/req/light_client_finality_update/1/ssz_snappy"
+            }
+            Self::LightClientOptimisticUpdateV1 => {
+                "/eth2/beacon_chain/req/light_client_optimistic_update/1/ssz_snappy"
+            }
+            Self::ExecutionPayloadEnvelopesByRangeV1 => {
+                "/eth2/beacon_chain/req/execution_payload_envelopes_by_range/1/ssz_snappy"
+            }
+            Self::ExecutionPayloadEnvelopesByRootV1 => {
+                "/eth2/beacon_chain/req/execution_payload_envelopes_by_root/1/ssz_snappy"
+            }
         }
     }
 
@@ -122,6 +158,12 @@ impl Protocol {
                 | Self::DataColumnSidecarsByRangeV1
                 | Self::DataColumnSidecarsByRootV1
                 | Self::BeaconBlocksByHeadV1
+                | Self::LightClientBootstrapV1
+                | Self::LightClientUpdatesByRangeV1
+                | Self::LightClientFinalityUpdateV1
+                | Self::LightClientOptimisticUpdateV1
+                | Self::ExecutionPayloadEnvelopesByRangeV1
+                | Self::ExecutionPayloadEnvelopesByRootV1
         )
     }
 
@@ -136,13 +178,22 @@ impl Protocol {
                 | Self::PingV1
                 | Self::MetaDataV2
                 | Self::MetaDataV3
+                | Self::LightClientBootstrapV1
+                | Self::LightClientFinalityUpdateV1
+                | Self::LightClientOptimisticUpdateV1
         )
     }
 
     /// Whether the request carries no content at all.
     #[must_use]
     pub const fn has_empty_request(self) -> bool {
-        matches!(self, Self::MetaDataV2 | Self::MetaDataV3)
+        matches!(
+            self,
+            Self::MetaDataV2
+                | Self::MetaDataV3
+                | Self::LightClientFinalityUpdateV1
+                | Self::LightClientOptimisticUpdateV1
+        )
     }
 
     /// The SSZ length range of a valid request, from the mainnet and minimal presets.
@@ -159,10 +210,13 @@ impl Protocol {
             Self::GoodbyeV1 | Self::PingV1 => 8..=8,
             // start_slot 8 + count 8 + step 8.
             Self::BeaconBlocksByRangeV2 => 24..=24,
-            // Up to MAX_REQUEST_BLOCKS_DENEB = 128 roots of 32 bytes.
-            Self::BeaconBlocksByRootV2 => 0..=128 * 32,
-            // start_slot 8 + count 8.
-            Self::BlobSidecarsByRangeV1 => 16..=16,
+            // Up to 128 roots of 32 bytes.
+            // The bound is MAX_REQUEST_BLOCKS_DENEB, or MAX_REQUEST_PAYLOADS for envelopes.
+            Self::BeaconBlocksByRootV2 | Self::ExecutionPayloadEnvelopesByRootV1 => 0..=128 * 32,
+            // A slot or period range: start 8 + count 8.
+            Self::BlobSidecarsByRangeV1
+            | Self::LightClientUpdatesByRangeV1
+            | Self::ExecutionPayloadEnvelopesByRangeV1 => 16..=16,
             // Up to MAX_REQUEST_BLOB_SIDECARS_ELECTRA = 1152 identifiers of root 32 + index 8.
             Self::BlobSidecarsByRootV1 => 0..=1152 * 40,
             // start_slot 8 + count 8 + offset 4, then up to NUMBER_OF_COLUMNS = 128 indices.
@@ -171,8 +225,13 @@ impl Protocol {
             Self::DataColumnSidecarsByRootV1 => 0..=128 * (4 + 32 + 4 + 128 * 8),
             // beacon_root 32 + count 8.
             Self::BeaconBlocksByHeadV1 => 40..=40,
+            // A block root.
+            Self::LightClientBootstrapV1 => 32..=32,
             // No request content.
-            Self::MetaDataV2 | Self::MetaDataV3 => 0..=0,
+            Self::MetaDataV2
+            | Self::MetaDataV3
+            | Self::LightClientFinalityUpdateV1
+            | Self::LightClientOptimisticUpdateV1 => 0..=0,
         }
     }
 
@@ -202,11 +261,15 @@ impl Protocol {
             // start_slot, then count.
             Self::BeaconBlocksByRangeV2
             | Self::BlobSidecarsByRangeV1
-            | Self::DataColumnSidecarsByRangeV1 => read_u64(8),
+            | Self::DataColumnSidecarsByRangeV1
+            | Self::LightClientUpdatesByRangeV1
+            | Self::ExecutionPayloadEnvelopesByRangeV1 => read_u64(8),
             // beacon_root, then count.
             Self::BeaconBlocksByHeadV1 => read_u64(32),
             // Lists of 32-byte roots or 40-byte identifiers.
-            Self::BeaconBlocksByRootV2 => payload.len() as u64 / 32,
+            Self::BeaconBlocksByRootV2 | Self::ExecutionPayloadEnvelopesByRootV1 => {
+                payload.len() as u64 / 32
+            }
             Self::BlobSidecarsByRootV1 => payload.len() as u64 / 40,
             _ => 1,
         };
@@ -224,17 +287,25 @@ impl Protocol {
             Self::MetaDataV2 => (17, 17),
             // MetaDataV2 + custody_group_count 8.
             Self::MetaDataV3 => (25, 25),
-            // A signed block: message offset 4 + signature 96, then the block.
+            // A signed block or envelope: message offset 4 + signature 96, then the message.
             Self::BeaconBlocksByRangeV2
             | Self::BeaconBlocksByRootV2
-            | Self::BeaconBlocksByHeadV1 => (100, u64::MAX),
+            | Self::BeaconBlocksByHeadV1
+            | Self::ExecutionPayloadEnvelopesByRangeV1
+            | Self::ExecutionPayloadEnvelopesByRootV1 => (100, u64::MAX),
             // A blob sidecar: 131072 blob + 8 + 48 + 48 + 208 header + depth * 32 proof.
             //
             //     minimal, depth 10: 131704
             //     mainnet, depth 17: 131928
             Self::BlobSidecarsByRangeV1 | Self::BlobSidecarsByRootV1 => (131_704, 131_928),
-            // A data column sidecar: index 8 + three offsets 12 + header 208 + proof 4 * 32.
-            Self::DataColumnSidecarsByRangeV1 | Self::DataColumnSidecarsByRootV1 => (356, u64::MAX),
+            // The smaller of the two column formats, the Gloas one.
+            // It holds an index 8, two offsets 8, a slot 8, and a root 32.
+            Self::DataColumnSidecarsByRangeV1 | Self::DataColumnSidecarsByRootV1 => (56, u64::MAX),
+            // Every light client message starts with a 112-byte beacon block header.
+            Self::LightClientBootstrapV1
+            | Self::LightClientUpdatesByRangeV1
+            | Self::LightClientFinalityUpdateV1
+            | Self::LightClientOptimisticUpdateV1 => (112, u64::MAX),
         };
         min.min(max_payload_size)..=max.min(max_payload_size)
     }

@@ -9,6 +9,7 @@ use axiom_types::{
         Attestation, AttesterSlashing, BeaconBlock, BeaconState, SignedAggregateAndProof,
         SignedBeaconBlock,
     },
+    combined,
 };
 
 use super::{
@@ -25,6 +26,10 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 
     const VOTE_WINDOW: VoteWindow = VoteWindow::SlotRange;
     const VOTE_INDEX: VoteIndex = VoteIndex::Committee;
+
+    fn into_any_block(signed: SignedBeaconBlock<P>) -> combined::SignedBeaconBlock<P> {
+        combined::SignedBeaconBlock::Capella(signed)
+    }
 
     fn split_block(signed: &SignedBeaconBlock<P>) -> (&BeaconBlock<P>, &BlsSignature) {
         (&signed.message, &signed.signature)

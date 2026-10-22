@@ -88,7 +88,10 @@ impl NodeRoutes {
         let attnets = metadata.attnets.load(Ordering::Relaxed);
         let data = Json::from([
             ("peer_id", Reply::text(&identity.peer_id)),
-            ("enr", identity.enr.clone().into()),
+            (
+                "enr",
+                identity.enr.as_ref().map(|enr| enr.borrow().clone()).into(),
+            ),
             (
                 "p2p_addresses",
                 Json::from(vec![Reply::text(&identity.p2p_address)]),

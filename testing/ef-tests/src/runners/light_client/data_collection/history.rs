@@ -54,17 +54,6 @@ pub(super) struct BlockRecord<P: Preset> {
 impl<P: Preset> BlockRecord<P> {
     /// The record of a block.
     pub(super) fn of(block: &SignedBeaconBlock<P>) -> Self {
-        let sync_aggregate = match block {
-            SignedBeaconBlock::Phase0(_) => None,
-            SignedBeaconBlock::Altair(signed) => Some(&signed.message.body.sync_aggregate),
-            SignedBeaconBlock::Bellatrix(signed) => Some(&signed.message.body.sync_aggregate),
-            SignedBeaconBlock::Capella(signed) => Some(&signed.message.body.sync_aggregate),
-            SignedBeaconBlock::Deneb(signed) => Some(&signed.message.body.sync_aggregate),
-            SignedBeaconBlock::Electra(signed) | SignedBeaconBlock::Fulu(signed) => {
-                Some(&signed.message.body.sync_aggregate)
-            }
-            SignedBeaconBlock::Gloas(signed) => Some(&signed.message.body.sync_aggregate),
-        };
         let header = LightClientHeader::of_block(block);
         Self {
             id: BlockId {
@@ -74,7 +63,7 @@ impl<P: Preset> BlockRecord<P> {
             parent_root: block.parent_root(),
             state_root: Header::<P>::beacon(&header).state_root,
             header,
-            sync_aggregate: sync_aggregate.cloned(),
+            sync_aggregate: block.sync_aggregate().cloned(),
         }
     }
 

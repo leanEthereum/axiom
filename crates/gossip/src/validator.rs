@@ -6,12 +6,13 @@ use axiom_kzg::Kzg;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
-    BlsPubkey, BlsSignature, ChainConfig, ColumnIndex, Domain, Epoch, Gwei, Preset, Root, Slot,
-    SubnetId, ValidatorIndex,
+    BlsPubkey, BlsSignature, ChainConfig, ColumnIndex, Domain, DomainType, Epoch, Gwei, Preset,
+    Root, Slot, SubnetId, ValidatorIndex,
     accessors::{CoreState, ForkState},
-    altair::{SignedContributionAndProof, SyncCommitteeContribution, SyncCommitteeMessage},
-    capella::SignedBlsToExecutionChange,
-    combined::BeaconState,
+    altair::{self, SignedContributionAndProof, SyncCommitteeContribution, SyncCommitteeMessage},
+    bellatrix,
+    capella::{self, SignedBlsToExecutionChange},
+    combined::{self, BeaconState},
     constants::{
         BLS_WITHDRAWAL_PREFIX, BUILDER_INDEX_SELF_BUILD, DOMAIN_BEACON_BUILDER,
         DOMAIN_BEACON_PROPOSER, DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_PROPOSER_PREFERENCES,
@@ -19,9 +20,10 @@ use axiom_types::{
         SYNC_COMMITTEE_SUBNET_COUNT, TARGET_AGGREGATORS_PER_COMMITTEE,
         TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE,
     },
-    deneb::BlobSidecar,
+    deneb::{self, BlobSidecar},
+    electra,
     fulu::{
-        DataColumnSidecar, PartialDataColumnGroupId, PartialDataColumnHeader,
+        self, DataColumnSidecar, PartialDataColumnGroupId, PartialDataColumnHeader,
         PartialDataColumnSidecar,
     },
     gloas::{
@@ -29,14 +31,13 @@ use axiom_types::{
         SignedExecutionPayloadEnvelope, SignedProposerPreferences,
     },
     phase0::{
-        AttestationData, BeaconBlockHeader, ProposerSlashing, SignedVoluntaryExit, Validator,
+        self, AttestationData, BeaconBlockHeader, ProposerSlashing, SignedVoluntaryExit, Validator,
     },
 };
 
 use crate::{
-    BlobSubnets, ChainView, Detail, GossipError, GossipFork, Seen, SeenPartialHeader, VoteIndex,
-    VoteWindow,
-    blob_sidecar::CheckedBlob,
+    BlobSubnets, ChainView, CheckedBlob, Detail, GossipError, GossipFork, Seen, SeenPartialHeader,
+    VoteIndex, VoteWindow,
     fork::{Bounded, BuilderFunds, ExecutionRequestLimits, GasTarget, Ptc, Verdict},
     partial_column::{PartialCells, PartialHeader},
     signers::Signers,
@@ -111,7 +112,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let beacon = state.beacon();
         let proposer =
             Self::registered(beacon, header.proposer_index, "proposer index out of range")?;
-        let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
+        let domain = self.domain(beacon, DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
         if !SigningClaim::new(&header, domain, signature).is_signed_by(&proposer.pubkey) {
             return Err(GossipError::reject("invalid proposer signature").with(proposer_detail));
         }
@@ -149,6 +150,46 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
 
         self.seen.proposer_slots.insert(key);
         Ok(())
+    }
+
+    /// Validates a block of whichever fork it belongs to.
+    ///
+    /// This is the entry point for a block decoded before its topic was known.
+    ///
+    /// # Errors
+    ///
+    /// Ignores or rejects as the spec's rules say.
+    pub fn any_beacon_block(
+        &mut self,
+        signed: &combined::SignedBeaconBlock<P>,
+        now_ms: u64,
+    ) -> Verdict {
+        match signed {
+            combined::SignedBeaconBlock::Phase0(block) => {
+                self.beacon_block::<phase0::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Altair(block) => {
+                self.beacon_block::<altair::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Bellatrix(block) => {
+                self.beacon_block::<bellatrix::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Capella(block) => {
+                self.beacon_block::<capella::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Deneb(block) => {
+                self.beacon_block::<deneb::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Electra(block) => {
+                self.beacon_block::<electra::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Fulu(block) => {
+                self.beacon_block::<fulu::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Gloas(block) => {
+                self.beacon_block::<gloas::BeaconState<P>>(block, now_ms)
+            }
+        }
     }
 
     /// Validates an aggregate of a fork, and its aggregator's proof of selection.
@@ -247,8 +288,12 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     .with(aggregator_detail),
             );
         }
-        Signers::of(state.beacon()).verify_aggregator(signed)?;
-        if !Signers::of(state.beacon()).attested(attesters, data, aggregate.signature()) {
+        Signers::of(state.beacon(), self.view.config()).verify_aggregator(signed)?;
+        if !Signers::of(state.beacon(), self.view.config()).attested(
+            attesters,
+            data,
+            aggregate.signature(),
+        ) {
             return Err(GossipError::reject("invalid aggregate signature"));
         }
         self.vote_is_on_chain(data)?;
@@ -329,7 +374,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             )
             .with(attester_detail));
         }
-        let signers = Signers::of(state.beacon());
+        let signers = Signers::of(state.beacon(), self.view.config());
         if !signers.attested(vec![attester_index], data, attestation.signature()) {
             return Err(GossipError::reject("invalid attestation signature").with(attester_detail));
         }
@@ -465,7 +510,11 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             return Err(GossipError::reject("proposer is not slashable").with(proposer_detail));
         }
         for signed in [&slashing.signed_header_1, &slashing.signed_header_2] {
-            let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, signed.message.slot.epoch::<P>());
+            let domain = self.domain(
+                beacon,
+                DOMAIN_BEACON_PROPOSER,
+                signed.message.slot.epoch::<P>(),
+            );
             if !SigningClaim::new(&signed.message, domain, &signed.signature)
                 .is_signed_by(&proposer.pubkey)
             {
@@ -519,7 +568,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     bound: count,
                 }));
             }
-            if !Signers::of(state.beacon()).is_valid_indexed_attestation(vote) {
+            if !Signers::of(state.beacon(), self.view.config()).is_valid_indexed_attestation(vote) {
                 return Err(GossipError::reject(invalid));
             }
         }
@@ -601,15 +650,16 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             message.aggregator_index,
             "aggregator index out of range",
         )?;
-        let subcommittee =
-            Signers::of(state.beacon()).sync_subcommittee(contribution.subcommittee_index);
+        let subcommittee = Signers::of(state.beacon(), self.view.config())
+            .sync_subcommittee(contribution.subcommittee_index);
         if !subcommittee.contains(&aggregator.pubkey) {
             return Err(
                 GossipError::reject("aggregator is not a member of the committee")
                     .with(aggregator_detail),
             );
         }
-        Signers::of(state.beacon()).verify_contributor(&aggregator.pubkey, signed)?;
+        Signers::of(state.beacon(), self.view.config())
+            .verify_contributor(&aggregator.pubkey, signed)?;
         let epoch = contribution.slot.epoch::<P>();
         let participants: Vec<BlsPubkey> = subcommittee
             .iter()
@@ -617,7 +667,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .filter(|(_, bit)| **bit)
             .map(|(pubkey, _)| *pubkey)
             .collect();
-        let sync_domain = beacon.domain(DOMAIN_SYNC_COMMITTEE, epoch);
+        let sync_domain = self.domain(beacon, DOMAIN_SYNC_COMMITTEE, epoch);
         if !SigningClaim::new(
             &contribution.beacon_block_root,
             sync_domain,
@@ -676,7 +726,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         )?;
         // The subnet holds the subcommittees the validator sits in, by position in the committee.
         let size = (P::SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT) as usize;
-        let in_subnet = Signers::of(state.beacon())
+        let in_subnet = Signers::of(state.beacon(), self.view.config())
             .sync_committee_for_next_slot()
             .iter()
             .enumerate()
@@ -689,7 +739,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     .with(validator_detail),
             );
         }
-        let domain = beacon.domain(DOMAIN_SYNC_COMMITTEE, message.slot.epoch::<P>());
+        let domain = self.domain(beacon, DOMAIN_SYNC_COMMITTEE, message.slot.epoch::<P>());
         if !SigningClaim::new(&message.beacon_block_root, domain, &message.signature)
             .is_signed_by(&validator.pubkey)
         {
@@ -831,7 +881,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let beacon = state.beacon();
         let proposer =
             Self::registered(beacon, header.proposer_index, "proposer index out of range")?;
-        let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
+        let domain = self.domain(beacon, DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
         if !SigningClaim::new(header, domain, &sidecar.signed_block_header.signature)
             .is_signed_by(&proposer.pubkey)
         {
@@ -1129,7 +1179,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let beacon = state.beacon();
         let proposer =
             Self::registered(beacon, header.proposer_index, "proposer index out of range")?;
-        let domain = beacon.domain(DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
+        let domain = self.domain(beacon, DOMAIN_BEACON_PROPOSER, header.slot.epoch::<P>());
         if !SigningClaim::new(header, domain, signature).is_signed_by(&proposer.pubkey) {
             return Err(GossipError::reject(reason).with(Detail::Validator(header.proposer_index)));
         }
@@ -2083,6 +2133,16 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             );
         }
         Ok(())
+    }
+
+    /// Signature domain of a message type at an epoch, under the fork schedule.
+    ///
+    /// The head state may not have crossed the fork the message's epoch is in.
+    /// Its own fork record would then give the previous version and reject an honest message.
+    fn domain(&self, state: &BeaconState<P>, domain_type: DomainType, epoch: Epoch) -> Domain {
+        self.view
+            .config()
+            .domain(domain_type, epoch, state.genesis_validators_root())
     }
 
     /// The head's post-state, which most rules read.

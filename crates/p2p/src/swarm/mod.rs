@@ -96,6 +96,8 @@ pub struct NetworkConfig {
     pub max_payload_size: u64,
     /// The agent string announced through identify.
     pub agent_version: String,
+    /// Req/resp methods this node serves; peers proposing others are refused.
+    pub protocols: Vec<Protocol>,
     /// Inbound request quotas, or nothing to serve every request.
     pub rate_limiter: Option<RateLimiter>,
     /// Time an outbound request may take before it fails.
@@ -133,6 +135,7 @@ impl NetworkConfig {
             yamux: yamux::Config::default(),
             max_payload_size: MAX_PAYLOAD_SIZE,
             agent_version: concat!("axiom/", env!("CARGO_PKG_VERSION")).to_owned(),
+            protocols: Protocol::ALL.to_vec(),
             rate_limiter: None,
             // RESP_TIMEOUT of the phase0 p2p-interface configuration: 10 seconds.
             request_timeout: Duration::from_secs(10),

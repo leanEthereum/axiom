@@ -199,6 +199,18 @@ pub enum ForkChoiceError {
     /// A merge block's payload builds on a block that is not the terminal proof-of-work block.
     #[error("proof-of-work block {0} is not the terminal block")]
     NotTerminalPowBlock(Hash32),
+    /// A merge block with an unvalidated payload is too recent to import optimistically.
+    #[error(
+        "unvalidated merge block of slot {slot} is under {safe_slots} slots old at slot {current_slot}"
+    )]
+    OptimisticMergeTooRecent {
+        /// The merge block's slot.
+        slot: Slot,
+        /// The store's current slot.
+        current_slot: Slot,
+        /// Slots the block must age first.
+        safe_slots: u64,
+    },
     /// A state invariant broke.
     #[error("state invariant broke: {0}")]
     State(#[from] StateError),

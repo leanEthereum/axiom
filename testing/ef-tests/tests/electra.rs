@@ -5,8 +5,8 @@
 //! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
-    SszStatic, StoreReplay, Suite, Transition,
+    Blocks, ChainReplay, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations,
+    Rewards, SszStatic, StoreReplay, Suite, Transition,
     forks::{Deneb, Electra},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -68,6 +68,25 @@ const CONTAINERS: [&str; 55] = [
     "VoluntaryExit",
     "Withdrawal",
     "WithdrawalRequest",
+];
+
+/// Fork choice cases per handler, replayed by the store and by the node's chain.
+const FORK_CHOICE_MINIMAL: &[(&str, usize)] = &[
+    ("deposit_with_reorg", 1),
+    ("ex_ante", 3),
+    ("get_head", 11),
+    ("get_proposer_head", 3),
+    ("on_block", 28),
+    ("reorg", 8),
+    ("withholding", 2),
+];
+
+/// Fork choice cases per handler on the mainnet preset.
+const FORK_CHOICE_MAINNET: &[(&str, usize)] = &[
+    ("ex_ante", 5),
+    ("get_head", 7),
+    ("get_proposer_head", 3),
+    ("on_block", 11),
 ];
 
 #[test]
@@ -335,28 +354,25 @@ fn merkle_proof_mainnet() {
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Electra>::fork_choice();
-    let expected = [
-        ("deposit_with_reorg", 1),
-        ("ex_ante", 3),
-        ("get_head", 11),
-        ("get_proposer_head", 3),
-        ("on_block", 28),
-        ("reorg", 8),
-        ("withholding", 2),
-    ];
-    Suite::check(&runner, "minimal", "electra", &expected);
+    Suite::check(&runner, "minimal", "electra", FORK_CHOICE_MINIMAL);
+}
+
+#[test]
+fn chain_replay_minimal() {
+    let runner = ChainReplay::<Minimal, Electra>::new();
+    Suite::check(&runner, "minimal", "electra", FORK_CHOICE_MINIMAL);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Electra>::fork_choice();
-    let expected = [
-        ("ex_ante", 5),
-        ("get_head", 7),
-        ("get_proposer_head", 3),
-        ("on_block", 11),
-    ];
-    Suite::check(&runner, "mainnet", "electra", &expected);
+    Suite::check(&runner, "mainnet", "electra", FORK_CHOICE_MAINNET);
+}
+
+#[test]
+fn chain_replay_mainnet() {
+    let runner = ChainReplay::<Mainnet, Electra>::new();
+    Suite::check(&runner, "mainnet", "electra", FORK_CHOICE_MAINNET);
 }
 
 #[test]

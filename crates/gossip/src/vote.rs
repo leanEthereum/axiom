@@ -7,9 +7,13 @@
 //! Each trait here names those fields, and each fork's container implements it.
 
 use axiom_ssz::Ssz;
-use axiom_types::{BlsSignature, CommitteeIndex, ValidatorIndex, phase0::AttestationData};
+use axiom_types::{
+    BlsSignature, CommitteeIndex, ValidatorIndex,
+    phase0::AttestationData,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
-use crate::GossipError;
+use crate::{Detail, GossipError};
 
 /// An aggregate of votes from one committee, as the aggregate topic carries it.
 pub trait Aggregate {
@@ -28,6 +32,9 @@ pub trait Aggregate {
     ///
     /// Rejects an aggregate that names no committee or several.
     fn committee(&self) -> Result<CommitteeIndex, GossipError>;
+
+    /// The aggregate as the fork choice counts it.
+    fn committee_vote(&self) -> CommitteeVote;
 }
 
 /// An aggregate with its aggregator's selection proof and signature.
@@ -73,6 +80,50 @@ pub trait SubnetVote {
     fn attester(&self, committee: &[ValidatorIndex]) -> Result<ValidatorIndex, GossipError>;
 }
 
+impl SubnetVote for CommitteeVote {
+    fn data(&self) -> &AttestationData {
+        &self.data
+    }
+
+    fn signature(&self) -> &BlsSignature {
+        &self.signature
+    }
+
+    fn committee_index(&self) -> CommitteeIndex {
+        // A vote with one signer names one committee; an empty list names none, read as zero.
+        self.committees.first().copied().unwrap_or_default()
+    }
+
+    fn attester(&self, committee: &[ValidatorIndex]) -> Result<ValidatorIndex, GossipError> {
+        let signers: Vec<usize> = self
+            .bits
+            .iter()
+            .enumerate()
+            .filter(|(_, bit)| **bit)
+            .map(|(position, _)| position)
+            .collect();
+        if self.committees.len() != 1 || signers.len() != 1 {
+            return Err(GossipError::reject("vote is not from one validator").with(
+                Detail::Mismatch {
+                    actual: signers.len() as u64,
+                    expected: 1,
+                },
+            ));
+        }
+        if self.bits.len() != committee.len() {
+            return Err(GossipError::reject(
+                "aggregation bits length does not match committee size",
+            )
+            .with(Detail::Mismatch {
+                actual: self.bits.len() as u64,
+                expected: committee.len() as u64,
+            }));
+        }
+        // Invariant: one signer, at a position the committee's length bounds.
+        Ok(committee[signers[0]])
+    }
+}
+
 /// A vote with its signers listed by validator index.
 #[derive(Clone, Copy, Debug)]
 pub struct IndexedVote<'a> {
@@ -88,6 +139,9 @@ pub struct IndexedVote<'a> {
 pub trait SlashingEvidence {
     /// The two votes, in the order the evidence lists them.
     fn votes(&self) -> [IndexedVote<'_>; 2];
+
+    /// The two votes as the fork choice reads them.
+    fn conflicting_votes(&self) -> ConflictingVotes;
 
     /// Validators that signed both votes, in increasing order.
     fn common_signers(&self) -> Vec<ValidatorIndex> {
@@ -106,9 +160,37 @@ pub trait SlashingEvidence {
 
 #[cfg(test)]
 mod tests {
-    use axiom_types::{Minimal, phase0::AttesterSlashing};
+    use axiom_types::{Minimal, phase0::AttesterSlashing, vote::PayloadClaim};
 
     use super::*;
+
+    #[test]
+    fn a_fork_agnostic_vote_with_one_signer_names_its_attester() {
+        // Fixture state: committee [v9, v4, v7], and bits 010 in committee 2.
+        let committee = [ValidatorIndex(9), ValidatorIndex(4), ValidatorIndex(7)];
+        let mut vote = CommitteeVote {
+            data: AttestationData::default(),
+            signature: BlsSignature::default(),
+            committees: vec![CommitteeIndex(2)],
+            bits: vec![false, true, false],
+            payload: PayloadClaim::Silent,
+        };
+
+        assert_eq!(SubnetVote::committee_index(&vote), CommitteeIndex(2));
+        assert_eq!(vote.attester(&committee), Ok(ValidatorIndex(4)));
+
+        // Mutation: a second signer makes it an aggregate, no longer a subnet vote.
+        vote.bits[2] = true;
+        assert_eq!(
+            vote.attester(&committee),
+            Err(
+                GossipError::reject("vote is not from one validator").with(Detail::Mismatch {
+                    actual: 2,
+                    expected: 1
+                })
+            )
+        );
+    }
 
     #[test]
     fn the_common_signers_are_the_sorted_intersection() {

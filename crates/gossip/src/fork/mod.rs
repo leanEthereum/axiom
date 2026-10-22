@@ -21,8 +21,8 @@ mod phase0;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{Fork, SignedBlock, State};
 use axiom_types::{
-    BlsSignature, ChainConfig, Domain, Epoch, Hash32, accessors::CoreState, combined,
-    constants::DOMAIN_VOLUNTARY_EXIT, gloas::ExecutionPayloadBid,
+    BlsSignature, ChainConfig, CommitteeIndex, Domain, Epoch, Hash32, accessors::CoreState,
+    combined, constants::DOMAIN_VOLUNTARY_EXIT, gloas::ExecutionPayloadBid, vote::PayloadClaim,
 };
 
 pub(crate) use self::gloas::{Bounded, BuilderFunds, ExecutionRequestLimits, GasTarget, Ptc};
@@ -63,6 +63,15 @@ pub enum VoteIndex {
 }
 
 impl VoteIndex {
+    /// What a vote with this data index says about its head's payload.
+    #[must_use]
+    pub const fn payload_claim(self, index: CommitteeIndex) -> PayloadClaim {
+        match self {
+            Self::PayloadPresence => PayloadClaim::of_index(index),
+            Self::Committee | Self::Zero => PayloadClaim::Silent,
+        }
+    }
+
     /// The violated rule, when an aggregate's data index breaks this meaning.
     #[must_use]
     pub const fn aggregate_violation(self, index: u64) -> Option<&'static str> {
@@ -111,6 +120,10 @@ pub trait GossipFork: Fork {
 
     /// What a vote's data index means.
     const VOTE_INDEX: VoteIndex;
+
+    /// The signed block as a block of any fork.
+    fn into_any_block(signed: Self::SignedBeaconBlock)
+    -> combined::SignedBeaconBlock<Self::Preset>;
 
     /// The unsigned block and the proposer's signature.
     fn split_block(signed: &Self::SignedBeaconBlock) -> (&Self::Block, &BlsSignature);

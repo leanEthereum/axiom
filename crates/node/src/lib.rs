@@ -31,5 +31,5 @@ pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use network::{DiscoverySettings, NodeKey};
-pub use publish::{PublishError, Published, Publisher};
+pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

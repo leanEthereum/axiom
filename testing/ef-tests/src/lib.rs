@@ -9,6 +9,7 @@
 //! Each handler of this crate knows how to run one kind of case.
 
 mod case;
+pub mod chain_builder;
 mod fields;
 pub mod forks;
 mod runners;
@@ -18,7 +19,7 @@ pub use case::{Case, Failure, Meta};
 pub use fields::FieldNames;
 pub use runners::{
     Applied, Blocks, ChainReplay, EpochProcessing, Fork, Genesis, GossipMessage, LightClient,
-    MerkleProofs, Networking, NodeFork, OperationInput, Operations, PendingAttestationRewards,
-    Rejection, Rewards, Shuffling, SszGeneric, SszStatic, StoreReplay, Transition, Verdict,
+    MerkleProofs, Networking, OperationInput, Operations, PendingAttestationRewards, Rejection,
+    Rewards, Shuffling, SszGeneric, SszStatic, StoreReplay, Transition, Verdict,
 };
 pub use suite::{Report, Runner, Suite, Vectors};
