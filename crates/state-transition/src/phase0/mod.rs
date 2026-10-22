@@ -6,23 +6,28 @@
 pub mod block;
 pub mod epoch;
 mod exits;
+mod genesis;
 mod slashing;
 mod slot;
 
 use axiom_types::{
     Preset, ValidatorIndex,
-    accessors::ForkState,
     phase0::{BeaconBlock, BeaconBlockHeader, BeaconState},
 };
 pub use exits::ExitQueue;
+pub use genesis::Genesis;
 pub use slashing::Slashing;
 pub use slot::SlotRoots;
 
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
     StateError,
-    phase0::epoch::{
-        CorrelationPenalty, HistoricalRootsUpdate, Hysteresis, RegistryUpdates, Rollover,
+    phase0::{
+        block::{AttestationRecord, DepositQuota, RandaoReveal},
+        epoch::{
+            CorrelationPenalty, HistoricalRootsUpdate, Hysteresis, Justification,
+            PendingParticipation, RegistryUpdates, RewardsAndPenalties, Rollover,
+        },
     },
     sampling::WeightedSampler,
 };
@@ -78,20 +83,55 @@ impl<P: Preset> Fork for BeaconState<P> {
         processor: &mut EpochProcessor<'_, Self>,
         step: EpochStep,
     ) -> Result<(), StateError> {
-        Phase0Epoch::run(processor, step)
+        let total = processor.total_active_balance;
+        match step {
+            EpochStep::JustificationAndFinalization => {
+                if !Justification::applies_at(processor.current_epoch) {
+                    return Ok(());
+                }
+                let participation = PendingParticipation::new(&mut processor.state, total)?;
+                participation
+                    .justification()
+                    .weigh(&mut *processor.state.beacon)
+            }
+            EpochStep::RewardsAndPenalties => {
+                RewardsAndPenalties::new(processor.current_epoch, total).apply(&mut processor.state)
+            }
+            EpochStep::ParticipationRecordUpdates => {
+                Rollover::new(processor.current_epoch)
+                    .rotate_pending_attestations(&mut *processor.state.beacon);
+                Ok(())
+            }
+            _ => Phase0Epoch::run(processor, step),
+        }
     }
 
+    /// Runs phase0's block processing.
+    ///
+    /// 1. The header, the RANDAO reveal, and the eth1 vote.
+    /// 2. Every outstanding deposit must be included, up to the block's limit.
+    /// 3. The operations, in the order the spec lists them.
+    ///
+    /// See `process_block` and `process_operations` in the phase0 beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
         _engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        processor.apply(header)?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&AttestationRecord(attestation))?;
         }
-        .into())
+        processor.apply_all(&body.deposits)?;
+        processor.apply_all(&body.voluntary_exits)
     }
 }
 

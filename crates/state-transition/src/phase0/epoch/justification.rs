@@ -24,6 +24,15 @@ pub struct Justification {
 }
 
 impl Justification {
+    /// Whether the finality update runs at the end of an epoch.
+    ///
+    /// The first two epochs keep their genesis checkpoints, whose roots are stubs.
+    /// The votes are not even read then, as the spec reads them only past that point.
+    #[must_use]
+    pub const fn applies_at(current_epoch: Epoch) -> bool {
+        current_epoch.0 > Epoch::GENESIS.0 + 1
+    }
+
     /// Justifies epochs with two thirds of target votes, and finalizes along justified chains.
     ///
     /// # Algorithm
@@ -48,8 +57,7 @@ impl Justification {
     ///
     /// Fails when a justified epoch's block root is no longer in the state.
     pub fn weigh<S: CoreState + ?Sized>(self, state: &mut S) -> Result<(), StateError> {
-        // The first two epochs keep their genesis checkpoints, whose roots are stubs.
-        if self.current_epoch.0 <= Epoch::GENESIS.0 + 1 {
+        if !Self::applies_at(self.current_epoch) {
             return Ok(());
         }
         let total = self.total;
@@ -96,5 +104,18 @@ impl Justification {
             *finalized = old_current_justified;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finality_updates_start_at_the_end_of_epoch_two() {
+        // Epochs 0 and 1 keep the genesis checkpoints.
+        assert!(!Justification::applies_at(Epoch(0)));
+        assert!(!Justification::applies_at(Epoch(1)));
+        assert!(Justification::applies_at(Epoch(2)));
     }
 }

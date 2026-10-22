@@ -116,7 +116,6 @@ fn fork_mainnet() {
 }
 
 #[test]
-#[ignore = "pre-fork blocks and epochs need phase0 block and epoch processing, written in parallel"]
 fn transition_minimal() {
     Suite::run(
         &Transition::<Minimal, Phase0, Altair>::default(),
@@ -126,7 +125,6 @@ fn transition_minimal() {
 }
 
 #[test]
-#[ignore = "pre-fork blocks and epochs need phase0 block and epoch processing, written in parallel"]
 fn transition_mainnet() {
     Suite::run(
         &Transition::<Mainnet, Phase0, Altair>::default(),

@@ -238,8 +238,8 @@ impl<S: Fork> BlockProcessor<'_, S> {
     /// # Errors
     ///
     /// Fails when the epoch has no active validator.
-    pub fn proposer(&self) -> Result<ValidatorIndex, StateError> {
-        S::beacon_proposer_index(self.state.beacon())
+    pub fn proposer(&mut self) -> Result<ValidatorIndex, StateError> {
+        self.state.proposer()
     }
 
     /// The state's registry, under the block's total active balance.

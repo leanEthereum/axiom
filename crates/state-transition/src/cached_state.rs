@@ -7,7 +7,7 @@ use axiom_types::{
     BlsPubkey, CommitteeIndex, Epoch, Gwei, Slot, ValidatorIndex, accessors::CoreState,
 };
 
-use crate::{BlockError, Caches, EpochCommittees, StateError, Verification};
+use crate::{BlockError, Caches, EpochCommittees, Fork, StateError, Verification};
 
 /// A state of a known type, borrowed with the caches derived from it.
 ///
@@ -51,8 +51,8 @@ impl<'a, S: CoreState + ?Sized> CachedState<'a, S> {
     /// Edits that reorder or replace validators invalidate the caches.
     /// Only spec tests need this, to set up a case.
     pub fn beacon_mut(&mut self) -> &mut S {
-        // Direct edits may change active sets, so committees are recomputed on demand.
-        self.caches.committees.clear();
+        // Direct edits may change active sets, so committees and proposers are recomputed on demand.
+        self.caches.invalidate();
         self.beacon
     }
 
@@ -190,5 +190,63 @@ impl<'a, S: CoreState + ?Sized> CachedState<'a, S> {
                 index,
                 registry_size,
             })
+    }
+}
+
+impl<S: Fork> CachedState<'_, S> {
+    /// Proposer of the state's slot, by the rules of the state's fork, drawn once per slot.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slot's epoch has no active validator.
+    pub fn proposer(&mut self) -> Result<ValidatorIndex, StateError> {
+        let slot = self.beacon.slot();
+        if let Some((fork, cached_slot, proposer)) = self.caches.proposer
+            && fork == S::FORK
+            && cached_slot == slot
+        {
+            return Ok(proposer);
+        }
+        let proposer = S::beacon_proposer_index(self.beacon)?;
+        self.caches.proposer = Some((S::FORK, slot, proposer));
+        Ok(proposer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_types::{ForkName, Minimal, Slot, phase0};
+
+    use super::*;
+
+    #[test]
+    fn the_proposer_is_drawn_once_per_slot_and_fork() {
+        // Fixture state: an empty phase0 state at slot 5, whose draw would fail for lack of validators.
+        let mut state = phase0::BeaconState::<Minimal> {
+            slot: Slot(5),
+            ..Default::default()
+        };
+        // A cached draw for slot 5 under phase0 is reused, so nothing is drawn.
+        let mut caches = Caches {
+            proposer: Some((ForkName::Phase0, Slot(5), ValidatorIndex(3))),
+            ..Caches::default()
+        };
+        let mut cached = CachedState::new(&mut state, &mut caches);
+        assert_eq!(cached.proposer(), Ok(ValidatorIndex(3)));
+
+        // A direct edit drops the cached draw, so the empty registry now fails to draw.
+        cached.beacon_mut();
+        assert_eq!(
+            cached.proposer(),
+            Err(StateError::NoActiveValidators(Epoch(0)))
+        );
+
+        // A draw cached for another fork at the same slot is not reused either.
+        caches.proposer = Some((ForkName::Altair, Slot(5), ValidatorIndex(3)));
+        let mut cached = CachedState::new(&mut state, &mut caches);
+        assert_eq!(
+            cached.proposer(),
+            Err(StateError::NoActiveValidators(Epoch(0)))
+        );
     }
 }

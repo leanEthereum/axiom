@@ -93,8 +93,8 @@ impl<P: Preset> State<P> {
     /// Edits that reorder or replace validators invalidate the caches.
     /// Only spec tests and fork upgrades need this.
     pub fn beacon_mut(&mut self) -> &mut combined::BeaconState<P> {
-        // Direct edits may change active sets, so committees are recomputed on demand.
-        self.caches.committees.clear();
+        // Direct edits may change active sets, so committees and proposers are recomputed on demand.
+        self.caches.invalidate();
         &mut self.beacon
     }
 

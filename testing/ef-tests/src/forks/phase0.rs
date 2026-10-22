@@ -1,9 +1,10 @@
 //! The vectors of phase0, the launch of the beacon chain.
 
+use axiom_state_transition::phase0::block::AttestationRecord;
 use axiom_types::{ForkName, Preset, phase0};
 
 use super::SpecFork;
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, OperationInput};
 
 /// The phase0 fork.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +40,27 @@ impl SpecFork for Phase0 {
     type State<P: Preset> = phase0::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = phase0::SignedBeaconBlock<P>;
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, phase0::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input
+                .apply_with::<phase0::Attestation<P>>("attestation", |attestation, processor| {
+                    processor.apply(&AttestationRecord(attestation))
+                }),
+            "attester_slashing" => input.apply::<phase0::AttesterSlashing<P>>("attester_slashing"),
+            "proposer_slashing" => input.apply::<phase0::ProposerSlashing>("proposer_slashing"),
+            "deposit" => input.apply::<phase0::Deposit>("deposit"),
+            "voluntary_exit" => input.apply::<phase0::SignedVoluntaryExit>("voluntary_exit"),
+            "block_header" => input
+                .apply_with::<phase0::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            other => Err(Failure(format!("unsupported operation {other} in phase0"))),
+        }
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

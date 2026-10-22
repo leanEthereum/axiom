@@ -1,7 +1,9 @@
 //! End-of-epoch resets of the ring buffers and per-period fields phase0 defined.
 
+use std::mem;
+
 use axiom_ssz::List;
-use axiom_types::{Epoch, Gwei, Preset, accessors::CoreState};
+use axiom_types::{Epoch, Gwei, Preset, accessors::CoreState, phase0::BeaconState};
 
 /// The passage from the ending epoch to the next one.
 ///
@@ -53,5 +55,12 @@ impl Rollover {
         let next = self.next % S::Preset::EPOCHS_PER_HISTORICAL_VECTOR;
         let mix = state.randao_mix(self.current);
         state.randao_mixes_mut()[next as usize] = mix;
+    }
+
+    /// Moves the current epoch's pending attestations to the previous epoch's list.
+    ///
+    /// See `process_participation_record_updates` in the phase0 beacon chain spec.
+    pub fn rotate_pending_attestations<P: Preset>(self, state: &mut BeaconState<P>) {
+        state.previous_epoch_attestations = mem::take(&mut state.current_epoch_attestations);
     }
 }

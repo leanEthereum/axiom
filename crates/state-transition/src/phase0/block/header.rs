@@ -22,11 +22,11 @@ impl<S: Fork> Operation<S> for BeaconBlockHeader {
                 state: state_slot,
             });
         }
-        let latest = state.latest_block_header();
-        if self.slot <= latest.slot {
+        let latest_slot = state.latest_block_header().slot;
+        if self.slot <= latest_slot {
             return Err(BlockError::NotNewerThanParent {
                 block: self.slot,
-                latest: latest.slot,
+                latest: latest_slot,
             });
         }
         let expected = processor.proposer()?;
@@ -36,7 +36,11 @@ impl<S: Fork> Operation<S> for BeaconBlockHeader {
                 expected,
             });
         }
-        let parent = latest.hash_tree_root();
+        let parent = processor
+            .state
+            .beacon()
+            .latest_block_header()
+            .hash_tree_root();
         if self.parent_root != parent {
             return Err(BlockError::ParentMismatch {
                 claimed: self.parent_root,
