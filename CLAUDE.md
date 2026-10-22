@@ -73,10 +73,34 @@ Async services reach it through a queue of closures, so no lock guards consensus
 - Imports sit at the top of the file or of `mod tests`. Never inline-qualify a path.
 - One concern per file. Every `impl` block sits right after its type, in the type's module.
 - A module that grows unrelated types becomes a folder of focused files.
-- Prefer methods on well-named types to free functions.
+- Prefer methods on well-named types to free functions. See "Abstractions" below.
 - A trait exists only for real variation. A closed set of alternatives is an enum.
 - No `macro_rules!`, and no proc macros besides the `thiserror` derive. Write the expansion by hand.
 - Standard derives only: `Clone`, `Copy`, `Debug`, `Default`, `PartialEq`, `Eq`, `Hash`, `PartialOrd`, `Ord`, plus `thiserror::Error` on error types.
+
+## Abstractions
+
+Behaviour lives on the type it belongs to, the way `std` puts it there.
+
+A module-level function is allowed only when it has no natural receiver:
+
+- A crate's single, obvious entry point over plain inputs, such as hashing a byte slice.
+- A stateless transform whose inputs are all primitives or foreign types, with no family of siblings.
+- A `const fn` that builds a compile-time table.
+
+Everything else is a method. These signals mean a type is missing:
+
+- Several functions pass the same bundle of arguments to each other: that bundle is a struct.
+- A position or offset threads through calls and comes back in a tuple: that is a cursor or reader.
+- A function returns an `Option` meaning "need more input": that is an incremental decoder with state.
+- A function allocates a scratch buffer on every call: that is an encoder that owns and reuses it.
+- A helper reads or writes one type's fields: it is a method of that type.
+
+Design the API before the body:
+
+- Name types after what they are: `FrameDecoder`, `Cursor`, `Encoder`, `Field`, not `Helper` or `Utils`.
+- Keep the public surface minimal; private steps are private methods.
+- A refactor never changes behaviour: vectors and tests pin it, and hot paths are benchmarked before and after.
 
 ## Documentation
 
