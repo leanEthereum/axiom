@@ -1,8 +1,7 @@
 //! The command line: flags parsed by hand into a typed configuration.
 
 use std::{
-    error::Error,
-    fmt, fs, io,
+    fs, io,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     str::FromStr,
@@ -14,6 +13,7 @@ use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
 use axiom_yaml::Yaml;
+use thiserror::Error;
 
 use crate::run::{PresetName, Run};
 
@@ -68,13 +68,16 @@ pub(crate) enum Command {
 }
 
 /// Why the command line cannot be used.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum CliError {
     /// A flag this client does not know.
+    #[error("unknown flag {0}")]
     UnknownFlag(String),
     /// A flag that needs a value came last.
+    #[error("{0} needs a value")]
     MissingValue(&'static str),
     /// A flag's value does not parse.
+    #[error("invalid value for {flag}: {value}")]
     InvalidValue {
         /// The flag.
         flag: &'static str,
@@ -82,37 +85,21 @@ pub(crate) enum CliError {
         value: String,
     },
     /// Only one of the engine endpoint and its secret was given.
+    #[error("--execution-endpoint and --jwt-secret go together")]
     IncompleteEngine,
     /// Genesis and checkpoint files were mixed, or a checkpoint file is missing.
+    #[error("give either --genesis-state, or both --checkpoint-state and --checkpoint-block")]
     ConflictingAnchors,
     /// The config file cannot be read.
+    #[error("cannot read the config file: {0}")]
     ConfigFile(io::Error),
     /// The config file is not valid YAML.
+    #[error("config file is not YAML: {0}")]
     ConfigYaml(String),
     /// The config file has a bad value.
+    #[error("config file: {0}")]
     Config(ConfigError),
 }
-
-impl fmt::Display for CliError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownFlag(flag) => write!(f, "unknown flag {flag}"),
-            Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
-            Self::InvalidValue { flag, value } => write!(f, "invalid value for {flag}: {value}"),
-            Self::IncompleteEngine => {
-                f.write_str("--execution-endpoint and --jwt-secret go together")
-            }
-            Self::ConflictingAnchors => f.write_str(
-                "give either --genesis-state, or both --checkpoint-state and --checkpoint-block",
-            ),
-            Self::ConfigFile(error) => write!(f, "cannot read the config file: {error}"),
-            Self::ConfigYaml(error) => write!(f, "config file is not YAML: {error}"),
-            Self::Config(error) => write!(f, "config file: {error}"),
-        }
-    }
-}
-
-impl Error for CliError {}
 
 /// The flags as given, before they are resolved into a configuration.
 #[derive(Debug, Default)]

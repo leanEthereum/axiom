@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 axiom-ssz.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

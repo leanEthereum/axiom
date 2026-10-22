@@ -1,20 +1,21 @@
 //! One test case directory, and typed access to its files.
 
 use std::{
-    error::Error,
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
 use axiom_snappy::raw;
 use axiom_ssz::{Container, Ssz};
 use axiom_yaml::Yaml;
+use thiserror::Error;
 
 /// Largest decompressed fixture accepted, well above any mainnet state in the vectors.
 const MAX_FIXTURE_BYTES: usize = 1 << 30;
 
 /// Why a case failed, with enough context to find the bug.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("{0}")]
 pub struct Failure(pub String);
 
 impl Failure {
@@ -23,14 +24,6 @@ impl Failure {
         Self(message.into())
     }
 }
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl Error for Failure {}
 
 /// The metadata file of a case.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

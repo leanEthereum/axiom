@@ -29,6 +29,7 @@ axiom-state-transition.workspace = true
 axiom-store.workspace = true
 axiom-telemetry.workspace = true
 axiom-types.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

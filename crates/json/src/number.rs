@@ -1,6 +1,8 @@
 //! JSON numbers, kept as the text they were written with.
 
-use std::{error::Error, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
+
+use thiserror::Error;
 
 /// A JSON number, stored as its validated text.
 ///
@@ -162,7 +164,8 @@ impl fmt::Display for Number {
 }
 
 /// A text that is not exactly one JSON number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("malformed number at byte {offset}")]
 pub struct NumberError {
     /// Byte offset of the first byte that breaks the grammar.
     offset: usize,
@@ -175,14 +178,6 @@ impl NumberError {
         self.offset
     }
 }
-
-impl fmt::Display for NumberError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "malformed number at byte {}", self.offset)
-    }
-}
-
-impl Error for NumberError {}
 
 #[cfg(test)]
 mod tests {

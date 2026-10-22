@@ -1,6 +1,6 @@
 //! Hex digits and the errors of the Ethereum hex encodings.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// Lowercase digits, the form every execution client emits.
 pub(crate) const DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -29,31 +29,38 @@ pub(crate) fn strip_prefix(text: &str) -> Result<&[u8], HexError> {
 /// A string that is not a valid QUANTITY or DATA.
 ///
 /// Offsets count bytes from the start of the string, prefix included.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum HexError {
     /// The string does not start with 0x.
+    #[error("hex string lacks the 0x prefix")]
     MissingPrefix,
 
     /// A QUANTITY has no digits after the prefix.
+    #[error("quantity has no digits")]
     Empty,
 
     /// A QUANTITY has a zero before its first significant digit.
+    #[error("quantity has a leading zero")]
     LeadingZero,
 
     /// A DATA has an odd number of digits, so its last byte is half missing.
+    #[error("data has an odd number of hex digits")]
     OddLength,
 
     /// A byte that is not a hex digit.
+    #[error("invalid hex digit at byte {offset}")]
     InvalidDigit {
         /// Byte offset of the offending character.
         offset: usize,
     },
 
     /// A QUANTITY exceeds the width of its integer type.
+    #[error("quantity overflows its integer type")]
     Overflow,
 
     /// A DATA decodes to a different number of bytes than its type holds.
+    #[error("data holds {actual} bytes, expected {expected}")]
     WrongLength {
         /// Bytes the type holds.
         expected: usize,
@@ -61,21 +68,3 @@ pub enum HexError {
         actual: usize,
     },
 }
-
-impl fmt::Display for HexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingPrefix => f.write_str("hex string lacks the 0x prefix"),
-            Self::Empty => f.write_str("quantity has no digits"),
-            Self::LeadingZero => f.write_str("quantity has a leading zero"),
-            Self::OddLength => f.write_str("data has an odd number of hex digits"),
-            Self::InvalidDigit { offset } => write!(f, "invalid hex digit at byte {offset}"),
-            Self::Overflow => f.write_str("quantity overflows its integer type"),
-            Self::WrongLength { expected, actual } => {
-                write!(f, "data holds {actual} bytes, expected {expected}")
-            }
-        }
-    }
-}
-
-impl Error for HexError {}
