@@ -6,7 +6,6 @@ mod upgrade;
 
 use axiom_types::{
     Preset, ValidatorIndex,
-    accessors::ForkState,
     capella::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
@@ -14,9 +13,18 @@ use axiom_types::{
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
     StateError,
-    altair::AltairEpoch,
-    capella::epoch::HistoricalSummaryUpdate,
-    phase0::{ExitQueue, Slashing, SlotRoots},
+    altair::{
+        AltairEpoch,
+        block::{FlaggedAttestation, ParticipantDeposit},
+    },
+    capella::{
+        block::{PayloadExecution, PayloadWithdrawals},
+        epoch::HistoricalSummaryUpdate,
+    },
+    phase0::{
+        ExitQueue, Slashing, SlotRoots,
+        block::{DepositQuota, RandaoReveal},
+    },
     sampling::WeightedSampler,
 };
 
@@ -82,16 +90,42 @@ impl<P: Preset> Fork for BeaconState<P> {
         }
     }
 
+    /// Runs Capella's block processing.
+    ///
+    /// 1. The header.
+    /// 2. The withdrawals and the execution payload, by Capella's rules.
+    /// 3. The RANDAO reveal and the eth1 vote, by phase0's rules.
+    /// 4. The operations, with attestations and deposits by Altair's rules.
+    /// 5. The sync aggregate, by Altair's rule.
+    ///
+    /// Capella runs the payload steps unconditionally, since every chain had merged.
+    /// See `process_block` and `process_operations` in the Capella beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
-        _engine: &E,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
+        engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        let payload = &body.execution_payload;
+        processor.apply(header)?;
+        processor.apply(&PayloadWithdrawals(&payload.withdrawals))?;
+        processor.apply(&PayloadExecution::new(payload, engine))?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&FlaggedAttestation(attestation))?;
         }
-        .into())
+        for deposit in &body.deposits {
+            processor.apply(&ParticipantDeposit(deposit))?;
+        }
+        processor.apply_all(&body.voluntary_exits)?;
+        processor.apply_all(&body.bls_to_execution_changes)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }

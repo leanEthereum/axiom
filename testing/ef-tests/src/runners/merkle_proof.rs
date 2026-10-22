@@ -3,32 +3,29 @@
 use std::marker::PhantomData;
 
 use axiom_ssz::{GeneralizedIndex, Root, Ssz};
-use axiom_types::{
-    Preset,
-    fulu::{BeaconBlockBody, BeaconState},
-};
+use axiom_types::Preset;
 use axiom_yaml::Yaml;
 
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Runner, forks::SpecFork};
 
 /// Builds the proof the vector names, and checks the leaf, the branch, and the root.
 ///
 /// The merkle_proof runner and the light client runner's single_merkle_proof handler share it.
 #[derive(Debug)]
-pub struct MerkleProofs<P> {
+pub struct MerkleProofs<P, F> {
     /// The runner directory these vectors live under.
     runner: &'static str,
-    /// The preset.
-    preset: PhantomData<P>,
+    /// The preset and the fork.
+    fork: PhantomData<(P, F)>,
 }
 
-impl<P: Preset> MerkleProofs<P> {
+impl<P: Preset, F: SpecFork> MerkleProofs<P, F> {
     /// The merkle_proof runner.
     #[must_use]
     pub const fn merkle_proof() -> Self {
         Self {
             runner: "merkle_proof",
-            preset: PhantomData,
+            fork: PhantomData,
         }
     }
 
@@ -37,7 +34,7 @@ impl<P: Preset> MerkleProofs<P> {
     pub const fn light_client() -> Self {
         Self {
             runner: "light_client",
-            preset: PhantomData,
+            fork: PhantomData,
         }
     }
 
@@ -83,7 +80,7 @@ impl<P: Preset> MerkleProofs<P> {
     }
 }
 
-impl<P: Preset> Runner for MerkleProofs<P> {
+impl<P: Preset, F: SpecFork> Runner for MerkleProofs<P, F> {
     fn name(&self) -> &'static str {
         self.runner
     }
@@ -100,8 +97,8 @@ impl<P: Preset> Runner for MerkleProofs<P> {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         match object_type.as_str() {
-            "BeaconBlockBody" => Self::check::<BeaconBlockBody<P>>(case),
-            "BeaconState" => Self::check::<BeaconState<P>>(case),
+            "BeaconBlockBody" => Self::check::<F::BeaconBlockBody<P>>(case),
+            "BeaconState" => Self::check::<F::State<P>>(case),
             other => Err(Failure(format!("unsupported object type {other}"))),
         }
     }

@@ -1,9 +1,17 @@
 //! The vectors of Deneb, which adds blobs.
 
+use axiom_gossip::{BlobSubnets, GossipValidator};
+use axiom_kzg::Kzg;
+use axiom_state_transition::{
+    KnownVerdict,
+    altair::block::ParticipantDeposit,
+    capella::block::PayloadWithdrawals,
+    deneb::block::{Exit, PayloadExecution, UnboundedAttestation},
+};
 use axiom_types::{ForkName, Preset, deneb};
 
 use super::{Capella, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Deneb fork.
 ///
@@ -49,6 +57,28 @@ impl SpecFork for Deneb {
 
     type SignedBeaconBlock<P: Preset> = deneb::SignedBeaconBlock<P>;
 
+    type BeaconBlockBody<P: Preset> = deneb::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        match topic {
+            "blob_sidecar" => {
+                let limits = BlobSubnets::deneb(validator.config());
+                Ok(validator.blob_sidecar(
+                    &message.decode::<deneb::BlobSidecar<P>>()?,
+                    message.now_ms(),
+                    message.subnet(),
+                    limits,
+                    Kzg::mainnet(),
+                ))
+            }
+            _ => Capella::gossip(topic, message, validator),
+        }
+    }
+
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {
             "BeaconBlock" => case.round_trip::<deneb::BeaconBlock<P>>(),
@@ -68,6 +98,46 @@ impl SpecFork for Deneb {
             "NewPayloadRequest" => case.round_trip::<deneb::NewPayloadRequest<P>>(),
             "SignedBeaconBlock" => case.round_trip::<deneb::SignedBeaconBlock<P>>(),
             _ => Capella::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, deneb::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input
+                .apply_with::<deneb::Attestation<P>>("attestation", |attestation, processor| {
+                    processor.apply(&UnboundedAttestation(attestation))
+                }),
+            "attester_slashing" => input.apply::<deneb::AttesterSlashing<P>>("attester_slashing"),
+            "proposer_slashing" => input.apply::<deneb::ProposerSlashing>("proposer_slashing"),
+            "deposit" => input.apply_with::<deneb::Deposit>("deposit", |deposit, processor| {
+                processor.apply(&ParticipantDeposit(deposit))
+            }),
+            "voluntary_exit" => input
+                .apply_with::<deneb::SignedVoluntaryExit>("voluntary_exit", |exit, processor| {
+                    processor.apply(&Exit(exit))
+                }),
+            "bls_to_execution_change" => {
+                input.apply::<deneb::SignedBlsToExecutionChange>("address_change")
+            }
+            "block_header" => input
+                .apply_with::<deneb::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "sync_aggregate" => input.apply::<deneb::SyncAggregate<P>>("sync_aggregate"),
+            "withdrawals" => input.apply_with::<deneb::ExecutionPayload<P>>(
+                "execution_payload",
+                |payload, processor| processor.apply(&PayloadWithdrawals(&payload.withdrawals)),
+            ),
+            "execution_payload" => {
+                let engine = KnownVerdict(input.execution_verdict()?);
+                input.apply_with::<deneb::BeaconBlockBody<P>>("body", |body, processor| {
+                    processor.apply(&PayloadExecution::new(body, &engine))
+                })
+            }
+            other => Err(Failure(format!("unsupported operation {other} in deneb"))),
         }
     }
 }

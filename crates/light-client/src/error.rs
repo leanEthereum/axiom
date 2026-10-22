@@ -1,12 +1,12 @@
 //! Reasons a light client refuses a bootstrap or an update.
 
 use axiom_bls::BlsError;
-use axiom_ssz::Root;
-use axiom_types::Slot;
+use axiom_ssz::{DecodeError, Root};
+use axiom_types::{ForkName, Slot};
 use thiserror::Error;
 
 /// A bootstrap or update the light client cannot accept.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum LightClientError {
     /// A header's execution payload is not proven against its body.
@@ -80,6 +80,42 @@ pub enum LightClientError {
         /// Why the bytes are not a key.
         #[source]
         source: BlsError,
+    },
+    /// A branch holds more nodes than its fork's branch type.
+    #[error("branch of {length} nodes exceeds the {capacity} its type holds")]
+    BranchTooLong {
+        /// Nodes in the branch.
+        length: usize,
+        /// Nodes the branch type holds.
+        capacity: usize,
+    },
+    /// Light client data comes from a later fork than the store.
+    #[error("{data} light client data cannot enter a {store} store before the store upgrades")]
+    LaterData {
+        /// Fork whose format the data has.
+        data: ForkName,
+        /// Fork whose format the store has.
+        store: ForkName,
+    },
+    /// Bytes do not decode as light client data of a fork.
+    #[error("bytes are not {fork} light client data: {source}")]
+    Decode {
+        /// The fork whose format the bytes claim.
+        fork: ForkName,
+        /// Why decoding failed.
+        #[source]
+        source: DecodeError,
+    },
+    /// A fork defines no light client data.
+    #[error("{0} defines no light client data")]
+    NoLightClientData(ForkName),
+    /// Two headers that must share a format do not.
+    #[error("attested header has the {attested} format, finalized header the {finalized} format")]
+    MixedHeaders {
+        /// Format of the attested header.
+        attested: ForkName,
+        /// Format of the finalized header.
+        finalized: ForkName,
     },
     /// The sync committee signature does not decompress.
     #[error("sync committee signature does not decompress: {0}")]

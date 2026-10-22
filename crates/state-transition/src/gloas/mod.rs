@@ -2,25 +2,36 @@
 //!
 //! A block carries a builder's bid, and the payload follows in its own envelope.
 
+pub mod block;
 pub mod builders;
+mod envelope;
+pub mod epoch;
 pub mod ptc;
 mod upgrade;
 
 use axiom_types::{
     ChainConfig, Gwei, Preset, ValidatorIndex,
-    accessors::{BuilderState, ForkState, LookaheadState},
+    accessors::{BuilderState, CoreState, LookaheadState},
     gloas::{BeaconBlock, BeaconState, BuilderPendingPayment},
     phase0::BeaconBlockHeader,
 };
+pub use envelope::{EnvelopeError, PayloadEnvelope};
 
 use crate::{
     ActiveBalance, BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine,
     Registry, StateError,
     electra::{
         ElectraEpoch,
+        block::Exit,
         churn::{BalanceChurn, ChurnLimits},
     },
-    phase0::{Slashing, SlotRoots},
+    fulu::epoch::DepositQueue,
+    gloas::{
+        block::{BodyLimits, CommittedWithdrawals, IncludedAttestation, ParentPayload},
+        epoch::{BuilderPayments, ProposerLookahead},
+        ptc::PtcWindow,
+    },
+    phase0::{Slashing, SlotRoots, block::RandaoReveal},
 };
 
 impl<P: Preset> Fork for BeaconState<P> {
@@ -101,26 +112,71 @@ impl<P: Preset> Fork for BeaconState<P> {
         step: EpochStep,
     ) -> Result<(), StateError> {
         match step {
-            // Gloas rewrote these steps, or introduced them.
-            EpochStep::PendingDeposits
-            | EpochStep::BuilderPendingPayments
-            | EpochStep::ProposerLookahead
-            | EpochStep::PtcWindow => Err(EpochProcessor::<Self>::unsupported(step)),
+            // Gloas only changed the churn that sizes the deposit pass, through its churn table.
+            EpochStep::PendingDeposits => {
+                let mut registry = processor.registry();
+                DepositQueue::new(&registry).apply(&mut registry)
+            }
+            EpochStep::BuilderPendingPayments => {
+                BuilderPayments::new::<P>(processor.total_active_balance)?
+                    .apply(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::ProposerLookahead => {
+                ProposerLookahead::new(processor.current_epoch).shift(&mut *processor.state.beacon)
+            }
+            EpochStep::PtcWindow => PtcWindow::shift(&mut processor.state),
             _ => ElectraEpoch::run(processor, step),
         }
     }
 
+    /// Runs Gloas's block processing.
+    ///
+    /// 1. The parent's payload, which the block reports as arrived or missing.
+    /// 2. The header.
+    /// 3. The withdrawals, fixed by the state alone and paid at once.
+    /// 4. The bid, which commits to this slot's payload in place of the payload itself.
+    /// 5. The RANDAO reveal and the eth1 vote, by phase0's rules.
+    /// 6. The operations, within their limits, with attestations judged at the parent's slot.
+    /// 7. The payload attestations on the parent's payload.
+    /// 8. The sync aggregate, by Altair's rule.
+    ///
+    /// The payload arrives later in its own envelope, so the engine has nothing to judge here.
+    /// See `process_block` and `process_operations` in the Gloas beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
         _engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        // The parent's slot, read before the header replaces the latest block header.
+        let parent_slot = processor.state.beacon().latest_block_header().slot;
+        processor.apply(&ParentPayload::of(body))?;
+        processor.apply(header)?;
+        processor.apply(&CommittedWithdrawals)?;
+        processor.apply(&body.signed_execution_payload_bid)?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        // Deposits from the deposit contract stay retired, as in Fulu.
+        if !body.deposits.is_empty() {
+            return Err(BlockError::DepositsNotAllowed(body.deposits.len()));
         }
-        .into())
+        BodyLimits(body).check()?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&IncludedAttestation::new(attestation, parent_slot))?;
+        }
+        for exit in &body.voluntary_exits {
+            processor.apply(&Exit(exit))?;
+        }
+        processor.apply_all(&body.bls_to_execution_changes)?;
+        // Execution requests left the block: the next block reports them with this payload.
+        processor.apply_all(&body.payload_attestations)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }
 

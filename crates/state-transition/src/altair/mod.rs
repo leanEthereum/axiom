@@ -9,7 +9,7 @@ mod upgrade;
 
 use axiom_types::{
     Preset, ValidatorIndex,
-    accessors::{ForkState, ParticipationState, SyncCommitteeState},
+    accessors::{ParticipationState, SyncCommitteeState},
     altair::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
@@ -17,10 +17,17 @@ use axiom_types::{
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
     StateError,
-    altair::epoch::{
-        FlagRotation, InactivityUpdates, Participation, RewardsAndPenalties, SyncCommitteeRotation,
+    altair::{
+        block::{FlaggedAttestation, ParticipantDeposit},
+        epoch::{
+            FlagRotation, InactivityUpdates, Participation, RewardsAndPenalties,
+            SyncCommitteeRotation,
+        },
     },
-    phase0::{ExitQueue, Slashing, SlotRoots, epoch::Rollover},
+    phase0::{
+        ExitQueue, Phase0Epoch, Slashing, SlotRoots,
+        block::{DepositQuota, RandaoReveal},
+    },
     sampling::WeightedSampler,
 };
 
@@ -80,17 +87,39 @@ impl<P: Preset> Fork for BeaconState<P> {
         AltairEpoch::run(processor, step)
     }
 
+    /// Runs Altair's block processing.
+    ///
+    /// 1. The header, the RANDAO reveal, and the eth1 vote, by phase0's rules.
+    /// 2. The slashings, by phase0's rules under Altair's penalty constants.
+    /// 3. The attestations, credited in participation flags.
+    /// 4. The deposits, registering validators with participation flags.
+    /// 5. The voluntary exits, by phase0's rule.
+    /// 6. The sync aggregate.
+    ///
+    /// See `process_block` and `process_operations` in the Altair beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
         _engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        processor.apply(header)?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&FlaggedAttestation(attestation))?;
         }
-        .into())
+        for deposit in &body.deposits {
+            processor.apply(&ParticipantDeposit(deposit))?;
+        }
+        processor.apply_all(&body.voluntary_exits)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }
 
@@ -131,18 +160,6 @@ impl AltairEpoch {
                 processor.config,
             )
             .apply(&mut processor.state),
-            EpochStep::Eth1DataReset => {
-                Rollover::new(current).reset_eth1_data(&mut *processor.state.beacon);
-                Ok(())
-            }
-            EpochStep::SlashingsReset => {
-                Rollover::new(current).reset_slashings(&mut *processor.state.beacon);
-                Ok(())
-            }
-            EpochStep::RandaoMixesReset => {
-                Rollover::new(current).reset_randao_mix(&mut *processor.state.beacon);
-                Ok(())
-            }
             EpochStep::ParticipationFlagUpdates => {
                 FlagRotation.apply(&mut *processor.state.beacon);
                 Ok(())
@@ -150,7 +167,7 @@ impl AltairEpoch {
             EpochStep::SyncCommitteeUpdates => {
                 SyncCommitteeRotation::new(current).apply(&mut processor.state)
             }
-            _ => Err(EpochProcessor::<S>::unsupported(step)),
+            _ => Phase0Epoch::run(processor, step),
         }
     }
 }

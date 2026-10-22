@@ -1,6 +1,8 @@
 //! Attester slashings: punishing validators that cast slashable votes.
 
-use axiom_types::{BlsSignature, ValidatorIndex, electra, gloas, phase0, phase0::AttestationData};
+use axiom_types::{
+    BlsSignature, Preset, ValidatorIndex, electra, gloas, phase0, phase0::AttestationData,
+};
 
 use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
 
@@ -107,7 +109,18 @@ impl<S: Fork> Operation<S> for electra::AttesterSlashing<S::Preset> {
 }
 
 impl<S: Fork> Operation<S> for gloas::AttesterSlashing {
+    /// Gloas lists are progressive, so each vote's signers are bounded here instead, see EIP-7688.
+    ///
+    /// Threshold: the committee size limit times the committees in a slot.
+    /// See `is_valid_indexed_attestation` in the Gloas beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
+        let limit = S::Preset::MAX_VALIDATORS_PER_COMMITTEE * S::Preset::MAX_COMMITTEES_PER_SLOT;
+        for vote in [&self.attestation_1, &self.attestation_2] {
+            let count = vote.attesting_indices.len();
+            if count as u64 > limit {
+                return Err(BlockError::TooManyAttestingIndices { count, limit });
+            }
+        }
         ConflictingVotes {
             first: Vote {
                 indices: &self.attestation_1.attesting_indices,

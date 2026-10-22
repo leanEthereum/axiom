@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axiom_types::{Epoch, accessors::CoreState};
+use axiom_types::{Epoch, ForkName, Slot, ValidatorIndex, accessors::CoreState};
 
 use crate::{EpochCommittees, PubkeyCache, StateError, Verification};
 
@@ -20,6 +20,11 @@ pub struct Caches {
     pub(crate) committees: Vec<Arc<EpochCommittees>>,
     /// Whether signatures are checked, including deposit proofs of possession.
     pub(crate) verification: Verification,
+    /// Proposer of the last slot asked for, under the fork whose rules drew it.
+    ///
+    /// Within a slot the proposer is fixed: blocks change neither the active set nor effective balances.
+    /// Before Fulu each draw walks a shuffle, so a block's several lookups share one.
+    pub(crate) proposer: Option<(ForkName, Slot, ValidatorIndex)>,
 }
 
 impl Caches {
@@ -31,7 +36,14 @@ impl Caches {
             pubkeys,
             committees: Vec::new(),
             verification: Verification::Verify,
+            proposer: None,
         }
+    }
+
+    /// Drops every value derived from the registry, after a direct edit of the state.
+    pub(crate) fn invalidate(&mut self) {
+        self.committees.clear();
+        self.proposer = None;
     }
 
     /// Whether transitions check signatures.

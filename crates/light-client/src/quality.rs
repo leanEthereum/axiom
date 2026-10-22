@@ -2,7 +2,9 @@
 
 use std::cmp::Reverse;
 
-use axiom_types::{Preset, Slot, fulu::LightClientUpdate};
+use axiom_types::{Preset, Slot};
+
+use crate::{Header, UpdateData};
 
 /// How good an update is, as a key whose natural order is the spec's preference.
 ///
@@ -42,12 +44,12 @@ pub struct UpdateQuality {
 impl UpdateQuality {
     /// The quality of an update.
     #[must_use]
-    pub fn of<P: Preset>(update: &LightClientUpdate<P>) -> Self {
+    pub fn of<P: Preset, H: Header<P>>(update: &UpdateData<H, P>) -> Self {
         let bits = &update.sync_aggregate.sync_committee_bits;
         let participants = bits.count_ones();
         // Threshold: participants * 3 >= committee * 2.
         let supermajority = participants * 3 >= bits.len() * 2;
-        let attested_slot = update.attested_header.beacon.slot;
+        let attested_slot = update.attested_header.beacon().slot;
         let finality = update.is_finality_update();
 
         Self {
@@ -60,7 +62,7 @@ impl UpdateQuality {
             sync_committee_finality: finality
                 && update
                     .finalized_header
-                    .beacon
+                    .beacon()
                     .slot
                     .sync_committee_period::<P>()
                     == attested_slot.sync_committee_period::<P>(),

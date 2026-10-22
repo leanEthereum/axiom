@@ -18,6 +18,7 @@ mod phase0;
 use std::fmt::Debug;
 
 pub use altair::Altair;
+use axiom_gossip::{GossipFork, GossipValidator};
 use axiom_ssz::{Container, Ssz};
 use axiom_state_transition::{Fork, SignedBlock};
 use axiom_types::{ForkName, Preset};
@@ -29,7 +30,7 @@ pub use fulu::Fulu;
 pub use gloas::Gloas;
 pub use phase0::Phase0;
 
-use crate::{Applied, Case, Failure, FieldNames, OperationInput};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// One fork's view of the spec vectors.
 ///
@@ -43,10 +44,13 @@ pub trait SpecFork: Copy + Debug + Default + Send + Sync + 'static {
     const STATE_FIELDS: FieldNames;
 
     /// The fork's beacon state.
-    type State<P: Preset>: Fork<Preset = P> + Container + PartialEq;
+    type State<P: Preset>: Fork<Preset = P> + GossipFork + Container + PartialEq;
 
     /// The signed block the fork's state applies.
     type SignedBeaconBlock<P: Preset>: SignedBlock<P> + Ssz;
+
+    /// The body of the fork's block, for merkle proofs into it.
+    type BeaconBlockBody<P: Preset>: Ssz;
 
     /// Applies one operations vector, choosing the operation type and rule by handler.
     ///
@@ -61,6 +65,25 @@ pub trait SpecFork: Copy + Debug + Default + Send + Sync + 'static {
     ) -> Applied {
         Err(Failure(format!(
             "unsupported operation {handler} in {}",
+            Self::FORK
+        )))
+    }
+
+    /// Validates a message on a gossip topic that not every fork has.
+    ///
+    /// The topics every fork shares run in the gossip runner, on the fork's gossip types.
+    /// A fork without topics of its own keeps this default.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork has no such topic, or the message's files are broken.
+    fn gossip<P: Preset>(
+        topic: &str,
+        _message: &GossipMessage<'_>,
+        _validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        Err(Failure(format!(
+            "unsupported gossip topic {topic} in {}",
             Self::FORK
         )))
     }

@@ -7,7 +7,7 @@ use std::{
 
 use axiom_snappy::raw;
 use axiom_ssz::{Root, Ssz};
-use axiom_types::{ChainConfig, ForkName, Preset};
+use axiom_types::{ChainConfig, ForkName, Preset, Slot};
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
@@ -33,6 +33,8 @@ pub struct Meta {
     pub bls_setting: u64,
     /// Number of blocks in a sanity or finality case.
     pub blocks_count: usize,
+    /// Slot of the including block's parent, which Gloas attestation cases name.
+    pub parent_slot: Option<Slot>,
 }
 
 impl Meta {
@@ -183,6 +185,7 @@ impl Case {
         Ok(Meta {
             bls_setting: field("bls_setting"),
             blocks_count: field("blocks_count") as usize,
+            parent_slot: yaml.get("parent_slot").and_then(Yaml::as_u64).map(Slot),
         })
     }
 }

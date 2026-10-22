@@ -1,13 +1,13 @@
 //! Payload timeliness committees, which vote on whether a slot's payload arrived.
 
 use axiom_types::{
-    Bytes32, CommitteeIndex, Preset, Root, Slot, ValidatorIndex,
+    Bytes32, CommitteeIndex, Epoch, Preset, Root, Slot, ValidatorIndex,
     accessors::{BuilderState, CoreState},
     constants::DOMAIN_PTC_ATTESTER,
     gloas::{BeaconState, PayloadTimelinessCommittee},
 };
 
-use crate::{CachedState, StateError, sampling::WeightedSampler};
+use crate::{BlockError, CachedState, StateError, sampling::WeightedSampler};
 
 /// The window of payload timeliness committees: the previous, current, and next epochs.
 ///
@@ -50,6 +50,65 @@ impl PtcWindow {
         Ok(())
     }
 
+    /// Drops the previous epoch's committees, and draws those of the epoch after the next.
+    ///
+    /// The window then covers the new previous, current, and next epochs.
+    /// See `process_ptc_window` in the Gloas beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the new epoch has no active validator.
+    pub fn shift<P: Preset>(state: &mut CachedState<'_, BeaconState<P>>) -> Result<(), StateError> {
+        let epoch = state.beacon().current_epoch() + P::MIN_SEED_LOOKAHEAD + 1;
+        let start = epoch.start_slot::<P>();
+        let mut committees = Vec::with_capacity(P::SLOTS_PER_EPOCH as usize);
+        for index in 0..P::SLOTS_PER_EPOCH {
+            committees.push(Self::committee(state, Slot(start.0 + index))?);
+        }
+        let window = state.beacon.ptc_window_mut();
+        let slots = P::SLOTS_PER_EPOCH as usize;
+        window.rotate_left(slots);
+        let tail = window.len() - slots;
+        for (entry, committee) in window[tail..].iter_mut().zip(committees) {
+            *entry = committee;
+        }
+        Ok(())
+    }
+
+    /// The payload timeliness committee of a slot in the previous, current, or next epochs.
+    ///
+    /// ```text
+    /// position = (epoch - current + 1) * SLOTS_PER_EPOCH + slot % SLOTS_PER_EPOCH
+    /// ```
+    ///
+    /// See `get_ptc` in the Gloas beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slot is before the Gloas fork or outside the window.
+    pub fn of_slot<S: BuilderState>(
+        state: &S,
+        slot: Slot,
+        fork_epoch: Epoch,
+    ) -> Result<&PayloadTimelinessCommittee<S::Preset>, BlockError> {
+        let epoch = slot.epoch::<S::Preset>();
+        let current = state.current_epoch();
+        let out_of_window = BlockError::PtcOutOfWindow { slot, current };
+        // The window holds the epoch before the current one, and MIN_SEED_LOOKAHEAD after it.
+        if epoch < fork_epoch
+            || epoch + 1 < current
+            || epoch > current + S::Preset::MIN_SEED_LOOKAHEAD
+        {
+            return Err(out_of_window);
+        }
+        let offset = (epoch + 1 - current) * S::Preset::SLOTS_PER_EPOCH;
+        let position = offset + slot.index_in_epoch::<S::Preset>();
+        state
+            .ptc_window()
+            .get(position as usize)
+            .ok_or(out_of_window)
+    }
+
     /// The payload timeliness committee of a slot, possibly repeating a validator.
     ///
     /// # Algorithm
@@ -63,13 +122,14 @@ impl PtcWindow {
     ///
     /// # Errors
     ///
-    /// Fails when the slot's epoch is outside the cached window or has no validator.
+    /// Fails when the slot's epoch has no active validator.
     pub fn committee<P: Preset>(
         state: &mut CachedState<'_, BeaconState<P>>,
         slot: Slot,
     ) -> Result<PayloadTimelinessCommittee<P>, StateError> {
         let epoch = slot.epoch::<P>();
-        let committees = state.committees(epoch)?;
+        // The epoch after the next lies outside the committee cache, so it is computed afresh.
+        let committees = state.compute_committees(epoch);
         let candidates: Vec<ValidatorIndex> = (0..committees.committees_per_slot())
             .filter_map(|index| committees.committee(slot, CommitteeIndex(index)))
             .flatten()

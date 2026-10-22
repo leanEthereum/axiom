@@ -1,7 +1,7 @@
 //! Builders and the split of block and payload, from Gloas on.
 
 use crate::{
-    BuilderIndex, Hash32,
+    BuilderIndex, Gwei, Hash32,
     accessors::CoreState,
     gloas::{
         BuilderPendingPayments, BuilderPendingWithdrawals, Builders, ExecutionPayloadAvailability,
@@ -68,4 +68,21 @@ pub trait BuilderState: CoreState {
 
     /// Payload timeliness committees, for the epoch shift.
     fn ptc_window_mut(&mut self) -> &mut PayloadTimelinessCommitteeWindow<Self::Preset>;
+
+    /// Balance a builder already owes: queued withdrawals and pending bid payments.
+    ///
+    /// See `get_pending_balance_to_withdraw_for_builder` in the Gloas beacon chain spec.
+    fn pending_balance_to_withdraw_for_builder(&self, index: BuilderIndex) -> Gwei {
+        let queued = self
+            .builder_pending_withdrawals()
+            .iter()
+            .filter(|withdrawal| withdrawal.builder_index == index)
+            .map(|withdrawal| withdrawal.amount);
+        let pending = self
+            .builder_pending_payments()
+            .iter()
+            .filter(|payment| payment.withdrawal.builder_index == index)
+            .map(|payment| payment.withdrawal.amount);
+        queued.chain(pending).sum()
+    }
 }

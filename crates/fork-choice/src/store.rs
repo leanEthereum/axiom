@@ -8,7 +8,8 @@ use axiom_types::{
     ChainConfig, Epoch, Hash32, Preset, Root, Slot, SlotClock,
     accessors::CoreState,
     fulu::{
-        Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, SignedBeaconBlock,
+        Attestation, AttesterSlashing, BeaconBlock, BeaconBlockHeader, BeaconState, Checkpoint,
+        SignedBeaconBlock,
     },
 };
 
@@ -77,24 +78,54 @@ impl<P: Preset> Store<P> {
         anchor_state: BeaconState<P>,
         anchor_block: &BeaconBlock<P>,
     ) -> Result<Self, ForkChoiceError> {
-        let computed = anchor_state.hash_tree_root();
-        if anchor_block.state_root != computed {
+        let header = BeaconBlockHeader {
+            slot: anchor_block.slot,
+            proposer_index: anchor_block.proposer_index,
+            parent_root: anchor_block.parent_root,
+            state_root: anchor_block.state_root,
+            body_root: anchor_block.body.hash_tree_root(),
+        };
+        Self::anchored(
+            config,
+            State::new(anchor_state),
+            &header,
+            anchor_block.body.execution_payload.block_hash,
+        )
+    }
+
+    /// A store anchored at a trusted state of any fork, and the header of its block.
+    ///
+    /// A header has its block's root, so it stands in for a block of any fork.
+    /// The hash is the block's execution block, zero before the merge.
+    /// See `get_forkchoice_store` in the phase0 fork choice spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the header does not commit to the state.
+    pub fn anchored(
+        config: ChainConfig,
+        state: State<P>,
+        anchor_header: &BeaconBlockHeader,
+        execution_block_hash: Hash32,
+    ) -> Result<Self, ForkChoiceError> {
+        let computed = state.hash_tree_root();
+        if anchor_header.state_root != computed {
             return Err(ForkChoiceError::AnchorMismatch {
-                claimed: anchor_block.state_root,
+                claimed: anchor_header.state_root,
                 computed,
             });
         }
-        let anchor_root = anchor_block.hash_tree_root();
+        let anchor_root = anchor_header.hash_tree_root();
+        let beacon = state.beacon();
         let checkpoint = Checkpoint {
-            epoch: anchor_state.current_epoch(),
+            epoch: beacon.current_epoch(),
             root: anchor_root,
         };
         let clock = SlotClock::new(
-            anchor_state.genesis_time.saturating_mul(1000),
+            beacon.genesis_time().saturating_mul(1000),
             config.slot_duration_ms,
         );
-        let time_ms = clock.slot_start_ms(anchor_state.slot);
-        let state = State::new(anchor_state);
+        let time_ms = clock.slot_start_ms(beacon.slot());
 
         Ok(Self {
             config,
@@ -105,10 +136,10 @@ impl<P: Preset> Store<P> {
             blocks: BlockTree::new(
                 anchor_root,
                 BlockNode {
-                    slot: anchor_block.slot,
-                    parent_root: anchor_block.parent_root,
-                    proposer_index: anchor_block.proposer_index,
-                    execution_block_hash: anchor_block.body.execution_payload.block_hash,
+                    slot: anchor_header.slot,
+                    parent_root: anchor_header.parent_root,
+                    proposer_index: anchor_header.proposer_index,
+                    execution_block_hash,
                     status: ExecutionStatus::Valid,
                 },
             ),
@@ -406,10 +437,8 @@ impl<P: Preset> Store<P> {
     /// This replays a chain whose blocks were already validated elsewhere.
     /// A checkpoint sync and a spec vector's history both do so.
     pub fn insert_validated_block(&mut self, block: &BeaconBlock<P>, state: State<P>) {
-        let root = block.hash_tree_root();
-        let justified = state.beacon().current_justified_checkpoint();
-        self.blocks.insert(
-            root,
+        self.insert_validated_node(
+            block.hash_tree_root(),
             BlockNode {
                 slot: block.slot,
                 parent_root: block.parent_root,
@@ -417,7 +446,16 @@ impl<P: Preset> Store<P> {
                 execution_block_hash: block.body.execution_payload.block_hash,
                 status: ExecutionStatus::Valid,
             },
+            state,
         );
+    }
+
+    /// Records a block of any fork by its root and tree node, with its post-state.
+    ///
+    /// Like the block form, this skips the timing, finality, and boost rules.
+    pub fn insert_validated_node(&mut self, root: Root, node: BlockNode, state: State<P>) {
+        let justified = state.beacon().current_justified_checkpoint();
+        self.blocks.insert(root, node);
         self.block_states.insert(root, state);
         self.unrealized_justifications.insert(root, justified);
     }

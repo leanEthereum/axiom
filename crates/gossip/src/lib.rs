@@ -12,18 +12,26 @@
 //! Rejection is reserved for messages no honest node would send.
 //! Ignoring covers what an honest but slow or early node might send.
 //!
-//! See the `p2p-interface.md` specs from phase0 to Fulu, which define each rule as a function.
+//! See the `p2p-interface.md` specs from phase0 to Gloas, which define each rule as a function.
 
+mod blob_sidecar;
 mod detail;
 mod error;
+mod fork;
+mod partial_column;
+mod payload_head;
 mod seen;
 mod signers;
 mod signing_claim;
 mod validator;
 mod view;
+mod vote;
 
+pub use blob_sidecar::BlobSubnets;
 pub use detail::Detail;
 pub use error::GossipError;
-pub use seen::Seen;
+pub use fork::{GossipFork, VoteIndex, VoteWindow};
+pub use seen::{Seen, SeenPartialHeader};
 pub use validator::GossipValidator;
 pub use view::ChainView;
+pub use vote::{Aggregate, IndexedVote, SignedAggregate, SlashingEvidence, SubnetVote};

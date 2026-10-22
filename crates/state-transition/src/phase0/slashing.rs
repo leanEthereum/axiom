@@ -59,7 +59,7 @@ impl Slashing {
         let penalty = effective_balance / S::FORK.min_slashing_penalty_quotient::<S::Preset>();
         registry.state.decrease_balance(self.slashed, penalty)?;
 
-        let proposer = S::beacon_proposer_index(registry.state.beacon())?;
+        let proposer = registry.state.proposer()?;
         let whistleblower = self.whistleblower.unwrap_or(proposer);
         let whistleblower_reward =
             effective_balance / S::FORK.whistleblower_reward_quotient::<S::Preset>();

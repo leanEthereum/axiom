@@ -11,7 +11,9 @@ use axiom_types::{
 
 use crate::{
     BlockError, BlockProcessor, CachedState, Caches, EpochCommittees, EpochProcessor, EpochStep,
-    Fork, PayloadEngine, PubkeyCache, StateError, TransitionError, Upgrade, Verification,
+    ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError, TransitionError, Upgrade,
+    Verification,
+    gloas::{EnvelopeError, PayloadEnvelope},
 };
 
 /// A beacon state of whichever fork it belongs to, with its derived caches.
@@ -93,8 +95,8 @@ impl<P: Preset> State<P> {
     /// Edits that reorder or replace validators invalidate the caches.
     /// Only spec tests and fork upgrades need this.
     pub fn beacon_mut(&mut self) -> &mut combined::BeaconState<P> {
-        // Direct edits may change active sets, so committees are recomputed on demand.
-        self.caches.committees.clear();
+        // Direct edits may change active sets, so committees and proposers are recomputed on demand.
+        self.caches.invalidate();
         &mut self.beacon
     }
 
@@ -268,6 +270,32 @@ impl<P: Preset> State<P> {
             });
         }
         Ok(())
+    }
+
+    /// Checks a Gloas execution payload envelope against the state its block produced.
+    ///
+    /// The envelope is the second input of a Gloas slot, after the block that bid for it.
+    /// It changes no state: the next block reports its requests, which then take effect.
+    /// See `verify_execution_payload_envelope` in the Gloas fork choice spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state is not Gloas, or the envelope breaks a rule.
+    pub fn verify_execution_payload_envelope<E>(
+        &mut self,
+        config: &ChainConfig,
+        envelope: &gloas::SignedExecutionPayloadEnvelope<P>,
+        verification: Verification,
+        engine: &E,
+    ) -> Result<(), EnvelopeError>
+    where
+        E: ExecutionEngine<gloas::NewPayloadRequest<P>>,
+    {
+        let fork = self.fork_name();
+        let mut state = self
+            .of_fork::<gloas::BeaconState<P>>()
+            .ok_or(EnvelopeError::WrongFork(fork))?;
+        PayloadEnvelope(envelope).verify(&mut state, config, verification, engine)
     }
 
     /// Runs one epoch processing step, by the rules of the state's fork.

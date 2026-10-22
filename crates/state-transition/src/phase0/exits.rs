@@ -1,6 +1,6 @@
 //! The phase0 exit queue, which admits a number of validators per epoch.
 
-use axiom_types::{Epoch, ValidatorIndex, accessors::CoreState};
+use axiom_types::{ChainConfig, Epoch, ValidatorIndex, accessors::CoreState};
 
 use crate::{Fork, Registry, StateError};
 
@@ -55,9 +55,31 @@ impl ExitQueue {
         Ok(())
     }
 
-    /// The queue of a state, with the churn its active set allows.
+    /// Validators that may enter or leave the active set in one epoch.
     ///
+    /// The churn grows with the active set, so the set changes by a bounded fraction per epoch.
     /// See `get_validator_churn_limit` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn churn_limit<S: CoreState + ?Sized>(state: &S, config: &ChainConfig) -> u64 {
+        Self::churn_of(
+            state,
+            config.min_per_epoch_churn_limit,
+            config.churn_limit_quotient,
+        )
+    }
+
+    /// The churn of a state's active set, under explicit limits.
+    fn churn_of<S: CoreState + ?Sized>(state: &S, min_churn: u64, churn_quotient: u64) -> u64 {
+        let current = state.current_epoch();
+        let active = state
+            .validators()
+            .iter()
+            .filter(|validator| validator.is_active_at(current))
+            .count() as u64;
+        min_churn.max(active / churn_quotient)
+    }
+
+    /// The queue of a state, with the churn its active set allows.
     fn of<S: CoreState + ?Sized>(state: &S, min_churn: u64, churn_quotient: u64) -> Self {
         let current = state.current_epoch();
         let validators = state.validators();
@@ -70,14 +92,10 @@ impl ExitQueue {
             .iter()
             .filter(|validator| validator.exit_epoch == tail)
             .count() as u64;
-        let active = validators
-            .iter()
-            .filter(|validator| validator.is_active_at(current))
-            .count() as u64;
         Self {
             tail,
             tail_exits,
-            churn_limit: min_churn.max(active / churn_quotient),
+            churn_limit: Self::churn_of(state, min_churn, churn_quotient),
         }
     }
 

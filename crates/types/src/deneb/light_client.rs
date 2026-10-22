@@ -2,26 +2,15 @@
 //!
 //! See the Deneb light client sync protocol.
 
-use axiom_ssz::{
-    Container, DecodeError, FieldDecoder, FieldVisitor, GeneralizedIndex, MerkleProof, Merkleizer,
-    Root, Ssz,
-};
+use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
 
 use crate::{
-    ChainConfig, Preset, Slot,
+    Preset, Slot,
     deneb::{
         BeaconBlockHeader, CurrentSyncCommitteeBranch, ExecutionBranch, ExecutionPayloadHeader,
         FinalityBranch, NextSyncCommitteeBranch, SyncAggregate, SyncCommittee,
     },
 };
-
-/// Generalized index of the execution payload in a block body.
-///
-/// See `EXECUTION_PAYLOAD_GINDEX` in the Capella light client sync protocol.
-const EXECUTION_PAYLOAD_GINDEX: u64 = 25;
-
-/// Fields of the Capella execution payload header, before Deneb appended two.
-const CAPELLA_PAYLOAD_HEADER_FIELDS: usize = 15;
 
 /// A beacon header with its execution payload header and proof.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -55,62 +44,6 @@ impl<P: Preset> Container for LightClientHeader<P> {
             execution: fields.field()?,
             execution_branch: fields.field()?,
         })
-    }
-}
-
-impl<P: Preset> LightClientHeader<P> {
-    /// Whether the execution payload header matches the block body, in the shape of its fork.
-    ///
-    /// Before Capella the payload header and its branch must be empty.
-    /// Before Deneb the blob gas fields must be zero.
-    ///
-    /// See `is_valid_light_client_header` in the Deneb light client sync protocol.
-    #[must_use]
-    pub fn is_valid(&self, config: &ChainConfig) -> bool {
-        let epoch = self.beacon.slot.epoch::<P>();
-        if epoch < config.deneb_fork_epoch
-            && (self.execution.blob_gas_used != 0 || self.execution.excess_blob_gas != 0)
-        {
-            return false;
-        }
-        if epoch < config.capella_fork_epoch {
-            return self.execution == ExecutionPayloadHeader::default()
-                && self.execution_branch.iter().all(|node| node.0 == [0; 32]);
-        }
-        let proof = MerkleProof {
-            branch: self
-                .execution_branch
-                .iter()
-                .map(|node| Root(node.0))
-                .collect(),
-        };
-        proof.verify(
-            self.execution_root(config),
-            GeneralizedIndex::new(EXECUTION_PAYLOAD_GINDEX),
-            self.beacon.body_root,
-        )
-    }
-
-    /// Root of the execution payload header, in the shape of the header's fork.
-    ///
-    /// See `get_lc_execution_root` in the Deneb light client sync protocol.
-    #[must_use]
-    pub fn execution_root(&self, config: &ChainConfig) -> Root {
-        let epoch = self.beacon.slot.epoch::<P>();
-        if epoch >= config.deneb_fork_epoch {
-            return self.execution.hash_tree_root();
-        }
-        // Before Deneb the payload header lacked its last two fields.
-        let mut merkleizer = Merkleizer::with_limit(CAPELLA_PAYLOAD_HEADER_FIELDS);
-        for root in self
-            .execution
-            .field_roots()
-            .into_iter()
-            .take(CAPELLA_PAYLOAD_HEADER_FIELDS)
-        {
-            merkleizer.push(root);
-        }
-        merkleizer.finish()
     }
 }
 
@@ -207,22 +140,6 @@ impl<P: Preset> Container for LightClientUpdate<P> {
             sync_aggregate: fields.field()?,
             signature_slot: fields.field()?,
         })
-    }
-}
-
-impl<P: Preset> LightClientUpdate<P> {
-    /// Whether the update carries a next sync committee.
-    #[must_use]
-    pub fn is_sync_committee_update(&self) -> bool {
-        self.next_sync_committee_branch
-            .iter()
-            .any(|node| node.0 != [0; 32])
-    }
-
-    /// Whether the update proves a finalized header.
-    #[must_use]
-    pub fn is_finality_update(&self) -> bool {
-        self.finality_branch.iter().any(|node| node.0 != [0; 32])
     }
 }
 

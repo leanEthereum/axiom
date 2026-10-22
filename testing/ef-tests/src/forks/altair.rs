@@ -1,9 +1,11 @@
 //! The vectors of Altair, which adds sync committees and participation flags.
 
+use axiom_gossip::GossipValidator;
+use axiom_state_transition::altair::block::{FlaggedAttestation, ParticipantDeposit};
 use axiom_types::{ForkName, Preset, altair};
 
 use super::{Phase0, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Altair fork.
 ///
@@ -45,6 +47,32 @@ impl SpecFork for Altair {
 
     type SignedBeaconBlock<P: Preset> = altair::SignedBeaconBlock<P>;
 
+    type BeaconBlockBody<P: Preset> = altair::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        let now = message.now_ms();
+        Ok(match topic {
+            "sync_committee_contribution_and_proof" => validator.sync_contribution(
+                &message.decode::<altair::SignedContributionAndProof<P>>()?,
+                now,
+            ),
+            "sync_committee" => validator.sync_committee_message(
+                &message.decode::<altair::SyncCommitteeMessage>()?,
+                now,
+                message.subnet(),
+            ),
+            other => {
+                return Err(Failure(format!(
+                    "unsupported gossip topic {other} in altair"
+                )));
+            }
+        })
+    }
+
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {
             "BeaconBlock" => case.round_trip::<altair::BeaconBlock<P>>(),
@@ -74,6 +102,30 @@ impl SpecFork for Altair {
             }
             "SyncCommitteeMessage" => case.round_trip::<altair::SyncCommitteeMessage>(),
             _ => Phase0::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, altair::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input
+                .apply_with::<altair::Attestation<P>>("attestation", |attestation, processor| {
+                    processor.apply(&FlaggedAttestation(attestation))
+                }),
+            "attester_slashing" => input.apply::<altair::AttesterSlashing<P>>("attester_slashing"),
+            "block_header" => input
+                .apply_with::<altair::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "deposit" => input.apply_with::<altair::Deposit>("deposit", |deposit, processor| {
+                processor.apply(&ParticipantDeposit(deposit))
+            }),
+            "proposer_slashing" => input.apply::<altair::ProposerSlashing>("proposer_slashing"),
+            "sync_aggregate" => input.apply::<altair::SyncAggregate<P>>("sync_aggregate"),
+            "voluntary_exit" => input.apply::<altair::SignedVoluntaryExit>("voluntary_exit"),
+            other => Err(Failure(format!("unsupported operation {other} in altair"))),
         }
     }
 }

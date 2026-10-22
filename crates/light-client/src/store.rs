@@ -3,49 +3,46 @@
 use std::mem;
 
 use axiom_bls::{PublicKey, Signature};
-use axiom_ssz::{Root, Ssz, Vector};
+use axiom_ssz::{Root, Ssz};
 use axiom_types::{
     ChainConfig, Domain, Preset, Slot,
+    altair::{SigningData, SyncCommittee},
     constants::DOMAIN_SYNC_COMMITTEE,
-    fulu::{
-        LightClientBootstrap, LightClientFinalityUpdate, LightClientHeader,
-        LightClientOptimisticUpdate, LightClientUpdate, SigningData, SyncCommittee,
-    },
 };
 
-use crate::{LightClientError, UpdateQuality, branch::Branch};
-
-/// Position of the finalized checkpoint root in an Electra state's tree.
-const FINALIZED_ROOT_GINDEX: u64 = 169;
-
-/// Position of the current sync committee in an Electra state's tree.
-const CURRENT_SYNC_COMMITTEE_GINDEX: u64 = 86;
-
-/// Position of the next sync committee in an Electra state's tree.
-const NEXT_SYNC_COMMITTEE_GINDEX: u64 = 87;
+use crate::{
+    BootstrapData, Header, Layout, LightClientError, LightClientFork, UpdateData, UpdateQuality,
+    Upgrade, branch::Branch,
+};
 
 /// What a light client knows: two committees, a finalized header, and an optimistic one.
 ///
-/// See `LightClientStore` in the Altair light client sync protocol.
+/// # Overview
+///
+/// The store holds headers in one fork's format, the fork it was created or upgraded for.
+/// Data in an earlier format is upgraded before it enters.
+/// The rules are the same in every format; only the header checks and proof positions vary.
+///
+/// See `LightClientStore` in the Altair light client sync protocol, as modified by later forks.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LightClientStore<P: Preset> {
+pub struct LightClientStore<P: Preset, F: LightClientFork> {
     /// Latest finalized header.
-    pub finalized_header: LightClientHeader<P>,
+    pub finalized_header: F::Header<P>,
     /// Sync committee of the finalized header's period.
     pub current_sync_committee: SyncCommittee<P>,
     /// Sync committee of the following period, empty until learned.
     pub next_sync_committee: SyncCommittee<P>,
     /// Best update seen since the last finalization, for a forced update after a timeout.
-    pub best_valid_update: Option<LightClientUpdate<P>>,
+    pub best_valid_update: Option<UpdateData<F::Header<P>, P>>,
     /// Latest header signed by a safe share of the committee.
-    pub optimistic_header: LightClientHeader<P>,
+    pub optimistic_header: F::Header<P>,
     /// Most signers seen in the previous period.
     pub previous_max_active_participants: usize,
     /// Most signers seen in the current period.
     pub current_max_active_participants: usize,
 }
 
-impl<P: Preset> LightClientStore<P> {
+impl<P: Preset, F: LightClientFork> LightClientStore<P, F> {
     /// A store bootstrapped from a trusted block and the committee proven in its state.
     ///
     /// See `initialize_light_client_store` in the Altair light client sync protocol.
@@ -56,34 +53,36 @@ impl<P: Preset> LightClientStore<P> {
     pub fn initialize(
         config: &ChainConfig,
         trusted_block_root: Root,
-        bootstrap: &LightClientBootstrap<P>,
+        bootstrap: F::Bootstrap<P>,
     ) -> Result<Self, LightClientError> {
-        if !bootstrap.header.is_valid(config) {
-            return Err(LightClientError::InvalidHeader(
-                bootstrap.header.beacon.slot,
-            ));
+        let BootstrapData {
+            header,
+            current_sync_committee,
+            current_sync_committee_branch,
+        } = F::bootstrap_data(bootstrap);
+        let beacon = header.beacon();
+        if !header.is_valid_at(config) {
+            return Err(LightClientError::InvalidHeader(beacon.slot));
         }
-        let header_root = bootstrap.header.beacon.hash_tree_root();
+        let header_root = beacon.hash_tree_root();
         if header_root != trusted_block_root {
             return Err(LightClientError::UntrustedBootstrap {
                 header: header_root,
                 trusted: trusted_block_root,
             });
         }
+        let layout = Layout::at::<P>(config, beacon.slot);
         Branch::new(
-            &bootstrap.current_sync_committee_branch,
-            CURRENT_SYNC_COMMITTEE_GINDEX,
+            &current_sync_committee_branch,
+            layout.current_sync_committee,
         )
-        .proves(
-            bootstrap.current_sync_committee.hash_tree_root(),
-            bootstrap.header.beacon.state_root,
-        )?;
+        .proves(current_sync_committee.hash_tree_root(), beacon.state_root)?;
         Ok(Self {
-            finalized_header: bootstrap.header.clone(),
-            current_sync_committee: bootstrap.current_sync_committee.clone(),
+            finalized_header: header.clone(),
+            current_sync_committee,
             next_sync_committee: SyncCommittee::default(),
             best_valid_update: None,
-            optimistic_header: bootstrap.header.clone(),
+            optimistic_header: header,
             previous_max_active_participants: 0,
             current_max_active_participants: 0,
         })
@@ -93,9 +92,9 @@ impl<P: Preset> LightClientStore<P> {
     ///
     /// # Algorithm
     ///
-    /// - Keep the update as the best seen, if it ranks higher.
-    /// - Move the optimistic header when more than the safety threshold signed.
-    /// - Move the finalized header when two thirds signed a newer finalized header.
+    /// 1. Keep the update as the best seen, if it ranks higher.
+    /// 2. Move the optimistic header when more than the safety threshold signed.
+    /// 3. Move the finalized header when two thirds signed a newer finalized header.
     ///
     /// See `process_light_client_update` in the Altair light client sync protocol.
     ///
@@ -105,53 +104,52 @@ impl<P: Preset> LightClientStore<P> {
     pub fn process_update(
         &mut self,
         config: &ChainConfig,
-        update: &LightClientUpdate<P>,
+        update: F::Update<P>,
         current_slot: Slot,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
-        self.validate_update(config, update, current_slot, genesis_validators_root)?;
-        let bits = &update.sync_aggregate.sync_committee_bits;
-        let participants = bits.count_ones();
+        self.process_data(
+            config,
+            F::update_data(update),
+            current_slot,
+            genesis_validators_root,
+        )
+    }
 
-        let better = self
-            .best_valid_update
-            .as_ref()
-            .is_none_or(|best| UpdateQuality::of(update) > UpdateQuality::of(best));
-        if better {
-            self.best_valid_update = Some(update.clone());
-        }
+    /// Processes a finality update, as an update without a next committee.
+    ///
+    /// See `process_light_client_finality_update` in the Altair light client sync protocol.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the update is invalid.
+    pub fn process_finality_update(
+        &mut self,
+        config: &ChainConfig,
+        update: F::FinalityUpdate<P>,
+        current_slot: Slot,
+        genesis_validators_root: Root,
+    ) -> Result<(), LightClientError> {
+        let data = F::finality_update_data(update);
+        self.process_data(config, data, current_slot, genesis_validators_root)
+    }
 
-        self.current_max_active_participants =
-            self.current_max_active_participants.max(participants);
-
-        if participants > self.safety_threshold()
-            && update.attested_header.beacon.slot > self.optimistic_header.beacon.slot
-        {
-            self.optimistic_header = update.attested_header.clone();
-        }
-
-        let finalizes_next_committee = !self.is_next_sync_committee_known()
-            && update.is_sync_committee_update()
-            && update.is_finality_update()
-            && update
-                .finalized_header
-                .beacon
-                .slot
-                .sync_committee_period::<P>()
-                == update
-                    .attested_header
-                    .beacon
-                    .slot
-                    .sync_committee_period::<P>();
-        // Threshold: participants * 3 >= committee * 2.
-        if participants * 3 >= bits.len() * 2
-            && (update.finalized_header.beacon.slot > self.finalized_header.beacon.slot
-                || finalizes_next_committee)
-        {
-            self.apply_update(update)?;
-            self.best_valid_update = None;
-        }
-        Ok(())
+    /// Processes an optimistic update, as an update with neither committee nor finality.
+    ///
+    /// See `process_light_client_optimistic_update` in the Altair light client sync protocol.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the update is invalid.
+    pub fn process_optimistic_update(
+        &mut self,
+        config: &ChainConfig,
+        update: F::OptimisticUpdate<P>,
+        current_slot: Slot,
+        genesis_validators_root: Root,
+    ) -> Result<(), LightClientError> {
+        let data = F::optimistic_update_data(update);
+        self.process_data(config, data, current_slot, genesis_validators_root)
     }
 
     /// Applies the best update after a timeout without finality.
@@ -165,13 +163,12 @@ impl<P: Preset> LightClientStore<P> {
     ///
     /// Fails when the best update skips a period, which validation already excludes.
     pub fn force_update(&mut self, current_slot: Slot) -> Result<(), LightClientError> {
-        let timed_out = current_slot.0 > self.finalized_header.beacon.slot.0 + P::UPDATE_TIMEOUT;
+        let timed_out = current_slot.0 > self.finalized_slot().0 + P::UPDATE_TIMEOUT;
+        if !timed_out {
+            return Ok(());
+        }
         if let Some(mut best) = self.best_valid_update.take() {
-            if !timed_out {
-                self.best_valid_update = Some(best);
-                return Ok(());
-            }
-            if best.finalized_header.beacon.slot <= self.finalized_header.beacon.slot {
+            if best.finalized_header.beacon().slot <= self.finalized_slot() {
                 best.finalized_header = best.attested_header.clone();
             }
             self.apply_update(&best)?;
@@ -179,49 +176,86 @@ impl<P: Preset> LightClientStore<P> {
         Ok(())
     }
 
-    /// Processes a finality update, as an update without a next committee.
+    /// The store in the next fork's format.
+    ///
+    /// The upgrade may happen before that fork activates.
+    /// See `upgrade_lc_store_to_*` in each fork's light client fork logic.
     ///
     /// # Errors
     ///
-    /// Fails when the update is invalid.
-    pub fn process_finality_update(
-        &mut self,
+    /// Fails when a branch of the best update is longer than the new format's.
+    pub fn upgrade<G: Upgrade<Previous = F>>(
+        self,
         config: &ChainConfig,
-        update: &LightClientFinalityUpdate<P>,
-        current_slot: Slot,
-        genesis_validators_root: Root,
-    ) -> Result<(), LightClientError> {
-        let full = LightClientUpdate {
-            attested_header: update.attested_header.clone(),
-            next_sync_committee: SyncCommittee::default(),
-            next_sync_committee_branch: Vector::default(),
-            finalized_header: update.finalized_header.clone(),
-            finality_branch: update.finality_branch.clone(),
-            sync_aggregate: update.sync_aggregate.clone(),
-            signature_slot: update.signature_slot,
-        };
-        self.process_update(config, &full, current_slot, genesis_validators_root)
+    ) -> Result<LightClientStore<P, G>, LightClientError> {
+        let best_valid_update = self
+            .best_valid_update
+            .map(|best| G::upgrade_data(best, config))
+            .transpose()?;
+        Ok(LightClientStore {
+            finalized_header: G::upgrade_header_at(self.finalized_header, config),
+            current_sync_committee: self.current_sync_committee,
+            next_sync_committee: self.next_sync_committee,
+            best_valid_update,
+            optimistic_header: G::upgrade_header_at(self.optimistic_header, config),
+            previous_max_active_participants: self.previous_max_active_participants,
+            current_max_active_participants: self.current_max_active_participants,
+        })
     }
 
-    /// Processes an optimistic update, as an update with neither committee nor finality.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the update is invalid.
-    pub fn process_optimistic_update(
+    /// Validates an update's fields and advances the store with them.
+    fn process_data(
         &mut self,
         config: &ChainConfig,
-        update: &LightClientOptimisticUpdate<P>,
+        update: UpdateData<F::Header<P>, P>,
         current_slot: Slot,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
-        let full = LightClientUpdate {
-            attested_header: update.attested_header.clone(),
-            sync_aggregate: update.sync_aggregate.clone(),
-            signature_slot: update.signature_slot,
-            ..LightClientUpdate::default()
-        };
-        self.process_update(config, &full, current_slot, genesis_validators_root)
+        self.validate_update(config, &update, current_slot, genesis_validators_root)?;
+        let bits = &update.sync_aggregate.sync_committee_bits;
+        let participants = bits.count_ones();
+        let committee_size = bits.len();
+
+        self.current_max_active_participants =
+            self.current_max_active_participants.max(participants);
+
+        if participants > self.safety_threshold()
+            && update.attested_header.beacon().slot > self.optimistic_header.beacon().slot
+        {
+            self.optimistic_header = update.attested_header.clone();
+        }
+
+        let finalizes_next_committee = !self.is_next_sync_committee_known()
+            && update.is_sync_committee_update()
+            && update.is_finality_update()
+            && update
+                .finalized_header
+                .beacon()
+                .slot
+                .sync_committee_period::<P>()
+                == update
+                    .attested_header
+                    .beacon()
+                    .slot
+                    .sync_committee_period::<P>();
+        // Threshold: participants * 3 >= committee * 2.
+        let applies = participants * 3 >= committee_size * 2
+            && (update.finalized_header.beacon().slot > self.finalized_slot()
+                || finalizes_next_committee);
+
+        if applies {
+            self.apply_update(&update)?;
+            self.best_valid_update = None;
+        } else if self
+            .best_valid_update
+            .as_ref()
+            .is_none_or(|best| UpdateQuality::of(&update) > UpdateQuality::of(best))
+        {
+            // The spec stores the best update first, then clears it on a normal update.
+            // Ending in the same state, a normal update skips the store.
+            self.best_valid_update = Some(update);
+        }
+        Ok(())
     }
 
     /// Checks every rule an update must satisfy, without changing the store.
@@ -230,11 +264,11 @@ impl<P: Preset> LightClientStore<P> {
     fn validate_update(
         &self,
         config: &ChainConfig,
-        update: &LightClientUpdate<P>,
+        update: &UpdateData<F::Header<P>, P>,
         current_slot: Slot,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
-        let participants = update.sync_aggregate.sync_committee_bits.count_ones() as u64;
+        let participants = update.participants() as u64;
         if participants < P::MIN_SYNC_COMMITTEE_PARTICIPANTS {
             return Err(LightClientError::InsufficientParticipants {
                 participants,
@@ -242,28 +276,24 @@ impl<P: Preset> LightClientStore<P> {
             });
         }
 
-        let attested_slot = update.attested_header.beacon.slot;
-        if !update.attested_header.is_valid(config) {
-            return Err(LightClientError::InvalidHeader(attested_slot));
+        let attested = update.attested_header.beacon();
+        if !update.attested_header.is_valid_at(config) {
+            return Err(LightClientError::InvalidHeader(attested.slot));
         }
-        let finalized_slot = update.finalized_header.beacon.slot;
+        let finalized_slot = update.finalized_header.beacon().slot;
         if !(current_slot >= update.signature_slot
-            && update.signature_slot > attested_slot
-            && attested_slot >= finalized_slot)
+            && update.signature_slot > attested.slot
+            && attested.slot >= finalized_slot)
         {
             return Err(LightClientError::InvalidSlots {
                 current: current_slot,
                 signature: update.signature_slot,
-                attested: attested_slot,
+                attested: attested.slot,
                 finalized: finalized_slot,
             });
         }
 
-        let store_period = self
-            .finalized_header
-            .beacon
-            .slot
-            .sync_committee_period::<P>();
+        let store_period = self.finalized_slot().sync_committee_period::<P>();
         let signature_period = update.signature_slot.sync_committee_period::<P>();
         let next_known = self.is_next_sync_committee_known();
         let period_ok = if next_known {
@@ -279,32 +309,34 @@ impl<P: Preset> LightClientStore<P> {
         }
 
         // The update must move the finalized header, or deliver the missing next committee.
-        let attested_period = attested_slot.sync_committee_period::<P>();
+        let attested_period = attested.slot.sync_committee_period::<P>();
         let has_next_committee =
             !next_known && update.is_sync_committee_update() && attested_period == store_period;
-        if attested_slot <= self.finalized_header.beacon.slot && !has_next_committee {
+        if attested.slot <= self.finalized_slot() && !has_next_committee {
             return Err(LightClientError::Irrelevant {
-                attested: attested_slot,
-                finalized: self.finalized_header.beacon.slot,
+                attested: attested.slot,
+                finalized: self.finalized_slot(),
             });
         }
 
+        // The attested block's fork fixes where its state keeps each proven field.
+        let layout = Layout::at::<P>(config, attested.slot);
         if update.is_finality_update() {
             // The genesis checkpoint's root is zero, and its header stays empty.
             let finalized_root = if finalized_slot == Slot::GENESIS {
-                if update.finalized_header != LightClientHeader::default() {
+                if update.finalized_header != F::Header::<P>::default() {
                     return Err(LightClientError::UnexpectedData("finalized header"));
                 }
                 Root::ZERO
             } else {
-                if !update.finalized_header.is_valid(config) {
+                if !update.finalized_header.is_valid_at(config) {
                     return Err(LightClientError::InvalidHeader(finalized_slot));
                 }
-                update.finalized_header.beacon.hash_tree_root()
+                update.finalized_header.beacon().hash_tree_root()
             };
-            Branch::new(&update.finality_branch, FINALIZED_ROOT_GINDEX)
-                .proves(finalized_root, update.attested_header.beacon.state_root)?;
-        } else if update.finalized_header != LightClientHeader::default() {
+            Branch::new(&update.finality_branch, layout.finalized_root)
+                .proves(finalized_root, attested.state_root)?;
+        } else if update.finalized_header != F::Header::<P>::default() {
             return Err(LightClientError::UnexpectedData("finalized header"));
         }
 
@@ -317,11 +349,11 @@ impl<P: Preset> LightClientStore<P> {
             }
             Branch::new(
                 &update.next_sync_committee_branch,
-                NEXT_SYNC_COMMITTEE_GINDEX,
+                layout.next_sync_committee,
             )
             .proves(
                 update.next_sync_committee.hash_tree_root(),
-                update.attested_header.beacon.state_root,
+                attested.state_root,
             )?;
         } else if update.next_sync_committee != SyncCommittee::default() {
             return Err(LightClientError::UnexpectedData("next sync committee"));
@@ -333,17 +365,13 @@ impl<P: Preset> LightClientStore<P> {
     /// Moves committees and headers forward with a validated update.
     ///
     /// See `apply_light_client_update` in the Altair light client sync protocol.
-    fn apply_update(&mut self, update: &LightClientUpdate<P>) -> Result<(), LightClientError> {
-        let store_period = self
-            .finalized_header
-            .beacon
-            .slot
-            .sync_committee_period::<P>();
-        let finalized_period = update
-            .finalized_header
-            .beacon
-            .slot
-            .sync_committee_period::<P>();
+    fn apply_update(
+        &mut self,
+        update: &UpdateData<F::Header<P>, P>,
+    ) -> Result<(), LightClientError> {
+        let store_period = self.finalized_slot().sync_committee_period::<P>();
+        let finalized_slot = update.finalized_header.beacon().slot;
+        let finalized_period = finalized_slot.sync_committee_period::<P>();
         if !self.is_next_sync_committee_known() {
             if finalized_period != store_period {
                 return Err(LightClientError::SkippedPeriod {
@@ -360,13 +388,18 @@ impl<P: Preset> LightClientStore<P> {
             self.previous_max_active_participants = self.current_max_active_participants;
             self.current_max_active_participants = 0;
         }
-        if update.finalized_header.beacon.slot > self.finalized_header.beacon.slot {
+        if finalized_slot > self.finalized_slot() {
             self.finalized_header = update.finalized_header.clone();
-            if self.finalized_header.beacon.slot > self.optimistic_header.beacon.slot {
+            if finalized_slot > self.optimistic_header.beacon().slot {
                 self.optimistic_header = self.finalized_header.clone();
             }
         }
         Ok(())
+    }
+
+    /// Slot of the finalized header.
+    fn finalized_slot(&self) -> Slot {
+        self.finalized_header.beacon().slot
     }
 
     /// Whether the next sync committee is known.
@@ -387,15 +420,11 @@ impl<P: Preset> LightClientStore<P> {
     fn verify_signature(
         &self,
         config: &ChainConfig,
-        update: &LightClientUpdate<P>,
+        update: &UpdateData<F::Header<P>, P>,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
         let committee = if update.signature_slot.sync_committee_period::<P>()
-            == self
-                .finalized_header
-                .beacon
-                .slot
-                .sync_committee_period::<P>()
+            == self.finalized_slot().sync_committee_period::<P>()
         {
             &self.current_sync_committee
         } else {
@@ -418,7 +447,7 @@ impl<P: Preset> LightClientStore<P> {
         let fork_version =
             config.fork_version_at(update.signature_slot.saturating_sub(1).epoch::<P>());
         let domain = Domain::compute(DOMAIN_SYNC_COMMITTEE, fork_version, genesis_validators_root);
-        let signing_root = SigningData::signing_root(&update.attested_header.beacon, domain);
+        let signing_root = SigningData::signing_root(update.attested_header.beacon(), domain);
         let signature = Signature::from_bytes(&update.sync_aggregate.sync_committee_signature.0)
             .map_err(LightClientError::MalformedSignature)?;
         if signature.fast_aggregate_verify(&signers, &signing_root.0) {

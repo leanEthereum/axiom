@@ -4,7 +4,14 @@ use std::collections::HashMap;
 
 use axiom_fork_choice::{BlockNode, ExecutionStatus, ForkChoiceError, Store};
 use axiom_state_transition::State;
-use axiom_types::{ChainConfig, Epoch, Preset, Root, Slot, accessors::CoreState, fulu::Checkpoint};
+use axiom_types::{
+    ChainConfig, Epoch, Preset, Root, Slot,
+    accessors::CoreState,
+    fulu::{AttestationData, Checkpoint},
+    gloas::{ExecutionPayloadBid, ExecutionPayloadEnvelope},
+};
+
+use crate::{Detail, GossipError, fork::Verdict};
 
 /// Everything gossip validation reads about the chain.
 ///
@@ -30,11 +37,22 @@ pub struct ChainView<'a, P: Preset> {
     pub payload_statuses: &'a HashMap<Root, ExecutionStatus>,
     /// Finalized checkpoint the rules respect.
     pub finalized: Checkpoint,
+    /// A finalized checkpoint that replaces every state's own, when one is fixed.
+    ///
+    /// Rules that read a state's finality read this instead, when set.
+    /// The spec's gossip vectors fix finality this way, see the gossip validation test format.
+    pub state_finality: Option<Checkpoint>,
+    /// The bid each block carries, by block root, from Gloas on.
+    pub bids: HashMap<Root, ExecutionPayloadBid>,
+    /// The verified payload envelope of each block whose payload arrived, from Gloas on.
+    ///
+    /// See `payloads` in the Gloas fork choice store.
+    pub payloads: HashMap<Root, ExecutionPayloadEnvelope<P>>,
 }
 
 impl<'a, P: Preset> ChainView<'a, P> {
     /// A view of a store and no other block, finalized where the store says.
-    pub const fn new(
+    pub fn new(
         store: &'a mut Store<P>,
         unimported: &'a HashMap<Root, BlockNode>,
         payload_statuses: &'a HashMap<Root, ExecutionStatus>,
@@ -45,6 +63,9 @@ impl<'a, P: Preset> ChainView<'a, P> {
             unimported,
             payload_statuses,
             finalized,
+            state_finality: None,
+            bids: HashMap::new(),
+            payloads: HashMap::new(),
         }
     }
 
@@ -111,6 +132,28 @@ impl<'a, P: Preset> ChainView<'a, P> {
         Ok(state)
     }
 
+    /// The block whose randomness fixed an epoch's proposer shuffling, on a block's chain.
+    ///
+    /// The walk goes through seen blocks too, and stops at the store's anchor.
+    /// See `get_shuffling_dependent_root` in the phase0 and Gloas fork choice specs.
+    #[must_use]
+    pub fn shuffling_dependent_root(&self, root: Root, epoch: Epoch) -> Root {
+        let lookahead_start = epoch
+            .saturating_sub(P::MIN_SEED_LOOKAHEAD)
+            .start_slot::<P>();
+        let dependent_slot = lookahead_start.saturating_sub(1);
+        let mut current = root;
+        while let Some(node) = self.block(&current) {
+            let at_anchor =
+                self.store.blocks().contains(&current) && self.block(&node.parent_root).is_none();
+            if node.slot <= dependent_slot || at_anchor {
+                break;
+            }
+            current = node.parent_root;
+        }
+        current
+    }
+
     /// The checkpoint block of an epoch on a block's chain, through seen blocks too.
     ///
     /// The store's anchor stands for every slot before it, as its tree has no parent for it.
@@ -168,6 +211,69 @@ impl<'a, P: Preset> ChainView<'a, P> {
         let start = clock.slot_start_ms(slot);
         let end = clock.slot_start_ms(slot + range + 1);
         now_ms + disparity >= start && end + disparity >= now_ms
+    }
+
+    /// Whether the current time falls in a slot.
+    ///
+    /// See `is_current_slot` in the Gloas p2p spec.
+    #[must_use]
+    pub fn is_current_slot(&self, slot: Slot, now_ms: u64) -> bool {
+        self.is_within_slot_range(slot, 0, now_ms)
+    }
+
+    /// Whether a slot started before the current time minus the allowed clock disparity.
+    ///
+    /// See `is_past_slot` in the Gloas p2p spec.
+    #[must_use]
+    pub const fn is_past_slot(&self, slot: Slot, now_ms: u64) -> bool {
+        now_ms
+            > self.store.slot_clock().slot_start_ms(slot)
+                + self.config().maximum_gossip_clock_disparity_ms
+    }
+
+    /// Checks that a vote's payload presence agrees with what the node knows of the payload.
+    ///
+    /// A vote from the block's own slot cannot have seen the payload yet.
+    /// A vote for a present payload needs that payload verified and found valid.
+    /// See `verify_attestation_payload_status` in the Gloas p2p spec.
+    ///
+    /// # Errors
+    ///
+    /// Ignores a vote for a payload not yet seen or validated, and rejects a contradiction.
+    pub fn vote_payload_is_consistent(&self, data: &AttestationData) -> Verdict {
+        let root = data.beacon_block_root;
+        let detail = Detail::Block(root);
+        let slot = self.block(&root).map(|block| block.slot);
+        if slot == Some(data.slot) && data.index.0 != 0 {
+            return Err(
+                GossipError::reject("same-slot attestation must attest with index 0").with(detail),
+            );
+        }
+        if data.index.0 != 1 {
+            return Ok(());
+        }
+        if !self.is_payload_verified(&root) {
+            return Err(
+                GossipError::ignore("execution payload envelope has not been seen").with(detail),
+            );
+        }
+        match self.payload_statuses.get(&root) {
+            None | Some(ExecutionStatus::Optimistic) => {
+                Err(GossipError::ignore("attested payload is optimistic").with(detail))
+            }
+            Some(ExecutionStatus::Invalid) => {
+                Err(GossipError::reject("attested payload is invalid").with(detail))
+            }
+            Some(ExecutionStatus::Valid) => Ok(()),
+        }
+    }
+
+    /// Whether a block's payload envelope arrived and verified.
+    ///
+    /// See `is_payload_verified` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn is_payload_verified(&self, root: &Root) -> bool {
+        self.payloads.contains_key(root)
     }
 
     /// Whether the current time falls in an epoch.

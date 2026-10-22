@@ -2,8 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use axiom_ssz::Ssz;
 use axiom_types::{
-    ColumnIndex, CommitteeIndex, Epoch, Preset, Root, Slot, SubnetId, ValidatorIndex,
+    BlobIndex, BuilderIndex, ColumnIndex, CommitteeIndex, Epoch, Gwei, Hash32, KzgCommitment,
+    Preset, Root, Slot, SubnetId, ValidatorIndex, fulu::PartialDataColumnHeader,
+    gloas::ProposerPreferences,
 };
 
 /// Deduplication state of gossip validation.
@@ -38,6 +41,51 @@ pub struct Seen {
     pub bls_to_execution_change_indices: HashSet<ValidatorIndex>,
     /// Slot, proposer, and column of every forwarded data column sidecar.
     pub data_column_sidecar_tuples: HashSet<(Slot, ValidatorIndex, ColumnIndex)>,
+    /// Slot, proposer, and blob of every forwarded blob sidecar.
+    pub blob_sidecar_tuples: HashSet<(Slot, ValidatorIndex, BlobIndex)>,
+    /// The validated partial column header of each block, by block root.
+    pub partial_data_column_headers: HashMap<Root, SeenPartialHeader>,
+    /// Block root and column of every forwarded Gloas data column sidecar.
+    pub data_column_sidecar_roots: HashSet<(Root, ColumnIndex)>,
+    /// Gas limit of every payload whose envelope was forwarded, by the payload's block hash.
+    ///
+    /// A bid's gas limit must follow its parent payload's, which this records.
+    pub execution_payloads: HashMap<Hash32, u64>,
+    /// Block root and builder of every forwarded payload envelope.
+    pub execution_payload_envelopes: HashSet<(Root, BuilderIndex)>,
+    /// Slot and validator of every forwarded payload attestation.
+    pub payload_attestation_validators: HashSet<(Slot, ValidatorIndex)>,
+    /// Slot, parent payload, parent block, and builder of every forwarded bid.
+    pub execution_payload_bids: HashSet<(Slot, Hash32, Root, BuilderIndex)>,
+    /// The highest forwarded bid value for each slot, parent payload, and parent block.
+    pub best_execution_payload_bid: HashMap<(Slot, Hash32, Root), Gwei>,
+    /// Forwarded proposer preferences, by proposal slot and shuffling dependent root.
+    pub proposer_preferences: HashMap<(Slot, Root), ProposerPreferences>,
+}
+
+/// What a validated partial column header tells about its block.
+///
+/// See `partial_data_column_headers` in the Fulu partial columns p2p spec.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SeenPartialHeader {
+    /// Root of the whole header, so a later header can be compared with it.
+    pub root: Root,
+    /// Slot of the header's block.
+    pub slot: Slot,
+    /// The block's blob commitments, which cells are checked against.
+    pub commitments: Vec<KzgCommitment>,
+}
+
+impl SeenPartialHeader {
+    /// What the seen state remembers of a validated header.
+    #[must_use]
+    pub fn of<P: Preset>(header: &PartialDataColumnHeader<P>) -> Self {
+        Self {
+            root: header.hash_tree_root(),
+            slot: header.signed_block_header.message.slot,
+            commitments: header.kzg_commitments.to_vec(),
+        }
+    }
 }
 
 impl Seen {
@@ -65,6 +113,18 @@ impl Seen {
             .retain(|(slot, _, _)| recent(*slot));
         self.data_column_sidecar_tuples
             .retain(|(slot, _, _)| recent(*slot));
+        self.blob_sidecar_tuples
+            .retain(|(slot, _, _)| recent(*slot));
+        self.partial_data_column_headers
+            .retain(|_, header| recent(header.slot));
+        self.payload_attestation_validators
+            .retain(|(slot, _)| recent(*slot));
+        self.execution_payload_bids
+            .retain(|(slot, _, _, _)| recent(*slot));
+        self.best_execution_payload_bid
+            .retain(|(slot, _, _), _| recent(*slot));
+        self.proposer_preferences
+            .retain(|(slot, _), _| recent(*slot));
     }
 
     /// Whether some remembered bitfield covers every bit set in a new one.

@@ -4,6 +4,8 @@ use std::fmt;
 
 use axiom_ssz::{DecodeError, Root, Ssz};
 
+use crate::constants::BUILDER_INDEX_FLAG;
+
 /// Position of a validator in the registry.
 ///
 /// Indices are stable: a validator keeps its index for life.
@@ -21,6 +23,19 @@ impl ValidatorIndex {
     )]
     pub const fn as_usize(self) -> usize {
         self.0 as usize
+    }
+
+    /// The builder this index names, when it carries the builder flag.
+    ///
+    /// Withdrawals name builders and validators in one field, told apart by the flag.
+    /// See `is_builder_index` and `convert_validator_index_to_builder_index` in the Gloas spec.
+    #[must_use]
+    pub const fn builder(self) -> Option<BuilderIndex> {
+        if self.0 & BUILDER_INDEX_FLAG == 0 {
+            None
+        } else {
+            Some(BuilderIndex(self.0 & !BUILDER_INDEX_FLAG))
+        }
     }
 }
 
@@ -82,6 +97,14 @@ impl BuilderIndex {
     )]
     pub const fn as_usize(self) -> usize {
         self.0 as usize
+    }
+
+    /// The index a withdrawal names this builder by: the builder index with the flag set.
+    ///
+    /// See `convert_builder_index_to_validator_index` in the Gloas beacon chain spec.
+    #[must_use]
+    pub const fn withdrawal_index(self) -> ValidatorIndex {
+        ValidatorIndex(self.0 | BUILDER_INDEX_FLAG)
     }
 }
 
@@ -414,5 +437,34 @@ impl Ssz for SubnetId {
 
     fn hash_tree_root(&self) -> Root {
         self.0.hash_tree_root()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[test]
+    fn a_registry_index_names_no_builder() {
+        // Validator 7 carries no flag, so it stays a validator.
+        assert_eq!(ValidatorIndex(7).builder(), None);
+    }
+
+    #[test]
+    fn builder_three_withdraws_under_the_flagged_index() {
+        // Builder 3 is named 2^40 + 3 in a withdrawal, and the flag maps back to it.
+        let flagged = BuilderIndex(3).withdrawal_index();
+        assert_eq!(flagged, ValidatorIndex((1 << 40) + 3));
+        assert_eq!(flagged.builder(), Some(BuilderIndex(3)));
+    }
+
+    proptest! {
+        #[test]
+        fn a_flagged_index_round_trips(index in 0_u64..(1 << 40)) {
+            let builder = BuilderIndex(index);
+            prop_assert_eq!(builder.withdrawal_index().builder(), Some(builder));
+        }
     }
 }

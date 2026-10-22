@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use axiom_types::{
-    BlsPubkey, ChainConfig, Epoch, ExecutionAddress, Gwei, Preset,
+    BlsPubkey, Bytes32, ChainConfig, Epoch, ExecutionAddress, Gwei, Preset, Slot,
     accessors::{BuilderState, CoreState},
     constants::{BUILDER_WITHDRAWAL_PREFIX, PAYLOAD_BUILDER_VERSION},
     electra::PendingDeposit,
@@ -87,7 +87,13 @@ impl<'a> BuilderDeposits<'a> {
                     if !self.has_valid_signature(state, &deposit) {
                         continue;
                     }
-                    Self::add_builder(state.beacon, &deposit);
+                    BuilderRegistration {
+                        pubkey: deposit.pubkey,
+                        withdrawal_credentials: deposit.withdrawal_credentials,
+                        amount: deposit.amount,
+                        slot: deposit.slot,
+                    }
+                    .register(state.beacon);
                 }
             }
         }
@@ -119,20 +125,37 @@ impl<'a> BuilderDeposits<'a> {
         state.verification() == Verification::Skip
             || DepositApplication(deposit).has_valid_signature(self.config)
     }
+}
 
-    /// Registers a builder, reusing the slot of an exited builder with nothing left.
+/// A builder joining the registry, from a deposit with builder credentials.
+///
+/// Builders join at the Gloas fork from the validator queue, and afterwards from deposit requests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuilderRegistration {
+    /// The builder's key.
+    pub pubkey: BlsPubkey,
+    /// The deposit's credentials, whose last twenty bytes are the execution address.
+    pub withdrawal_credentials: Bytes32,
+    /// The deposited balance.
+    pub amount: Gwei,
+    /// Slot the deposit was made in, whose epoch dates the builder.
+    pub slot: Slot,
+}
+
+impl BuilderRegistration {
+    /// Registers the builder, reusing the slot of an exited builder with nothing left.
     ///
     /// See `add_builder_to_registry` and `get_index_for_new_builder` in the Gloas spec.
-    fn add_builder<P: Preset>(state: &mut BeaconState<P>, deposit: &PendingDeposit) {
+    pub fn register<S: BuilderState>(self, state: &mut S) {
         let current = state.current_epoch();
         let mut address = [0; 20];
-        address.copy_from_slice(&deposit.withdrawal_credentials.0[12..]);
+        address.copy_from_slice(&self.withdrawal_credentials.0[12..]);
         let builder = Builder {
-            pubkey: deposit.pubkey,
+            pubkey: self.pubkey,
             version: PAYLOAD_BUILDER_VERSION,
             execution_address: ExecutionAddress(address),
-            balance: deposit.amount,
-            deposit_epoch: deposit.slot.epoch::<P>(),
+            balance: self.amount,
+            deposit_epoch: self.slot.epoch::<S::Preset>(),
             withdrawable_epoch: Epoch::FAR_FUTURE,
         };
         let builders = state.builders_mut();
@@ -148,7 +171,7 @@ impl<'a> BuilderDeposits<'a> {
 
 #[cfg(test)]
 mod tests {
-    use axiom_types::{Bytes32, Minimal, Slot};
+    use axiom_types::Minimal;
 
     use super::*;
 
@@ -173,13 +196,13 @@ mod tests {
         let mut credentials = [0; 32];
         credentials[0] = BUILDER_WITHDRAWAL_PREFIX;
         credentials[31] = 0xaa;
-        let deposit = PendingDeposit {
+        BuilderRegistration {
+            pubkey: BlsPubkey::default(),
             withdrawal_credentials: Bytes32(credentials),
             amount: Gwei(7),
             slot: Slot(9),
-            ..Default::default()
-        };
-        BuilderDeposits::add_builder(&mut state, &deposit);
+        }
+        .register(&mut state);
 
         // The new builder takes slot 0, and the registry keeps two entries.
         assert_eq!(state.builders.len(), 2);

@@ -1,14 +1,16 @@
 //! The vectors of Fulu, which adds peer data availability sampling.
 
+use axiom_gossip::GossipValidator;
+use axiom_kzg::Kzg;
 use axiom_state_transition::{
     KnownVerdict,
     electra::block::{Exit, PayloadWithdrawals},
     fulu::block::{PayloadExecution, QueuedDeposit},
 };
-use axiom_types::{ForkName, Preset, fulu};
+use axiom_types::{ColumnIndex, ForkName, Preset, fulu};
 
-use super::{Electra, SpecFork};
-use crate::{Applied, Case, Failure, FieldNames, OperationInput};
+use super::{Capella, Electra, SpecFork};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Fulu fork.
 ///
@@ -63,6 +65,33 @@ impl SpecFork for Fulu {
     type State<P: Preset> = fulu::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = fulu::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = fulu::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        let now = message.now_ms();
+        match topic {
+            "data_column_sidecar" => Ok(validator.data_column_sidecar(
+                &message.decode::<fulu::DataColumnSidecar<P>>()?,
+                now,
+                message.subnet(),
+                Kzg::mainnet(),
+            )),
+            "partial_data_column_sidecar" => Ok(validator.partial_data_column_sidecar(
+                &message.decode::<fulu::PartialDataColumnSidecar<P>>()?,
+                now,
+                &message.decode_field::<fulu::PartialDataColumnGroupId>("group_id")?,
+                ColumnIndex(message.number("column_index")),
+                Kzg::mainnet(),
+            )),
+            // Data columns replace blob sidecars; the other topics are Capella's.
+            _ => Capella::gossip(topic, message, validator),
+        }
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

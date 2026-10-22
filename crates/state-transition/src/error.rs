@@ -6,8 +6,8 @@
 use axiom_bls::BlsError;
 use axiom_ssz::CapacityError;
 use axiom_types::{
-    Bytes32, CommitteeIndex, Epoch, ForkName, Hash32, Root, Slot, ValidatorIndex,
-    phase0::Checkpoint,
+    BuilderIndex, Bytes32, CommitteeIndex, Epoch, ForkName, Gwei, Hash32, Root, Slot,
+    ValidatorIndex, phase0::Checkpoint,
 };
 use thiserror::Error;
 
@@ -21,6 +21,14 @@ pub enum StateError {
         /// The index asked for.
         index: ValidatorIndex,
         /// Validators in the registry, one more than the largest valid index.
+        registry_size: usize,
+    },
+    /// A builder index points past the builder registry.
+    #[error("builder {index} is not in the registry of {registry_size}")]
+    UnknownBuilder {
+        /// The index asked for.
+        index: BuilderIndex,
+        /// Builders in the registry, one more than the largest valid index.
         registry_size: usize,
     },
     /// A registry key does not decompress to a curve point.
@@ -225,6 +233,22 @@ pub enum BlockError {
     /// The block carries deposits, which Fulu removed.
     #[error("block carries {0} deposits")]
     DepositsNotAllowed(usize),
+    /// The block does not carry every pending deposit from the contract it can.
+    #[error("block carries {actual} deposits, {expected} expected")]
+    DepositCountMismatch {
+        /// Deposits the block must carry.
+        expected: u64,
+        /// Deposits the block carries.
+        actual: usize,
+    },
+    /// A deposit's branch does not lead to the deposit root the state adopted.
+    #[error("deposit {index} is not under deposit root {deposit_root}")]
+    InvalidDepositProof {
+        /// Position of the deposit in the contract's tree.
+        index: u64,
+        /// The contract root the state's eth1 data holds.
+        deposit_root: Root,
+    },
     /// A proposer slashing does not show two distinct headers from one slot and proposer.
     #[error("proposer slashing of validator {proposer} is invalid: {reason}")]
     InvalidProposerSlashing {
@@ -277,6 +301,14 @@ pub enum BlockError {
     /// An attestation is included before its slot plus the inclusion delay.
     #[error("attestation of slot {slot} is included too early at slot {state_slot}")]
     AttestationTooEarly {
+        /// The attestation's slot.
+        slot: Slot,
+        /// The slot of the including block.
+        state_slot: Slot,
+    },
+    /// An attestation is included after its inclusion window, which Deneb lifted.
+    #[error("attestation of slot {slot} is included too late at slot {state_slot}")]
+    AttestationTooLate {
         /// The attestation's slot.
         slot: Slot,
         /// The slot of the including block.
@@ -337,6 +369,143 @@ pub enum BlockError {
         validator: ValidatorIndex,
         /// The rule the change breaks.
         reason: &'static str,
+    },
+    /// A block carries more operations of one kind than the spec allows.
+    ///
+    /// Gloas lists are progressive and carry no bound of their own, so processing checks it.
+    #[error("{count} {operation} exceed the limit of {limit}")]
+    TooManyOperations {
+        /// The kind of operation, such as attestations.
+        operation: &'static str,
+        /// Operations of that kind in the block or payload.
+        count: usize,
+        /// The most the spec allows.
+        limit: u64,
+    },
+    /// An indexed attestation names more validators than every committee of a slot holds.
+    #[error("{count} attesting indices exceed the limit of {limit}")]
+    TooManyAttestingIndices {
+        /// Indices in the attestation.
+        count: usize,
+        /// Committee size limit times committees per slot.
+        limit: u64,
+    },
+    /// An attestation's index field is not a payload availability signal of 0 or 1.
+    #[error("attestation payload index {0} is neither 0 nor 1")]
+    AttestationPayloadIndexOutOfRange(CommitteeIndex),
+    /// A vote for the block of its own slot signals a payload, which cannot exist before it.
+    #[error("same-slot attestation of slot {slot} signals payload index {index}, not 0")]
+    SameSlotPayloadSignal {
+        /// The attestation's slot.
+        slot: Slot,
+        /// The payload index it carries.
+        index: CommitteeIndex,
+    },
+    /// An execution payload bid breaks one of its rules.
+    #[error("bid of builder {builder}: {reason}")]
+    InvalidBid {
+        /// The builder the bid names.
+        builder: BuilderIndex,
+        /// The rule the bid breaks.
+        reason: &'static str,
+    },
+    /// A proposer building its own payload bids a value, which only builders may.
+    #[error("self-built bid carries value {0}, not zero")]
+    SelfBuildBidValue(Gwei),
+    /// A builder's balance, net of what it owes, does not cover its bid.
+    #[error(
+        "builder {builder} bids {value} with balance {balance}, owing {owed} plus a reserve of {reserve}"
+    )]
+    BidNotCovered {
+        /// The builder.
+        builder: BuilderIndex,
+        /// The value of the bid.
+        value: Gwei,
+        /// The builder's balance.
+        balance: Gwei,
+        /// Withdrawals and payments the builder already owes.
+        owed: Gwei,
+        /// Balance the builder must keep, the minimum deposit.
+        reserve: Gwei,
+    },
+    /// A bid is for another slot than the block's.
+    #[error("bid slot {bid} is not state slot {state}")]
+    BidSlotMismatch {
+        /// The slot the bid names.
+        bid: Slot,
+        /// The state's slot.
+        state: Slot,
+    },
+    /// A bid does not build on the latest execution block.
+    #[error("bid parent hash {claimed} is not the latest block hash {expected}")]
+    BidParentHashMismatch {
+        /// The parent hash the bid names.
+        claimed: Hash32,
+        /// The latest execution block hash of the state.
+        expected: Hash32,
+    },
+    /// A bid's block hash equals its parent hash, so it commits to no new block.
+    #[error("bid block hash {0} repeats its parent hash")]
+    BidBlockHashRepeatsParent(Hash32),
+    /// A bid does not build on the previous slot's beacon block.
+    #[error("bid parent root {claimed} is not the previous slot's block root {expected}")]
+    BidParentRootMismatch {
+        /// The parent root the bid names.
+        claimed: Root,
+        /// Block root of the previous slot.
+        expected: Root,
+    },
+    /// A bid's randomness is not the current randao mix.
+    #[error("bid randomness {claimed} is not the randao mix {expected}")]
+    BidRandaoMismatch {
+        /// The randomness the bid carries.
+        claimed: Bytes32,
+        /// The state's randao mix of the current epoch.
+        expected: Bytes32,
+    },
+    /// A block reports execution requests of a parent whose payload never arrived.
+    #[error(
+        "bid builds on {bid_parent}, not on parent payload {parent_payload}, yet the block reports parent requests"
+    )]
+    RequestsOfEmptyParent {
+        /// The execution block the block's bid builds on.
+        bid_parent: Hash32,
+        /// Block hash the parent's bid committed to.
+        parent_payload: Hash32,
+    },
+    /// The parent execution requests a block reports are not those the parent's bid committed to.
+    #[error(
+        "parent execution requests have root {actual}, the parent bid committed to {committed}"
+    )]
+    ParentRequestsRootMismatch {
+        /// Root the parent's bid committed to.
+        committed: Root,
+        /// Root of the requests the block reports.
+        actual: Root,
+    },
+    /// A payload attestation votes on another block than the parent.
+    #[error("payload attestation votes on block {claimed}, the parent is {expected}")]
+    PayloadAttestationBlockMismatch {
+        /// The block root the attestation names.
+        claimed: Root,
+        /// The parent root of the block including it.
+        expected: Root,
+    },
+    /// A payload attestation is not for the previous slot.
+    #[error("payload attestation of slot {slot} is not for the slot before {state_slot}")]
+    PayloadAttestationSlotMismatch {
+        /// The attestation's slot.
+        slot: Slot,
+        /// The slot of the including block.
+        state_slot: Slot,
+    },
+    /// A payload timeliness committee was asked for outside the window the state keeps.
+    #[error("payload timeliness committee of slot {slot} is not kept at epoch {current}")]
+    PtcOutOfWindow {
+        /// The slot asked for.
+        slot: Slot,
+        /// The state's epoch.
+        current: Epoch,
     },
     /// A state invariant broke while processing.
     #[error("state invariant broke: {0}")]

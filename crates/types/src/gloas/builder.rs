@@ -41,6 +41,16 @@ pub struct Builder {
     pub withdrawable_epoch: Epoch,
 }
 
+impl Builder {
+    /// Whether the builder may bid: its deposit is finalized, and it has not started to exit.
+    ///
+    /// See `is_active_builder` in the Gloas beacon chain spec.
+    #[must_use]
+    pub fn is_active(&self, finalized_epoch: Epoch) -> bool {
+        self.deposit_epoch < finalized_epoch && self.withdrawable_epoch == Epoch::FAR_FUTURE
+    }
+}
+
 impl Container for Builder {
     const FIELDS: &'static [Option<usize>] = &[
         BlsPubkey::FIXED_SIZE,

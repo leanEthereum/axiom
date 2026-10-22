@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::elements::Elements;
-use crate::{CapacityError, DecodeError, Length, Root, Ssz};
+use crate::{CapacityError, DecodeError, GeneralizedIndex, Length, MerkleProof, Root, Ssz};
 
 /// A sequence of exactly `N` elements, the spec's `Vector[T, N]`.
 ///
@@ -173,6 +173,10 @@ impl<T: Ssz, N: Length> Ssz for Vector<T, N> {
 
     fn hash_tree_root(&self) -> Root {
         Elements::root(&self.items, N::LEN)
+    }
+
+    fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
+        Elements::prove(&self.items, N::LEN, index)
     }
 }
 

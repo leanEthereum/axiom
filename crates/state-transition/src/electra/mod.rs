@@ -11,7 +11,7 @@ mod upgrade;
 
 use axiom_types::{
     ChainConfig, Preset, ValidatorIndex,
-    accessors::{ForkState, ParticipationState, SyncCommitteeState, WithdrawalState},
+    accessors::{ParticipationState, SyncCommitteeState, WithdrawalState},
     electra::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
@@ -22,10 +22,13 @@ use crate::{
     altair::AltairEpoch,
     capella::epoch::HistoricalSummaryUpdate,
     electra::{
+        block::{BridgeDeposits, Exit, PayloadExecution, PayloadWithdrawals, RequestedDeposit},
         churn::{BalanceChurn, ChurnLimits},
-        epoch::{ConsolidationQueue, CorrelationPenalty, Hysteresis, RegistryUpdates},
+        epoch::{
+            ConsolidationQueue, CorrelationPenalty, DepositQueue, Hysteresis, RegistryUpdates,
+        },
     },
-    phase0::{Slashing, SlotRoots},
+    phase0::{Slashing, SlotRoots, block::RandaoReveal},
     sampling::WeightedSampler,
 };
 
@@ -87,17 +90,45 @@ impl<P: Preset> Fork for BeaconState<P> {
         ElectraEpoch::run(processor, step)
     }
 
+    /// Runs Electra's block processing.
+    ///
+    /// 1. The header, by phase0's rule.
+    /// 2. The withdrawals, by Electra's rule.
+    /// 3. The execution payload, by Electra's rule.
+    /// 4. The RANDAO reveal and the eth1 vote, by phase0's rules.
+    /// 5. The operations, with contract deposits bridged until requests take over.
+    /// 6. The sync aggregate, by Altair's rule.
+    ///
+    /// See `process_block` and `process_operations` in the Electra beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
-        _engine: &E,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
+        engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        processor.apply(header)?;
+        processor.apply(&PayloadWithdrawals(&body.execution_payload.withdrawals))?;
+        processor.apply(&PayloadExecution::new(body, engine))?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        processor.apply_all(&body.attestations)?;
+        // The spec asserts the deposit count first; no earlier operation moves the counts it reads.
+        processor.apply(&BridgeDeposits(&body.deposits))?;
+        for exit in &body.voluntary_exits {
+            processor.apply(&Exit(exit))?;
         }
-        .into())
+        processor.apply_all(&body.bls_to_execution_changes)?;
+        for request in &body.execution_requests.deposits {
+            processor.apply(&RequestedDeposit(request))?;
+        }
+        processor.apply_all(&body.execution_requests.withdrawals)?;
+        processor.apply_all(&body.execution_requests.consolidations)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }
 
@@ -133,6 +164,10 @@ impl ElectraEpoch {
             EpochStep::Slashings => {
                 CorrelationPenalty::new(&*processor.state.beacon, processor.total_active_balance)?
                     .apply(&mut processor.state)
+            }
+            EpochStep::PendingDeposits => {
+                let mut registry = processor.registry();
+                DepositQueue::new(&registry).apply(&mut registry)
             }
             EpochStep::PendingConsolidations => {
                 ConsolidationQueue::new(current).apply(&mut processor.state)

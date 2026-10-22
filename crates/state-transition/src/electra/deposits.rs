@@ -2,7 +2,7 @@
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_types::{
-    ChainConfig, Domain, Root,
+    ChainConfig, Domain, Gwei, Root,
     accessors::ParticipationState,
     constants::DOMAIN_DEPOSIT,
     electra::PendingDeposit,
@@ -37,7 +37,7 @@ impl DepositApplication<'_> {
             None => {
                 let skip = state.verification() == Verification::Skip;
                 if skip || self.has_valid_signature(config) {
-                    self.add_validator(state)?;
+                    self.add_validator(state, deposit.amount)?;
                 }
                 Ok(())
             }
@@ -68,22 +68,28 @@ impl DepositApplication<'_> {
         signature.verify(&key, &signing_root.0)
     }
 
-    /// Appends a new validator and its per-validator entries.
+    /// Appends a new validator with a starting balance, and its per-validator entries.
     ///
+    /// A contract deposit registers its key with no balance, and queues the amount.
     /// See `add_validator_to_registry` in the Electra beacon chain spec.
-    fn add_validator<S: ParticipationState>(
+    ///
+    /// # Errors
+    ///
+    /// Fails when a list is full.
+    pub fn add_validator<S: ParticipationState>(
         self,
         state: &mut CachedState<'_, S>,
+        balance: Gwei,
     ) -> Result<(), StateError> {
         let deposit = self.0;
         let validator = Validator::from_deposit::<S::Preset>(
             deposit.pubkey,
             deposit.withdrawal_credentials,
-            deposit.amount,
+            balance,
         );
         let beacon = &mut *state.beacon;
         beacon
-            .push_validator(validator, deposit.amount)
+            .push_validator(validator, balance)
             .map_err(|source| StateError::Capacity {
                 list: "validators",
                 source,

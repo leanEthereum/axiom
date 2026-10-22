@@ -1,20 +1,20 @@
-//! Networking vectors: custody assignment, and gossip validation.
+//! Networking vectors: custody assignment, and gossip validation, for one fork.
 
 use std::marker::PhantomData;
 
 use axiom_das::{CustodyGroup, NodeId};
 use axiom_ssz::U256;
-use axiom_types::{ChainConfig, ForkName, Preset};
+use axiom_types::{ChainConfig, Preset};
 use axiom_yaml::Yaml;
 
 use super::gossip::GossipCase;
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Runner, forks::SpecFork};
 
-/// Checks custody assignment against the vectors.
+/// Checks custody assignment and gossip validation against one fork's vectors.
 #[derive(Debug, Default)]
-pub struct Networking<P>(PhantomData<P>);
+pub struct Networking<P, F>(PhantomData<(P, F)>);
 
-impl<P: Preset> Networking<P> {
+impl<P: Preset, F: SpecFork> Networking<P, F> {
     /// The expected result list of a case.
     fn result(meta: &Yaml) -> Result<Vec<u64>, Failure> {
         meta.get("result")
@@ -30,13 +30,13 @@ impl<P: Preset> Networking<P> {
     }
 }
 
-impl<P: Preset> Runner for Networking<P> {
+impl<P: Preset, F: SpecFork> Runner for Networking<P, F> {
     fn name(&self) -> &'static str {
         "networking"
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu);
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(F::FORK);
         let meta = case.yaml("meta.yaml")?;
         match handler {
             "get_custody_groups" => {
@@ -72,13 +72,8 @@ impl<P: Preset> Runner for Networking<P> {
                 }
                 Ok(())
             }
-            gossip if gossip.starts_with("gossip_") => GossipCase::<P>::new(case)?.run(),
+            gossip if gossip.starts_with("gossip_") => GossipCase::<P, F>::new(case)?.run(),
             other => Err(Failure(format!("unsupported handler {other}"))),
         }
-    }
-
-    fn skip_handler(&self, handler: &str) -> Option<&'static str> {
-        (handler == "gossip_partial_data_column_sidecar")
-            .then_some("partial data column gossip is an optional extension, not implemented")
     }
 }
