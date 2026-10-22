@@ -10,7 +10,7 @@ use crate::{identity::PeerId, protobuf::ProtobufError};
 pub enum SecureError {
     /// A handshake message is not valid protobuf or has a malformed frame.
     #[error("malformed handshake message: {0}")]
-    Framing(ProtobufError),
+    Framing(#[from] ProtobufError),
 
     /// A handshake message is shorter than its pattern requires.
     #[error("handshake message too short")]
@@ -52,10 +52,4 @@ pub enum SecureError {
     /// The handshake received more bytes after its last message was due.
     #[error("unexpected data during handshake")]
     UnexpectedData,
-}
-
-impl From<ProtobufError> for SecureError {
-    fn from(error: ProtobufError) -> Self {
-        Self::Framing(error)
-    }
 }

@@ -269,7 +269,7 @@ pub fn split_length_prefixed(
 pub enum ProtobufError {
     /// A key, length, or value varint is malformed.
     #[error("malformed varint: {0}")]
-    Varint(VarintError),
+    Varint(#[from] VarintError),
 
     /// The input ends inside a field.
     #[error("message ends inside a field")]
@@ -321,12 +321,6 @@ pub enum ProtobufError {
         /// Largest count accepted.
         max: usize,
     },
-}
-
-impl From<VarintError> for ProtobufError {
-    fn from(error: VarintError) -> Self {
-        Self::Varint(error)
-    }
 }
 
 #[cfg(test)]

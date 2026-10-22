@@ -133,7 +133,7 @@ fn decode_list(mut body: &[u8]) -> Result<Vec<String>, NegotiationError> {
 pub enum NegotiationError {
     /// A length prefix is malformed or above the message bound.
     #[error("malformed message frame: {0}")]
-    Framing(ProtobufError),
+    Framing(#[from] ProtobufError),
 
     /// A message does not end with a newline.
     #[error("message lacks its trailing newline")]
@@ -162,10 +162,4 @@ pub enum NegotiationError {
     /// The dialer was given no protocol to propose.
     #[error("no protocol to propose")]
     NothingToPropose,
-}
-
-impl From<ProtobufError> for NegotiationError {
-    fn from(error: ProtobufError) -> Self {
-        Self::Framing(error)
-    }
 }

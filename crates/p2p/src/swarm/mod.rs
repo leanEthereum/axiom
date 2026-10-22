@@ -265,49 +265,25 @@ pub enum NetworkEvent {
 pub enum NetworkError {
     /// A socket operation failed.
     #[error("i/o error: {0}")]
-    Io(io::Error),
+    Io(#[from] io::Error),
     /// The address is not a TCP address.
     #[error("unsupported address {0}")]
     UnsupportedAddress(Multiaddr),
     /// The address is malformed.
     #[error("invalid address: {0}")]
-    InvalidAddress(MultiaddrError),
+    InvalidAddress(#[from] MultiaddrError),
     /// A protocol negotiation failed.
     #[error("negotiation failed: {0}")]
-    Negotiation(NegotiationError),
+    Negotiation(#[from] NegotiationError),
     /// The security handshake failed.
     #[error("security handshake failed: {0}")]
-    Security(SecureError),
+    Security(#[from] SecureError),
     /// The peer closed the connection.
     #[error("connection closed")]
     ConnectionClosed,
     /// The swarm task has stopped.
     #[error("network has shut down")]
     Shutdown,
-}
-
-impl From<io::Error> for NetworkError {
-    fn from(error: io::Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-impl From<NegotiationError> for NetworkError {
-    fn from(error: NegotiationError) -> Self {
-        Self::Negotiation(error)
-    }
-}
-
-impl From<SecureError> for NetworkError {
-    fn from(error: SecureError) -> Self {
-        Self::Security(error)
-    }
-}
-
-impl From<MultiaddrError> for NetworkError {
-    fn from(error: MultiaddrError) -> Self {
-        Self::InvalidAddress(error)
-    }
 }
 
 /// A command from the handle to the swarm task.

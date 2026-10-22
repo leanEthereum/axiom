@@ -307,13 +307,7 @@ pub enum MultiaddrError {
 
     /// A peer layer holds a malformed identifier.
     #[error("malformed peer id layer: {0}")]
-    InvalidPeerId(PeerIdError),
-}
-
-impl From<PeerIdError> for MultiaddrError {
-    fn from(error: PeerIdError) -> Self {
-        Self::InvalidPeerId(error)
-    }
+    InvalidPeerId(#[from] PeerIdError),
 }
 
 #[cfg(test)]

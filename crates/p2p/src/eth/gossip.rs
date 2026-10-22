@@ -97,7 +97,7 @@ pub enum GossipDecodeError {
     },
     /// The payload is not a valid snappy block within the size bound.
     #[error("invalid snappy payload: {0}")]
-    Snappy(SnappyError),
+    Snappy(#[source] SnappyError),
 }
 
 #[cfg(test)]

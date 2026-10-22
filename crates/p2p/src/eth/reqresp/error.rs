@@ -11,7 +11,7 @@ use crate::varint::VarintError;
 pub enum ReqRespError {
     /// The length prefix is not a valid varint of at most 10 bytes.
     #[error("invalid length prefix: {0}")]
-    Varint(VarintError),
+    Varint(#[from] VarintError),
 
     /// The declared SSZ length is outside the bounds of the type or the payload limit.
     #[error("declared length {len} outside {min}..={max}")]
@@ -37,7 +37,7 @@ pub enum ReqRespError {
 
     /// The snappy frames are malformed or decode past the declared length.
     #[error("invalid snappy frames: {0}")]
-    Snappy(SnappyError),
+    Snappy(#[from] SnappyError),
 
     /// Bytes follow a complete request.
     #[error("bytes after the end of the payload")]
@@ -46,16 +46,4 @@ pub enum ReqRespError {
     /// The stream ended inside a request or a response chunk.
     #[error("stream ended inside a payload")]
     UnexpectedEof,
-}
-
-impl From<VarintError> for ReqRespError {
-    fn from(error: VarintError) -> Self {
-        Self::Varint(error)
-    }
-}
-
-impl From<SnappyError> for ReqRespError {
-    fn from(error: SnappyError) -> Self {
-        Self::Snappy(error)
-    }
 }
