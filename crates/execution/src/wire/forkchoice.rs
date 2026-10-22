@@ -153,3 +153,38 @@ impl JsonCodec for ForkchoiceUpdated {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_ssz::List;
+    use axiom_types::Minimal;
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::wire::payload::tests::withdrawal;
+
+    proptest! {
+        #[test]
+        fn attributes_and_state_round_trip(
+            withdrawals in proptest::collection::vec(withdrawal(), 0..=4),
+            timestamp in any::<u64>(),
+            hashes in any::<[[u8; 32]; 3]>(),
+        ) {
+            let attributes = PayloadAttributes::<Minimal> {
+                timestamp,
+                prev_randao: Bytes32(hashes[0]),
+                suggested_fee_recipient: ExecutionAddress([hashes[1][0]; 20]),
+                withdrawals: List::try_from(withdrawals).unwrap(),
+                parent_beacon_block_root: Root(hashes[2]),
+            };
+            prop_assert_eq!(PayloadAttributes::from_json(&attributes.to_json()), Ok(attributes));
+
+            let state = ForkchoiceState {
+                head_block_hash: Hash32(hashes[0]),
+                safe_block_hash: Hash32(hashes[1]),
+                finalized_block_hash: Hash32(hashes[2]),
+            };
+            prop_assert_eq!(ForkchoiceState::from_json(&state.to_json()), Ok(state));
+        }
+    }
+}

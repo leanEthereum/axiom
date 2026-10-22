@@ -42,3 +42,34 @@ impl Counter {
         self.value.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use proptest::{collection::vec, prelude::*};
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn concurrent_increments_all_count(per_thread in vec(0_u64..2_000, 2..8)) {
+            let counter = Counter::new();
+
+            // Each thread adds one at a time, racing the others on the same atomic.
+            thread::scope(|scope| {
+                for &count in &per_thread {
+                    let counter = counter.clone();
+                    scope.spawn(move || {
+                        for _ in 0..count {
+                            counter.inc();
+                        }
+                    });
+                }
+            });
+
+            // No increment is lost: the total is the sum of every thread's share.
+            prop_assert_eq!(counter.get(), per_thread.iter().sum::<u64>());
+        }
+    }
+}
