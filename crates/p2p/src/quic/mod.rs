@@ -16,12 +16,14 @@
 mod cid;
 mod crypto;
 mod error;
-pub mod packet;
+mod frame;
+mod packet;
 mod range_set;
 mod reader;
 mod stream;
 #[cfg(test)]
 mod testing;
+mod transport_parameters;
 mod varint;
 
 pub use cid::ConnectionId;

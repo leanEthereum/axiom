@@ -4,7 +4,7 @@ use std::fmt;
 
 /// A packet number in one packet number space, below 2^62.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PacketNumber(pub u64);
+pub(crate) struct PacketNumber(pub u64);
 
 impl PacketNumber {
     /// Bytes of the truncated encoding a sender writes, from one to four.
@@ -13,7 +13,7 @@ impl PacketNumber {
     /// That span runs from the largest acknowledged number to this one.
     /// See RFC 9000, appendix A.2.
     #[must_use]
-    pub fn encoded_len(self, largest_acked: Option<Self>) -> usize {
+    pub(crate) fn encoded_len(self, largest_acked: Option<Self>) -> usize {
         let unacked = match largest_acked {
             Some(acked) => self.0.saturating_sub(acked.0),
             None => self.0 + 1,
@@ -26,7 +26,7 @@ impl PacketNumber {
 
     /// The low bytes of the number, as the header carries them.
     #[must_use]
-    pub const fn truncate(self, len: usize) -> u32 {
+    pub(crate) const fn truncate(self, len: usize) -> u32 {
         // Invariant: len is 1 to 4, so the mask keeps at most 32 bits.
         (self.0 & ((1 << (8 * len)) - 1)) as u32
     }
@@ -36,7 +36,7 @@ impl PacketNumber {
     /// The candidate nearest the number after the largest one processed wins.
     /// See RFC 9000, appendix A.3.
     #[must_use]
-    pub const fn decode(truncated: u32, len: usize, largest: Option<Self>) -> Self {
+    pub(crate) const fn decode(truncated: u32, len: usize, largest: Option<Self>) -> Self {
         let expected = match largest {
             Some(largest) => largest.0 + 1,
             None => 0,
@@ -57,7 +57,7 @@ impl PacketNumber {
 
     /// The next number.
     #[must_use]
-    pub const fn next(self) -> Self {
+    pub(crate) const fn next(self) -> Self {
         Self(self.0 + 1)
     }
 }

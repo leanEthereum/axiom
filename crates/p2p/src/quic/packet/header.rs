@@ -29,7 +29,7 @@ pub(crate) const RETRY_TAG_LEN: usize = 16;
 
 /// The type of a long-header packet, per RFC 9000, section 17.2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum LongType {
+pub(crate) enum LongType {
     /// The first flights of the handshake, under keys any observer can derive.
     Initial,
     /// Early data, which this stack never sends and drops on receipt.
@@ -43,7 +43,7 @@ pub enum LongType {
 impl LongType {
     /// The two type bits in the first byte.
     #[must_use]
-    pub const fn bits(self) -> u8 {
+    pub(crate) const fn bits(self) -> u8 {
         match self {
             Self::Initial => 0,
             Self::ZeroRtt => 1,
@@ -54,7 +54,7 @@ impl LongType {
 
     /// The type of a first byte.
     #[must_use]
-    pub const fn from_first_byte(first: u8) -> Self {
+    pub(crate) const fn from_first_byte(first: u8) -> Self {
         match (first >> 4) & 0x03 {
             0 => Self::Initial,
             1 => Self::ZeroRtt,
@@ -66,7 +66,7 @@ impl LongType {
 
 /// The readable part of a received packet's header.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Header<'a> {
+pub(crate) enum Header<'a> {
     /// A version 1 long-header packet with a protected packet number.
     Long {
         /// Initial, 0-RTT, or Handshake.
@@ -116,13 +116,13 @@ pub enum Header<'a> {
 
 /// One packet cut out of a datagram, its header parsed, its protection still on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProtectedPacket<'a> {
+pub(crate) struct ProtectedPacket<'a> {
     /// The parsed header.
-    pub header: Header<'a>,
+    pub(crate) header: Header<'a>,
     /// The whole packet: header, packet number, and sealed payload.
-    pub bytes: &'a [u8],
+    pub(crate) bytes: &'a [u8],
     /// Where the packet number starts, for protected packets.
-    pub pn_offset: usize,
+    pub(crate) pn_offset: usize,
 }
 
 impl<'a> ProtectedPacket<'a> {
@@ -140,7 +140,7 @@ impl<'a> ProtectedPacket<'a> {
     /// # Errors
     ///
     /// Fails on a header that does not parse.
-    pub fn parse(
+    pub(crate) fn parse(
         datagram: &'a [u8],
         local_cid_len: usize,
     ) -> Result<(Self, &'a [u8]), DecodeError> {
