@@ -35,8 +35,9 @@ None of them is ever traded to zero.
    When a source contradicts memory, the source wins.
 2. Read the neighbouring code, and match its types, traits, and idioms.
    New code should be indistinguishable from the best code already here.
-3. Read a strong existing implementation when one exists, such as lighthouse or grandine.
-   Note what it got right, and which of its mistakes to avoid.
+3. Read how the existing consensus clients implement it, across languages:
+   Lighthouse, Prysm, Teku, Nimbus, Lodestar, Grandine, and Caplin.
+   Note what they got right, and which of their mistakes to avoid.
 4. Design the API before the body: types, signatures, bounds, and error enums.
 5. Write the clear, correct version first.
    Specialize a hot path only where a measurement points.
