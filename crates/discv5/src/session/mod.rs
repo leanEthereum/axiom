@@ -82,6 +82,24 @@ impl Session {
         Nonce(nonce)
     }
 
+    /// Seals a message in an ordinary packet, with a fresh nonce and masking IV.
+    ///
+    /// # Returns
+    ///
+    /// The nonce, which a WHOAREYOU answer would echo, and the datagram.
+    pub fn seal_message(
+        &mut self,
+        rng: &mut Csprng,
+        src_id: NodeId,
+        dest: &NodeId,
+        message: &Message,
+    ) -> (Nonce, Vec<u8>) {
+        let nonce = self.next_nonce(rng);
+        let auth = AuthData::Message { src_id };
+        let datagram = self.seal(MaskingIv(rng.bytes()), nonce, auth, message, dest);
+        (nonce, datagram)
+    }
+
     /// Seals a message into a packet for a destination.
     ///
     /// The caller picks the masking IV, nonce, and authdata; tests pin them to vectors.
