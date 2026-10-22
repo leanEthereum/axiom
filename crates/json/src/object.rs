@@ -45,6 +45,15 @@ impl Object {
             .map(|(_, value)| value)
     }
 
+    /// The value of a member, for changing it in place.
+    #[must_use]
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Json> {
+        self.members
+            .iter_mut()
+            .find(|(member, _)| member == name)
+            .map(|(_, value)| value)
+    }
+
     /// Sets a member, keeping its position when it already exists.
     ///
     /// # Returns

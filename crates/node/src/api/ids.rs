@@ -3,10 +3,14 @@
 use std::str::FromStr;
 
 use axiom_http::Request;
-use axiom_json::Data;
-use axiom_types::{Preset, Root, Slot, combined::SignedBeaconBlock};
+use axiom_json::{Data, Json};
+use axiom_state_transition::State;
+use axiom_types::{
+    BlsPubkey, ChainConfig, Preset, Root, Slot, ValidatorIndex, accessors::CoreState,
+    combined::SignedBeaconBlock,
+};
 
-use super::ApiError;
+use super::{ApiContext, ApiError, reply::Freshness};
 use crate::{Chain, ChainError};
 
 /// A block named in a path: a keyword, a slot, or a root.
@@ -138,24 +142,6 @@ impl StateId {
             .parse()
     }
 
-    /// The block whose post-state this names, and its root, or a 404.
-    ///
-    /// # Errors
-    ///
-    /// Fails with a 404 when the node holds no such state.
-    pub(crate) fn find_block<P: Preset>(
-        self,
-        chain: &Chain<P>,
-    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
-        let root = self
-            .resolve(chain)?
-            .ok_or_else(|| ApiError::not_found("state not found"))?;
-        let block = chain
-            .block(root)?
-            .ok_or_else(|| ApiError::not_found("state not found"))?;
-        Ok((root, block))
-    }
-
     /// The root of the block whose post-state this names, if the node holds that state.
     ///
     /// # Errors
@@ -180,6 +166,163 @@ impl StateId {
     }
 }
 
+impl StateId {
+    /// Finds the state this names, by value, with the block it follows and its freshness.
+    ///
+    /// # Overview
+    ///
+    /// A keyword or slot names the canonical state at a slot.
+    /// When no block was proposed at that slot, the block before it is advanced through the empty slots.
+    /// The justified and finalized keywords name the checkpoint state, at the start of its epoch.
+    ///
+    /// Advancing runs slot and epoch processing, so it is left to the caller, off the chain thread.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a 404 when the node knows no such state or no longer holds it.
+    pub(crate) fn locate<P: Preset>(self, chain: &Chain<P>) -> Result<StateView<P>, ApiError> {
+        let head = chain.head();
+        let (root, target) = match self {
+            Self::Root(state_root) => {
+                let root = self
+                    .resolve(chain)?
+                    .ok_or_else(|| ApiError::not_found(format!("state {state_root} not found")))?;
+                (root, None)
+            }
+            Self::Block(BlockId::Root(root)) => (root, None),
+            Self::Block(BlockId::Head) => (head.root, None),
+            Self::Block(BlockId::Finalized) => (
+                head.finalized.root,
+                Some(head.finalized.epoch.start_slot::<P>()),
+            ),
+            Self::Block(BlockId::Justified) => (
+                head.justified.root,
+                Some(head.justified.epoch.start_slot::<P>()),
+            ),
+            Self::Block(BlockId::Genesis) => (Self::canonical(chain, Slot(0))?, Some(Slot(0))),
+            Self::Block(BlockId::Slot(slot)) => {
+                // A slot the clock has not reached has no state yet.
+                if slot > chain.store().current_slot() {
+                    return Err(ApiError::not_found(format!("slot {slot} is in the future")));
+                }
+                (Self::canonical(chain, slot)?, Some(slot))
+            }
+        };
+        let state = chain
+            .state_by_block(root)?
+            .ok_or_else(|| ApiError::not_found(format!("state of block {root} is not held")))?;
+        // Only a later slot needs advancing; an earlier one is the block's own slot.
+        let target = target.filter(|target| *target > state.beacon().slot());
+        let slot = target.unwrap_or_else(|| state.beacon().slot());
+        Ok(StateView {
+            state,
+            freshness: ApiContext::freshness(chain, root, slot),
+            target,
+        })
+    }
+
+    /// The canonical block at or before a slot, or a 404.
+    fn canonical<P: Preset>(chain: &Chain<P>, slot: Slot) -> Result<Root, ApiError> {
+        chain.canonical_root_at_or_before(slot)?.ok_or_else(|| {
+            ApiError::not_found(format!("no canonical block at or before slot {slot}"))
+        })
+    }
+}
+
+/// A state a request named, held by value.
+///
+/// States share their large collections, so holding one by value is cheap.
+#[derive(Clone, Debug)]
+pub(crate) struct StateView<P: Preset> {
+    /// The state.
+    pub state: State<P>,
+    /// Whether the state is optimistic and whether it is finalized.
+    pub freshness: Freshness,
+    /// The slot the state still has to reach through empty slots, if any.
+    target: Option<Slot>,
+}
+
+impl<P: Preset> StateView<P> {
+    /// Runs the empty slots up to the slot the request named.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a 500 when slot processing fails, which a valid state never does.
+    pub(crate) fn advance(&mut self, config: &ChainConfig) -> Result<(), ApiError> {
+        if let Some(target) = self.target.take() {
+            self.state
+                .process_slots(config, target)
+                .map_err(|error| ApiError::internal(format!("cannot advance state: {error}")))?;
+        }
+        Ok(())
+    }
+}
+
+/// A validator named in a request: its index or its public key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValidatorId {
+    /// An index into the registry.
+    Index(ValidatorIndex),
+    /// A 48-byte public key.
+    Pubkey(BlsPubkey),
+}
+
+impl FromStr for ValidatorId {
+    type Err = ApiError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || ApiError::bad_request(format!("invalid validator id: {text}"));
+        if text.starts_with("0x") {
+            <[u8; 48]>::from_data(text)
+                .map(|bytes| Self::Pubkey(BlsPubkey(bytes)))
+                .map_err(|_| invalid())
+        } else {
+            text.parse()
+                .map(|index| Self::Index(ValidatorIndex(index)))
+                .map_err(|_| invalid())
+        }
+    }
+}
+
+impl ValidatorId {
+    /// The validators a request body lists, as a JSON array of identifier strings.
+    ///
+    /// An empty body lists none, which routes read as every validator.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a bad request when the body is not such an array.
+    pub(crate) fn list_from_body(body: &[u8]) -> Result<Vec<Self>, ApiError> {
+        if body.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Vec::new());
+        }
+        let json = Json::parse(body)
+            .map_err(|error| ApiError::bad_request(format!("malformed body: {error}")))?;
+        let items = json
+            .as_array()
+            .ok_or_else(|| ApiError::bad_request("body is not an array of validator ids"))?;
+        items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .ok_or_else(|| ApiError::bad_request("a validator id is not a string"))?
+                    .parse()
+            })
+            .collect()
+    }
+
+    /// The registry index this names in a state, if the validator exists there.
+    pub(crate) fn index<P: Preset>(self, state: &mut State<P>) -> Option<ValidatorIndex> {
+        match self {
+            Self::Index(index) => {
+                let known = (index.0 as usize) < state.beacon().validators().len();
+                known.then_some(index)
+            }
+            Self::Pubkey(pubkey) => state.validator_index(&pubkey),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +340,24 @@ mod tests {
         // A root names a state directly, a keyword names it through its block.
         assert_eq!(root.parse(), Ok(StateId::Root(Root([0xab; 32]))));
         assert_eq!("head".parse(), Ok(StateId::Block(BlockId::Head)));
+    }
+
+    #[test]
+    fn validator_ids_are_indices_or_keys() {
+        let key = format!("0x{}", "cd".repeat(48));
+        assert_eq!("7".parse(), Ok(ValidatorId::Index(ValidatorIndex(7))));
+        assert_eq!(key.parse(), Ok(ValidatorId::Pubkey(BlsPubkey([0xcd; 48]))));
+
+        // A short key and a negative index are both refused.
+        for text in ["0xcd", "-1"] {
+            assert_eq!(
+                text.parse::<ValidatorId>(),
+                Err(ApiError::bad_request(format!(
+                    "invalid validator id: {text}"
+                ))),
+                "{text}"
+            );
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod clock;
 mod config;
 mod engine;
 mod error;
+mod events;
 pub(crate) mod network;
 mod proposer;
 mod publish;
@@ -31,6 +32,10 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig, ProposerSettings};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
+pub use events::{
+    ApiEvent, EventHub, EventSender, EventSubscriptions, EventTopic, HubStopped, TopicSet,
+    UnknownTopic,
+};
 pub use network::{DiscoverySettings, NodeKey};
 pub use proposer::{BlockOrder, ProposerError, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};

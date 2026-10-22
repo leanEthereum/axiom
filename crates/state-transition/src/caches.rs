@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axiom_types::{Epoch, ForkName, Slot, ValidatorIndex, accessors::CoreState};
 
-use crate::{EpochCommittees, PubkeyCache, StateError, Verification};
+use crate::{EpochCommittees, PubkeyCache, StateError, Verification, rewards::ProposerLedger};
 
 /// Derived values that survive a fork upgrade, since no fork changed how they are computed.
 ///
@@ -25,6 +25,8 @@ pub struct Caches {
     /// Within a slot the proposer is fixed: blocks change neither the active set nor effective balances.
     /// Before Fulu each draw walks a shuffle, so a block's several lookups share one.
     pub(crate) proposer: Option<(ForkName, Slot, ValidatorIndex)>,
+    /// What the block being processed has paid its proposer, by source.
+    pub(crate) proposer_ledger: ProposerLedger,
 }
 
 impl Caches {
@@ -37,6 +39,7 @@ impl Caches {
             committees: Vec::new(),
             verification: Verification::Verify,
             proposer: None,
+            proposer_ledger: ProposerLedger::default(),
         }
     }
 

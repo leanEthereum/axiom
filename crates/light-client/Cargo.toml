@@ -14,7 +14,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-beacon-json.workspace = true
 axiom-bls.workspace = true
+axiom-json.workspace = true
 axiom-ssz.workspace = true
 axiom-types.workspace = true
 thiserror.workspace = true

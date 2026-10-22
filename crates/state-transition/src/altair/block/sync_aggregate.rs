@@ -2,14 +2,14 @@
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_types::{
-    Preset, Root, ValidatorIndex,
+    Gwei, Preset, Root, ValidatorIndex,
     accessors::SyncCommitteeState,
     altair::SyncAggregate,
     constants::{DOMAIN_SYNC_COMMITTEE, PROPOSER_WEIGHT, SYNC_REWARD_WEIGHT, WEIGHT_DENOMINATOR},
     phase0::SigningData,
 };
 
-use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
+use crate::{ActiveBalance, BlockError, BlockProcessor, Fork, Operation, StateError};
 
 impl<S: Fork + SyncCommitteeState> Operation<S> for SyncAggregate<S::Preset> {
     /// Checks the sync committee's signature over the parent block, and settles its rewards.
@@ -58,17 +58,10 @@ impl<S: Fork + SyncCommitteeState> Operation<S> for SyncAggregate<S::Preset> {
         }
 
         // Phase 2: rewards, as a share of one slot's sync reward budget.
-        let total_active_balance = processor.total_active_balance;
-        let total_active_increments =
-            total_active_balance.0 / S::Preset::EFFECTIVE_BALANCE_INCREMENT;
-        let total_base_rewards =
-            total_active_balance.base_reward_per_increment::<S::Preset>() * total_active_increments;
-        let max_participant_rewards = total_base_rewards * SYNC_REWARD_WEIGHT
-            / WEIGHT_DENOMINATOR
-            / S::Preset::SLOTS_PER_EPOCH;
-        let participant_reward = max_participant_rewards / S::Preset::SYNC_COMMITTEE_SIZE;
-        let proposer_reward =
-            participant_reward * PROPOSER_WEIGHT / (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT);
+        let SyncRewardRates {
+            participant: participant_reward,
+            proposer: proposer_reward,
+        } = SyncRewardRates::new::<S::Preset>(processor.total_active_balance);
 
         let proposer = processor.proposer()?;
         for (index, bit) in indices.into_iter().zip(self.sync_committee_bits.iter()) {
@@ -79,6 +72,7 @@ impl<S: Fork + SyncCommitteeState> Operation<S> for SyncAggregate<S::Preset> {
                 processor
                     .state
                     .increase_balance(proposer, proposer_reward)?;
+                processor.state.caches.proposer_ledger.sync_aggregate += proposer_reward;
             } else {
                 processor
                     .state
@@ -86,6 +80,37 @@ impl<S: Fork + SyncCommitteeState> Operation<S> for SyncAggregate<S::Preset> {
             }
         }
         Ok(())
+    }
+}
+
+/// What one sync committee bit is worth, to its member and to the proposer.
+///
+/// A member gains the participant amount for a set bit and loses it for a clear one.
+/// See `process_sync_aggregate` in the Altair beacon chain spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncRewardRates {
+    /// What a member gains by signing, or loses by not signing.
+    pub participant: Gwei,
+    /// What the proposer gains for each signing member.
+    pub proposer: Gwei,
+}
+
+impl SyncRewardRates {
+    /// The rates under an epoch's total active balance.
+    ///
+    /// The committee shares a slot's part of the sync reward weight equally.
+    #[must_use]
+    pub fn new<P: Preset>(total_active_balance: ActiveBalance) -> Self {
+        let total_active_increments = total_active_balance.0 / P::EFFECTIVE_BALANCE_INCREMENT;
+        let total_base_rewards =
+            total_active_balance.base_reward_per_increment::<P>() * total_active_increments;
+        let max_participant_rewards =
+            total_base_rewards * SYNC_REWARD_WEIGHT / WEIGHT_DENOMINATOR / P::SLOTS_PER_EPOCH;
+        let participant = max_participant_rewards / P::SYNC_COMMITTEE_SIZE;
+        Self {
+            participant,
+            proposer: participant * PROPOSER_WEIGHT / (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT),
+        }
     }
 }
 

@@ -52,18 +52,6 @@ const MAX_CASE_BYTES: usize = 1 << 30;
 ///
 /// A container in neither this list nor a fork's table fails the run, so none is skipped silently.
 const OUT_OF_SCOPE: &[(&str, &str)] = &[
-    ("BeaconState", "state endpoints are outside this crate"),
-    ("Validator", "state endpoints are outside this crate"),
-    ("HistoricalBatch", "a state component"),
-    ("HistoricalSummary", "a state component"),
-    ("PendingAttestation", "a state component"),
-    ("PendingConsolidation", "a state component"),
-    ("PendingDeposit", "a state component"),
-    ("PendingPartialWithdrawal", "a state component"),
-    ("SyncCommittee", "a state component"),
-    ("Builder", "a state component"),
-    ("BuilderPendingPayment", "a state component"),
-    ("BuilderPendingWithdrawal", "a state component"),
     ("DepositMessage", "signed, never sent"),
     ("ForkData", "signed, never sent"),
     ("SigningData", "signed, never sent"),
@@ -72,26 +60,6 @@ const OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("PowBlock", "an execution layer view"),
     ("NewPayloadRequest", "an engine API request"),
     ("IndexedPayloadAttestation", "internal to block processing"),
-    (
-        "LightClientBootstrap",
-        "light client endpoints are outside this crate",
-    ),
-    (
-        "LightClientFinalityUpdate",
-        "light client endpoints are outside this crate",
-    ),
-    (
-        "LightClientHeader",
-        "light client endpoints are outside this crate",
-    ),
-    (
-        "LightClientOptimisticUpdate",
-        "light client endpoints are outside this crate",
-    ),
-    (
-        "LightClientUpdate",
-        "light client endpoints are outside this crate",
-    ),
     ("BlobIdentifier", "a peer-to-peer request"),
     ("DataColumnsByRootIdentifier", "a peer-to-peer request"),
     ("MatrixEntry", "internal to data availability sampling"),
@@ -633,6 +601,217 @@ fn gloas_table<P: Preset>() -> Vec<Entry> {
     table
 }
 
+/// The phase0 state and light client containers, which the state and light client routes carry.
+fn phase0_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<phase0::BeaconState<P>>),
+        ("HistoricalBatch", check::<phase0::HistoricalBatch<P>>),
+        ("PendingAttestation", check::<phase0::PendingAttestation<P>>),
+        ("Validator", check::<phase0::Validator>),
+    ]
+}
+
+/// The altair state and light client containers, which the state and light client routes carry.
+fn altair_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<altair::BeaconState<P>>),
+        ("HistoricalBatch", check::<altair::HistoricalBatch<P>>),
+        (
+            "LightClientBootstrap",
+            check::<altair::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<altair::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<altair::LightClientHeader>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<altair::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<altair::LightClientUpdate<P>>),
+        ("SyncCommittee", check::<altair::SyncCommittee<P>>),
+        ("Validator", check::<altair::Validator>),
+    ]
+}
+
+/// The bellatrix state and light client containers, which the state and light client routes carry.
+fn bellatrix_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<bellatrix::BeaconState<P>>),
+        ("HistoricalBatch", check::<bellatrix::HistoricalBatch<P>>),
+        (
+            "LightClientBootstrap",
+            check::<bellatrix::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<bellatrix::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<bellatrix::LightClientHeader>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<bellatrix::LightClientOptimisticUpdate<P>>,
+        ),
+        (
+            "LightClientUpdate",
+            check::<bellatrix::LightClientUpdate<P>>,
+        ),
+        ("SyncCommittee", check::<bellatrix::SyncCommittee<P>>),
+        ("Validator", check::<bellatrix::Validator>),
+    ]
+}
+
+/// The capella state and light client containers, which the state and light client routes carry.
+fn capella_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<capella::BeaconState<P>>),
+        ("HistoricalSummary", check::<capella::HistoricalSummary>),
+        (
+            "LightClientBootstrap",
+            check::<capella::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<capella::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<capella::LightClientHeader<P>>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<capella::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<capella::LightClientUpdate<P>>),
+        ("SyncCommittee", check::<capella::SyncCommittee<P>>),
+        ("Validator", check::<capella::Validator>),
+    ]
+}
+
+/// The deneb state and light client containers, which the state and light client routes carry.
+fn deneb_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<deneb::BeaconState<P>>),
+        ("HistoricalSummary", check::<deneb::HistoricalSummary>),
+        (
+            "LightClientBootstrap",
+            check::<deneb::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<deneb::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<deneb::LightClientHeader<P>>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<deneb::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<deneb::LightClientUpdate<P>>),
+        ("SyncCommittee", check::<deneb::SyncCommittee<P>>),
+        ("Validator", check::<deneb::Validator>),
+    ]
+}
+
+/// The electra state and light client containers, which the state and light client routes carry.
+fn electra_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<electra::BeaconState<P>>),
+        ("HistoricalSummary", check::<electra::HistoricalSummary>),
+        (
+            "LightClientBootstrap",
+            check::<electra::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<electra::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<electra::LightClientHeader<P>>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<electra::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<electra::LightClientUpdate<P>>),
+        (
+            "PendingConsolidation",
+            check::<electra::PendingConsolidation>,
+        ),
+        ("PendingDeposit", check::<electra::PendingDeposit>),
+        (
+            "PendingPartialWithdrawal",
+            check::<electra::PendingPartialWithdrawal>,
+        ),
+        ("SyncCommittee", check::<electra::SyncCommittee<P>>),
+        ("Validator", check::<electra::Validator>),
+    ]
+}
+
+/// The fulu state and light client containers, which the state and light client routes carry.
+fn fulu_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<fulu::BeaconState<P>>),
+        ("HistoricalSummary", check::<fulu::HistoricalSummary>),
+        (
+            "LightClientBootstrap",
+            check::<fulu::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<fulu::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<fulu::LightClientHeader<P>>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<fulu::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<fulu::LightClientUpdate<P>>),
+        ("PendingConsolidation", check::<fulu::PendingConsolidation>),
+        ("PendingDeposit", check::<fulu::PendingDeposit>),
+        (
+            "PendingPartialWithdrawal",
+            check::<fulu::PendingPartialWithdrawal>,
+        ),
+        ("SyncCommittee", check::<fulu::SyncCommittee<P>>),
+        ("Validator", check::<fulu::Validator>),
+    ]
+}
+
+/// The gloas state and light client containers, which the state and light client routes carry.
+fn gloas_state<P: Preset>() -> Vec<Entry> {
+    vec![
+        ("BeaconState", check::<gloas::BeaconState<P>>),
+        ("Builder", check::<gloas::Builder>),
+        (
+            "BuilderPendingPayment",
+            check::<gloas::BuilderPendingPayment>,
+        ),
+        (
+            "BuilderPendingWithdrawal",
+            check::<gloas::BuilderPendingWithdrawal>,
+        ),
+        ("HistoricalSummary", check::<gloas::HistoricalSummary>),
+        (
+            "LightClientBootstrap",
+            check::<gloas::LightClientBootstrap<P>>,
+        ),
+        (
+            "LightClientFinalityUpdate",
+            check::<gloas::LightClientFinalityUpdate<P>>,
+        ),
+        ("LightClientHeader", check::<gloas::LightClientHeader>),
+        (
+            "LightClientOptimisticUpdate",
+            check::<gloas::LightClientOptimisticUpdate<P>>,
+        ),
+        ("LightClientUpdate", check::<gloas::LightClientUpdate<P>>),
+        ("PendingConsolidation", check::<gloas::PendingConsolidation>),
+        ("PendingDeposit", check::<gloas::PendingDeposit>),
+        (
+            "PendingPartialWithdrawal",
+            check::<gloas::PendingPartialWithdrawal>,
+        ),
+        ("SyncCommittee", check::<gloas::SyncCommittee<P>>),
+        ("Validator", check::<gloas::Validator>),
+    ]
+}
+
 /// Runs a fork and pins its container count and its cases per preset.
 fn conform(fork: ForkName, minimal: &[Entry], mainnet: &[Entry], containers: usize) {
     assert_eq!(minimal.len(), containers);
@@ -649,12 +828,12 @@ fn conform(fork: ForkName, minimal: &[Entry], mainnet: &[Entry], containers: usi
 
 #[test]
 fn phase0_containers() {
-    // 19 containers: 2337 minimal cases and 95 mainnet cases.
+    // 23 containers: 19 of blocks and operations, and 4 of the state.
     conform(
         ForkName::Phase0,
-        &phase0_table::<Minimal>(),
-        &phase0_table::<Mainnet>(),
-        19,
+        &[phase0_table::<Minimal>(), phase0_state::<Minimal>()].concat(),
+        &[phase0_table::<Mainnet>(), phase0_state::<Mainnet>()].concat(),
+        23,
     );
 }
 
@@ -663,9 +842,9 @@ fn altair_containers() {
     // 24 containers: phase0's 19 and five of the sync committee.
     conform(
         ForkName::Altair,
-        &altair_table::<Minimal>(),
-        &altair_table::<Mainnet>(),
-        24,
+        &[altair_table::<Minimal>(), altair_state::<Minimal>()].concat(),
+        &[altair_table::<Mainnet>(), altair_state::<Mainnet>()].concat(),
+        33,
     );
 }
 
@@ -674,9 +853,9 @@ fn bellatrix_containers() {
     // 26 containers: Altair's 24, the payload, and its header.
     conform(
         ForkName::Bellatrix,
-        &bellatrix_table::<Minimal>(),
-        &bellatrix_table::<Mainnet>(),
-        26,
+        &[bellatrix_table::<Minimal>(), bellatrix_state::<Minimal>()].concat(),
+        &[bellatrix_table::<Mainnet>(), bellatrix_state::<Mainnet>()].concat(),
+        35,
     );
 }
 
@@ -685,9 +864,9 @@ fn capella_containers() {
     // 29 containers: Bellatrix's 26, the withdrawal, and the credential change and its signature.
     conform(
         ForkName::Capella,
-        &capella_table::<Minimal>(),
-        &capella_table::<Mainnet>(),
-        29,
+        &[capella_table::<Minimal>(), capella_state::<Minimal>()].concat(),
+        &[capella_table::<Mainnet>(), capella_state::<Mainnet>()].concat(),
+        38,
     );
 }
 
@@ -696,9 +875,9 @@ fn deneb_containers() {
     // 30 containers: Capella's 29 and the blob sidecar.
     conform(
         ForkName::Deneb,
-        &deneb_table::<Minimal>(),
-        &deneb_table::<Mainnet>(),
-        30,
+        &[deneb_table::<Minimal>(), deneb_state::<Minimal>()].concat(),
+        &[deneb_table::<Mainnet>(), deneb_state::<Mainnet>()].concat(),
+        39,
     );
 }
 
@@ -707,9 +886,9 @@ fn electra_containers() {
     // 35 containers: Deneb's 30, four requests and their container, and the single attestation.
     conform(
         ForkName::Electra,
-        &electra_table::<Minimal>(),
-        &electra_table::<Mainnet>(),
-        35,
+        &[electra_table::<Minimal>(), electra_state::<Minimal>()].concat(),
+        &[electra_table::<Mainnet>(), electra_state::<Mainnet>()].concat(),
+        47,
     );
 }
 
@@ -718,9 +897,9 @@ fn fulu_containers() {
     // 35 containers: Electra's, with the data column sidecar in place of the blob sidecar.
     conform(
         ForkName::Fulu,
-        &fulu_table::<Minimal>(),
-        &fulu_table::<Mainnet>(),
-        35,
+        &[fulu_table::<Minimal>(), fulu_state::<Minimal>()].concat(),
+        &[fulu_table::<Mainnet>(), fulu_state::<Mainnet>()].concat(),
+        47,
     );
 }
 
@@ -729,8 +908,8 @@ fn gloas_containers() {
     // 45 containers: 23 kept from earlier forks and 22 of Gloas.
     conform(
         ForkName::Gloas,
-        &gloas_table::<Minimal>(),
-        &gloas_table::<Mainnet>(),
-        45,
+        &[gloas_table::<Minimal>(), gloas_state::<Minimal>()].concat(),
+        &[gloas_table::<Mainnet>(), gloas_state::<Mainnet>()].concat(),
+        60,
     );
 }

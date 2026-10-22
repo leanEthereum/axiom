@@ -2,10 +2,12 @@
 
 use std::{sync::Arc, time::Duration};
 
+use axiom_beacon_json::ApiJson;
 use axiom_gossip::{
     Aggregate, BlobSubnets, GossipError, GossipFork, GossipValidator, SignedAggregate,
     SlashingEvidence, SubnetVote,
 };
+use axiom_json::Json;
 use axiom_kzg::Kzg;
 use axiom_light_client::combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate};
 use axiom_p2p::{
@@ -33,7 +35,9 @@ use tokio::time;
 use tracing::{debug, warn};
 
 use super::forks::ForkDigests;
-use crate::{Chain, ChainError, ChainHandle, Clock, ExecutionLayer};
+use crate::{
+    ApiEvent, Chain, ChainError, ChainHandle, Clock, EventSender, EventTopic, ExecutionLayer,
+};
 
 /// Work on the chain that an accepted message leaves, run after it was forwarded.
 type ChainJob<P> = Box<dyn FnOnce(&mut Chain<P>) -> Result<(), ChainError> + Send>;
@@ -46,6 +50,36 @@ enum Accepted<P: Preset> {
     Envelope(Arc<SignedExecutionPayloadEnvelope<P>>),
     /// Anything else the chain consumes: votes, slashings, sidecars.
     Job(ChainJob<P>),
+}
+
+/// How an accepted message goes out on the beacon API's event stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Announce {
+    /// It does not, or another step reports it with more context.
+    Nothing,
+    /// As the message itself.
+    Plain(EventTopic),
+    /// As the message wrapped with the name of its fork.
+    Versioned(EventTopic, ForkName),
+}
+
+impl Announce {
+    /// Publishes an accepted message, when a client listens to its topic.
+    fn publish<M: ApiJson>(self, events: &EventSender, message: &M) {
+        match self {
+            Self::Nothing => {}
+            Self::Plain(topic) => {
+                if events.wants(topic) {
+                    events.publish(ApiEvent::object(topic, message));
+                }
+            }
+            Self::Versioned(topic, fork) => {
+                if events.wants(topic) {
+                    events.publish(ApiEvent::versioned(topic, fork, message.to_json()));
+                }
+            }
+        }
+    }
 }
 
 /// The verdict on a message and what remains to do with it.
@@ -76,6 +110,8 @@ pub(crate) struct GossipHandler<P: Preset> {
     metrics: NodeMetrics,
     /// The fork each topic digest names.
     forks: Arc<ForkDigests>,
+    /// Where accepted messages go out to event stream clients.
+    events: EventSender,
 }
 
 impl<P: Preset> Clone for GossipHandler<P> {
@@ -87,19 +123,21 @@ impl<P: Preset> Clone for GossipHandler<P> {
             network: self.network.clone(),
             metrics: self.metrics.clone(),
             forks: Arc::clone(&self.forks),
+            events: self.events.clone(),
         }
     }
 }
 
 impl<P: Preset> GossipHandler<P> {
     /// A handler over the node's services.
-    pub(crate) const fn new(
+    pub(crate) fn new(
         chain: ChainHandle<P>,
         execution: Arc<ExecutionLayer>,
         clock: Arc<dyn Clock>,
         network: NetworkHandle,
         metrics: NodeMetrics,
         forks: Arc<ForkDigests>,
+        events: EventSender,
     ) -> Self {
         Self {
             chain,
@@ -108,6 +146,7 @@ impl<P: Preset> GossipHandler<P> {
             network,
             metrics,
             forks,
+            events,
         }
     }
 
@@ -158,26 +197,32 @@ impl<P: Preset> GossipHandler<P> {
     async fn validate_in<F>(&self, kind: GossipKind, data: Vec<u8>) -> Checked<P>
     where
         F: GossipFork<Preset = P>,
-        F::SignedBeaconBlock: Send + 'static,
-        F::SignedAggregateAndProof: Send + 'static,
-        F::SubnetAttestation: Send + 'static,
-        F::AttesterSlashing: Send + 'static,
+        F::SignedBeaconBlock: ApiJson + Send + 'static,
+        F::SignedAggregateAndProof: ApiJson + Send + 'static,
+        F::SubnetAttestation: ApiJson + Send + 'static,
+        F::AttesterSlashing: ApiJson + Send + 'static,
     {
         let now = self.clock.now_ms();
         match kind {
             GossipKind::BeaconBlock => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     move |validator, block: &F::SignedBeaconBlock| {
                         validator.beacon_block::<F>(block, now)
                     },
-                    |block| Some(Accepted::Block(Arc::new(F::into_any_block(block)))),
+                    |block| {
+                        let block = F::into_any_block(block);
+                        self.announce_block(&block);
+                        Some(Accepted::Block(Arc::new(block)))
+                    },
                 )
                 .await
             }
             GossipKind::BeaconAggregateAndProof => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     move |validator, aggregate: &F::SignedAggregateAndProof| {
                         validator.aggregate_and_proof::<F>(aggregate, now)
                     },
@@ -191,6 +236,11 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::BeaconAttestation(subnet) => {
                 self.check(
                     data,
+                    Announce::Plain(if F::FORK.single_attestations() {
+                        EventTopic::SingleAttestation
+                    } else {
+                        EventTopic::Attestation
+                    }),
                     move |validator, vote: &F::SubnetAttestation| {
                         validator.beacon_attestation::<F>(vote, now, SubnetId(subnet))
                     },
@@ -204,6 +254,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::AttesterSlashing => {
                 self.check(
                     data,
+                    Announce::Plain(EventTopic::AttesterSlashing),
                     |validator, slashing: &F::AttesterSlashing| {
                         validator.attester_slashing(slashing)
                     },
@@ -217,6 +268,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::VoluntaryExit => {
                 self.check(
                     data,
+                    Announce::Plain(EventTopic::VoluntaryExit),
                     move |validator, exit: &SignedVoluntaryExit| {
                         validator.voluntary_exit::<F>(exit, now)
                     },
@@ -233,7 +285,7 @@ impl<P: Preset> GossipHandler<P> {
                 self.validate_column(F::FORK.blob_data(), subnet, data, now)
                     .await
             }
-            _ => self.validate_operation(kind, data, now).await,
+            _ => self.validate_operation(F::FORK, kind, data, now).await,
         }
     }
 
@@ -288,6 +340,7 @@ impl<P: Preset> GossipHandler<P> {
     ) -> Checked<P> {
         self.check(
             data,
+            Announce::Nothing,
             move |validator, sidecar: &BlobSidecar<P>| {
                 // Forks without blob sidecars have no such topic; a message there is noise.
                 let limits = BlobSubnets::of(fork, validator.config())
@@ -295,6 +348,7 @@ impl<P: Preset> GossipHandler<P> {
                 validator.blob_sidecar(sidecar, now, SubnetId(subnet), limits, Kzg::mainnet())
             },
             |sidecar| {
+                self.announce_blob(&sidecar);
                 let sidecar = Arc::new(sidecar);
                 Some(Self::job(move |chain| {
                     chain.submit_blob(sidecar).map(|_| ())
@@ -313,6 +367,7 @@ impl<P: Preset> GossipHandler<P> {
         now: u64,
     ) -> Checked<P> {
         let submit = |column: combined::DataColumnSidecar<P>| {
+            self.announce_column(&column);
             let column = Arc::new(column);
             Some(Self::job(move |chain| {
                 chain.submit_column(column).map(|_| ())
@@ -322,6 +377,7 @@ impl<P: Preset> GossipHandler<P> {
             BlobData::BlockColumns => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     move |validator, sidecar: &fulu::DataColumnSidecar<P>| {
                         validator.data_column_sidecar(
                             sidecar,
@@ -337,6 +393,7 @@ impl<P: Preset> GossipHandler<P> {
             BlobData::PayloadColumns => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     move |validator, sidecar: &gloas::DataColumnSidecar<P>| {
                         validator.gloas_data_column_sidecar(
                             sidecar,
@@ -358,11 +415,18 @@ impl<P: Preset> GossipHandler<P> {
     ///
     /// Without block production, the node keeps no operation pool.
     /// So the operations, bids, and preferences these topics carry are only forwarded.
-    async fn validate_operation(&self, kind: GossipKind, data: Vec<u8>, now: u64) -> Checked<P> {
+    async fn validate_operation(
+        &self,
+        fork: ForkName,
+        kind: GossipKind,
+        data: Vec<u8>,
+        now: u64,
+    ) -> Checked<P> {
         match kind {
             GossipKind::ProposerSlashing => {
                 self.check(
                     data,
+                    Announce::Plain(EventTopic::ProposerSlashing),
                     |validator, slashing: &ProposerSlashing| validator.proposer_slashing(slashing),
                     |slashing| Some(Self::job(move |chain| chain.on_proposer_slashing(slashing))),
                 )
@@ -371,6 +435,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::SyncCommitteeContributionAndProof => {
                 self.check(
                     data,
+                    Announce::Plain(EventTopic::ContributionAndProof),
                     move |validator, contribution: &SignedContributionAndProof<P>| {
                         validator.sync_contribution(contribution, now)
                     },
@@ -384,6 +449,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::SyncCommittee(subnet) => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     move |validator, message: &SyncCommitteeMessage| {
                         validator.sync_committee_message(message, now, SubnetId(subnet))
                     },
@@ -394,6 +460,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::BlsToExecutionChange => {
                 self.check(
                     data,
+                    Announce::Plain(EventTopic::BlsToExecutionChange),
                     move |validator, change: &SignedBlsToExecutionChange| {
                         validator.bls_to_execution_change(change, now)
                     },
@@ -401,9 +468,23 @@ impl<P: Preset> GossipHandler<P> {
                 )
                 .await
             }
+            _ => self.validate_payload_operation(fork, kind, data, now).await,
+        }
+    }
+
+    /// Validates a Gloas message of the payload's own pipeline: envelopes, votes, bids, preferences.
+    async fn validate_payload_operation(
+        &self,
+        fork: ForkName,
+        kind: GossipKind,
+        data: Vec<u8>,
+        now: u64,
+    ) -> Checked<P> {
+        match kind {
             GossipKind::ExecutionPayload => {
                 self.check(
                     data,
+                    Announce::Nothing,
                     |validator, envelope: &SignedExecutionPayloadEnvelope<P>| {
                         validator.execution_payload_envelope(envelope)
                     },
@@ -414,6 +495,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::PayloadAttestationMessage => {
                 self.check(
                     data,
+                    Announce::Versioned(EventTopic::PayloadAttestationMessage, fork),
                     move |validator, message: &PayloadAttestationMessage| {
                         validator.payload_attestation_message(message, now)
                     },
@@ -428,6 +510,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::ExecutionPayloadBid => {
                 self.check(
                     data,
+                    Announce::Versioned(EventTopic::ExecutionPayloadBid, fork),
                     move |validator, bid: &SignedExecutionPayloadBid| {
                         validator.execution_payload_bid(bid, now)
                     },
@@ -443,6 +526,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::ProposerPreferences => {
                 self.check(
                     data,
+                    Announce::Versioned(EventTopic::ProposerPreferences, fork),
                     move |validator, preferences: &SignedProposerPreferences| {
                         validator.proposer_preferences(preferences, now)
                     },
@@ -467,11 +551,18 @@ impl<P: Preset> GossipHandler<P> {
     /// # Arguments
     ///
     /// - `data`: the decompressed SSZ payload.
+    /// - `announce`: the event stream topic an accepted message goes out on, if any.
     /// - `rule`: the gossip rule for the message's topic.
     /// - `then`: what to keep of an accepted message, if anything.
-    async fn check<M, R, T>(&self, data: Vec<u8>, rule: R, then: T) -> Checked<P>
+    async fn check<M, R, T>(
+        &self,
+        data: Vec<u8>,
+        announce: Announce,
+        rule: R,
+        then: T,
+    ) -> Checked<P>
     where
-        M: Ssz + Send + 'static,
+        M: Ssz + ApiJson + Send + 'static,
         R: FnOnce(&mut GossipValidator<'_, '_, P>, &M) -> Result<(), GossipError> + Send + 'static,
         T: FnOnce(M) -> Option<Accepted<P>>,
     {
@@ -486,7 +577,10 @@ impl<P: Preset> GossipHandler<P> {
             })
             .await;
         match checked {
-            Ok((Ok(()), message)) => (ValidationOutcome::Accept, then(message)),
+            Ok((Ok(()), message)) => {
+                announce.publish(&self.events, &message);
+                (ValidationOutcome::Accept, then(message))
+            }
             Ok((Err(error @ GossipError::Ignore { .. }), _)) => {
                 debug!(%error, "gossip ignored");
                 (ValidationOutcome::Ignore, None)
@@ -521,6 +615,7 @@ impl<P: Preset> GossipHandler<P> {
                     .await
             }
             Accepted::Envelope(envelope) => {
+                self.announce_envelope(&envelope).await;
                 let payload = self.execution.judge_envelope(&self.chain, &envelope).await;
                 self.chain
                     .run(move |chain| chain.submit_envelope(envelope, payload).map(|_| ()))
@@ -533,6 +628,88 @@ impl<P: Preset> GossipHandler<P> {
             // Gossip rules passed but the fork choice refused: log, the peer was not at fault.
             Ok(Err(error)) => warn!(%error, "accepted gossip not applied"),
         }
+    }
+
+    /// Tells event stream clients of a block that passed gossip validation.
+    fn announce_block(&self, block: &combined::SignedBeaconBlock<P>) {
+        if self.events.wants(EventTopic::BlockGossip) {
+            self.events.publish(ApiEvent::json(
+                EventTopic::BlockGossip,
+                Json::from([
+                    ("slot", Json::from(block.slot().0.to_string())),
+                    ("block", Json::from(block.block_root().to_string())),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients of a blob sidecar that passed gossip validation.
+    fn announce_blob(&self, sidecar: &BlobSidecar<P>) {
+        if self.events.wants(EventTopic::BlobSidecar) {
+            let header = &sidecar.signed_block_header.message;
+            self.events.publish(ApiEvent::json(
+                EventTopic::BlobSidecar,
+                Json::from([
+                    (
+                        "block_root",
+                        Json::from(header.hash_tree_root().to_string()),
+                    ),
+                    ("index", Json::from(sidecar.index.0.to_string())),
+                    ("slot", Json::from(header.slot.0.to_string())),
+                    (
+                        "kzg_commitment",
+                        Json::from(sidecar.kzg_commitment.to_string()),
+                    ),
+                    (
+                        "versioned_hash",
+                        Json::from(sidecar.kzg_commitment.versioned_hash().to_string()),
+                    ),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients of a data column sidecar that passed gossip validation.
+    fn announce_column(&self, column: &combined::DataColumnSidecar<P>) {
+        if self.events.wants(EventTopic::DataColumnSidecar) {
+            self.events.publish(ApiEvent::json(
+                EventTopic::DataColumnSidecar,
+                Json::from([
+                    ("block_root", Json::from(column.block_root().to_string())),
+                    ("index", Json::from(column.index().0.to_string())),
+                    ("slot", Json::from(column.slot().0.to_string())),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients of a payload envelope that passed gossip validation.
+    ///
+    /// The envelope names its block, whose slot the chain knows.
+    async fn announce_envelope(&self, envelope: &SignedExecutionPayloadEnvelope<P>) {
+        if !self.events.wants(EventTopic::ExecutionPayloadGossip) {
+            return;
+        }
+        let message = &envelope.message;
+        let root = message.beacon_block_root;
+        let Ok(Ok(Some(slot))) = self.chain.run(move |chain| chain.block_slot(root)).await else {
+            return;
+        };
+        self.events.publish(ApiEvent::json(
+            EventTopic::ExecutionPayloadGossip,
+            Json::from([
+                ("slot", Json::from(slot.0.to_string())),
+                (
+                    "builder_index",
+                    Json::from(message.builder_index.0.to_string()),
+                ),
+                (
+                    "block_hash",
+                    Json::from(message.payload.block_hash.to_string()),
+                ),
+                ("block_root", Json::from(root.to_string())),
+            ]),
+        ));
     }
 
     /// Sends a verdict to the router and counts it.

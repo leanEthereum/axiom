@@ -5,6 +5,7 @@ mod forks;
 mod gossip;
 mod handshake;
 mod identity;
+mod peers;
 mod record;
 mod requests;
 mod responder;
@@ -42,17 +43,19 @@ pub use self::{discovery::DiscoverySettings, identity::NodeKey};
 pub(crate) use self::{
     discovery::{Discovery, RecordSetup},
     forks::ForkDigests,
+    peers::PeerRecord,
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
 use self::{
     gossip::GossipHandler,
     handshake::Handshakes,
+    peers::PeerBook,
     server::RequestServer,
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
 };
-use crate::{ChainHandle, Clock, ExecutionLayer, NodeError, race::Either};
+use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
@@ -136,6 +139,10 @@ pub(crate) struct NetworkService<P: Preset> {
     handshakes: Handshakes,
     /// Connected peers, for the peer count and status refreshes.
     peers: BTreeSet<PeerId>,
+    /// Peers met, published for the node routes.
+    peer_book: PeerBook,
+    /// A reader of the published peers, handed to the identity.
+    peer_reader: watch::Receiver<Arc<Vec<PeerRecord>>>,
     /// Peer counts and gossip outcomes.
     metrics: NodeMetrics,
     /// Peer discovery, when enabled.
@@ -159,6 +166,8 @@ pub(crate) struct NodeIdentity {
     pub(crate) discovery_address: Option<String>,
     /// The metadata peers fetch.
     pub(crate) metadata: Arc<LocalMetadata>,
+    /// The peers met, as the network task last published them.
+    pub(crate) peers: watch::Receiver<Arc<Vec<PeerRecord>>>,
 }
 
 /// Inbound requests answered at once.
@@ -201,6 +210,7 @@ impl<P: Preset> NetworkService<P> {
             clock,
             metrics,
             discovery,
+            events,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
         let (discovery, discovery_events) = discovery
@@ -219,6 +229,7 @@ impl<P: Preset> NetworkService<P> {
             attnets: AtomicU64::new(0),
             custody_group_count: identity.custody_group_count,
         });
+        let (peer_book, peer_reader) = PeerBook::new();
         let mut service = Self {
             gossip: GossipHandler::new(
                 chain.clone(),
@@ -227,6 +238,7 @@ impl<P: Preset> NetworkService<P> {
                 network.clone(),
                 metrics.clone(),
                 Arc::clone(&forks),
+                events,
             ),
             server: Arc::new(RequestServer::new(
                 chain.clone(),
@@ -250,6 +262,8 @@ impl<P: Preset> NetworkService<P> {
             metadata,
             handshakes: Handshakes::default(),
             peers: BTreeSet::new(),
+            peer_book,
+            peer_reader,
             metrics,
             discovery,
             discovery_events,
@@ -280,6 +294,7 @@ impl<P: Preset> NetworkService<P> {
                 format!("/{family}/{}/udp/{}", address.ip(), address.port())
             }),
             metadata: Arc::clone(&self.metadata),
+            peers: self.peer_reader.clone(),
         }
     }
 
@@ -464,7 +479,12 @@ impl<P: Preset> NetworkService<P> {
     /// Handles one event.
     async fn handle(&mut self, event: NetworkEvent) {
         match event {
-            NetworkEvent::PeerConnected { peer, outbound, .. } => {
+            NetworkEvent::PeerConnected {
+                peer,
+                address,
+                outbound,
+            } => {
+                self.peer_book.connected(&peer, &address, outbound);
                 self.peers.insert(peer.clone());
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 // The dialer opens the handshake; the listener answers it.
@@ -473,6 +493,7 @@ impl<P: Preset> NetworkService<P> {
                 }
             }
             NetworkEvent::PeerDisconnected { peer } => {
+                self.peer_book.disconnected(&peer);
                 self.peers.remove(&peer);
                 self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
@@ -581,4 +602,6 @@ pub(crate) struct NetworkSetup {
     pub(crate) metrics: NodeMetrics,
     /// Peer discovery and its events, when enabled.
     pub(crate) discovery: Option<(Discovery, Discv5Events)>,
+    /// Where accepted gossip goes out to event stream clients.
+    pub(crate) events: EventSender,
 }

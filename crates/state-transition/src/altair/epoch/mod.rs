@@ -9,5 +9,5 @@ mod sync_committees;
 pub use flag_rotation::FlagRotation;
 pub use inactivity::InactivityUpdates;
 pub use participation::Participation;
-pub use rewards::{Deltas, RewardsAndPenalties};
+pub use rewards::{Deltas, FlagReward, RewardsAndPenalties};
 pub use sync_committees::SyncCommitteeRotation;

@@ -4,7 +4,6 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use axiom_execution::{EngineClient, JwtSecret};
@@ -29,8 +28,7 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainHandle, DiscoverySettings, ExecutionLayer, NodeError,
-    NodeKey, ProposerService, Publisher,
-    network::{NetworkIdentity, NodeIdentity},
+    NodeKey, api::ApiServices, network::NetworkIdentity,
 };
 
 /// Where the node reaches its execution engine.
@@ -255,15 +253,13 @@ impl NodeConfig {
     pub(crate) async fn start_servers<P: Preset>(
         &self,
         handle: &ChainHandle<P>,
-        publisher: Arc<Publisher<P>>,
-        proposer: Arc<ProposerService<P>>,
-        identity: Option<Arc<NodeIdentity>>,
+        api: ApiServices<P>,
         registry: Registry,
         stopped: &watch::Receiver<bool>,
     ) -> Result<Vec<JoinHandle<()>>, NodeError> {
         let mut servers = Vec::new();
         if let Some(address) = self.http_address {
-            let router = BeaconApi::router(handle.clone(), publisher, proposer, identity);
+            let router = BeaconApi::router(handle.clone(), api);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Bind {

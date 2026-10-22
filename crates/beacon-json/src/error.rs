@@ -54,7 +54,8 @@ impl ApiJsonError {
     }
 
     /// The error for a fork that has no container of a kind.
-    pub(crate) const fn absent(fork: ForkName, container: &'static str) -> Self {
+    #[must_use]
+    pub const fn absent(fork: ForkName, container: &'static str) -> Self {
         Self::new(ApiJsonErrorKind::AbsentInFork { fork, container })
     }
 

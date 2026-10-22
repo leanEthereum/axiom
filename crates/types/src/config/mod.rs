@@ -7,6 +7,7 @@
 
 mod blob_data;
 mod blob_schedule;
+mod entries;
 mod fork_name;
 mod yaml;
 
@@ -14,6 +15,7 @@ use axiom_ssz::U256;
 use axiom_yaml::Yaml;
 pub use blob_data::BlobData;
 pub use blob_schedule::{BlobParameters, BlobSchedule};
+pub use entries::ConfigValue;
 pub use fork_name::ForkName;
 use yaml::ConfigEntry;
 pub use yaml::ConfigError;

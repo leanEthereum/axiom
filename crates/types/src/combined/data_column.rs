@@ -57,6 +57,15 @@ impl<P: Preset> DataColumnSidecar<P> {
         }
     }
 
+    /// The column's cells, one per blob of its block, in blob order.
+    #[must_use]
+    pub fn cells(&self) -> &[fulu::Cell<P>] {
+        match self {
+            Self::Fulu(sidecar) => &sidecar.column,
+            Self::Gloas(sidecar) => &sidecar.column,
+        }
+    }
+
     /// The column's SSZ encoding, which does not record the fork.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {

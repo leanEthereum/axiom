@@ -6,3 +6,4 @@ mod sync_aggregate;
 
 pub use attestation::{FlaggedAttestation, ParticipationCredit};
 pub use deposit::ParticipantDeposit;
+pub use sync_aggregate::SyncRewardRates;

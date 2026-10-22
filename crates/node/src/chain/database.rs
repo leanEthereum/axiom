@@ -236,6 +236,19 @@ impl<P: Preset> ChainDatabase<P> {
         Ok(Some((checkpoint, state)))
     }
 
+    /// The stored post-state of a block, if the database keeps one.
+    ///
+    /// Only the latest finalized anchor's state is kept.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails or the record does not decode.
+    pub fn state(&self, root: Root) -> Result<Option<combined::BeaconState<P>>, ChainError> {
+        self.read_with(self.states, &root.0, "state", |bytes| {
+            combined::BeaconState::decode_at(bytes, &self.config)
+        })
+    }
+
     /// The earliest slot whose canonical block the database holds.
     ///
     /// # Errors
