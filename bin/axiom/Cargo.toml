@@ -20,5 +20,6 @@ axiom-p2p.workspace = true
 axiom-telemetry.workspace = true
 axiom-types.workspace = true
 axiom-yaml.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

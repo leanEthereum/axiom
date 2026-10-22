@@ -8,9 +8,8 @@
 //!
 //! The specification is at jsonrpc.org; the engine's error codes are in `src/engine/common.md`.
 
-use std::{error::Error, fmt};
-
 use axiom_json::{Json, Object};
+use thiserror::Error;
 
 use crate::EnvelopeError;
 
@@ -66,7 +65,8 @@ impl From<EnvelopeError> for ResponseError {
 }
 
 /// An error object returned by the engine.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("{message} ({code}){}", self.detail())]
 pub struct RpcError {
     /// The error code, standard or engine-specific.
     pub code: i64,
@@ -126,6 +126,13 @@ impl RpcError {
         Json::Object(object)
     }
 
+    /// The extra detail with its separator, or nothing when absent.
+    fn detail(&self) -> String {
+        self.data
+            .as_ref()
+            .map_or_else(String::new, |data| format!(": {data}"))
+    }
+
     /// Reads an error object.
     fn from_json(value: &Json) -> Result<Self, EnvelopeError> {
         let code = value.get("code").and_then(Json::as_i64);
@@ -141,18 +148,6 @@ impl RpcError {
         })
     }
 }
-
-impl fmt::Display for RpcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.message, self.code)?;
-        if let Some(data) = &self.data {
-            write!(f, ": {data}")?;
-        }
-        Ok(())
-    }
-}
-
-impl Error for RpcError {}
 
 #[cfg(test)]
 mod tests {
