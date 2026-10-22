@@ -20,6 +20,8 @@ allow = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal crates are path dependencies and never published, so their paths are not wildcards.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
