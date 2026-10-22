@@ -64,7 +64,7 @@ OPTIONS (key generation):
     --compounding                0x02 credentials, with --withdrawal-address
     --amount <GWEI>              deposit amount [default: 32000000000]
     --pbkdf2                     encrypt with PBKDF2 instead of scrypt
-    --network <NAME>             mainnet or minimal [default: mainnet]
+    --network <NAME>             a built-in network, as for the beacon node [default: mainnet]
     --config <FILE>              chain config YAML
 
 OPTIONS (slashing protection):

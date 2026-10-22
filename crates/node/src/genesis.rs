@@ -281,13 +281,12 @@ mod tests {
         let state = genesis(1_606_824_023);
         let bytes = state.encode();
         let checksum = Hash32(Sha256::digest(&bytes).into());
-        let served = bytes.clone();
         let router =
             Router::new().route(
                 Method::Get,
                 "/eth/v2/debug/beacon/states/genesis",
                 move |_| {
-                    let body = served.clone();
+                    let body = bytes.clone();
                     async move {
                         Response::new(StatusCode::OK).with_body("application/octet-stream", body)
                     }
