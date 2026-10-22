@@ -2,19 +2,12 @@
 //!
 //! # Overview
 //!
-//! The file is a YAML sequence, one mapping per validator, which an operator may edit by hand:
+//! The file is a YAML sequence, one mapping per validator, which an operator may edit by hand.
+//! Each mapping holds three required fields:
 //!
-//! ```text
-//! - enabled: true
-//!   voting_public_key: "0x8000...06aa"
-//!   type: local_keystore
-//!   suggested_fee_recipient: "0x0000...05fa"
-//!   gas_limit: "36000000"
-//! - enabled: false
-//!   voting_public_key: "0x9035...0c02"
-//!   type: remote_signer
-//!   url: "http://127.0.0.1:9000"
-//! ```
+//! - enabled: whether the key runs.
+//! - voting_public_key: the key, as 0x-prefixed hex.
+//! - type: local_keystore, or remote_signer with the signer's url.
 //!
 //! A local key's keystore and password live in the key directory under its public key.
 //! Every override field is optional; an absent one follows the client's default.
