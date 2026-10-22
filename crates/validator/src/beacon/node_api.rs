@@ -1,6 +1,8 @@
 //! The node namespace: whether a beacon node is fit to serve duties.
 
-use crate::beacon::{BeaconClient, BeaconError, SyncStatus};
+use axiom_beacon_json::api::SyncStatus;
+
+use crate::beacon::{BeaconClient, BeaconError};
 
 /// The node namespace of one beacon node.
 #[derive(Clone, Copy, Debug)]

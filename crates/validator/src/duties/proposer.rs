@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::api::ProposerDuty;
 use axiom_ssz::Ssz;
 use axiom_types::{Preset, Root, Slot, constants::BUILDER_INDEX_SELF_BUILD, gloas};
 use tracing::{info, warn};
 
 use crate::{
-    beacon::{BeaconClient, ProposerDuty},
+    beacon::BeaconClient,
     duties::{DutyContext, DutyError},
     signing::SigningRequest,
 };

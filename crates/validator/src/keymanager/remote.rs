@@ -4,12 +4,12 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, Fields};
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request};
 use axiom_json::Json;
 use axiom_types::BlsPubkey;
 
 use crate::{
-    json::{ApiJson, Fields, JsonError},
     keymanager::{
         registry::KeyRegistry,
         reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
@@ -35,10 +35,10 @@ impl ApiJson for RemoteKey {
         ])
     }
 
-    fn from_json(json: &Json) -> Result<Self, JsonError> {
+    fn from_json(json: &Json) -> Result<Self, ApiJsonError> {
         let fields = Fields::of(json)?;
         Ok(Self {
-            pubkey: fields.get("pubkey")?,
+            pubkey: fields.required("pubkey")?,
             url: fields.optional("url")?,
         })
     }
@@ -115,7 +115,7 @@ impl RemoteKeys {
     /// Imports remote keys, each signing through its signer from then on.
     fn import(&self, request: &Request) -> ApiResult {
         let body = ApiRequest::new(request).json()?;
-        let keys: Vec<RemoteKey> = Fields::of(&body)?.get("remote_keys")?;
+        let keys: Vec<RemoteKey> = Fields::of(&body)?.required("remote_keys")?;
 
         let _edit = self.registry.edit();
         // Keys behind one signer share one client, so they share its connections.
@@ -130,7 +130,7 @@ impl RemoteKeys {
     /// Deletes remote keys.
     fn delete(&self, request: &Request) -> ApiResult {
         let body = ApiRequest::new(request).json()?;
-        let pubkeys: Vec<BlsPubkey> = Fields::of(&body)?.get("pubkeys")?;
+        let pubkeys: Vec<BlsPubkey> = Fields::of(&body)?.required("pubkeys")?;
 
         let _edit = self.registry.edit();
         let data: Vec<Json> = pubkeys

@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::{ApiJson, Fields};
 use axiom_http::{Method, Request, Response, StatusCode};
 use axiom_json::{Json, Object};
 use axiom_types::BlsPubkey;
 use tokio::task;
 
 use crate::{
-    json::{ApiJson, Fields},
     keymanager::{
         registry::KeyRegistry,
         reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
@@ -95,8 +95,8 @@ impl LocalKeystores {
     async fn import(&self, request: Request) -> ApiResult {
         let body = ApiRequest::new(&request).json()?;
         let fields = Fields::of(&body)?;
-        let keystores: Vec<String> = fields.get("keystores")?;
-        let passwords: Vec<String> = fields.get("passwords")?;
+        let keystores: Vec<String> = fields.required("keystores")?;
+        let passwords: Vec<String> = fields.required("passwords")?;
         if keystores.len() != passwords.len() {
             return Err(ApiError::bad_request(format!(
                 "{} keystores but {} passwords",
@@ -163,7 +163,7 @@ impl LocalKeystores {
     /// - The history stays in the database, so a repeated request returns it again.
     fn delete(&self, request: &Request) -> ApiResult {
         let body = ApiRequest::new(request).json()?;
-        let pubkeys: Vec<BlsPubkey> = Fields::of(&body)?.get("pubkeys")?;
+        let pubkeys: Vec<BlsPubkey> = Fields::of(&body)?.required("pubkeys")?;
 
         let _edit = self.registry.edit();
         let protection = self.registry.store().guard().protection();

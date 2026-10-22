@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use axiom_beacon_json::api::SyncDuty;
 use axiom_types::{
     BlsPubkey, BlsSignature, Preset, Root, Slot, ValidatorIndex,
     altair::{
@@ -13,7 +14,6 @@ use axiom_types::{
 use tracing::{debug, info, warn};
 
 use crate::{
-    beacon::SyncDuty,
     duties::{AggregatorSelection, DutyContext, DutyError},
     signing::SigningRequest,
 };

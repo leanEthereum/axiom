@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::api::PtcDuty;
 use axiom_types::{Preset, Slot, gloas::PayloadAttestationMessage};
 use tracing::{debug, info, warn};
 
 use crate::{
-    beacon::{BeaconError, PtcDuty},
+    beacon::BeaconError,
     duties::{DutyContext, DutyError},
     signing::SigningRequest,
 };

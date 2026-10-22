@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use axiom_beacon_json::api::ProposerPreparation;
 use axiom_types::{
     BlsPubkey, Epoch, Preset,
     bellatrix::{SignedValidatorRegistrationV1, ValidatorRegistrationV1},
@@ -12,7 +13,7 @@ use axiom_types::{
 };
 use tracing::{debug, info, warn};
 
-use crate::{beacon::ProposerPreparation, duties::DutyContext, signing::SigningRequest};
+use crate::{duties::DutyContext, signing::SigningRequest};
 
 /// Tells beacon nodes and builders, once an epoch, how this client's validators want to be paid.
 ///
@@ -162,7 +163,7 @@ impl<P: Preset> Preparation<P> {
             };
             for duty in &duties.data {
                 if duty.slot > current && self.context.store.contains(&duty.pubkey) {
-                    coming.push((*duty, duties.dependent_root));
+                    coming.push((*duty, duties.dependent_root.unwrap_or_default()));
                 }
             }
         }

@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::{ApiJson, Fields};
 use axiom_http::{Method, Request, StatusCode};
 use axiom_json::Json;
 use axiom_types::{BlsPubkey, Bytes32, ExecutionAddress};
 
 use crate::{
-    json::{ApiJson, Fields},
     keymanager::reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
     validators::ValidatorStore,
 };
@@ -159,7 +159,7 @@ impl ProposerOverrides {
     fn set_fee_recipient(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
         let body = ApiRequest::new(request).json()?;
-        let address: ExecutionAddress = Fields::of(&body)?.get("ethaddress")?;
+        let address: ExecutionAddress = Fields::of(&body)?.required("ethaddress")?;
         if address == ExecutionAddress::default() {
             return Err(ApiError::bad_request(
                 "the zero address cannot be a fee recipient",
@@ -186,7 +186,7 @@ impl ProposerOverrides {
     fn set_gas_limit(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
         let body = ApiRequest::new(request).json()?;
-        let gas_limit: u64 = Fields::of(&body)?.get("gas_limit")?;
+        let gas_limit: u64 = Fields::of(&body)?.required("gas_limit")?;
         Self::applied(self.store.set_gas_limit(&pubkey, Some(gas_limit)), &pubkey)?;
         Ok(Reply::empty(StatusCode::ACCEPTED))
     }
@@ -205,7 +205,7 @@ impl ProposerOverrides {
     fn set_graffiti(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
         let body = ApiRequest::new(request).json()?;
-        let text: String = Fields::of(&body)?.get("graffiti")?;
+        let text: String = Fields::of(&body)?.required("graffiti")?;
         let graffiti = Graffiti::parse(&text)?;
         Self::applied(self.store.set_graffiti(&pubkey, Some(graffiti.0)), &pubkey)?;
         Ok(Reply::empty(StatusCode::ACCEPTED))

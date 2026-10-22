@@ -1,11 +1,10 @@
 //! Why a beacon node request failed.
 
+use axiom_beacon_json::ApiJsonError;
 use axiom_http::{HttpError, StatusCode};
 use axiom_json::ParseError;
 use axiom_ssz::DecodeError;
 use thiserror::Error;
-
-use crate::json::JsonError;
 
 /// A beacon node request that did not produce its answer.
 #[derive(Debug, Error)]
@@ -26,7 +25,7 @@ pub enum BeaconError {
     Parse(#[from] ParseError),
     /// The answer is JSON of the wrong shape.
     #[error("beacon node answer is malformed: {0}")]
-    Json(#[from] JsonError),
+    Json(#[from] ApiJsonError),
     /// The answer is not the SSZ value expected.
     #[error("beacon node answer is not valid SSZ: {0}")]
     Ssz(#[from] DecodeError),

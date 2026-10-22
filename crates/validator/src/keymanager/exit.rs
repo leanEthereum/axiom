@@ -4,6 +4,7 @@
 
 use std::{marker::PhantomData, sync::Arc};
 
+use axiom_beacon_json::ApiJson;
 use axiom_http::{Method, Request};
 use axiom_types::{
     Epoch, Preset,
@@ -12,7 +13,6 @@ use axiom_types::{
 
 use crate::{
     duties::SlotTimer,
-    json::ApiJson,
     keymanager::reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
     signing::{SignError, SigningRequest},
     validators::ValidatorStore,

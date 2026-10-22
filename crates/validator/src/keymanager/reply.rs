@@ -2,11 +2,12 @@
 
 use std::{future::Future, sync::Arc};
 
+use axiom_beacon_json::ApiJsonError;
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_types::BlsPubkey;
 
-use crate::{json::JsonError, keymanager::auth::ApiToken};
+use crate::keymanager::auth::ApiToken;
 
 /// Media type of JSON bodies.
 const JSON: &str = "application/json";
@@ -68,8 +69,8 @@ impl ApiError {
     }
 }
 
-impl From<JsonError> for ApiError {
-    fn from(error: JsonError) -> Self {
+impl From<ApiJsonError> for ApiError {
+    fn from(error: ApiJsonError) -> Self {
         Self::bad_request(format!("malformed request body: {error}"))
     }
 }

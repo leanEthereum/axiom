@@ -16,7 +16,6 @@ mod beacon_api;
 mod blocks;
 pub(crate) mod client;
 mod error;
-mod messages;
 mod node_api;
 mod nodes;
 mod validator_api;
@@ -26,11 +25,6 @@ pub use beacon_api::BeaconEndpoints;
 pub use blocks::{ProducedBlock, SignedProposal};
 pub use client::BeaconClient;
 pub use error::BeaconError;
-pub use messages::{
-    AttesterDuty, BeaconCommitteeSubscription, Duties, Genesis, Liveness, ProposerDuty,
-    ProposerPreparation, PtcDuty, SyncCommitteeSubscription, SyncDuty, SyncStatus, ValidatorStatus,
-    ValidatorSummary,
-};
 pub use node_api::NodeEndpoints;
 pub use nodes::{BeaconNodes, Health};
 pub use validator_api::ValidatorEndpoints;

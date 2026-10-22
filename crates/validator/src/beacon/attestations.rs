@@ -1,5 +1,6 @@
 //! Attestations and aggregates in the shape of the fork that carries them.
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, ForkedJson, api::AttesterDuty};
 use axiom_json::Json;
 use axiom_ssz::BitList;
 use axiom_types::{
@@ -7,11 +8,7 @@ use axiom_types::{
     phase0::{self, AttestationData},
 };
 
-use crate::{
-    beacon::{AttesterDuty, BeaconError},
-    json::{ApiJson, JsonError},
-    signing::AggregateAndProofRef,
-};
+use crate::{beacon::BeaconError, signing::AggregateAndProofRef};
 
 /// One validator's vote, in the shape the pool route of its fork takes.
 ///
@@ -84,13 +81,17 @@ impl<P: Preset> PoolAttestation<P> {
             Self::Single(attestation) => &attestation.data,
         }
     }
+}
 
-    /// Reads a pool entry in the shape of a fork.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the JSON is not that fork's shape.
-    pub fn from_json(json: &Json, fork: ForkName) -> Result<Self, JsonError> {
+impl<P: Preset> ForkedJson for PoolAttestation<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Phase0(attestation) => attestation.to_json(),
+            Self::Single(attestation) => attestation.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, json: &Json) -> Result<Self, ApiJsonError> {
         match fork {
             ForkName::Phase0
             | ForkName::Altair
@@ -100,15 +101,6 @@ impl<P: Preset> PoolAttestation<P> {
             ForkName::Electra | ForkName::Fulu | ForkName::Gloas => {
                 electra::SingleAttestation::from_json(json).map(Self::Single)
             }
-        }
-    }
-
-    /// The entry as JSON.
-    #[must_use]
-    pub fn to_json(&self) -> Json {
-        match self {
-            Self::Phase0(attestation) => attestation.to_json(),
-            Self::Single(attestation) => attestation.to_json(),
         }
     }
 }
@@ -125,35 +117,6 @@ pub enum Aggregate<P: Preset> {
 }
 
 impl<P: Preset> Aggregate<P> {
-    /// Reads an aggregate in the shape of a fork.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the JSON is not that fork's shape.
-    pub fn from_json(json: &Json, fork: ForkName) -> Result<Self, JsonError> {
-        match fork {
-            ForkName::Phase0
-            | ForkName::Altair
-            | ForkName::Bellatrix
-            | ForkName::Capella
-            | ForkName::Deneb => phase0::Attestation::from_json(json).map(Self::Phase0),
-            ForkName::Electra | ForkName::Fulu => {
-                electra::Attestation::from_json(json).map(Self::Electra)
-            }
-            ForkName::Gloas => gloas::Attestation::from_json(json).map(Self::Gloas),
-        }
-    }
-
-    /// The aggregate as JSON.
-    #[must_use]
-    pub fn to_json(&self) -> Json {
-        match self {
-            Self::Phase0(aggregate) => aggregate.to_json(),
-            Self::Electra(aggregate) => aggregate.to_json(),
-            Self::Gloas(aggregate) => aggregate.to_json(),
-        }
-    }
-
     /// The vote the aggregate carries.
     #[must_use]
     pub const fn data(&self) -> &AttestationData {
@@ -187,6 +150,30 @@ impl<P: Preset> Aggregate<P> {
                 aggregate,
                 selection_proof,
             }),
+        }
+    }
+}
+
+impl<P: Preset> ForkedJson for Aggregate<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Phase0(aggregate) => aggregate.to_json(),
+            Self::Electra(aggregate) => aggregate.to_json(),
+            Self::Gloas(aggregate) => aggregate.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, json: &Json) -> Result<Self, ApiJsonError> {
+        match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb => phase0::Attestation::from_json(json).map(Self::Phase0),
+            ForkName::Electra | ForkName::Fulu => {
+                electra::Attestation::from_json(json).map(Self::Electra)
+            }
+            ForkName::Gloas => gloas::Attestation::from_json(json).map(Self::Gloas),
         }
     }
 }
@@ -241,13 +228,16 @@ pub enum SignedAggregate<P: Preset> {
     Gloas(gloas::SignedAggregateAndProof<P>),
 }
 
-impl<P: Preset> SignedAggregate<P> {
-    /// Reads a signed aggregate in the shape of a fork.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the JSON is not that fork's shape.
-    pub fn from_json(json: &Json, fork: ForkName) -> Result<Self, JsonError> {
+impl<P: Preset> ForkedJson for SignedAggregate<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Phase0(signed) => signed.to_json(),
+            Self::Electra(signed) => signed.to_json(),
+            Self::Gloas(signed) => signed.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, json: &Json) -> Result<Self, ApiJsonError> {
         match fork {
             ForkName::Phase0
             | ForkName::Altair
@@ -258,16 +248,6 @@ impl<P: Preset> SignedAggregate<P> {
                 electra::SignedAggregateAndProof::from_json(json).map(Self::Electra)
             }
             ForkName::Gloas => gloas::SignedAggregateAndProof::from_json(json).map(Self::Gloas),
-        }
-    }
-
-    /// The message as JSON.
-    #[must_use]
-    pub fn to_json(&self) -> Json {
-        match self {
-            Self::Phase0(signed) => signed.to_json(),
-            Self::Electra(signed) => signed.to_json(),
-            Self::Gloas(signed) => signed.to_json(),
         }
     }
 }

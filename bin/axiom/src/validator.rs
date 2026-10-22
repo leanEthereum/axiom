@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use axiom_beacon_json::api::Genesis;
 use axiom_http::{Client, ClientConfig, Endpoint, HttpError};
 use axiom_json::Data;
 use axiom_node::SystemClock;
@@ -17,7 +18,7 @@ use axiom_types::{
     Bytes32, ChainConfig, ExecutionAddress, Mainnet, Minimal, Preset, SlotClock, Version,
 };
 use axiom_validator::{
-    beacon::{BeaconClient, BeaconError, BeaconNodes, Genesis},
+    beacon::{BeaconClient, BeaconError, BeaconNodes},
     duties::{ClientSettings, DutyContext, SlotTimer, ValidatorClient},
     keymanager::{DirectoryError, KeyDirectory, Keymanager},
     protection::{ProtectionError, SlashingDatabase},

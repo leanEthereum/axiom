@@ -1,15 +1,13 @@
 //! One beacon node, reached over HTTP.
 
+use axiom_beacon_json::{ApiJson, Fields};
 use axiom_http::{
     Client, ClientConfig, Endpoint, HttpError, Method, Request, Response, StatusCode,
 };
 use axiom_json::Json;
 use axiom_types::ForkName;
 
-use crate::{
-    beacon::{BeaconEndpoints, BeaconError, NodeEndpoints, ValidatorEndpoints},
-    json::{ApiJson, Fields},
-};
+use crate::beacon::{BeaconEndpoints, BeaconError, NodeEndpoints, ValidatorEndpoints};
 
 /// Media type of JSON bodies.
 pub(crate) const JSON: &str = "application/json";
@@ -80,7 +78,7 @@ impl BeaconClient {
         // The API's error object carries a message; anything else is shown raw.
         let message = Json::parse(&response.body)
             .ok()
-            .and_then(|json| Fields::of(&json).ok()?.get::<String>("message").ok())
+            .and_then(|json| Fields::of(&json).ok()?.required::<String>("message").ok())
             .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
         Err(BeaconError::Status {
             status: response.status,
@@ -137,7 +135,7 @@ impl BeaconClient {
 
     /// The data member of a JSON answer, decoded.
     pub(crate) fn data<T: ApiJson>(json: &Json) -> Result<T, BeaconError> {
-        Ok(Fields::of(json)?.get("data")?)
+        Ok(Fields::of(json)?.required("data")?)
     }
 
     /// The fork an answer names in its header.

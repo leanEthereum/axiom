@@ -1,5 +1,9 @@
 //! The beacon namespace: chain data a validator reads, and the messages it publishes.
 
+use axiom_beacon_json::{
+    ApiJson, Fields, ForkedJson,
+    api::{Genesis, ValidatorResponse},
+};
 use axiom_http::{Method, Request};
 use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
@@ -11,12 +15,7 @@ use axiom_types::{
     phase0::SignedVoluntaryExit,
 };
 
-use crate::{
-    beacon::{
-        BeaconClient, BeaconError, Genesis, PoolAttestation, SignedProposal, ValidatorSummary,
-    },
-    json::{ApiJson, Fields},
-};
+use crate::beacon::{BeaconClient, BeaconError, PoolAttestation, SignedProposal};
 
 /// The beacon namespace of one beacon node.
 #[derive(Clone, Copy, Debug)]
@@ -56,7 +55,7 @@ impl<'a> BeaconEndpoints<'a> {
             .get_json("/eth/v1/beacon/blocks/head/root")
             .await?;
         let data = Fields::of(&json)?;
-        Ok(Fields::of(data.raw("data")?)?.get("root")?)
+        Ok(Fields::of(data.raw("data")?)?.required("root")?)
     }
 
     /// The registry entries of the given keys in the head state; unknown keys are left out.
@@ -69,7 +68,7 @@ impl<'a> BeaconEndpoints<'a> {
     pub async fn validators(
         self,
         pubkeys: &[BlsPubkey],
-    ) -> Result<Vec<ValidatorSummary>, BeaconError> {
+    ) -> Result<Vec<ValidatorResponse>, BeaconError> {
         let ids: Vec<Json> = pubkeys
             .iter()
             .map(|pubkey| Json::from(pubkey.0.to_data()))
@@ -136,7 +135,7 @@ impl<'a> BeaconEndpoints<'a> {
         fork: ForkName,
         attestations: &[PoolAttestation<P>],
     ) -> Result<(), BeaconError> {
-        let body = Json::Array(attestations.iter().map(PoolAttestation::to_json).collect());
+        let body = Json::Array(attestations.iter().map(ForkedJson::to_json).collect());
         self.client
             .post_json("/eth/v2/beacon/pool/attestations", &body, Some(fork))
             .await?;

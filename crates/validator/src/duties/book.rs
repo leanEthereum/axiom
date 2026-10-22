@@ -2,9 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use axiom_beacon_json::api::{AttesterDuty, Duties, ProposerDuty, PtcDuty, SyncDuty};
 use axiom_types::{BlsSignature, Epoch, Preset, Root, Slot};
-
-use crate::beacon::{AttesterDuty, Duties, ProposerDuty, PtcDuty, SyncDuty};
 
 /// A committee seat, with the proof that makes its holder an aggregator, if it is one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

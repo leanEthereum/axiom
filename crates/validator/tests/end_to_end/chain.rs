@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use axiom_beacon_json::api::{
+    AttesterDuty, Duties, ProposerDuty, PtcDuty, SyncDuty, ValidatorResponse, ValidatorStatus,
+};
 use axiom_bls::Signature;
 use axiom_ef_tests::chain_builder::{
     BlockAttestations, BlockInputs, ChainBuilder, UnsignedProposal,
@@ -18,10 +21,7 @@ use axiom_types::{
     electra, gloas,
     phase0::{self, AttestationData, Checkpoint},
 };
-use axiom_validator::beacon::{
-    Aggregate, AttesterDuty, Duties, PoolAttestation, ProducedBlock, ProposerDuty, PtcDuty,
-    SignedProposal, SyncDuty, ValidatorStatus, ValidatorSummary,
-};
+use axiom_validator::beacon::{Aggregate, PoolAttestation, ProducedBlock, SignedProposal};
 
 /// One committee's votes for one slot, as single votes arrive.
 #[derive(Clone, Debug)]
@@ -149,20 +149,18 @@ impl TestChain {
     }
 
     /// Registry entries of the given keys.
-    pub(crate) fn validators(&self, pubkeys: &[BlsPubkey]) -> Vec<ValidatorSummary> {
+    pub(crate) fn validators(&self, pubkeys: &[BlsPubkey]) -> Vec<ValidatorResponse> {
         let beacon = self.builder.state().beacon();
         beacon
             .validators()
             .iter()
             .enumerate()
             .filter(|(_, validator)| pubkeys.contains(&validator.pubkey))
-            .map(|(index, validator)| ValidatorSummary {
+            .map(|(index, validator)| ValidatorResponse {
                 index: ValidatorIndex(index as u64),
-                pubkey: validator.pubkey,
-                status: ValidatorStatus::ActiveOngoing,
                 balance: beacon.balances()[index],
-                activation_epoch: validator.activation_epoch,
-                exit_epoch: validator.exit_epoch,
+                status: ValidatorStatus::ActiveOngoing,
+                validator: validator.clone(),
             })
             .collect()
     }
@@ -187,7 +185,7 @@ impl TestChain {
             })
             .collect();
         Duties {
-            dependent_root: self.dependent_root(epoch),
+            dependent_root: Some(self.dependent_root(epoch)),
             execution_optimistic: false,
             data,
         }
@@ -227,7 +225,7 @@ impl TestChain {
             }
         }
         Duties {
-            dependent_root: self.dependent_root(Epoch(epoch.0.saturating_sub(1))),
+            dependent_root: Some(self.dependent_root(Epoch(epoch.0.saturating_sub(1)))),
             execution_optimistic: false,
             data,
         }

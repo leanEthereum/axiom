@@ -137,6 +137,7 @@ impl<P: Preset> Doppelganger<P> {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use axiom_beacon_json::{ApiJson, api::Liveness};
     use axiom_bls::SecretKey;
     use axiom_http::{ClientConfig, Method, Response, Router, Server, ServerConfig, StatusCode};
     use axiom_json::Json;
@@ -146,9 +147,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        beacon::{BeaconClient, BeaconNodes, Liveness},
+        beacon::{BeaconClient, BeaconNodes},
         duties::{ClientSettings, SlotTimer},
-        json::ApiJson,
         protection::SlashingDatabase,
         signing::{Bls, LocalKey, SigningContext, SigningGuard, ValidatorSigner},
         validators::{ProposerDefaults, ValidatorStore},

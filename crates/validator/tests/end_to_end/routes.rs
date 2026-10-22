@@ -5,6 +5,10 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use axiom_beacon_json::{
+    ApiJson, Fields, ForkedJson,
+    api::{Duties, Genesis, Liveness, SyncStatus},
+};
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
@@ -14,12 +18,7 @@ use axiom_types::{
     altair::{SignedContributionAndProof, SyncCommitteeMessage},
     gloas::{PayloadAttestationMessage, SignedExecutionPayloadEnvelope, SignedProposerPreferences},
 };
-use axiom_validator::{
-    beacon::{
-        Duties, Genesis, Liveness, PoolAttestation, SignedAggregate, SignedProposal, SyncStatus,
-    },
-    json::{ApiJson, Fields},
-};
+use axiom_validator::beacon::{PoolAttestation, SignedAggregate, SignedProposal};
 
 use crate::chain::TestChain;
 
@@ -105,7 +104,7 @@ impl Routes {
             "/eth/v1/beacon/states/head/validators",
             |chain, request| async move {
                 let ids: Vec<BlsPubkey> = Fields::of(&body(&request))
-                    .and_then(|fields| fields.get("ids"))
+                    .and_then(|fields| fields.required("ids"))
                     .expect("the request names keys");
                 let validators = lock(&chain).validators(&ids);
                 data(validators.to_json())
@@ -228,7 +227,9 @@ impl Routes {
                 let fork = fork_of(&request);
                 let votes: Vec<PoolAttestation<Minimal>> = items(&request)
                     .iter()
-                    .map(|vote| PoolAttestation::from_json(vote, fork).expect("a vote of the fork"))
+                    .map(|vote| {
+                        PoolAttestation::from_json_in(fork, vote).expect("a vote of the fork")
+                    })
                     .collect();
                 let mut chain = lock(&chain);
                 for vote in votes {
@@ -268,7 +269,7 @@ impl Routes {
                 let fork = fork_of(&request);
                 let signed = items(&request);
                 for aggregate in &signed {
-                    SignedAggregate::<Minimal>::from_json(aggregate, fork)
+                    SignedAggregate::<Minimal>::from_json_in(fork, aggregate)
                         .expect("an aggregate of the fork");
                 }
                 let count = signed.len();
@@ -407,7 +408,7 @@ fn lock(chain: &Shared) -> MutexGuard<'_, TestChain> {
 /// Duties that depend on no root.
 const fn unrooted<T>(data: Vec<T>) -> Duties<T> {
     Duties {
-        dependent_root: Root::ZERO,
+        dependent_root: None,
         execution_optimistic: false,
         data,
     }

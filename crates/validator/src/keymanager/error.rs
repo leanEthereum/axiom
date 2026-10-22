@@ -2,11 +2,12 @@
 
 use std::{io, path::PathBuf};
 
+use axiom_beacon_json::ApiJsonError;
 use axiom_http::HttpError;
 use axiom_json::ParseError;
 use thiserror::Error;
 
-use crate::{json::JsonError, keys::KeystoreError, signing::LocalKeyError};
+use crate::{keys::KeystoreError, signing::LocalKeyError};
 
 /// Why a keystore did not open.
 #[derive(Debug, Error)]
@@ -73,7 +74,7 @@ pub enum DirectoryError {
         path: PathBuf,
         /// What is wrong with its shape.
         #[source]
-        source: JsonError,
+        source: ApiJsonError,
     },
     /// A remote signer URL is not a plain http URL.
     #[error("remote signer URL {url:?}: {source}")]

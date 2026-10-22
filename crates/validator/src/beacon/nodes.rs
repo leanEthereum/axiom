@@ -5,10 +5,11 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use axiom_beacon_json::api::SyncStatus;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-use crate::beacon::{BeaconClient, BeaconError, SyncStatus};
+use crate::beacon::{BeaconClient, BeaconError};
 
 /// How fit a beacon node is to serve duties, best first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

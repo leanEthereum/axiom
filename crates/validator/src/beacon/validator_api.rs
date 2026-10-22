@@ -1,5 +1,12 @@
 //! The validator namespace: duties, block and vote production, and preparation.
 
+use axiom_beacon_json::{
+    ApiJson, Fields, ForkedJson,
+    api::{
+        AttesterDuty, BeaconCommitteeSubscription, Duties, Liveness, ProposerDuty,
+        ProposerPreparation, PtcDuty, SyncCommitteeSubscription, SyncDuty,
+    },
+};
 use axiom_http::{Method, Request};
 use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
@@ -11,14 +18,9 @@ use axiom_types::{
     phase0::AttestationData,
 };
 
-use crate::{
-    beacon::{
-        Aggregate, AttesterDuty, BeaconClient, BeaconCommitteeSubscription, BeaconError, Duties,
-        Liveness, ProducedBlock, ProposerDuty, ProposerPreparation, PtcDuty, SignedAggregate,
-        SyncCommitteeSubscription, SyncDuty,
-        client::{CONSENSUS_VERSION, JSON, SSZ},
-    },
-    json::{ApiJson, Fields},
+use crate::beacon::{
+    Aggregate, BeaconClient, BeaconError, ProducedBlock, SignedAggregate,
+    client::{CONSENSUS_VERSION, JSON, SSZ},
 };
 
 /// Header saying whether a produced block is blinded.
@@ -262,7 +264,7 @@ impl<'a> ValidatorEndpoints<'a> {
             ))
             .await?;
         let data = Fields::of(&json)?.raw("data")?;
-        Ok(Aggregate::from_json(data, fork)?)
+        Ok(Aggregate::from_json_in(fork, data)?)
     }
 
     /// Publishes signed aggregates.
@@ -277,7 +279,7 @@ impl<'a> ValidatorEndpoints<'a> {
         fork: ForkName,
         aggregates: &[SignedAggregate<P>],
     ) -> Result<(), BeaconError> {
-        let body = Json::Array(aggregates.iter().map(SignedAggregate::to_json).collect());
+        let body = Json::Array(aggregates.iter().map(ForkedJson::to_json).collect());
         self.client
             .post_json("/eth/v2/validator/aggregate_and_proofs", &body, Some(fork))
             .await?;

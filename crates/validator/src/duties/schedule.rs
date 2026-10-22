@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::api::{BeaconCommitteeSubscription, SyncCommitteeSubscription};
 use axiom_types::{Epoch, Preset, ValidatorIndex};
 use tracing::{debug, info, warn};
 
 use crate::{
-    beacon::{BeaconCommitteeSubscription, SyncCommitteeSubscription},
     duties::{AggregatorSelection, AttesterSeat, DutyContext},
     signing::SigningRequest,
 };
@@ -73,7 +73,9 @@ impl<P: Preset> DutyScheduler<P> {
                         status = summary.status.as_str(),
                         "validator found"
                     );
-                    self.context.store.set_index(&summary.pubkey, summary.index);
+                    self.context
+                        .store
+                        .set_index(&summary.validator.pubkey, summary.index);
                 }
             }
             Err(error) => warn!(%error, "validator indices unavailable"),
@@ -108,7 +110,8 @@ impl<P: Preset> DutyScheduler<P> {
                 return;
             }
         };
-        if self.context.book().attester_root(epoch) == Some(duties.dependent_root) {
+        let dependent_root = duties.dependent_root.unwrap_or_default();
+        if self.context.book().attester_root(epoch) == Some(dependent_root) {
             return;
         }
 
@@ -149,7 +152,7 @@ impl<P: Preset> DutyScheduler<P> {
             .collect();
         self.context
             .book()
-            .set_attesters(epoch, duties.dependent_root, seats);
+            .set_attesters(epoch, dependent_root, seats);
         if subscriptions.is_empty() {
             return;
         }

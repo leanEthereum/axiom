@@ -2,15 +2,13 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, Fields};
 use axiom_http::{Client, HttpError, Method, Request, StatusCode};
 use axiom_json::{Data, Json, ParseError};
 use axiom_types::{BlsPubkey, BlsSignature, Epoch, ForkName, Preset, Root};
 use thiserror::Error;
 
-use crate::{
-    json::{ApiJson, Fields, JsonError},
-    signing::{AggregateAndProofRef, DomainScope, SigningContext, SigningRequest},
-};
+use crate::signing::{AggregateAndProofRef, DomainScope, SigningContext, SigningRequest};
 
 /// Media type of the request and response bodies.
 const JSON: &str = "application/json";
@@ -218,7 +216,7 @@ impl RemoteBody {
         let text = text.trim();
         if text.starts_with('{') {
             let json = Json::parse(text)?;
-            return Ok(Fields::of(&json)?.get("signature")?);
+            return Ok(Fields::of(&json)?.required("signature")?);
         }
         Ok(BlsSignature::from_json(&Json::from(text))?)
     }
@@ -246,7 +244,7 @@ pub enum RemoteError {
     Parse(#[from] ParseError),
     /// The answer is JSON of the wrong shape.
     #[error("remote signer answer is malformed: {0}")]
-    Json(#[from] JsonError),
+    Json(#[from] ApiJsonError),
 }
 
 #[cfg(test)]
@@ -282,7 +280,7 @@ mod tests {
                     let body = Json::parse(&request.body).unwrap();
                     let root = Fields::of(&body)
                         .unwrap()
-                        .get::<Root>("signingRoot")
+                        .required::<Root>("signingRoot")
                         .unwrap();
                     bodies.lock().unwrap().push(body);
                     let signature = Bls::sign(&secret(), None, root).unwrap();

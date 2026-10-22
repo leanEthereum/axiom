@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use axiom_beacon_json::ApiJson;
 use axiom_http::{HttpError, Method, Request, Router, StatusCode};
 use axiom_json::Json;
 use axiom_node::ManualClock;
@@ -22,7 +23,6 @@ use axiom_types::{
 };
 use axiom_validator::{
     duties::SlotTimer,
-    json::ApiJson,
     keymanager::{KeyDirectory, Keymanager, UnlockError},
     keys::{
         DerivationPath, EncryptionParams, Kdf, Keystore, KeystoreError, Password, SecretKeyBytes,

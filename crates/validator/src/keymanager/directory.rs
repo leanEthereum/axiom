@@ -1,21 +1,21 @@
 //! The directory the client keeps its keys in, durable across restarts.
 
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, ErrorKind, Write},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
+#[cfg(unix)]
+use axiom_beacon_json::{ApiJson, ApiJsonError, Fields};
 use axiom_http::{Client, ClientConfig, Endpoint};
 use axiom_json::{Data, Json};
 use axiom_types::BlsPubkey;
 
 use crate::{
-    json::{ApiJson, Fields, JsonError},
     keymanager::{DirectoryError, sealed::SealedKey},
     keys::{DerivationPath, Keystore, OsEntropy, Password},
     signing::{RemoteSigner, ValidatorSigner},
@@ -56,11 +56,11 @@ impl ApiJson for RemoteEntry {
         ])
     }
 
-    fn from_json(json: &Json) -> Result<Self, JsonError> {
+    fn from_json(json: &Json) -> Result<Self, ApiJsonError> {
         let fields = Fields::of(json)?;
         Ok(Self {
-            pubkey: fields.get("pubkey")?,
-            url: fields.get("url")?,
+            pubkey: fields.required("pubkey")?,
+            url: fields.required("url")?,
         })
     }
 }
