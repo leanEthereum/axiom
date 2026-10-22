@@ -3,13 +3,18 @@
 //! Registry-sized lists are unbounded and merkleized progressively, see EIP-7688.
 
 use axiom_ssz::{
-    BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, Merkleization, ProgressiveList,
-    Ssz,
+    BitVector, CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Merkleization,
+    ProgressiveList, Ssz,
 };
 
 use crate::{
-    BuilderIndex, Epoch, Gwei, Hash32, ParticipationFlags, Preset, Root, Slot, ValidatorIndex,
-    WithdrawalIndex,
+    BuilderIndex, Epoch, ForkName, Gwei, Hash32, ParticipationFlags, Preset, Root, Slot,
+    ValidatorIndex, WithdrawalIndex,
+    accessors::{
+        BuilderState, CoreState, ForkState, LookaheadState, ParticipationState, PendingQueueState,
+        SyncCommitteeState, WithdrawalState,
+    },
+    combined,
     gloas::{
         BeaconBlockHeader, BlockRoots, BuilderPendingPayments, BuilderPendingWithdrawals, Builders,
         Checkpoint, Eth1Data, Eth1DataVotes, ExecutionPayloadBid, Fork, HistoricalRoots,
@@ -337,5 +342,498 @@ impl<P: Preset> Container for BeaconState<P> {
             payload_expected_withdrawals: fields.field()?,
             ptc_window: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> ForkState for BeaconState<P> {
+    const FORK: ForkName = ForkName::Gloas;
+
+    fn from_any(state: &combined::BeaconState<P>) -> Option<&Self> {
+        match state {
+            combined::BeaconState::Gloas(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn from_any_mut(state: &mut combined::BeaconState<P>) -> Option<&mut Self> {
+        match state {
+            combined::BeaconState::Gloas(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn into_any(self) -> combined::BeaconState<P> {
+        combined::BeaconState::Gloas(self)
+    }
+}
+
+impl<P: Preset> CoreState for BeaconState<P> {
+    type Preset = P;
+
+    fn fork_name(&self) -> ForkName {
+        Self::FORK
+    }
+
+    fn state_root(&self) -> Root {
+        self.hash_tree_root()
+    }
+
+    fn genesis_time(&self) -> u64 {
+        self.genesis_time
+    }
+
+    fn genesis_validators_root(&self) -> Root {
+        self.genesis_validators_root
+    }
+
+    fn slot(&self) -> Slot {
+        self.slot
+    }
+
+    fn slot_mut(&mut self) -> &mut Slot {
+        &mut self.slot
+    }
+
+    fn fork(&self) -> &Fork {
+        &self.fork
+    }
+
+    fn latest_block_header(&self) -> &BeaconBlockHeader {
+        &self.latest_block_header
+    }
+
+    fn latest_block_header_mut(&mut self) -> &mut BeaconBlockHeader {
+        &mut self.latest_block_header
+    }
+
+    fn block_roots(&self) -> &BlockRoots<P> {
+        &self.block_roots
+    }
+
+    fn block_roots_mut(&mut self) -> &mut BlockRoots<P> {
+        &mut self.block_roots
+    }
+
+    fn state_roots(&self) -> &StateRoots<P> {
+        &self.state_roots
+    }
+
+    fn state_roots_mut(&mut self) -> &mut StateRoots<P> {
+        &mut self.state_roots
+    }
+
+    fn historical_roots(&self) -> &HistoricalRoots<P> {
+        &self.historical_roots
+    }
+
+    fn historical_roots_mut(&mut self) -> &mut HistoricalRoots<P> {
+        &mut self.historical_roots
+    }
+
+    fn eth1_data(&self) -> &Eth1Data {
+        &self.eth1_data
+    }
+
+    fn eth1_data_mut(&mut self) -> &mut Eth1Data {
+        &mut self.eth1_data
+    }
+
+    fn eth1_data_votes(&self) -> &Eth1DataVotes<P> {
+        &self.eth1_data_votes
+    }
+
+    fn eth1_data_votes_mut(&mut self) -> &mut Eth1DataVotes<P> {
+        &mut self.eth1_data_votes
+    }
+
+    fn eth1_deposit_index(&self) -> u64 {
+        self.eth1_deposit_index
+    }
+
+    fn eth1_deposit_index_mut(&mut self) -> &mut u64 {
+        &mut self.eth1_deposit_index
+    }
+
+    fn validators(&self) -> &[Validator] {
+        &self.validators
+    }
+
+    fn validators_mut(&mut self) -> &mut [Validator] {
+        &mut self.validators
+    }
+
+    fn balances(&self) -> &[Gwei] {
+        &self.balances
+    }
+
+    fn balances_mut(&mut self) -> &mut [Gwei] {
+        &mut self.balances
+    }
+
+    fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {
+        // Progressive lists have no limit, so the registry always grows.
+        self.validators.push(validator);
+        self.balances.push(balance);
+        Ok(())
+    }
+
+    fn randao_mixes(&self) -> &RandaoMixes<P> {
+        &self.randao_mixes
+    }
+
+    fn randao_mixes_mut(&mut self) -> &mut RandaoMixes<P> {
+        &mut self.randao_mixes
+    }
+
+    fn slashings(&self) -> &Slashings<P> {
+        &self.slashings
+    }
+
+    fn slashings_mut(&mut self) -> &mut Slashings<P> {
+        &mut self.slashings
+    }
+
+    fn justification_bits(&self) -> &JustificationBits {
+        &self.justification_bits
+    }
+
+    fn justification_bits_mut(&mut self) -> &mut JustificationBits {
+        &mut self.justification_bits
+    }
+
+    fn previous_justified_checkpoint(&self) -> Checkpoint {
+        self.previous_justified_checkpoint
+    }
+
+    fn previous_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.previous_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint(&self) -> Checkpoint {
+        self.current_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.current_justified_checkpoint
+    }
+
+    fn finalized_checkpoint(&self) -> Checkpoint {
+        self.finalized_checkpoint
+    }
+
+    fn finalized_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.finalized_checkpoint
+    }
+}
+
+impl<P: Preset> ParticipationState for BeaconState<P> {
+    fn previous_epoch_participation(&self) -> &[ParticipationFlags] {
+        &self.previous_epoch_participation
+    }
+
+    fn current_epoch_participation(&self) -> &[ParticipationFlags] {
+        &self.current_epoch_participation
+    }
+
+    fn epoch_participation_mut(
+        &mut self,
+    ) -> (&mut [ParticipationFlags], &mut [ParticipationFlags]) {
+        (
+            &mut self.previous_epoch_participation[..],
+            &mut self.current_epoch_participation[..],
+        )
+    }
+
+    fn inactivity_scores(&self) -> &[u64] {
+        &self.inactivity_scores
+    }
+
+    fn inactivity_scores_mut(&mut self) -> &mut [u64] {
+        &mut self.inactivity_scores
+    }
+
+    fn push_participant(&mut self) -> Result<(), CapacityError> {
+        // Progressive lists have no limit, so every list always grows.
+        self.previous_epoch_participation
+            .push(ParticipationFlags::default());
+        self.current_epoch_participation
+            .push(ParticipationFlags::default());
+        self.inactivity_scores.push(0);
+        Ok(())
+    }
+}
+
+impl<P: Preset> SyncCommitteeState for BeaconState<P> {
+    fn current_sync_committee(&self) -> &SyncCommittee<P> {
+        &self.current_sync_committee
+    }
+
+    fn current_sync_committee_mut(&mut self) -> &mut SyncCommittee<P> {
+        &mut self.current_sync_committee
+    }
+
+    fn next_sync_committee(&self) -> &SyncCommittee<P> {
+        &self.next_sync_committee
+    }
+
+    fn next_sync_committee_mut(&mut self) -> &mut SyncCommittee<P> {
+        &mut self.next_sync_committee
+    }
+}
+
+impl<P: Preset> WithdrawalState for BeaconState<P> {
+    fn next_withdrawal_index(&self) -> WithdrawalIndex {
+        self.next_withdrawal_index
+    }
+
+    fn next_withdrawal_index_mut(&mut self) -> &mut WithdrawalIndex {
+        &mut self.next_withdrawal_index
+    }
+
+    fn next_withdrawal_validator_index(&self) -> ValidatorIndex {
+        self.next_withdrawal_validator_index
+    }
+
+    fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
+        &mut self.next_withdrawal_validator_index
+    }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
+    }
+}
+
+impl<P: Preset> PendingQueueState for BeaconState<P> {
+    fn deposit_requests_start_index(&self) -> u64 {
+        self.deposit_requests_start_index
+    }
+
+    fn deposit_requests_start_index_mut(&mut self) -> &mut u64 {
+        &mut self.deposit_requests_start_index
+    }
+
+    fn deposit_balance_to_consume(&self) -> Gwei {
+        self.deposit_balance_to_consume
+    }
+
+    fn deposit_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.deposit_balance_to_consume
+    }
+
+    fn exit_balance_to_consume(&self) -> Gwei {
+        self.exit_balance_to_consume
+    }
+
+    fn exit_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.exit_balance_to_consume
+    }
+
+    fn earliest_exit_epoch(&self) -> Epoch {
+        self.earliest_exit_epoch
+    }
+
+    fn earliest_exit_epoch_mut(&mut self) -> &mut Epoch {
+        &mut self.earliest_exit_epoch
+    }
+
+    fn consolidation_balance_to_consume(&self) -> Gwei {
+        self.consolidation_balance_to_consume
+    }
+
+    fn consolidation_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.consolidation_balance_to_consume
+    }
+
+    fn earliest_consolidation_epoch(&self) -> Epoch {
+        self.earliest_consolidation_epoch
+    }
+
+    fn earliest_consolidation_epoch_mut(&mut self) -> &mut Epoch {
+        &mut self.earliest_consolidation_epoch
+    }
+
+    fn pending_deposits(&self) -> &[PendingDeposit] {
+        &self.pending_deposits
+    }
+
+    fn push_pending_deposit(&mut self, deposit: PendingDeposit) -> Result<(), CapacityError> {
+        self.pending_deposits.push(deposit);
+        Ok(())
+    }
+
+    fn remove_pending_deposits(&mut self, count: usize) {
+        self.pending_deposits.drain(..count);
+    }
+
+    fn pending_partial_withdrawals(&self) -> &[PendingPartialWithdrawal] {
+        &self.pending_partial_withdrawals
+    }
+
+    fn push_pending_partial_withdrawal(
+        &mut self,
+        withdrawal: PendingPartialWithdrawal,
+    ) -> Result<(), CapacityError> {
+        self.pending_partial_withdrawals.push(withdrawal);
+        Ok(())
+    }
+
+    fn remove_pending_partial_withdrawals(&mut self, count: usize) {
+        self.pending_partial_withdrawals.drain(..count);
+    }
+
+    fn pending_consolidations(&self) -> &[PendingConsolidation] {
+        &self.pending_consolidations
+    }
+
+    fn push_pending_consolidation(
+        &mut self,
+        consolidation: PendingConsolidation,
+    ) -> Result<(), CapacityError> {
+        self.pending_consolidations.push(consolidation);
+        Ok(())
+    }
+
+    fn remove_pending_consolidations(&mut self, count: usize) {
+        self.pending_consolidations.drain(..count);
+    }
+}
+
+impl<P: Preset> LookaheadState for BeaconState<P> {
+    fn proposer_lookahead(&self) -> &ProposerLookahead<P> {
+        &self.proposer_lookahead
+    }
+
+    fn proposer_lookahead_mut(&mut self) -> &mut ProposerLookahead<P> {
+        &mut self.proposer_lookahead
+    }
+}
+
+impl<P: Preset> BuilderState for BeaconState<P> {
+    fn latest_block_hash(&self) -> Hash32 {
+        self.latest_block_hash
+    }
+
+    fn latest_block_hash_mut(&mut self) -> &mut Hash32 {
+        &mut self.latest_block_hash
+    }
+
+    fn builders(&self) -> &Builders {
+        &self.builders
+    }
+
+    fn builders_mut(&mut self) -> &mut Builders {
+        &mut self.builders
+    }
+
+    fn next_withdrawal_builder_index(&self) -> BuilderIndex {
+        self.next_withdrawal_builder_index
+    }
+
+    fn next_withdrawal_builder_index_mut(&mut self) -> &mut BuilderIndex {
+        &mut self.next_withdrawal_builder_index
+    }
+
+    fn execution_payload_availability(&self) -> &ExecutionPayloadAvailability<P> {
+        &self.execution_payload_availability
+    }
+
+    fn execution_payload_availability_mut(&mut self) -> &mut ExecutionPayloadAvailability<P> {
+        &mut self.execution_payload_availability
+    }
+
+    fn builder_pending_payments(&self) -> &BuilderPendingPayments<P> {
+        &self.builder_pending_payments
+    }
+
+    fn builder_pending_payments_mut(&mut self) -> &mut BuilderPendingPayments<P> {
+        &mut self.builder_pending_payments
+    }
+
+    fn builder_pending_withdrawals(&self) -> &BuilderPendingWithdrawals {
+        &self.builder_pending_withdrawals
+    }
+
+    fn builder_pending_withdrawals_mut(&mut self) -> &mut BuilderPendingWithdrawals {
+        &mut self.builder_pending_withdrawals
+    }
+
+    fn latest_execution_payload_bid(&self) -> &ExecutionPayloadBid {
+        &self.latest_execution_payload_bid
+    }
+
+    fn latest_execution_payload_bid_mut(&mut self) -> &mut ExecutionPayloadBid {
+        &mut self.latest_execution_payload_bid
+    }
+
+    fn payload_expected_withdrawals(&self) -> &Withdrawals {
+        &self.payload_expected_withdrawals
+    }
+
+    fn payload_expected_withdrawals_mut(&mut self) -> &mut Withdrawals {
+        &mut self.payload_expected_withdrawals
+    }
+
+    fn ptc_window(&self) -> &PayloadTimelinessCommitteeWindow<P> {
+        &self.ptc_window
+    }
+
+    fn ptc_window_mut(&mut self) -> &mut PayloadTimelinessCommitteeWindow<P> {
+        &mut self.ptc_window
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Minimal;
+
+    #[test]
+    fn registry_lists_grow_together() {
+        // Fixture state: an empty Gloas registry, whose lists have no limit.
+        let mut state = BeaconState::<Minimal>::default();
+
+        // One validator with 32 ETH, then its participation entries.
+        state
+            .push_validator(Validator::default(), Gwei(32_000_000_000))
+            .unwrap();
+        state.push_participant().unwrap();
+
+        assert_eq!(state.validators().len(), 1);
+        assert_eq!(state.balances(), [Gwei(32_000_000_000)]);
+        assert_eq!(
+            state.epoch_participation_mut(),
+            (
+                &mut [ParticipationFlags::default()][..],
+                &mut [ParticipationFlags::default()][..]
+            )
+        );
+        assert_eq!(state.inactivity_scores(), [0]);
+    }
+
+    #[test]
+    fn queues_drop_from_the_front() {
+        // Fixture state: three pending deposits of 1, 2, and 3 Gwei.
+        let mut state = BeaconState::<Minimal>::default();
+        for amount in 1..=3 {
+            state
+                .push_pending_deposit(PendingDeposit {
+                    amount: Gwei(amount),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        // Removing two leaves the newest, of 3 Gwei.
+        state.remove_pending_deposits(2);
+        let amounts: Vec<Gwei> = state
+            .pending_deposits()
+            .iter()
+            .map(|deposit| deposit.amount)
+            .collect();
+        assert_eq!(amounts, [Gwei(3)]);
     }
 }

@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axiom_state_transition::EpochCommittees;
-use axiom_types::{CommitteeIndex, Gwei, Preset, Root, Slot};
+use axiom_types::{CommitteeIndex, Gwei, Preset, Root, Slot, accessors::CoreState};
 
 use crate::{BlockNode, Ghost};
 
@@ -121,7 +121,9 @@ impl<'a, P: Preset> LateHeadReorg<'a, P> {
             let equivocating: Gwei = committee
                 .iter()
                 .filter(|validator| store.votes.is_equivocating(**validator))
-                .map(|validator| balance_source.validators[validator.as_usize()].effective_balance)
+                .map(|validator| {
+                    balance_source.validators()[validator.as_usize()].effective_balance
+                })
                 .sum();
             weight += equivocating;
         }

@@ -84,6 +84,18 @@ pub struct ChainConfig {
     pub sync_message_due_bps: u64,
     /// Point in the slot, in basis points, by which sync contributions are due.
     pub contribution_due_bps: u64,
+    /// Point in the slot, in basis points, by which attestations are due from Gloas on.
+    pub attestation_due_bps_gloas: u64,
+    /// Point in the slot, in basis points, by which aggregates are due from Gloas on.
+    pub aggregate_due_bps_gloas: u64,
+    /// Point in the slot, in basis points, by which sync messages are due from Gloas on.
+    pub sync_message_due_bps_gloas: u64,
+    /// Point in the slot, in basis points, by which sync contributions are due from Gloas on.
+    pub contribution_due_bps_gloas: u64,
+    /// Point in the slot, in basis points, by which the builder reveals the payload.
+    pub payload_due_bps: u64,
+    /// Point in the slot, in basis points, by which the payload timeliness committee votes.
+    pub payload_attestation_due_bps: u64,
 
     /// Inactivity score added per epoch of missed target votes during a leak.
     pub inactivity_score_bias: u64,
@@ -101,8 +113,14 @@ pub struct ChainConfig {
     pub min_per_epoch_churn_limit_electra: Gwei,
     /// Cap of the activation and exit balance churn per epoch.
     pub max_per_epoch_activation_exit_churn_limit: Gwei,
-    /// Divides the total active balance into the consolidation churn.
+    /// Divides the total active balance into the consolidation churn, from Gloas on.
     pub consolidation_churn_limit_quotient: u64,
+    /// Divides the total active balance into the balance churn, from Gloas on.
+    pub churn_limit_quotient_gloas: u64,
+    /// Cap of the activation balance churn per epoch, from Gloas on.
+    pub max_per_epoch_activation_churn_limit_gloas: Gwei,
+    /// Epochs between a builder's exit and its balance becoming withdrawable.
+    pub min_builder_withdrawability_delay: u64,
 
     /// Weight of proposer boost, as a percentage of one committee's weight.
     pub proposer_score_boost: u64,
@@ -169,6 +187,8 @@ pub struct ChainConfig {
     pub balance_per_additional_custody_group: Gwei,
     /// Epochs of data columns a node must serve.
     pub min_epochs_for_data_column_sidecars_requests: u64,
+    /// Execution payload envelopes per request.
+    pub max_request_payloads: u64,
 
     /// Blob limits that change at fixed epochs, see EIP-7892.
     pub blob_schedule: BlobSchedule,
@@ -228,6 +248,12 @@ impl ChainConfig {
             aggregate_due_bps: 6667,
             sync_message_due_bps: 3333,
             contribution_due_bps: 6667,
+            attestation_due_bps_gloas: 2500,
+            aggregate_due_bps_gloas: 5000,
+            sync_message_due_bps_gloas: 2500,
+            contribution_due_bps_gloas: 5000,
+            payload_due_bps: 5000,
+            payload_attestation_due_bps: 7500,
             inactivity_score_bias: 4,
             inactivity_score_recovery_rate: 16,
             ejection_balance: Gwei(16_000_000_000),
@@ -237,6 +263,9 @@ impl ChainConfig {
             min_per_epoch_churn_limit_electra: Gwei(128_000_000_000),
             max_per_epoch_activation_exit_churn_limit: Gwei(256_000_000_000),
             consolidation_churn_limit_quotient: 65_536,
+            churn_limit_quotient_gloas: 32_768,
+            max_per_epoch_activation_churn_limit_gloas: Gwei(256_000_000_000),
+            min_builder_withdrawability_delay: 64,
             proposer_score_boost: 40,
             reorg_head_weight_threshold: 20,
             reorg_parent_weight_threshold: 160,
@@ -271,6 +300,7 @@ impl ChainConfig {
             validator_custody_requirement: 8,
             balance_per_additional_custody_group: Gwei(32_000_000_000),
             min_epochs_for_data_column_sidecars_requests: 4096,
+            max_request_payloads: 128,
             blob_schedule: BlobSchedule::new(vec![
                 BlobParameters {
                     epoch: Epoch(412_672),
@@ -294,17 +324,21 @@ impl ChainConfig {
         }
     }
 
-    /// The same configuration with every fork through Fulu active from genesis.
+    /// The same configuration with every fork up to the given one active from genesis.
     ///
-    /// Spec test vectors are generated this way, whatever the published fork epochs say.
+    /// Later forks never activate.
+    /// Spec test vectors of a fork are generated this way, whatever the published epochs say.
     #[must_use]
-    pub const fn with_forks_at_genesis(mut self) -> Self {
-        self.altair_fork_epoch = Epoch::GENESIS;
-        self.bellatrix_fork_epoch = Epoch::GENESIS;
-        self.capella_fork_epoch = Epoch::GENESIS;
-        self.deneb_fork_epoch = Epoch::GENESIS;
-        self.electra_fork_epoch = Epoch::GENESIS;
-        self.fulu_fork_epoch = Epoch::GENESIS;
+    pub fn with_forks_at_genesis(mut self, last: ForkName) -> Self {
+        for fork in ForkName::ALL {
+            if let Some(epoch) = self.fork_epoch_mut(fork) {
+                *epoch = if fork <= last {
+                    Epoch::GENESIS
+                } else {
+                    Epoch::FAR_FUTURE
+                };
+            }
+        }
         self
     }
 
@@ -342,6 +376,9 @@ impl ChainConfig {
             min_per_epoch_churn_limit_electra: Gwei(64_000_000_000),
             max_per_epoch_activation_exit_churn_limit: Gwei(128_000_000_000),
             consolidation_churn_limit_quotient: 32,
+            churn_limit_quotient_gloas: 16,
+            max_per_epoch_activation_churn_limit_gloas: Gwei(128_000_000_000),
+            min_builder_withdrawability_delay: 2,
             deposit_chain_id: 5,
             deposit_network_id: 5,
             deposit_contract_address: ExecutionAddress([
@@ -375,6 +412,22 @@ impl ChainConfig {
             ForkName::Electra => self.electra_fork_epoch,
             ForkName::Fulu => self.fulu_fork_epoch,
             ForkName::Gloas => self.gloas_fork_epoch,
+        }
+    }
+
+    /// Activation epoch of a fork, for test configurations.
+    ///
+    /// Phase0 starts at genesis by definition, so it has no epoch to set.
+    const fn fork_epoch_mut(&mut self, fork: ForkName) -> Option<&mut Epoch> {
+        match fork {
+            ForkName::Phase0 => None,
+            ForkName::Altair => Some(&mut self.altair_fork_epoch),
+            ForkName::Bellatrix => Some(&mut self.bellatrix_fork_epoch),
+            ForkName::Capella => Some(&mut self.capella_fork_epoch),
+            ForkName::Deneb => Some(&mut self.deneb_fork_epoch),
+            ForkName::Electra => Some(&mut self.electra_fork_epoch),
+            ForkName::Fulu => Some(&mut self.fulu_fork_epoch),
+            ForkName::Gloas => Some(&mut self.gloas_fork_epoch),
         }
     }
 
@@ -521,6 +574,52 @@ mod tests {
             config.fork_version_at(Epoch(500_000)),
             Version([0x06, 0, 0, 0])
         );
+    }
+
+    #[test]
+    fn forks_at_genesis_stop_at_the_named_fork() {
+        // Fixture state: the minimal configuration with forks through Deneb at genesis.
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Deneb);
+
+        // Deneb is in force from epoch 0, and Electra never comes.
+        assert_eq!(config.fork_at(Epoch::GENESIS), ForkName::Deneb);
+        assert_eq!(config.fork_epoch(ForkName::Altair), Epoch::GENESIS);
+        assert_eq!(config.fork_epoch(ForkName::Electra), Epoch::FAR_FUTURE);
+        assert_eq!(config.fork_epoch(ForkName::Gloas), Epoch::FAR_FUTURE);
+
+        // Through Gloas, every fork starts at genesis.
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Gloas);
+        assert_eq!(config.fork_at(Epoch::GENESIS), ForkName::Gloas);
+    }
+
+    #[test]
+    fn gloas_values_follow_the_published_configurations() {
+        // Mainnet halves the churn quotient to 2^15, minimal customizes it to 16.
+        let mainnet = ChainConfig::mainnet();
+        let minimal = ChainConfig::minimal();
+        assert_eq!(mainnet.churn_limit_quotient_gloas, 32_768);
+        assert_eq!(minimal.churn_limit_quotient_gloas, 16);
+
+        // Builders wait 64 epochs on mainnet and 2 on minimal before withdrawing.
+        assert_eq!(mainnet.min_builder_withdrawability_delay, 64);
+        assert_eq!(minimal.min_builder_withdrawability_delay, 2);
+
+        // The activation churn caps at 256 ETH on mainnet and 128 ETH on minimal.
+        assert_eq!(
+            mainnet.max_per_epoch_activation_churn_limit_gloas,
+            Gwei(256_000_000_000)
+        );
+        assert_eq!(
+            minimal.max_per_epoch_activation_churn_limit_gloas,
+            Gwei(128_000_000_000)
+        );
+
+        // A configuration file sets each key by its spec name.
+        let yaml =
+            Yaml::parse("CHURN_LIMIT_QUOTIENT_GLOAS: 8\nMAX_REQUEST_PAYLOADS: 64\n").unwrap();
+        let config = ChainConfig::from_yaml(&yaml).unwrap();
+        assert_eq!(config.churn_limit_quotient_gloas, 8);
+        assert_eq!(config.max_request_payloads, 64);
     }
 
     #[test]

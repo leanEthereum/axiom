@@ -1,11 +1,14 @@
 //! The beacon state of phase0.
 
 use axiom_ssz::{
-    BitVector, Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz, Vector,
+    BitVector, CapacityError, Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
+    Vector,
 };
 
 use crate::{
-    Bytes32, Gwei, Preset, Root, Slot,
+    Bytes32, ForkName, Gwei, Preset, Root, Slot,
+    accessors::{CoreState, ForkState},
+    combined,
     constants::JUSTIFICATION_BITS_LENGTH,
     phase0::{BeaconBlockHeader, Checkpoint, Eth1Data, Fork, PendingAttestation, Validator},
 };
@@ -184,5 +187,185 @@ impl<P: Preset> Container for BeaconState<P> {
             current_justified_checkpoint: fields.field()?,
             finalized_checkpoint: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> ForkState for BeaconState<P> {
+    const FORK: ForkName = ForkName::Phase0;
+
+    fn from_any(state: &combined::BeaconState<P>) -> Option<&Self> {
+        match state {
+            combined::BeaconState::Phase0(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn from_any_mut(state: &mut combined::BeaconState<P>) -> Option<&mut Self> {
+        match state {
+            combined::BeaconState::Phase0(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn into_any(self) -> combined::BeaconState<P> {
+        combined::BeaconState::Phase0(self)
+    }
+}
+
+impl<P: Preset> CoreState for BeaconState<P> {
+    type Preset = P;
+
+    fn fork_name(&self) -> ForkName {
+        Self::FORK
+    }
+
+    fn state_root(&self) -> Root {
+        self.hash_tree_root()
+    }
+
+    fn genesis_time(&self) -> u64 {
+        self.genesis_time
+    }
+
+    fn genesis_validators_root(&self) -> Root {
+        self.genesis_validators_root
+    }
+
+    fn slot(&self) -> Slot {
+        self.slot
+    }
+
+    fn slot_mut(&mut self) -> &mut Slot {
+        &mut self.slot
+    }
+
+    fn fork(&self) -> &Fork {
+        &self.fork
+    }
+
+    fn latest_block_header(&self) -> &BeaconBlockHeader {
+        &self.latest_block_header
+    }
+
+    fn latest_block_header_mut(&mut self) -> &mut BeaconBlockHeader {
+        &mut self.latest_block_header
+    }
+
+    fn block_roots(&self) -> &BlockRoots<P> {
+        &self.block_roots
+    }
+
+    fn block_roots_mut(&mut self) -> &mut BlockRoots<P> {
+        &mut self.block_roots
+    }
+
+    fn state_roots(&self) -> &StateRoots<P> {
+        &self.state_roots
+    }
+
+    fn state_roots_mut(&mut self) -> &mut StateRoots<P> {
+        &mut self.state_roots
+    }
+
+    fn historical_roots(&self) -> &HistoricalRoots<P> {
+        &self.historical_roots
+    }
+
+    fn historical_roots_mut(&mut self) -> &mut HistoricalRoots<P> {
+        &mut self.historical_roots
+    }
+
+    fn eth1_data(&self) -> &Eth1Data {
+        &self.eth1_data
+    }
+
+    fn eth1_data_mut(&mut self) -> &mut Eth1Data {
+        &mut self.eth1_data
+    }
+
+    fn eth1_data_votes(&self) -> &Eth1DataVotes<P> {
+        &self.eth1_data_votes
+    }
+
+    fn eth1_data_votes_mut(&mut self) -> &mut Eth1DataVotes<P> {
+        &mut self.eth1_data_votes
+    }
+
+    fn eth1_deposit_index(&self) -> u64 {
+        self.eth1_deposit_index
+    }
+
+    fn eth1_deposit_index_mut(&mut self) -> &mut u64 {
+        &mut self.eth1_deposit_index
+    }
+
+    fn validators(&self) -> &[Validator] {
+        &self.validators
+    }
+
+    fn validators_mut(&mut self) -> &mut [Validator] {
+        &mut self.validators
+    }
+
+    fn balances(&self) -> &[Gwei] {
+        &self.balances
+    }
+
+    fn balances_mut(&mut self) -> &mut [Gwei] {
+        &mut self.balances
+    }
+
+    fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {
+        self.validators.push(validator)?;
+        // Invariant: balances share the registry's length and limit, so they have room too.
+        self.balances.push(balance)
+    }
+
+    fn randao_mixes(&self) -> &RandaoMixes<P> {
+        &self.randao_mixes
+    }
+
+    fn randao_mixes_mut(&mut self) -> &mut RandaoMixes<P> {
+        &mut self.randao_mixes
+    }
+
+    fn slashings(&self) -> &Slashings<P> {
+        &self.slashings
+    }
+
+    fn slashings_mut(&mut self) -> &mut Slashings<P> {
+        &mut self.slashings
+    }
+
+    fn justification_bits(&self) -> &JustificationBits {
+        &self.justification_bits
+    }
+
+    fn justification_bits_mut(&mut self) -> &mut JustificationBits {
+        &mut self.justification_bits
+    }
+
+    fn previous_justified_checkpoint(&self) -> Checkpoint {
+        self.previous_justified_checkpoint
+    }
+
+    fn previous_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.previous_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint(&self) -> Checkpoint {
+        self.current_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.current_justified_checkpoint
+    }
+
+    fn finalized_checkpoint(&self) -> Checkpoint {
+        self.finalized_checkpoint
+    }
+
+    fn finalized_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.finalized_checkpoint
     }
 }

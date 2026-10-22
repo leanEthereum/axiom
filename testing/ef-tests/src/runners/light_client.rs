@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use axiom_light_client::{LightClientStore, UpdateQuality};
 use axiom_ssz::{Root, Ssz};
 use axiom_types::{
-    Preset, Slot,
+    ForkName, Preset, Slot,
     fulu::{LightClientBootstrap, LightClientHeader, LightClientUpdate},
 };
 use axiom_yaml::Yaml;
@@ -25,7 +25,7 @@ pub struct LightClient<P>(PhantomData<P>);
 impl<P: Preset> LightClient<P> {
     /// Runs a sync case: bootstrap, then updates and forced updates with checks.
     fn sync(case: &Case) -> Result<(), Failure> {
-        let config = case.config::<P>()?;
+        let config = case.config::<P>(ForkName::Fulu)?;
         let meta = case.yaml("meta.yaml")?;
         let hex = |key: &str| {
             meta.get(key)

@@ -3,7 +3,7 @@
 use axiom_types::{ForkName, Preset, phase0};
 
 use super::SpecFork;
-use crate::{Case, Failure};
+use crate::{Case, Failure, FieldNames};
 
 /// The phase0 fork.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -11,6 +11,34 @@ pub struct Phase0;
 
 impl SpecFork for Phase0 {
     const FORK: ForkName = ForkName::Phase0;
+
+    const STATE_FIELDS: FieldNames = FieldNames(&[
+        "genesis_time",
+        "genesis_validators_root",
+        "slot",
+        "fork",
+        "latest_block_header",
+        "block_roots",
+        "state_roots",
+        "historical_roots",
+        "eth1_data",
+        "eth1_data_votes",
+        "eth1_deposit_index",
+        "validators",
+        "balances",
+        "randao_mixes",
+        "slashings",
+        "previous_epoch_attestations",
+        "current_epoch_attestations",
+        "justification_bits",
+        "previous_justified_checkpoint",
+        "current_justified_checkpoint",
+        "finalized_checkpoint",
+    ]);
+
+    type State<P: Preset> = phase0::BeaconState<P>;
+
+    type SignedBeaconBlock<P: Preset> = phase0::SignedBeaconBlock<P>;
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

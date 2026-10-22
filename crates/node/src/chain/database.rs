@@ -5,7 +5,7 @@ use std::{marker::PhantomData, path::Path, sync::Arc};
 use axiom_ssz::{DecodeError, Ssz};
 use axiom_store::{Batch, Options, Store, Table};
 use axiom_types::{
-    ColumnIndex, Preset, Root, Slot,
+    ColumnIndex, Preset, Root, Slot, combined,
     fulu::{BeaconState, Checkpoint, DataColumnSidecar, SignedBeaconBlock},
 };
 
@@ -203,7 +203,7 @@ impl<P: Preset> ChainDatabase<P> {
         &self,
         previous: Checkpoint,
         checkpoint: Checkpoint,
-        state: &BeaconState<P>,
+        state: &combined::BeaconState<P>,
         chain: &[(Slot, Root)],
         orphans: &[Root],
     ) -> Result<(), ChainError> {
@@ -319,14 +319,15 @@ mod tests {
             epoch: Epoch(0),
             root: roots[0],
         };
+        let anchor = combined::BeaconState::from(state.clone());
         database
-            .finalize(first, first, &state, &[(Slot(1), roots[0])], &[])
+            .finalize(first, first, &anchor, &[(Slot(1), roots[0])], &[])
             .unwrap();
         database
             .finalize(
                 first,
                 checkpoint,
-                &state,
+                &anchor,
                 &[(Slot(3), roots[2])],
                 &[roots[1]],
             )

@@ -7,6 +7,8 @@ use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
     BlsPubkey, CommitteeIndex, Domain, Epoch, Preset, Root, Slot, SubnetId, ValidatorIndex,
+    accessors::CoreState,
+    combined::BeaconState,
     constants::{
         BLS_WITHDRAWAL_PREFIX, DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER,
         DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_SYNC_COMMITTEE, DOMAIN_VOLUNTARY_EXIT,
@@ -14,8 +16,8 @@ use axiom_types::{
         TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE,
     },
     fulu::{
-        Attestation, AttestationData, AttesterSlashing, BeaconState, DataColumnSidecar,
-        ProposerSlashing, SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
+        Attestation, AttestationData, AttesterSlashing, DataColumnSidecar, ProposerSlashing,
+        SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
         SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation,
         SyncCommitteeContribution, SyncCommitteeMessage, Validator,
     },
@@ -98,7 +100,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             return Err(GossipError::reject("invalid proposer signature").with(proposer_detail));
         }
         let expected_timestamp =
-            beacon.genesis_time + block.slot.0 * self.view.config().slot_duration_ms / 1000;
+            beacon.genesis_time() + block.slot.0 * self.view.config().slot_duration_ms / 1000;
         let timestamp = block.body.execution_payload.timestamp;
         if timestamp != expected_timestamp {
             return Err(
@@ -140,7 +142,9 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             );
         }
         let parent_state = self.parent_state(&block.parent_root, block.slot)?;
-        let expected_proposer = parent_state.beacon().beacon_proposer_index();
+        let expected_proposer = parent_state
+            .beacon_proposer_index()
+            .map_err(|_| GossipError::ignore("proposer shuffling is unavailable"))?;
         if block.proposer_index != expected_proposer {
             return Err(GossipError::reject(
                 "block proposer_index does not match expected proposer",
@@ -330,7 +334,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             );
         }
         let beacon = state.beacon();
-        let attester = &beacon.validators[attestation.attester_index.as_usize()];
+        let attester = &beacon.validators()[attestation.attester_index.as_usize()];
         let domain = beacon.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
         if !SigningClaim::new(data, domain, &attestation.signature).is_signed_by(&attester.pubkey) {
             return Err(GossipError::reject("invalid attestation signature").with(attester_detail));
@@ -401,7 +405,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let domain = Domain::compute(
             DOMAIN_VOLUNTARY_EXIT,
             self.view.config().capella_fork_version,
-            beacon.genesis_validators_root,
+            beacon.genesis_validators_root(),
         );
         if !SigningClaim::new(exit, domain, &signed.signature).is_signed_by(&validator.pubkey) {
             return Err(
@@ -514,7 +518,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                 "invalid indexed attestation 2",
             ),
         ] {
-            let count = beacon.validators.len() as u64;
+            let count = beacon.validators().len() as u64;
             if let Some(index) = attestation
                 .attesting_indices
                 .iter()
@@ -532,7 +536,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let epoch = beacon.current_epoch();
         if !both
             .iter()
-            .any(|index| beacon.validators[index.as_usize()].is_slashable_at(epoch))
+            .any(|index| beacon.validators()[index.as_usize()].is_slashable_at(epoch))
         {
             return Err(GossipError::reject(
                 "no slashable validators in intersection",
@@ -764,7 +768,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let domain = Domain::compute(
             DOMAIN_BLS_TO_EXECUTION_CHANGE,
             self.view.config().genesis_fork_version,
-            beacon.genesis_validators_root,
+            beacon.genesis_validators_root(),
         );
         if !SigningClaim::new(change, domain, &signed.signature)
             .is_signed_by(&change.from_bls_pubkey)
@@ -873,7 +877,9 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             );
         }
         let parent_state = self.parent_state(&header.parent_root, header.slot)?;
-        let expected_proposer = parent_state.beacon().beacon_proposer_index();
+        let expected_proposer = parent_state
+            .beacon_proposer_index()
+            .map_err(|_| GossipError::ignore("proposer shuffling is unavailable"))?;
         if header.proposer_index != expected_proposer {
             return Err(GossipError::reject(
                 "sidecar proposer_index does not match expected proposer",
@@ -1011,10 +1017,10 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         index: ValidatorIndex,
         reason: &'static str,
     ) -> Result<&'s Validator, GossipError> {
-        beacon.validators.get(index.as_usize()).ok_or_else(|| {
+        beacon.validators().get(index.as_usize()).ok_or_else(|| {
             GossipError::reject(reason).with(Detail::Bound {
                 value: index.0,
-                bound: beacon.validators.len() as u64,
+                bound: beacon.validators().len() as u64,
             })
         })
     }

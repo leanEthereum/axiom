@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axiom_types::{Epoch, Gwei, Preset, Root, fulu::BeaconState};
+use axiom_types::{Epoch, Gwei, Preset, Root, accessors::CoreState, combined::BeaconState};
 
 use crate::{ExecutionStatus, Store, committee_weight::CommitteeWeight};
 
@@ -142,7 +142,7 @@ impl<'a, P: Preset> Ghost<'a, P> {
         let mut weights: HashMap<Root, Gwei> = HashMap::new();
 
         // Phase 1: direct votes.
-        for (index, validator) in state.validators.iter().enumerate() {
+        for (index, validator) in state.validators().iter().enumerate() {
             if !validator.is_active_at(epoch) || validator.slashed {
                 continue;
             }

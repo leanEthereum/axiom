@@ -3,26 +3,16 @@
 use std::marker::PhantomData;
 
 use axiom_ssz::{DecodeError, Ssz};
-use axiom_state_transition::{
-    BlockError, BlockProcessor, KnownVerdict, Operation, PayloadExecution, State, Verification,
-};
-use axiom_types::{
-    ChainConfig, Preset,
-    fulu::{
-        Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
-        ConsolidationRequest, DepositRequest, ExecutionPayload, ProposerSlashing,
-        SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
-    },
-};
+use axiom_state_transition::{BlockError, BlockProcessor, Fork, Operation, State, Verification};
+use axiom_types::{ChainConfig, Preset, accessors::ForkState};
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
-use super::BEACON_STATE_FIELDS;
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Runner, forks::SpecFork};
 
 /// Why an operation vector's input was not applied.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
-enum Rejection {
+pub enum Rejection {
     /// The input file does not decode, which the vectors count as an invalid operation.
     #[error("input {stem} does not decode: {source}")]
     Undecodable {
@@ -37,101 +27,107 @@ enum Rejection {
     Block(#[from] BlockError),
 }
 
-/// Applies the case's operation, and compares with the post-state or expects rejection.
-#[derive(Debug, Default)]
-pub struct Operations<P>(PhantomData<P>);
+/// What applying a case's operation came to: applied, rejected, or a broken case.
+pub type Applied = Result<Result<(), Rejection>, Failure>;
 
-impl<P: Preset> Operations<P> {
-    /// Decodes an operation input, treating undecodable input as an invalid operation.
-    fn input<T: Ssz>(case: &Case, stem: &'static str) -> Result<Result<T, Rejection>, Failure> {
-        let bytes = case.ssz_bytes(stem)?;
+/// One operation case, with the processor its operation applies to.
+///
+/// Each fork maps a handler name to the operation type and rule version it runs.
+#[derive(Debug)]
+pub struct OperationInput<'c, 'p, 's, S> {
+    /// The case directory.
+    case: &'c Case,
+    /// The processor over the case's pre-state.
+    processor: &'p mut BlockProcessor<'s, S>,
+}
+
+impl<S: Fork> OperationInput<'_, '_, '_, S> {
+    /// Decodes an input file, counting undecodable input as an invalid operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file is missing or does not decompress.
+    pub fn decode<T: Ssz>(&self, stem: &'static str) -> Result<Result<T, Rejection>, Failure> {
+        let bytes = self.case.ssz_bytes(stem)?;
         Ok(T::decode(&bytes).map_err(|source| Rejection::Undecodable { stem, source }))
     }
 
-    /// Runs an operation through the trait every block operation implements.
-    fn operation<O: Operation<P> + Ssz>(
-        case: &Case,
+    /// Decodes an input and applies it as the operation it is.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file is missing or does not decompress.
+    pub fn apply<O: Operation<S> + Ssz>(&mut self, stem: &'static str) -> Applied {
+        self.apply_with::<O>(stem, |operation, processor| processor.apply(operation))
+    }
+
+    /// Decodes an input and hands it to a step of the fork's choosing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file is missing or does not decompress.
+    pub fn apply_with<T: Ssz>(
+        &mut self,
         stem: &'static str,
-        processor: &mut BlockProcessor<'_, P>,
-    ) -> Result<Result<(), Rejection>, Failure> {
-        Ok(Self::input::<O>(case, stem)?.and_then(|operation| Ok(processor.apply(&operation)?)))
+        step: impl FnOnce(&T, &mut BlockProcessor<'_, S>) -> Result<(), BlockError>,
+    ) -> Applied {
+        Ok(self
+            .decode::<T>(stem)?
+            .and_then(|input| Ok(step(&input, self.processor)?)))
+    }
+
+    /// The execution engine's verdict the case ships.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the execution file is missing or carries no verdict.
+    pub fn execution_verdict(&self) -> Result<bool, Failure> {
+        self.case
+            .yaml("execution.yaml")?
+            .get("execution_valid")
+            .and_then(Yaml::as_bool)
+            .ok_or_else(|| Failure::new("execution.yaml has no verdict"))
     }
 }
 
-impl<P: Preset> Runner for Operations<P> {
+/// Applies the case's operation, and compares with the post-state or expects rejection.
+#[derive(Debug, Default)]
+pub struct Operations<P, F>(PhantomData<(P, F)>);
+
+impl<P: Preset, F: SpecFork> Runner for Operations<P, F> {
     fn name(&self) -> &'static str {
         "operations"
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
-        let meta = case.meta()?;
-        let verification = if meta.bls_ignored() {
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(F::FORK);
+        let verification = if case.meta()?.bls_ignored() {
             Verification::Skip
         } else {
             Verification::Verify
         };
-        let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
-        let expected = case.ssz_if_present::<BeaconState<P>>("post")?;
+        let mut state = State::new(case.ssz::<F::State<P>>("pre")?.into_any());
+        let expected = case.ssz_if_present::<F::State<P>>("post")?;
 
         let outcome = {
-            let mut processor = BlockProcessor::new(&mut state, &config, verification);
-            let applied = match handler {
-                "attestation" => {
-                    Self::operation::<Attestation<P>>(case, "attestation", &mut processor)?
-                }
-                "attester_slashing" => Self::operation::<AttesterSlashing<P>>(
-                    case,
-                    "attester_slashing",
-                    &mut processor,
-                )?,
-                "proposer_slashing" => {
-                    Self::operation::<ProposerSlashing>(case, "proposer_slashing", &mut processor)?
-                }
-                "voluntary_exit" => {
-                    Self::operation::<SignedVoluntaryExit>(case, "voluntary_exit", &mut processor)?
-                }
-                "bls_to_execution_change" => Self::operation::<SignedBlsToExecutionChange>(
-                    case,
-                    "address_change",
-                    &mut processor,
-                )?,
-                "deposit_request" => {
-                    Self::operation::<DepositRequest>(case, "deposit_request", &mut processor)?
-                }
-                "withdrawal_request" => Self::operation::<WithdrawalRequest>(
-                    case,
-                    "withdrawal_request",
-                    &mut processor,
-                )?,
-                "consolidation_request" => Self::operation::<ConsolidationRequest>(
-                    case,
-                    "consolidation_request",
-                    &mut processor,
-                )?,
-                "block_header" => Self::input::<BeaconBlock<P>>(case, "block")?
-                    .and_then(|block| Ok(processor.apply(&block.header())?)),
-                "sync_aggregate" => Self::input::<SyncAggregate<P>>(case, "sync_aggregate")?
-                    .and_then(|aggregate| Ok(processor.apply(&aggregate)?)),
-                "withdrawals" => Self::input::<ExecutionPayload<P>>(case, "execution_payload")?
-                    .and_then(|payload| Ok(processor.apply(payload.withdrawals.as_slice())?)),
-                "execution_payload" => {
-                    let valid = case
-                        .yaml("execution.yaml")?
-                        .get("execution_valid")
-                        .and_then(Yaml::as_bool)
-                        .ok_or_else(|| Failure::new("execution.yaml has no verdict"))?;
-                    Self::input::<BeaconBlockBody<P>>(case, "body")?.and_then(|body| {
-                        Ok(processor.apply(&PayloadExecution::new(&body, &KnownVerdict(valid)))?)
-                    })
-                }
-                other => return Err(Failure(format!("unsupported operation {other}"))),
+            let typed = state
+                .of_fork::<F::State<P>>()
+                .ok_or_else(|| Failure::new("pre-state is not of the case's fork"))?;
+            let mut processor = BlockProcessor::new(typed, &config, verification);
+            let mut input = OperationInput {
+                case,
+                processor: &mut processor,
             };
+            let applied = F::operation::<P>(handler, &mut input)?;
             applied.and_then(|()| Ok(processor.finish()?))
         };
 
         match (outcome, expected) {
-            (Ok(()), Some(expected)) => BEACON_STATE_FIELDS.check(&expected, state.beacon()),
+            (Ok(()), Some(expected)) => {
+                let actual = F::State::<P>::from_any(state.beacon())
+                    .ok_or_else(|| Failure::new("post-state left the case's fork"))?;
+                F::STATE_FIELDS.check(&expected, actual)
+            }
             (Err(_), None) => Ok(()),
             (Ok(()), None) => Err(Failure::new("operation accepted, the vector rejects it")),
             (Err(error), Some(_)) => Err(Failure(format!("operation rejected: {error}"))),

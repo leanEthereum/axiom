@@ -3,7 +3,7 @@
 use axiom_types::{ForkName, Preset, electra};
 
 use super::{Deneb, SpecFork};
-use crate::{Case, Failure};
+use crate::{Case, Failure, FieldNames};
 
 /// The Electra fork.
 ///
@@ -13,6 +13,50 @@ pub struct Electra;
 
 impl SpecFork for Electra {
     const FORK: ForkName = ForkName::Electra;
+
+    const STATE_FIELDS: FieldNames = FieldNames(&[
+        "genesis_time",
+        "genesis_validators_root",
+        "slot",
+        "fork",
+        "latest_block_header",
+        "block_roots",
+        "state_roots",
+        "historical_roots",
+        "eth1_data",
+        "eth1_data_votes",
+        "eth1_deposit_index",
+        "validators",
+        "balances",
+        "randao_mixes",
+        "slashings",
+        "previous_epoch_participation",
+        "current_epoch_participation",
+        "justification_bits",
+        "previous_justified_checkpoint",
+        "current_justified_checkpoint",
+        "finalized_checkpoint",
+        "inactivity_scores",
+        "current_sync_committee",
+        "next_sync_committee",
+        "latest_execution_payload_header",
+        "next_withdrawal_index",
+        "next_withdrawal_validator_index",
+        "historical_summaries",
+        "deposit_requests_start_index",
+        "deposit_balance_to_consume",
+        "exit_balance_to_consume",
+        "earliest_exit_epoch",
+        "consolidation_balance_to_consume",
+        "earliest_consolidation_epoch",
+        "pending_deposits",
+        "pending_partial_withdrawals",
+        "pending_consolidations",
+    ]);
+
+    type State<P: Preset> = electra::BeaconState<P>;
+
+    type SignedBeaconBlock<P: Preset> = electra::SignedBeaconBlock<P>;
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

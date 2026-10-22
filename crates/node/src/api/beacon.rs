@@ -5,8 +5,7 @@ use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
-    Preset, Root,
-    fulu::{BeaconState, SignedBlockContents},
+    Preset, Root, accessors::CoreState, combined::BeaconState, fulu::SignedBlockContents,
 };
 use tracing::warn;
 
@@ -56,10 +55,10 @@ impl BeaconRoutes {
                 let beacon = state.beacon();
                 Ok(Reply::data(
                     Json::from([
-                        ("genesis_time", Reply::number(beacon.genesis_time)),
+                        ("genesis_time", Reply::number(beacon.genesis_time())),
                         (
                             "genesis_validators_root",
-                            Reply::text(&beacon.genesis_validators_root),
+                            Reply::text(&beacon.genesis_validators_root()),
                         ),
                         (
                             "genesis_fork_version",
@@ -178,7 +177,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
-                let fork = &Self::held_state(chain, root)?.fork;
+                let fork = Self::held_state(chain, root)?.fork();
                 let data = Json::from([
                     ("previous_version", Reply::text(&fork.previous_version)),
                     ("current_version", Reply::text(&fork.current_version)),
@@ -205,13 +204,13 @@ impl BeaconRoutes {
                 let data = Json::from([
                     (
                         "previous_justified",
-                        Reply::checkpoint(state.previous_justified_checkpoint),
+                        Reply::checkpoint(state.previous_justified_checkpoint()),
                     ),
                     (
                         "current_justified",
-                        Reply::checkpoint(state.current_justified_checkpoint),
+                        Reply::checkpoint(state.current_justified_checkpoint()),
                     ),
-                    ("finalized", Reply::checkpoint(state.finalized_checkpoint)),
+                    ("finalized", Reply::checkpoint(state.finalized_checkpoint())),
                 ]);
                 Ok(Reply::data(
                     data,

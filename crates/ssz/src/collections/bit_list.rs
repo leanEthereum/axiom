@@ -89,7 +89,7 @@ impl<N: Length> BitList<N> {
     }
 
     /// Iterates over the bits in order.
-    pub fn iter(&self) -> impl Iterator<Item = bool> + '_ {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = bool> + '_ {
         (0..self.len).map(|index| self.bytes[index / 8] >> (index % 8) & 1 == 1)
     }
 

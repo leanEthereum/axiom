@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use axiom_das::{CustodyGroup, NodeId};
 use axiom_ssz::U256;
-use axiom_types::{ChainConfig, Preset};
+use axiom_types::{ChainConfig, ForkName, Preset};
 use axiom_yaml::Yaml;
 
 use super::gossip::GossipCase;
@@ -36,7 +36,7 @@ impl<P: Preset> Runner for Networking<P> {
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu);
         let meta = case.yaml("meta.yaml")?;
         match handler {
             "get_custody_groups" => {

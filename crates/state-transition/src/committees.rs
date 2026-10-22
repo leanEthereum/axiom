@@ -3,9 +3,8 @@
 use std::collections::BTreeSet;
 
 use axiom_types::{
-    CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
+    CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex, accessors::CoreState,
     constants::DOMAIN_BEACON_ATTESTER,
-    fulu::{Attestation, BeaconState},
 };
 
 use crate::{BlockError, SwapOrNot};
@@ -39,12 +38,14 @@ pub struct EpochCommittees {
 
 impl EpochCommittees {
     /// Committees of an epoch, as the state determines them.
+    ///
+    /// No fork changed how committees are formed, so the state of any fork will do.
     #[must_use]
-    pub fn compute<P: Preset>(state: &BeaconState<P>, epoch: Epoch) -> Self {
+    pub fn compute<S: CoreState + ?Sized>(state: &S, epoch: Epoch) -> Self {
         let active = state.active_validator_indices(epoch);
         let seed = state.seed(epoch, DOMAIN_BEACON_ATTESTER);
         let permutation =
-            SwapOrNot::new(seed, P::SHUFFLE_ROUND_COUNT).permutation(active.len() as u64);
+            SwapOrNot::new(seed, S::Preset::SHUFFLE_ROUND_COUNT).permutation(active.len() as u64);
 
         Self {
             epoch,
@@ -53,8 +54,22 @@ impl EpochCommittees {
                 .into_iter()
                 .map(|image| active[image as usize])
                 .collect(),
-            committees_per_slot: state.committee_count_per_slot(active.len()),
-            slots_per_epoch: P::SLOTS_PER_EPOCH,
+            committees_per_slot: Self::count_per_slot::<S::Preset>(active.len()),
+            slots_per_epoch: S::Preset::SLOTS_PER_EPOCH,
+        }
+    }
+
+    /// Committees per slot for an active set, between 1 and the preset maximum.
+    ///
+    /// See `get_committee_count_per_slot` in the phase0 beacon chain spec.
+    const fn count_per_slot<P: Preset>(active_validator_count: usize) -> u64 {
+        let count = active_validator_count as u64 / P::SLOTS_PER_EPOCH / P::TARGET_COMMITTEE_SIZE;
+        if count < 1 {
+            1
+        } else if count > P::MAX_COMMITTEES_PER_SLOT {
+            P::MAX_COMMITTEES_PER_SLOT
+        } else {
+            count
         }
     }
 
@@ -92,27 +107,29 @@ impl EpochCommittees {
         Some(&self.shuffled[start..end])
     }
 
-    /// Validators an attestation counts, sorted and unique.
+    /// Validators that set their bit across some committees of a slot, sorted and unique.
     ///
-    /// The aggregation bits run across the selected committees, back to back.
+    /// The bits run across the named committees, back to back.
+    /// A phase0 attestation names one committee, an Electra attestation several.
     ///
     /// ```text
-    /// committee bits:    0 1 0 1          committees 1 and 3 are aggregated
-    /// aggregation bits:  [c1 members][c3 members]
+    /// committees:  1 and 3
+    /// bits:        [c1 members][c3 members]
     /// ```
     ///
-    /// See `get_attesting_indices` in the Electra beacon chain spec.
+    /// See `get_attesting_indices` in the phase0 and Electra beacon chain specs.
     ///
     /// # Errors
     ///
     /// Fails when a committee does not exist or the bits run short.
-    pub fn attesting_indices<P: Preset>(
+    pub fn attesters(
         &self,
-        attestation: &Attestation<P>,
+        slot: Slot,
+        committee_indices: impl IntoIterator<Item = CommitteeIndex>,
+        bits: impl ExactSizeIterator<Item = bool>,
     ) -> Result<BTreeSet<ValidatorIndex>, BlockError> {
-        let slot = attestation.data.slot;
-        let committees = attestation
-            .committee_indices()
+        let committees = committee_indices
+            .into_iter()
             .map(|index| {
                 self.committee(slot, index)
                     .ok_or(BlockError::UnknownCommittee {
@@ -124,14 +141,14 @@ impl EpochCommittees {
             .collect::<Result<Vec<_>, _>>()?;
         // Bits past the committees are ignored here, as in the spec; only a short bitfield fails.
         let expected = committees.iter().map(|committee| committee.len()).sum();
-        let actual = attestation.aggregation_bits.len();
+        let actual = bits.len();
         if actual < expected {
             return Err(BlockError::AggregationBitsLengthMismatch { expected, actual });
         }
         let attesters = committees
             .into_iter()
             .flatten()
-            .zip(attestation.aggregation_bits.iter())
+            .zip(bits)
             .filter_map(|(validator, bit)| bit.then_some(*validator))
             .collect();
         Ok(attesters)

@@ -34,7 +34,7 @@ pub enum BeaconBlock<P: Preset> {
 impl<P: Preset> BeaconBlock<P> {
     /// The fork the block belongs to.
     #[must_use]
-    pub const fn fork(&self) -> ForkName {
+    pub const fn fork_name(&self) -> ForkName {
         match self {
             Self::Phase0(_) => ForkName::Phase0,
             Self::Altair(_) => ForkName::Altair,
@@ -188,7 +188,7 @@ mod tests {
         let decoded = BeaconBlock::<Minimal>::decode_at(&block.encode(), &config).unwrap();
 
         assert_eq!(decoded, BeaconBlock::Fulu(block.clone()));
-        assert_eq!(decoded.fork(), ForkName::Fulu);
+        assert_eq!(decoded.fork_name(), ForkName::Fulu);
         assert_eq!(decoded.hash_tree_root(), block.hash_tree_root());
     }
 }

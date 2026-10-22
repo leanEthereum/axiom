@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axiom_fork_choice::{BlockNode, ExecutionStatus, ForkChoiceError, Store};
 use axiom_state_transition::State;
-use axiom_types::{ChainConfig, Epoch, Preset, Root, Slot, fulu::Checkpoint};
+use axiom_types::{ChainConfig, Epoch, Preset, Root, Slot, accessors::CoreState, fulu::Checkpoint};
 
 /// Everything gossip validation reads about the chain.
 ///
@@ -105,7 +105,7 @@ impl<'a, P: Preset> ChainView<'a, P> {
             .block_state(root)
             .cloned()
             .ok_or(ForkChoiceError::MissingState(*root))?;
-        if state.beacon().slot < slot {
+        if state.beacon().slot() < slot {
             state.process_slots(self.store.config(), slot)?;
         }
         Ok(state)

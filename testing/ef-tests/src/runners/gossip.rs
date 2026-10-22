@@ -8,7 +8,7 @@ use axiom_kzg::Kzg;
 use axiom_ssz::{Root, Ssz};
 use axiom_state_transition::{KnownVerdict, Verification};
 use axiom_types::{
-    Epoch, Preset, SubnetId,
+    Epoch, ForkName, Preset, SubnetId,
     fulu::{
         AttesterSlashing, BeaconState, Checkpoint, DataColumnSidecar, ProposerSlashing,
         SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
@@ -50,7 +50,7 @@ impl<'c, P: Preset> GossipCase<'c, P> {
     ///
     /// Fails when a verdict differs from the expected one.
     pub(super) fn run(&self) -> Result<(), Failure> {
-        let config = self.case.config::<P>()?;
+        let config = self.case.config::<P>(ForkName::Fulu)?;
         let blocks = self
             .meta
             .get("blocks")

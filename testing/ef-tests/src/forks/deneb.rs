@@ -3,7 +3,7 @@
 use axiom_types::{ForkName, Preset, deneb};
 
 use super::{Capella, SpecFork};
-use crate::{Case, Failure};
+use crate::{Case, Failure, FieldNames};
 
 /// The Deneb fork.
 ///
@@ -13,6 +13,41 @@ pub struct Deneb;
 
 impl SpecFork for Deneb {
     const FORK: ForkName = ForkName::Deneb;
+
+    const STATE_FIELDS: FieldNames = FieldNames(&[
+        "genesis_time",
+        "genesis_validators_root",
+        "slot",
+        "fork",
+        "latest_block_header",
+        "block_roots",
+        "state_roots",
+        "historical_roots",
+        "eth1_data",
+        "eth1_data_votes",
+        "eth1_deposit_index",
+        "validators",
+        "balances",
+        "randao_mixes",
+        "slashings",
+        "previous_epoch_participation",
+        "current_epoch_participation",
+        "justification_bits",
+        "previous_justified_checkpoint",
+        "current_justified_checkpoint",
+        "finalized_checkpoint",
+        "inactivity_scores",
+        "current_sync_committee",
+        "next_sync_committee",
+        "latest_execution_payload_header",
+        "next_withdrawal_index",
+        "next_withdrawal_validator_index",
+        "historical_summaries",
+    ]);
+
+    type State<P: Preset> = deneb::BeaconState<P>;
+
+    type SignedBeaconBlock<P: Preset> = deneb::SignedBeaconBlock<P>;
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

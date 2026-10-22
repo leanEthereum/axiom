@@ -1,15 +1,20 @@
 //! The beacon state of Fulu, which fixes proposers one epoch ahead.
 
-use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz, Vector};
+use axiom_ssz::{CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Ssz, Vector};
 
 use crate::{
-    BlsPubkey, Bytes32, Domain, DomainType, Epoch, Gwei, Preset, Root, Slot, ValidatorIndex,
-    Version, WithdrawalIndex, electra,
+    Epoch, ForkName, Gwei, ParticipationFlags, Preset, Root, Slot, ValidatorIndex, WithdrawalIndex,
+    accessors::{
+        CoreState, ExecutionHeaderState, ForkState, LookaheadState, ParticipationState,
+        PendingQueueState, SyncCommitteeState, WithdrawalState,
+    },
+    combined,
     fulu::{
         Balances, BeaconBlockHeader, BlockRoots, Checkpoint, EpochParticipation, Eth1Data,
         Eth1DataVotes, ExecutionPayloadHeader, Fork, HistoricalRoots, HistoricalSummaries,
-        InactivityScores, JustificationBits, PendingConsolidations, PendingDeposits,
-        PendingPartialWithdrawals, RandaoMixes, Slashings, StateRoots, SyncCommittee, Validators,
+        InactivityScores, JustificationBits, PendingConsolidation, PendingConsolidations,
+        PendingDeposit, PendingDeposits, PendingPartialWithdrawal, PendingPartialWithdrawals,
+        RandaoMixes, Slashings, StateRoots, SyncCommittee, Validator, Validators,
     },
 };
 
@@ -263,231 +268,375 @@ impl<P: Preset> Container for BeaconState<P> {
     }
 }
 
-impl<P: Preset> BeaconState<P> {
-    /// Epoch of the state's slot.
-    #[must_use]
-    pub const fn current_epoch(&self) -> Epoch {
-        self.slot.epoch::<P>()
+impl<P: Preset> ForkState for BeaconState<P> {
+    const FORK: ForkName = ForkName::Fulu;
+
+    fn from_any(state: &combined::BeaconState<P>) -> Option<&Self> {
+        match state {
+            combined::BeaconState::Fulu(state) => Some(state),
+            _ => None,
+        }
     }
 
-    /// Epoch before the current one, or genesis at genesis.
-    #[must_use]
-    pub const fn previous_epoch(&self) -> Epoch {
-        self.current_epoch().saturating_sub(1)
+    fn from_any_mut(state: &mut combined::BeaconState<P>) -> Option<&mut Self> {
+        match state {
+            combined::BeaconState::Fulu(state) => Some(state),
+            _ => None,
+        }
     }
 
-    /// Root of the block at a recent slot.
-    ///
-    /// Returns nothing unless the slot is in the past and still in the ring buffer.
-    /// See `get_block_root_at_slot` in the phase0 beacon chain spec.
-    #[must_use]
-    pub fn block_root_at_slot(&self, slot: Slot) -> Option<Root> {
-        let in_range =
-            slot < self.slot && self.slot.0 <= slot.0.saturating_add(P::SLOTS_PER_HISTORICAL_ROOT);
-        in_range.then(|| self.block_roots[(slot % P::SLOTS_PER_HISTORICAL_ROOT) as usize])
-    }
-
-    /// Root of the block at the start of a recent epoch.
-    #[must_use]
-    pub fn block_root(&self, epoch: Epoch) -> Option<Root> {
-        self.block_root_at_slot(epoch.start_slot::<P>())
-    }
-
-    /// Randao mix of a recent epoch.
-    #[must_use]
-    pub fn randao_mix(&self, epoch: Epoch) -> Bytes32 {
-        self.randao_mixes[(epoch % P::EPOCHS_PER_HISTORICAL_VECTOR) as usize]
-    }
-
-    /// Indices of the validators active at an epoch, in registry order.
-    #[must_use]
-    pub fn active_validator_indices(&self, epoch: Epoch) -> Vec<ValidatorIndex> {
-        self.validators
-            .iter()
-            .enumerate()
-            .filter(|(_, validator)| validator.is_active_at(epoch))
-            .map(|(index, _)| ValidatorIndex::from(index))
-            .collect()
-    }
-
-    /// Seed for a domain at an epoch.
-    ///
-    /// The mix comes from MIN_SEED_LOOKAHEAD + 1 epochs earlier.
-    /// That mix was fixed before anyone could know which seed it would feed.
-    /// See `get_seed` in the phase0 beacon chain spec.
-    #[must_use]
-    pub fn seed(&self, epoch: Epoch, domain_type: DomainType) -> Bytes32 {
-        // Adding the vector length first keeps the subtraction from underflowing near genesis.
-        let mix_epoch =
-            Epoch(epoch.0 + P::EPOCHS_PER_HISTORICAL_VECTOR - P::MIN_SEED_LOOKAHEAD - 1);
-        let mix = self.randao_mix(mix_epoch);
-
-        let mut preimage = [0; 4 + 8 + 32];
-        preimage[..4].copy_from_slice(&domain_type.0);
-        preimage[4..12].copy_from_slice(&epoch.0.to_le_bytes());
-        preimage[12..].copy_from_slice(&mix.0);
-        Bytes32(Root::sha256(&preimage).0)
-    }
-
-    /// Committees per slot at an epoch, between 1 and the preset maximum.
-    ///
-    /// See `get_committee_count_per_slot` in the phase0 beacon chain spec.
-    #[must_use]
-    pub fn committee_count_per_slot(&self, active_validator_count: usize) -> u64 {
-        (active_validator_count as u64 / P::SLOTS_PER_EPOCH / P::TARGET_COMMITTEE_SIZE)
-            .clamp(1, P::MAX_COMMITTEES_PER_SLOT)
-    }
-
-    /// Sum of the effective balances of some validators, at least one increment.
-    ///
-    /// The floor keeps every division by a total balance well defined.
-    #[must_use]
-    pub fn total_balance(&self, indices: impl IntoIterator<Item = ValidatorIndex>) -> Gwei {
-        let sum: Gwei = indices
-            .into_iter()
-            .map(|index| self.validators[index.as_usize()].effective_balance)
-            .sum();
-        sum.max(P::EFFECTIVE_BALANCE_INCREMENT)
-    }
-
-    /// Sum of the effective balances of the validators active in the current epoch.
-    #[must_use]
-    pub fn total_active_balance(&self) -> Gwei {
-        let epoch = self.current_epoch();
-        let sum: Gwei = self
-            .validators
-            .iter()
-            .filter(|validator| validator.is_active_at(epoch))
-            .map(|validator| validator.effective_balance)
-            .sum();
-        sum.max(P::EFFECTIVE_BALANCE_INCREMENT)
-    }
-
-    /// Signature domain of a message type at an epoch.
-    ///
-    /// Messages from before the latest fork sign with the previous fork version.
-    /// See `get_domain` in the phase0 beacon chain spec.
-    #[must_use]
-    pub fn domain(&self, domain_type: DomainType, epoch: Epoch) -> Domain {
-        Domain::compute(
-            domain_type,
-            self.fork.version_at(epoch),
-            self.genesis_validators_root,
-        )
-    }
-
-    /// Proposer of the current slot, read from the lookahead.
-    ///
-    /// See `get_beacon_proposer_index` in the Fulu beacon chain spec.
-    #[must_use]
-    pub fn beacon_proposer_index(&self) -> ValidatorIndex {
-        self.proposer_lookahead[self.slot.index_in_epoch::<P>() as usize]
-    }
-
-    /// Epochs since the last finalized checkpoint, counted from the previous epoch.
-    #[must_use]
-    pub fn finality_delay(&self) -> u64 {
-        self.previous_epoch() - self.finalized_checkpoint.epoch
-    }
-
-    /// Whether finality has stalled long enough for the inactivity leak.
-    ///
-    /// The leak drains non-participants until the participants hold two thirds again.
-    #[must_use]
-    pub fn is_in_inactivity_leak(&self) -> bool {
-        self.finality_delay() > P::MIN_EPOCHS_TO_INACTIVITY_PENALTY
-    }
-
-    /// Validators that earn rewards or penalties for the previous epoch.
-    ///
-    /// Slashed validators stay eligible until withdrawable, so they keep paying penalties.
-    #[must_use]
-    pub fn eligible_validator_indices(&self) -> Vec<ValidatorIndex> {
-        let previous_epoch = self.previous_epoch();
-        self.validators
-            .iter()
-            .enumerate()
-            .filter(|(_, validator)| {
-                validator.is_active_at(previous_epoch)
-                    || (validator.slashed && previous_epoch + 1 < validator.withdrawable_epoch)
-            })
-            .map(|(index, _)| ValidatorIndex::from(index))
-            .collect()
-    }
-
-    /// Balance already queued for partial withdrawal from a validator.
-    #[must_use]
-    pub fn pending_balance_to_withdraw(&self, index: ValidatorIndex) -> Gwei {
-        self.pending_partial_withdrawals
-            .iter()
-            .filter(|withdrawal| withdrawal.validator_index == index)
-            .map(|withdrawal| withdrawal.amount)
-            .sum()
-    }
-
-    /// Index of the validator with a public key, scanning the registry.
-    #[must_use]
-    pub fn validator_index_of(&self, pubkey: &BlsPubkey) -> Option<ValidatorIndex> {
-        self.validators
-            .iter()
-            .position(|validator| validator.pubkey == *pubkey)
-            .map(ValidatorIndex::from)
+    fn into_any(self) -> combined::BeaconState<P> {
+        combined::BeaconState::Fulu(self)
     }
 }
 
-impl<P: Preset> BeaconState<P> {
-    /// The Fulu state an Electra state becomes, with an empty proposer lookahead.
-    ///
-    /// Every field carries over, and the fork version advances to the given one.
-    /// The lookahead depends on proposer sampling, so the state transition fills it.
-    ///
-    /// See `upgrade_to_fulu` in the Fulu fork spec.
-    #[must_use]
-    pub fn upgrade_from(pre: electra::BeaconState<P>, fulu_fork_version: Version) -> Self {
-        let epoch = pre.slot.epoch::<P>();
-        Self {
-            genesis_time: pre.genesis_time,
-            genesis_validators_root: pre.genesis_validators_root,
-            slot: pre.slot,
-            fork: Fork {
-                previous_version: pre.fork.current_version,
-                current_version: fulu_fork_version,
-                epoch,
-            },
-            latest_block_header: pre.latest_block_header,
-            block_roots: pre.block_roots,
-            state_roots: pre.state_roots,
-            historical_roots: pre.historical_roots,
-            eth1_data: pre.eth1_data,
-            eth1_data_votes: pre.eth1_data_votes,
-            eth1_deposit_index: pre.eth1_deposit_index,
-            validators: pre.validators,
-            balances: pre.balances,
-            randao_mixes: pre.randao_mixes,
-            slashings: pre.slashings,
-            previous_epoch_participation: pre.previous_epoch_participation,
-            current_epoch_participation: pre.current_epoch_participation,
-            justification_bits: pre.justification_bits,
-            previous_justified_checkpoint: pre.previous_justified_checkpoint,
-            current_justified_checkpoint: pre.current_justified_checkpoint,
-            finalized_checkpoint: pre.finalized_checkpoint,
-            inactivity_scores: pre.inactivity_scores,
-            current_sync_committee: pre.current_sync_committee,
-            next_sync_committee: pre.next_sync_committee,
-            latest_execution_payload_header: pre.latest_execution_payload_header,
-            next_withdrawal_index: pre.next_withdrawal_index,
-            next_withdrawal_validator_index: pre.next_withdrawal_validator_index,
-            historical_summaries: pre.historical_summaries,
-            deposit_requests_start_index: pre.deposit_requests_start_index,
-            deposit_balance_to_consume: pre.deposit_balance_to_consume,
-            exit_balance_to_consume: pre.exit_balance_to_consume,
-            earliest_exit_epoch: pre.earliest_exit_epoch,
-            consolidation_balance_to_consume: pre.consolidation_balance_to_consume,
-            earliest_consolidation_epoch: pre.earliest_consolidation_epoch,
-            pending_deposits: pre.pending_deposits,
-            pending_partial_withdrawals: pre.pending_partial_withdrawals,
-            pending_consolidations: pre.pending_consolidations,
-            proposer_lookahead: Vector::default(),
-        }
+impl<P: Preset> CoreState for BeaconState<P> {
+    type Preset = P;
+
+    fn fork_name(&self) -> ForkName {
+        Self::FORK
+    }
+
+    fn state_root(&self) -> Root {
+        self.hash_tree_root()
+    }
+
+    fn genesis_time(&self) -> u64 {
+        self.genesis_time
+    }
+
+    fn genesis_validators_root(&self) -> Root {
+        self.genesis_validators_root
+    }
+
+    fn slot(&self) -> Slot {
+        self.slot
+    }
+
+    fn slot_mut(&mut self) -> &mut Slot {
+        &mut self.slot
+    }
+
+    fn fork(&self) -> &Fork {
+        &self.fork
+    }
+
+    fn latest_block_header(&self) -> &BeaconBlockHeader {
+        &self.latest_block_header
+    }
+
+    fn latest_block_header_mut(&mut self) -> &mut BeaconBlockHeader {
+        &mut self.latest_block_header
+    }
+
+    fn block_roots(&self) -> &BlockRoots<P> {
+        &self.block_roots
+    }
+
+    fn block_roots_mut(&mut self) -> &mut BlockRoots<P> {
+        &mut self.block_roots
+    }
+
+    fn state_roots(&self) -> &StateRoots<P> {
+        &self.state_roots
+    }
+
+    fn state_roots_mut(&mut self) -> &mut StateRoots<P> {
+        &mut self.state_roots
+    }
+
+    fn historical_roots(&self) -> &HistoricalRoots<P> {
+        &self.historical_roots
+    }
+
+    fn historical_roots_mut(&mut self) -> &mut HistoricalRoots<P> {
+        &mut self.historical_roots
+    }
+
+    fn eth1_data(&self) -> &Eth1Data {
+        &self.eth1_data
+    }
+
+    fn eth1_data_mut(&mut self) -> &mut Eth1Data {
+        &mut self.eth1_data
+    }
+
+    fn eth1_data_votes(&self) -> &Eth1DataVotes<P> {
+        &self.eth1_data_votes
+    }
+
+    fn eth1_data_votes_mut(&mut self) -> &mut Eth1DataVotes<P> {
+        &mut self.eth1_data_votes
+    }
+
+    fn eth1_deposit_index(&self) -> u64 {
+        self.eth1_deposit_index
+    }
+
+    fn eth1_deposit_index_mut(&mut self) -> &mut u64 {
+        &mut self.eth1_deposit_index
+    }
+
+    fn validators(&self) -> &[Validator] {
+        &self.validators
+    }
+
+    fn validators_mut(&mut self) -> &mut [Validator] {
+        &mut self.validators
+    }
+
+    fn balances(&self) -> &[Gwei] {
+        &self.balances
+    }
+
+    fn balances_mut(&mut self) -> &mut [Gwei] {
+        &mut self.balances
+    }
+
+    fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {
+        self.validators.push(validator)?;
+        // Invariant: balances share the registry's length and limit, so they have room too.
+        self.balances.push(balance)
+    }
+
+    fn randao_mixes(&self) -> &RandaoMixes<P> {
+        &self.randao_mixes
+    }
+
+    fn randao_mixes_mut(&mut self) -> &mut RandaoMixes<P> {
+        &mut self.randao_mixes
+    }
+
+    fn slashings(&self) -> &Slashings<P> {
+        &self.slashings
+    }
+
+    fn slashings_mut(&mut self) -> &mut Slashings<P> {
+        &mut self.slashings
+    }
+
+    fn justification_bits(&self) -> &JustificationBits {
+        &self.justification_bits
+    }
+
+    fn justification_bits_mut(&mut self) -> &mut JustificationBits {
+        &mut self.justification_bits
+    }
+
+    fn previous_justified_checkpoint(&self) -> Checkpoint {
+        self.previous_justified_checkpoint
+    }
+
+    fn previous_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.previous_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint(&self) -> Checkpoint {
+        self.current_justified_checkpoint
+    }
+
+    fn current_justified_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.current_justified_checkpoint
+    }
+
+    fn finalized_checkpoint(&self) -> Checkpoint {
+        self.finalized_checkpoint
+    }
+
+    fn finalized_checkpoint_mut(&mut self) -> &mut Checkpoint {
+        &mut self.finalized_checkpoint
+    }
+}
+
+impl<P: Preset> ParticipationState for BeaconState<P> {
+    fn previous_epoch_participation(&self) -> &[ParticipationFlags] {
+        &self.previous_epoch_participation
+    }
+
+    fn current_epoch_participation(&self) -> &[ParticipationFlags] {
+        &self.current_epoch_participation
+    }
+
+    fn epoch_participation_mut(
+        &mut self,
+    ) -> (&mut [ParticipationFlags], &mut [ParticipationFlags]) {
+        (
+            &mut self.previous_epoch_participation[..],
+            &mut self.current_epoch_participation[..],
+        )
+    }
+
+    fn inactivity_scores(&self) -> &[u64] {
+        &self.inactivity_scores
+    }
+
+    fn inactivity_scores_mut(&mut self) -> &mut [u64] {
+        &mut self.inactivity_scores
+    }
+
+    fn push_participant(&mut self) -> Result<(), CapacityError> {
+        self.previous_epoch_participation
+            .push(ParticipationFlags::default())?;
+        self.current_epoch_participation
+            .push(ParticipationFlags::default())?;
+        self.inactivity_scores.push(0)
+    }
+}
+
+impl<P: Preset> SyncCommitteeState for BeaconState<P> {
+    fn current_sync_committee(&self) -> &SyncCommittee<P> {
+        &self.current_sync_committee
+    }
+
+    fn current_sync_committee_mut(&mut self) -> &mut SyncCommittee<P> {
+        &mut self.current_sync_committee
+    }
+
+    fn next_sync_committee(&self) -> &SyncCommittee<P> {
+        &self.next_sync_committee
+    }
+
+    fn next_sync_committee_mut(&mut self) -> &mut SyncCommittee<P> {
+        &mut self.next_sync_committee
+    }
+}
+
+impl<P: Preset> ExecutionHeaderState for BeaconState<P> {
+    type ExecutionPayloadHeader = ExecutionPayloadHeader<P>;
+
+    fn latest_execution_payload_header(&self) -> &ExecutionPayloadHeader<P> {
+        &self.latest_execution_payload_header
+    }
+
+    fn latest_execution_payload_header_mut(&mut self) -> &mut ExecutionPayloadHeader<P> {
+        &mut self.latest_execution_payload_header
+    }
+}
+
+impl<P: Preset> WithdrawalState for BeaconState<P> {
+    fn next_withdrawal_index(&self) -> WithdrawalIndex {
+        self.next_withdrawal_index
+    }
+
+    fn next_withdrawal_index_mut(&mut self) -> &mut WithdrawalIndex {
+        &mut self.next_withdrawal_index
+    }
+
+    fn next_withdrawal_validator_index(&self) -> ValidatorIndex {
+        self.next_withdrawal_validator_index
+    }
+
+    fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
+        &mut self.next_withdrawal_validator_index
+    }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
+    }
+}
+
+impl<P: Preset> PendingQueueState for BeaconState<P> {
+    fn deposit_requests_start_index(&self) -> u64 {
+        self.deposit_requests_start_index
+    }
+
+    fn deposit_requests_start_index_mut(&mut self) -> &mut u64 {
+        &mut self.deposit_requests_start_index
+    }
+
+    fn deposit_balance_to_consume(&self) -> Gwei {
+        self.deposit_balance_to_consume
+    }
+
+    fn deposit_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.deposit_balance_to_consume
+    }
+
+    fn exit_balance_to_consume(&self) -> Gwei {
+        self.exit_balance_to_consume
+    }
+
+    fn exit_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.exit_balance_to_consume
+    }
+
+    fn earliest_exit_epoch(&self) -> Epoch {
+        self.earliest_exit_epoch
+    }
+
+    fn earliest_exit_epoch_mut(&mut self) -> &mut Epoch {
+        &mut self.earliest_exit_epoch
+    }
+
+    fn consolidation_balance_to_consume(&self) -> Gwei {
+        self.consolidation_balance_to_consume
+    }
+
+    fn consolidation_balance_to_consume_mut(&mut self) -> &mut Gwei {
+        &mut self.consolidation_balance_to_consume
+    }
+
+    fn earliest_consolidation_epoch(&self) -> Epoch {
+        self.earliest_consolidation_epoch
+    }
+
+    fn earliest_consolidation_epoch_mut(&mut self) -> &mut Epoch {
+        &mut self.earliest_consolidation_epoch
+    }
+
+    fn pending_deposits(&self) -> &[PendingDeposit] {
+        &self.pending_deposits
+    }
+
+    fn push_pending_deposit(&mut self, deposit: PendingDeposit) -> Result<(), CapacityError> {
+        self.pending_deposits.push(deposit)
+    }
+
+    fn remove_pending_deposits(&mut self, count: usize) {
+        self.pending_deposits.drain(..count);
+    }
+
+    fn pending_partial_withdrawals(&self) -> &[PendingPartialWithdrawal] {
+        &self.pending_partial_withdrawals
+    }
+
+    fn push_pending_partial_withdrawal(
+        &mut self,
+        withdrawal: PendingPartialWithdrawal,
+    ) -> Result<(), CapacityError> {
+        self.pending_partial_withdrawals.push(withdrawal)
+    }
+
+    fn remove_pending_partial_withdrawals(&mut self, count: usize) {
+        self.pending_partial_withdrawals.drain(..count);
+    }
+
+    fn pending_consolidations(&self) -> &[PendingConsolidation] {
+        &self.pending_consolidations
+    }
+
+    fn push_pending_consolidation(
+        &mut self,
+        consolidation: PendingConsolidation,
+    ) -> Result<(), CapacityError> {
+        self.pending_consolidations.push(consolidation)
+    }
+
+    fn remove_pending_consolidations(&mut self, count: usize) {
+        self.pending_consolidations.drain(..count);
+    }
+}
+
+impl<P: Preset> LookaheadState for BeaconState<P> {
+    fn proposer_lookahead(&self) -> &ProposerLookahead<P> {
+        &self.proposer_lookahead
+    }
+
+    fn proposer_lookahead_mut(&mut self) -> &mut ProposerLookahead<P> {
+        &mut self.proposer_lookahead
     }
 }
