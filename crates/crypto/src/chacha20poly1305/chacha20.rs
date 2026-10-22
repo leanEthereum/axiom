@@ -158,7 +158,7 @@ impl ChaCha20 {
             for chunk in wide.as_chunks_mut::<{ avx2::BLOCKS * BLOCK_LEN }>().0 {
                 // SAFETY: the CPU reports AVX2, the only feature the function enables.
                 unsafe {
-                    avx2::xor_blocks(&self.state, chunk);
+                    avx2::EightBlocks::xor_keystream(&self.state, chunk);
                 }
                 self.state[COUNTER] = self.state[COUNTER].wrapping_add(avx2::BLOCKS as u32);
             }

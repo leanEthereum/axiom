@@ -4,7 +4,7 @@ use std::{fmt, slice};
 
 use super::{
     error::Secp256k1Error,
-    field::{FieldElement, add_with_carry, limbs_to_be_bytes},
+    field::FieldElement,
     point::AffinePoint,
     rfc6979::NonceGenerator,
     scalar::Scalar,
@@ -12,15 +12,6 @@ use super::{
     table::GeneratorTable,
 };
 use crate::ct::wipe;
-
-/// SEC 1 prefix of a compressed point with even y.
-const TAG_EVEN: u8 = 0x02;
-
-/// SEC 1 prefix of a compressed point with odd y.
-const TAG_ODD: u8 = 0x03;
-
-/// SEC 1 prefix of an uncompressed point.
-const TAG_UNCOMPRESSED: u8 = 0x04;
 
 /// A secp256k1 secret key: a scalar d in [1, n).
 ///
@@ -204,17 +195,7 @@ impl PublicKey {
     ///
     /// Fails on a wrong prefix, x not below p, or x with no point on the curve.
     pub fn from_compressed(bytes: &[u8; 33]) -> Result<Self, Secp256k1Error> {
-        // The prefix byte carries the parity of y.
-        let (tag, x) = bytes
-            .split_first()
-            .ok_or(Secp256k1Error::InvalidPublicKey)?;
-        let y_is_odd = match *tag {
-            TAG_EVEN => false,
-            TAG_ODD => true,
-            _ => return Err(Secp256k1Error::InvalidPublicKey),
-        };
-        let x = Self::coordinate(x)?;
-        AffinePoint::decompress(x, y_is_odd)
+        AffinePoint::from_compressed(bytes)
             .map(Self::from_point)
             .ok_or(Secp256k1Error::InvalidPublicKey)
     }
@@ -227,41 +208,21 @@ impl PublicKey {
     ///
     /// Fails on a wrong prefix, a coordinate not below p, or a point off the curve.
     pub fn from_uncompressed(bytes: &[u8; 65]) -> Result<Self, Secp256k1Error> {
-        // Only the plain uncompressed prefix is accepted.
-        if bytes[0] != TAG_UNCOMPRESSED {
-            return Err(Secp256k1Error::InvalidPublicKey);
-        }
-        let x = Self::coordinate(&bytes[1..33])?;
-        let y = Self::coordinate(&bytes[33..])?;
-        AffinePoint::new(x, y)
+        AffinePoint::from_uncompressed(bytes)
             .map(Self::from_point)
             .ok_or(Secp256k1Error::InvalidPublicKey)
-    }
-
-    /// Decodes one coordinate, refusing values not below p.
-    fn coordinate(bytes: &[u8]) -> Result<FieldElement, Secp256k1Error> {
-        // Exactly 32 bytes, then the range check against p.
-        let bytes: &[u8; 32] = bytes
-            .try_into()
-            .map_err(|_| Secp256k1Error::InvalidPublicKey)?;
-        FieldElement::from_bytes(bytes).ok_or(Secp256k1Error::InvalidPublicKey)
     }
 
     /// The 33-byte compressed form.
     #[must_use]
     pub fn to_compressed(&self) -> [u8; 33] {
-        compress(&self.point)
+        self.point.to_compressed()
     }
 
     /// The 65-byte uncompressed form.
     #[must_use]
     pub fn to_uncompressed(&self) -> [u8; 65] {
-        // Prefix 0x04, then x and y big-endian.
-        let mut out = [0_u8; 65];
-        out[0] = TAG_UNCOMPRESSED;
-        out[1..33].copy_from_slice(&self.point.x.to_bytes());
-        out[33..].copy_from_slice(&self.point.y.to_bytes());
-        out
+        self.point.to_uncompressed()
     }
 
     /// Checks a signature over a 32-byte message hash.
@@ -303,14 +264,14 @@ impl PublicKey {
 
         // Phase 2: compare in projective form against r, then r + n.
         let zz = x.z.square();
-        let mut candidates = [Some(r.limbs()), None];
-        let (r_plus_n, carry) = add_with_carry(r.limbs(), Scalar::ORDER);
+        let mut candidates = [Some(r.to_uint()), None];
+        let (r_plus_n, carry) = r.to_uint().add_with_carry(Scalar::ORDER);
         if carry == 0 {
             candidates[1] = Some(r_plus_n);
         }
-        for limbs in candidates.into_iter().flatten() {
+        for value in candidates.into_iter().flatten() {
             // A candidate at or above p is no field element and cannot match.
-            if let Some(candidate) = FieldElement::from_bytes(&limbs_to_be_bytes(limbs))
+            if let Some(candidate) = FieldElement::from_uint(value)
                 && candidate.mul(zz).equals(x.x).reveal()
             {
                 return Ok(());
@@ -351,7 +312,7 @@ impl SharedSecret {
     /// discv5 feeds exactly these bytes into its session key derivation.
     #[must_use]
     pub fn to_compressed(&self) -> [u8; 33] {
-        compress(&self.point)
+        self.point.to_compressed()
     }
 }
 
@@ -367,14 +328,4 @@ impl fmt::Debug for SharedSecret {
         // The shared point is secret: never print it.
         f.debug_struct("SharedSecret").finish_non_exhaustive()
     }
-}
-
-/// The 33-byte SEC 1 compressed encoding of a point, per section 2.3.3.
-fn compress(point: &AffinePoint) -> [u8; 33] {
-    // Prefix 0x02 or 0x03 by parity of y, then x big-endian.
-    let mut out = [0_u8; 33];
-    // Timing: the parity bit is added, not branched on, since a shared point is secret.
-    out[0] = TAG_EVEN + point.y.is_odd().bit() as u8;
-    out[1..].copy_from_slice(&point.x.to_bytes());
-    out
 }

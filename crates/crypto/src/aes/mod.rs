@@ -17,10 +17,13 @@
 mod clmul;
 mod ctr;
 mod gcm;
+mod gf128;
 mod ghash;
 #[cfg(target_arch = "x86_64")]
 mod ni;
+mod sbox;
 mod soft;
+mod state;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::is_x86_feature_detected;
@@ -28,6 +31,8 @@ use std::{fmt, slice};
 
 pub use ctr::Aes128Ctr;
 pub use gcm::Aes128Gcm;
+#[cfg(target_arch = "x86_64")]
+use ni::NiSchedule;
 use soft::RoundKeys;
 
 use crate::ct::wipe;
@@ -55,7 +60,7 @@ const BATCH: usize = 8;
 /// ```
 #[derive(Clone)]
 pub struct Aes128 {
-    /// The expanded key.
+    /// The expanded key, cleared from memory when dropped.
     keys: RoundKeys,
     /// Whether the CPU offers AES-NI, checked once at construction.
     hardware: bool,
@@ -69,7 +74,7 @@ impl Aes128 {
     #[must_use]
     pub fn new(key: &[u8; Self::KEY_LEN]) -> Self {
         Self {
-            keys: soft::expand_key(key),
+            keys: RoundKeys::expand(key),
             hardware: Self::hardware_available(),
         }
     }
@@ -78,7 +83,7 @@ impl Aes128 {
     #[cfg(test)]
     pub(crate) fn portable(key: &[u8; Self::KEY_LEN]) -> Self {
         Self {
-            keys: soft::expand_key(key),
+            keys: RoundKeys::expand(key),
             hardware: false,
         }
     }
@@ -109,12 +114,12 @@ impl Aes128 {
             // SAFETY: the flag is set only when the CPU reports AES-NI and SSE2.
             // Those are the features the function enables.
             unsafe {
-                ni::encrypt_blocks(&self.keys, blocks);
+                NiSchedule::encrypt(self.keys.as_blocks(), blocks);
             }
             return;
         }
         for block in blocks {
-            soft::encrypt_block(&self.keys, block);
+            self.keys.encrypt_block(block);
         }
     }
 
@@ -136,12 +141,6 @@ impl Aes128 {
             }
             wipe(keystream.as_flattened_mut());
         }
-    }
-}
-
-impl Drop for Aes128 {
-    fn drop(&mut self) {
-        wipe(self.keys.as_flattened_mut());
     }
 }
 

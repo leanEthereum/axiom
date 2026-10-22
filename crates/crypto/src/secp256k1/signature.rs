@@ -1,12 +1,8 @@
 //! ECDSA signatures, their recovery identifiers, and public key recovery.
 
 use super::{
-    error::Secp256k1Error,
-    field::{FieldElement, add_with_carry, limbs_to_be_bytes},
-    keys::PublicKey,
-    point::AffinePoint,
-    scalar::Scalar,
-    table::GeneratorTable,
+    error::Secp256k1Error, field::FieldElement, keys::PublicKey, point::AffinePoint,
+    scalar::Scalar, table::GeneratorTable,
 };
 
 /// An ECDSA signature (r, s) with both components in [1, n).
@@ -225,18 +221,17 @@ impl RecoverableSignature {
         let Signature { r, s } = self.signature;
 
         // Phase 1: rebuild the nonce point R.
-        let mut x_limbs = r.limbs();
+        let mut x_value = r.to_uint();
         if self.recovery_id.is_x_reduced() {
             // x = r + n must stay below p.
             // A carry, or a value past p, means no such point.
-            let (sum, carry) = add_with_carry(x_limbs, Scalar::ORDER);
+            let (sum, carry) = x_value.add_with_carry(Scalar::ORDER);
             if carry == 1 {
                 return Err(Secp256k1Error::RecoveryFailed);
             }
-            x_limbs = sum;
+            x_value = sum;
         }
-        let x = FieldElement::from_bytes(&limbs_to_be_bytes(x_limbs))
-            .ok_or(Secp256k1Error::RecoveryFailed)?;
+        let x = FieldElement::from_uint(x_value).ok_or(Secp256k1Error::RecoveryFailed)?;
         let big_r = AffinePoint::decompress(x, self.recovery_id.is_y_odd())
             .ok_or(Secp256k1Error::RecoveryFailed)?;
 
