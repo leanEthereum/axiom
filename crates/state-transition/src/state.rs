@@ -224,6 +224,15 @@ impl<P: Preset> State<P> {
         Ok(computed)
     }
 
+    /// Committees of any epoch whose randomness the state holds, cached ones reused.
+    ///
+    /// Epochs outside the cached window are computed afresh and not kept.
+    #[must_use]
+    pub fn compute_committees(&mut self, epoch: Epoch) -> Arc<EpochCommittees> {
+        self.committees(epoch)
+            .unwrap_or_else(|_| Arc::new(EpochCommittees::compute(&self.beacon, epoch)))
+    }
+
     /// Validators an attestation counts, sorted and unique.
     ///
     /// See `get_attesting_indices` in the Electra beacon chain spec.
