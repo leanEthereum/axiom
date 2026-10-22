@@ -226,9 +226,9 @@ impl<P: Preset> ProposerService<P> {
     ///
     /// Building ahead gives the engine the whole slot to fill the payload.
     /// Electing the proposer advances the head state to the slot, which costs the chain thread.
-    /// So with no validator prepared at all, the chain is not visited.
+    /// So with no validator prepared at all, the chain is not visited, unless told to always prepare.
     pub async fn prepare_next(&self, slot: Slot) {
-        if !self.preparations().any_prepared() {
+        if !self.always_prepare && !self.preparations().any_prepared() {
             return;
         }
         let reorgs = self.reorgs;
@@ -527,6 +527,19 @@ mod tests {
             visited.is_err(),
             "a prepared validator makes the call visit the chain"
         );
+
+        // Told to always prepare, the desk visits the chain even with nobody prepared.
+        let always = ProposerService::new(
+            proposer.chain.clone(),
+            Arc::new(ExecutionLayer::disconnected()),
+            Arc::new(ManualClock::at(0)),
+            ExecutionAddress::ZERO,
+            None,
+        )
+        .preparing_always();
+        let visited =
+            runtime.block_on(async { timeout(wait, always.prepare_next(Slot(1_000))).await });
+        assert!(visited.is_err(), "always preparing visits the chain");
         release.send(()).unwrap();
     }
 }
