@@ -30,13 +30,19 @@
 //! A fork introducing it brings new containers, and the duties dispatch on that fork once.
 
 mod context;
+mod guard;
 mod ledger;
 mod local;
+mod remote;
 mod request;
 mod scheme;
+mod signer;
 
 pub use context::SigningContext;
+pub use guard::{Cleared, SigningGuard};
 pub use ledger::{LeafLedger, LedgerError};
 pub use local::{LocalKey, LocalKeyError};
+pub use remote::{RemoteError, RemoteSigner};
 pub use request::{AggregateAndProofRef, DomainScope, Protected, SigningRequest};
 pub use scheme::{Bls, KeyState, Leaf, SchemeError, SignatureScheme};
+pub use signer::{SignError, ValidatorSigner};
