@@ -18,7 +18,7 @@
 //! The multiformats unsigned-varint spec caps encodings at nine bytes and requires minimality.
 //! Decoders here enforce the stricter rule only where the caller asks for it.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// Longest varint any 64-bit value needs: ceil(64 / 7) bytes.
 pub const MAX_LEN: usize = 10;
@@ -29,30 +29,21 @@ pub const MAX_LEN: usize = 10;
 pub const MAX_MULTIFORMAT_LEN: usize = 9;
 
 /// A byte string that does not start with a well-formed varint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum VarintError {
     /// The encoding runs past the longest length allowed.
+    #[error("varint exceeds its maximum length")]
     TooLong,
 
     /// The tenth byte carries bits beyond the 64th.
+    #[error("varint overflows 64 bits")]
     Overflow,
 
     /// The encoding ends in a zero byte that a shorter encoding would drop.
+    #[error("varint is not minimally encoded")]
     NotMinimal,
 }
-
-impl fmt::Display for VarintError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooLong => f.write_str("varint exceeds its maximum length"),
-            Self::Overflow => f.write_str("varint overflows 64 bits"),
-            Self::NotMinimal => f.write_str("varint is not minimally encoded"),
-        }
-    }
-}
-
-impl Error for VarintError {}
 
 /// Appends the varint encoding of a value.
 pub fn encode(mut value: u64, out: &mut Vec<u8>) {

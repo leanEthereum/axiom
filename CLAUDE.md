@@ -21,6 +21,7 @@ Allowed, and already declared in the root `Cargo.toml`:
 - `sha2`, for SHA-256.
 - `tokio`, for the async runtime at the effectful edge only, with the features it needs.
 - `tracing` and `tracing-subscriber`, for telemetry, with default features off and no serde.
+- `thiserror`, for error types.
 - `proptest`, as a dev-dependency only.
 
 Everything else is written here:
@@ -32,9 +33,9 @@ Everything else is written here:
 
 Adding a crate requires a reason recorded in the commit message and in the root manifest.
 
-`thiserror`, `anyhow`, `serde`, and derive macros of any kind are not used.
+`anyhow` and `serde` are not used.
 
-Errors implement `Display` and `std::error::Error` by hand.
+Errors derive `thiserror::Error`: one `#[error("...")]` message per variant, `#[from]` or `#[source]` for wrapped causes.
 
 ## Crate graph
 
@@ -74,8 +75,8 @@ Async services reach it through a queue of closures, so no lock guards consensus
 - A module that grows unrelated types becomes a folder of focused files.
 - Prefer methods on well-named types to free functions.
 - A trait exists only for real variation. A closed set of alternatives is an enum.
-- No `macro_rules!` and no proc macros. Write the expansion by hand.
-- Standard derives only: `Clone`, `Copy`, `Debug`, `Default`, `PartialEq`, `Eq`, `Hash`, `PartialOrd`, `Ord`.
+- No `macro_rules!`, and no proc macros besides the `thiserror` derive. Write the expansion by hand.
+- Standard derives only: `Clone`, `Copy`, `Debug`, `Default`, `PartialEq`, `Eq`, `Hash`, `PartialOrd`, `Ord`, plus `thiserror::Error` on error types.
 
 ## Documentation
 

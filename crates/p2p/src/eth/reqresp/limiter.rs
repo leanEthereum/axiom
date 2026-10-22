@@ -17,7 +17,9 @@
 //! The consensus specs suggest token buckets per protocol without fixing values.
 //! See `specs/phase0/p2p-interface.md`, typical rate limiting strategy.
 
-use std::{collections::BTreeMap, error::Error, fmt, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
+
+use thiserror::Error;
 
 use super::Protocol;
 use crate::identity::PeerId;
@@ -32,25 +34,16 @@ pub struct Quota {
 }
 
 /// A request over quota.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum RateLimited {
     /// The request would conform after waiting this long.
+    #[error("rate limited, retry after {0:?}")]
     RetryAfter(Duration),
     /// The request alone exceeds the whole quota and never conforms.
+    #[error("request exceeds the whole quota")]
     TooLarge,
 }
-
-impl fmt::Display for RateLimited {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RetryAfter(wait) => write!(f, "rate limited, retry after {wait:?}"),
-            Self::TooLarge => f.write_str("request exceeds the whole quota"),
-        }
-    }
-}
-
-impl Error for RateLimited {}
 
 /// Token buckets per peer and protocol.
 #[derive(Clone, Debug, Default)]

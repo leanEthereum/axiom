@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features --locked
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
       # The consensus spec, BLS, and KZG vectors are large and versioned, so they are cached.
       - uses: actions/cache@v4
@@ -67,7 +67,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.98"
+          toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --all-features --no-deps --locked
 

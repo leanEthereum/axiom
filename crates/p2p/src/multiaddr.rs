@@ -16,11 +16,12 @@
 //! See `multiformats/multiaddr` and its protocol table.
 
 use std::{
-    error::Error,
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     str::FromStr,
 };
+
+use thiserror::Error;
 
 use crate::{
     identity::{PeerId, PeerIdError},
@@ -289,40 +290,25 @@ impl FromStr for Multiaddr {
 }
 
 /// A byte string or text that is not a supported multiaddress.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum MultiaddrError {
     /// The binary form ends inside a layer.
+    #[error("multiaddress ends inside a layer")]
     Truncated,
 
     /// A binary layer uses a protocol code this implementation does not know.
+    #[error("unknown multiaddress protocol code {0:#x}")]
     UnknownCode(u64),
 
     /// The text form names an unknown protocol or holds a malformed value.
+    #[error("malformed multiaddress text")]
     InvalidText,
 
     /// A peer layer holds a malformed identifier.
-    InvalidPeerId(PeerIdError),
+    #[error("malformed peer id layer: {0}")]
+    InvalidPeerId(#[from] PeerIdError),
 }
-
-impl From<PeerIdError> for MultiaddrError {
-    fn from(error: PeerIdError) -> Self {
-        Self::InvalidPeerId(error)
-    }
-}
-
-impl fmt::Display for MultiaddrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Truncated => f.write_str("multiaddress ends inside a layer"),
-            Self::UnknownCode(code) => write!(f, "unknown multiaddress protocol code {code:#x}"),
-            Self::InvalidText => f.write_str("malformed multiaddress text"),
-            Self::InvalidPeerId(error) => write!(f, "malformed peer id layer: {error}"),
-        }
-    }
-}
-
-impl Error for MultiaddrError {}
 
 #[cfg(test)]
 mod tests {

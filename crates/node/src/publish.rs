@@ -1,6 +1,6 @@
 //! Publishing a block a validator proposed: check it, gossip it with its columns, import it.
 
-use std::{error::Error, fmt, sync::Arc};
+use std::sync::Arc;
 
 use axiom_das::{BlockColumns, ColumnError};
 use axiom_gossip::GossipError;
@@ -11,6 +11,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_types::{DataColumnSidecar, Preset, Root, SignedBeaconBlock, SignedBlockContents};
+use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{ChainError, ChainHandle, Clock, ExecutionLayer};
@@ -25,27 +26,18 @@ pub enum Published {
 }
 
 /// Why a block was not published at all.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum PublishError {
     /// The blobs or proofs do not match the block's commitments.
+    #[error("blob data: {0}")]
     Columns(ColumnError),
     /// The block breaks a gossip rule, so peers would reject it.
+    #[error("invalid block: {0}")]
     Invalid(&'static str),
     /// The chain thread has stopped.
+    #[error("chain service stopped")]
     ChainStopped,
 }
-
-impl fmt::Display for PublishError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Columns(error) => write!(f, "blob data: {error}"),
-            Self::Invalid(reason) => write!(f, "invalid block: {reason}"),
-            Self::ChainStopped => f.write_str("chain service stopped"),
-        }
-    }
-}
-
-impl Error for PublishError {}
 
 /// Publishes proposed blocks.
 ///

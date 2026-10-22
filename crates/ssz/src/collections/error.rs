@@ -1,11 +1,12 @@
 //! Errors building a collection from a value of the wrong length.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// A collection built from too many elements, or from the wrong number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum CapacityError {
     /// A list received more elements than its limit.
+    #[error("{length} elements exceed the limit of {limit}")]
     ExceedsLimit {
         /// The list's limit.
         limit: usize,
@@ -13,6 +14,7 @@ pub enum CapacityError {
         length: usize,
     },
     /// A vector received a number of elements other than its length.
+    #[error("expected exactly {expected} elements, got {length}")]
     WrongLength {
         /// The vector's length.
         expected: usize,
@@ -20,18 +22,3 @@ pub enum CapacityError {
         length: usize,
     },
 }
-
-impl fmt::Display for CapacityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExceedsLimit { limit, length } => {
-                write!(f, "{length} elements exceed the limit of {limit}")
-            }
-            Self::WrongLength { expected, length } => {
-                write!(f, "expected exactly {expected} elements, got {length}")
-            }
-        }
-    }
-}
-
-impl Error for CapacityError {}

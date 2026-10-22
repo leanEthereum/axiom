@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(cache.gossip_ids(&topic), [id]);
         // After two shifts, window 2: cached but no longer announced.
         cache.shift();
-        assert!(cache.gossip_ids(&topic).is_empty());
+        assert_eq!(cache.gossip_ids(&topic), Vec::<MessageId>::new());
         let peer = PeerId::from_public_key(&PublicKey::secp256k1([2; 33]));
         assert!(cache.get_for_peer(&id, &peer).is_some());
         // After three shifts it falls off the end.

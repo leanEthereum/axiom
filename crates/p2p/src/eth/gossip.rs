@@ -1,9 +1,8 @@
 //! The Ethereum gossip encoding: snappy blocks, size bounds, and message identifiers.
 
-use std::{error::Error, fmt};
-
 use axiom_snappy::{SnappyError, raw};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::gossipsub::{MESSAGE_ID_LEN, MessageId, Topic};
 
@@ -85,10 +84,11 @@ pub fn decode_gossip(data: &[u8], max_payload_size: u64) -> Result<Vec<u8>, Goss
 }
 
 /// A gossip payload that breaks the encoding rules.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GossipDecodeError {
     /// The compressed payload exceeds the worst case for the largest payload.
+    #[error("compressed payload of {len} bytes exceeds {max}")]
     CompressedTooLarge {
         /// Compressed length.
         len: usize,
@@ -96,21 +96,9 @@ pub enum GossipDecodeError {
         max: u64,
     },
     /// The payload is not a valid snappy block within the size bound.
-    Snappy(SnappyError),
+    #[error("invalid snappy payload: {0}")]
+    Snappy(#[source] SnappyError),
 }
-
-impl fmt::Display for GossipDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CompressedTooLarge { len, max } => {
-                write!(f, "compressed payload of {len} bytes exceeds {max}")
-            }
-            Self::Snappy(error) => write!(f, "invalid snappy payload: {error}"),
-        }
-    }
-}
-
-impl Error for GossipDecodeError {}
 
 #[cfg(test)]
 mod tests {

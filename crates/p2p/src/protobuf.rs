@@ -25,7 +25,9 @@
 //! Types are written by hand per message, with no code generation.
 //! See `protocolbuffers.dev/docs/encoding`.
 
-use std::{error::Error, fmt, str};
+use std::str;
+
+use thiserror::Error;
 
 use crate::varint::{self, VarintError};
 
@@ -262,31 +264,39 @@ pub fn split_length_prefixed(
 }
 
 /// A byte string that is not the encoding of the expected message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProtobufError {
     /// A key, length, or value varint is malformed.
-    Varint(VarintError),
+    #[error("malformed varint: {0}")]
+    Varint(#[from] VarintError),
 
     /// The input ends inside a field.
+    #[error("message ends inside a field")]
     Truncated,
 
     /// A key uses a group or unassigned wire type.
+    #[error("unsupported wire type {0}")]
     InvalidWireType(u8),
 
     /// A key carries field number zero or one above 2^29 - 1.
+    #[error("field number out of range")]
     InvalidFieldNumber,
 
     /// A known field arrives with a wire type its schema forbids.
+    #[error("field {0} has the wrong wire type")]
     UnexpectedWireType(u32),
 
     /// A required field is absent.
+    #[error("required field {0} is missing")]
     MissingField(u32),
 
     /// A string field holds bytes that are not UTF-8.
+    #[error("field {0} is not valid UTF-8")]
     InvalidUtf8(u32),
 
     /// An enum field holds a value outside the schema.
+    #[error("field {field} holds unknown enum value {value}")]
     InvalidEnum {
         /// Field number.
         field: u32,
@@ -295,6 +305,7 @@ pub enum ProtobufError {
     },
 
     /// A length-prefixed frame declares more bytes than the reader accepts.
+    #[error("frame of {len} bytes exceeds the limit of {max}")]
     FrameTooLarge {
         /// Declared length.
         len: usize,
@@ -303,6 +314,7 @@ pub enum ProtobufError {
     },
 
     /// A repeated field holds more elements than the reader accepts.
+    #[error("field {field} repeats more than {max} times")]
     TooManyElements {
         /// Field number.
         field: u32,
@@ -310,37 +322,6 @@ pub enum ProtobufError {
         max: usize,
     },
 }
-
-impl From<VarintError> for ProtobufError {
-    fn from(error: VarintError) -> Self {
-        Self::Varint(error)
-    }
-}
-
-impl fmt::Display for ProtobufError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Varint(error) => write!(f, "malformed varint: {error}"),
-            Self::Truncated => f.write_str("message ends inside a field"),
-            Self::InvalidWireType(tag) => write!(f, "unsupported wire type {tag}"),
-            Self::InvalidFieldNumber => f.write_str("field number out of range"),
-            Self::UnexpectedWireType(field) => write!(f, "field {field} has the wrong wire type"),
-            Self::MissingField(field) => write!(f, "required field {field} is missing"),
-            Self::InvalidUtf8(field) => write!(f, "field {field} is not valid UTF-8"),
-            Self::InvalidEnum { field, value } => {
-                write!(f, "field {field} holds unknown enum value {value}")
-            }
-            Self::FrameTooLarge { len, max } => {
-                write!(f, "frame of {len} bytes exceeds the limit of {max}")
-            }
-            Self::TooManyElements { field, max } => {
-                write!(f, "field {field} repeats more than {max} times")
-            }
-        }
-    }
-}
-
-impl Error for ProtobufError {}
 
 #[cfg(test)]
 mod tests {

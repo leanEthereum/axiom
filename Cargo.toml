@@ -6,7 +6,7 @@ default-members = ["bin/axiom"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/leanEthereum/axiom"
 homepage = "https://github.com/leanEthereum/axiom"
@@ -91,6 +91,9 @@ axiom-telemetry = { path = "crates/telemetry" }
 axiom-p2p = { path = "crates/p2p" }
 axiom-rlp = { path = "crates/rlp" }
 axiom-discv5 = { path = "crates/discv5" }
+
+# Error types: the derive writes the Display and Error impls each error enum needs.
+thiserror = "2"
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"

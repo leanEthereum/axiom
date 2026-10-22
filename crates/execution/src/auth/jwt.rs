@@ -13,9 +13,10 @@
 //! Each HTTP request carries a fresh token in its authorization field.
 //! The execution client accepts an issued-at within 60 seconds of its own clock.
 
-use std::{error::Error, fmt};
+use std::fmt;
 
 use axiom_json::{Json, Object, data};
+use thiserror::Error;
 
 use super::{
     base64url,
@@ -147,25 +148,31 @@ pub struct Claims {
 }
 
 /// A secret or token that fails the authentication rules.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum JwtError {
     /// The secret is not 32 bytes of hex.
+    #[error("JWT secret is not 32 bytes of hex")]
     InvalidSecret,
 
     /// The token is not three base64url segments of JSON.
+    #[error("malformed JWT")]
     Malformed,
 
     /// The header names an algorithm other than HS256.
+    #[error("unsupported JWT algorithm {0:?}")]
     UnsupportedAlgorithm(String),
 
     /// The signature does not match the secret.
+    #[error("JWT signature does not match")]
     BadSignature,
 
     /// The claims lack an integer issued-at.
+    #[error("JWT lacks an issued-at claim")]
     MissingIssuedAt,
 
     /// The issued-at is too far from the verifier's clock.
+    #[error("JWT issued at {issued_at} is stale at {now}")]
     Stale {
         /// The token's issued-at.
         issued_at: u64,
@@ -173,23 +180,6 @@ pub enum JwtError {
         now: u64,
     },
 }
-
-impl fmt::Display for JwtError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSecret => f.write_str("JWT secret is not 32 bytes of hex"),
-            Self::Malformed => f.write_str("malformed JWT"),
-            Self::UnsupportedAlgorithm(alg) => write!(f, "unsupported JWT algorithm {alg:?}"),
-            Self::BadSignature => f.write_str("JWT signature does not match"),
-            Self::MissingIssuedAt => f.write_str("JWT lacks an issued-at claim"),
-            Self::Stale { issued_at, now } => {
-                write!(f, "JWT issued at {issued_at} is stale at {now}")
-            }
-        }
-    }
-}
-
-impl Error for JwtError {}
 
 #[cfg(test)]
 mod tests {

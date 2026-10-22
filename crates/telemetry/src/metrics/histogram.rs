@@ -78,7 +78,7 @@ impl Histogram {
         let _ = self
             .core
             .sum
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                 Some((f64::from_bits(bits) + value).to_bits())
             });
     }

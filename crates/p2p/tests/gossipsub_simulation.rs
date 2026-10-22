@@ -257,7 +257,7 @@ fn messages_reach_every_node_and_meshes_stay_in_bounds() {
     }
 
     // After every heartbeat past warm-up, the mesh degree sat within [D_low, D_high] = [6, 12].
-    assert!(!network.mesh_sizes.is_empty());
+    assert_ne!(network.mesh_sizes, Vec::<usize>::new());
     let (min, max) = (
         network.mesh_sizes.iter().min().copied(),
         network.mesh_sizes.iter().max().copied(),

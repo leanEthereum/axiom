@@ -150,7 +150,7 @@ mod tests {
         encode_bytes_field(1, &PublicKey::secp256k1([2; 33]).encode(), &mut bytes);
         encode_bytes_field(2, &[0x36, 0x01, b'a'], &mut bytes);
         let info = IdentifyInfo::decode(&bytes).unwrap();
-        assert!(info.listen_addrs.is_empty());
+        assert_eq!(info.listen_addrs, Vec::<Multiaddr>::new());
     }
 
     proptest! {

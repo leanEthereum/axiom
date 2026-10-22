@@ -1,15 +1,16 @@
 //! Reasons a byte string fails to decode.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// A byte string that is not the encoding of any value of the expected type.
 ///
 /// Every variant names the rule the input broke.
 /// Decoders reject at the first broken rule, so one input yields one error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum DecodeError {
     /// A fixed-size value received the wrong number of bytes.
+    #[error("expected {expected} bytes, got {actual}")]
     InvalidLength {
         /// Length the type requires.
         expected: usize,
@@ -18,6 +19,7 @@ pub enum DecodeError {
     },
 
     /// The input ended before a fixed-size part or an offset was complete.
+    #[error("expected at least {minimum} bytes, got {actual}")]
     TooShort {
         /// Minimum length the type requires.
         minimum: usize,
@@ -28,6 +30,7 @@ pub enum DecodeError {
     /// The first offset does not point right past the fixed-size part.
     ///
     /// Any other value would leave unread bytes or overlap the fixed part.
+    #[error("first offset is {actual}, fixed part ends at {expected}")]
     FirstOffsetMismatch {
         /// Length of the fixed-size part.
         expected: usize,
@@ -36,9 +39,11 @@ pub enum DecodeError {
     },
 
     /// A collection's first offset does not end a whole, non-empty offset table.
+    #[error("first offset {0} does not end a whole offset table")]
     MisalignedOffsetTable(usize),
 
     /// An offset decreased, which would give a part negative length.
+    #[error("offset {next} follows larger offset {previous}")]
     OffsetsNotIncreasing {
         /// The earlier offset.
         previous: usize,
@@ -47,6 +52,7 @@ pub enum DecodeError {
     },
 
     /// An offset points past the end of the input.
+    #[error("offset {offset} exceeds input length {length}")]
     OffsetOutOfBounds {
         /// The offset found.
         offset: usize,
@@ -55,6 +61,7 @@ pub enum DecodeError {
     },
 
     /// A collection holds more elements than its type allows.
+    #[error("{actual} elements exceed the limit of {limit}")]
     TooManyElements {
         /// Maximum number of elements.
         limit: usize,
@@ -63,6 +70,7 @@ pub enum DecodeError {
     },
 
     /// A run of fixed-size elements does not divide into whole elements.
+    #[error("{length} bytes do not divide into {element_size}-byte elements")]
     TrailingBytes {
         /// Size of one element.
         element_size: usize,
@@ -71,53 +79,16 @@ pub enum DecodeError {
     },
 
     /// A boolean byte is neither zero nor one.
+    #[error("boolean byte {0:#04x} is not 0 or 1")]
     InvalidBoolean(u8),
 
     /// A bitlist lacks its length-marking sentinel bit.
+    #[error("bitlist lacks its sentinel bit")]
     MissingSentinel,
 
     /// A bitvector sets padding bits beyond its length.
     ///
     /// Accepting them would give one value two encodings.
+    #[error("bitvector sets bits beyond its length")]
     ExcessBits,
 }
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidLength { expected, actual } => {
-                write!(f, "expected {expected} bytes, got {actual}")
-            }
-            Self::TooShort { minimum, actual } => {
-                write!(f, "expected at least {minimum} bytes, got {actual}")
-            }
-            Self::FirstOffsetMismatch { expected, actual } => {
-                write!(f, "first offset is {actual}, fixed part ends at {expected}")
-            }
-            Self::MisalignedOffsetTable(offset) => {
-                write!(f, "first offset {offset} does not end a whole offset table")
-            }
-            Self::OffsetsNotIncreasing { previous, next } => {
-                write!(f, "offset {next} follows larger offset {previous}")
-            }
-            Self::OffsetOutOfBounds { offset, length } => {
-                write!(f, "offset {offset} exceeds input length {length}")
-            }
-            Self::TooManyElements { limit, actual } => {
-                write!(f, "{actual} elements exceed the limit of {limit}")
-            }
-            Self::TrailingBytes {
-                element_size,
-                length,
-            } => write!(
-                f,
-                "{length} bytes do not divide into {element_size}-byte elements"
-            ),
-            Self::InvalidBoolean(byte) => write!(f, "boolean byte {byte:#04x} is not 0 or 1"),
-            Self::MissingSentinel => f.write_str("bitlist lacks its sentinel bit"),
-            Self::ExcessBits => f.write_str("bitvector sets bits beyond its length"),
-        }
-    }
-}
-
-impl Error for DecodeError {}

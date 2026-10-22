@@ -8,7 +8,8 @@ use std::{
 use axiom_execution::{
     CAPABILITIES, EngineClient, EngineError, ForkchoiceState, JsonCodec, JwtSecret,
     PayloadAttributes, PayloadId, PayloadStatus, PayloadStatusKind, RpcError, SyncStatus,
-    WireErrorKind, mock::MockEngine,
+    WireErrorKind,
+    mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
 use axiom_json::{Json, data};
@@ -459,7 +460,7 @@ fn wrong_secret_is_rejected_before_any_call() {
         ));
 
         // The engine recorded nothing: authentication precedes the call.
-        assert!(engine.calls().is_empty());
+        assert_eq!(engine.calls(), Vec::<RecordedCall>::new());
         engine.stop().await;
     });
 }

@@ -1,26 +1,31 @@
 //! Reasons a secure channel fails.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 use crate::{identity::PeerId, protobuf::ProtobufError};
 
 /// A failed handshake or a corrupted protected stream.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SecureError {
     /// A handshake message is not valid protobuf or has a malformed frame.
-    Framing(ProtobufError),
+    #[error("malformed handshake message: {0}")]
+    Framing(#[from] ProtobufError),
 
     /// A handshake message is shorter than its pattern requires.
+    #[error("handshake message too short")]
     MessageTooShort,
 
     /// The peer's identity key or identifier is malformed.
+    #[error("malformed identity")]
     InvalidIdentity,
 
     /// The claimed identifier does not match the claimed key.
+    #[error("peer id does not match public key")]
     IdentifierMismatch,
 
     /// The proven identity is not the peer the dialer meant to reach.
+    #[error("dialed {expected} but reached {actual}")]
     UnexpectedPeer {
         /// The peer the dialer asked for.
         expected: PeerId,
@@ -29,44 +34,22 @@ pub enum SecureError {
     },
 
     /// The identity signature over the static key does not verify.
+    #[error("identity signature does not verify")]
     InvalidSignature,
 
     /// A Diffie-Hellman input or output is invalid.
+    #[error("invalid Diffie-Hellman key")]
     InvalidKey,
 
     /// A ciphertext fails authentication.
+    #[error("ciphertext fails authentication")]
     DecryptionFailed,
 
     /// A cipher used up its 2^64 - 1 nonces.
+    #[error("cipher nonces exhausted")]
     NonceExhausted,
 
     /// The handshake received more bytes after its last message was due.
+    #[error("unexpected data during handshake")]
     UnexpectedData,
 }
-
-impl From<ProtobufError> for SecureError {
-    fn from(error: ProtobufError) -> Self {
-        Self::Framing(error)
-    }
-}
-
-impl fmt::Display for SecureError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Framing(error) => write!(f, "malformed handshake message: {error}"),
-            Self::MessageTooShort => f.write_str("handshake message too short"),
-            Self::InvalidIdentity => f.write_str("malformed identity"),
-            Self::IdentifierMismatch => f.write_str("peer id does not match public key"),
-            Self::UnexpectedPeer { expected, actual } => {
-                write!(f, "dialed {expected} but reached {actual}")
-            }
-            Self::InvalidSignature => f.write_str("identity signature does not verify"),
-            Self::InvalidKey => f.write_str("invalid Diffie-Hellman key"),
-            Self::DecryptionFailed => f.write_str("ciphertext fails authentication"),
-            Self::NonceExhausted => f.write_str("cipher nonces exhausted"),
-            Self::UnexpectedData => f.write_str("unexpected data during handshake"),
-        }
-    }
-}
-
-impl Error for SecureError {}

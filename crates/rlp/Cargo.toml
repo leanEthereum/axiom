@@ -13,6 +13,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+thiserror.workspace = true
+
 [dev-dependencies]
 axiom-json.workspace = true
 proptest.workspace = true

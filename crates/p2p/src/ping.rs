@@ -12,7 +12,9 @@
 //!
 //! See `libp2p/specs/ping/ping.md`.
 
-use std::{error::Error, fmt, mem, time::Duration};
+use std::{mem, time::Duration};
+
+use thiserror::Error;
 
 /// The multistream-select name.
 pub const PROTOCOL: &str = "/ipfs/ping/1.0.0";
@@ -71,22 +73,13 @@ impl PingResponder {
 }
 
 /// A failed probe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PingError {
     /// The echo differs from the probe.
+    #[error("ping echo does not match the probe")]
     Mismatch,
 }
-
-impl fmt::Display for PingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Mismatch => f.write_str("ping echo does not match the probe"),
-        }
-    }
-}
-
-impl Error for PingError {}
 
 #[cfg(test)]
 mod tests {
@@ -99,7 +92,7 @@ mod tests {
         let mut responder = PingResponder::default();
 
         // 20 bytes arrive: not a full block, nothing to echo yet.
-        assert!(responder.receive(&ping.payload()[..20]).is_empty());
+        assert_eq!(responder.receive(&ping.payload()[..20]), Vec::<u8>::new());
         // The other 12 bytes complete the block, which comes back whole.
         let echo = responder.receive(&ping.payload()[20..]);
         assert_eq!(echo, ping.payload());

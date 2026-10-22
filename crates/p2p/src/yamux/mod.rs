@@ -25,10 +25,9 @@
 mod frame;
 mod session;
 
-use std::{error::Error, fmt};
-
 pub use frame::{Flags, FrameType, HEADER_LEN, Header, StreamId};
 pub use session::{Mode, Session, SessionEvent};
+use thiserror::Error;
 
 /// The multistream-select name of the protocol.
 pub const PROTOCOL: &str = "/yamux/1.0.0";
@@ -115,24 +114,29 @@ impl GoAwayCode {
 }
 
 /// A violation by the peer, or a request this session cannot honour.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum YamuxError {
     /// A header names a version other than zero.
+    #[error("unsupported yamux version {0}")]
     InvalidVersion(u8),
 
     /// A header names a frame type outside the four defined.
+    #[error("unknown frame type {0}")]
     InvalidFrameType(u8),
 
     /// A frame uses a stream identifier the peer may not use.
     ///
     /// The cause is either zero on a stream frame or the opener's parity on a SYN.
+    #[error("invalid stream identifier {0}")]
     InvalidStreamId(StreamId),
 
     /// A SYN reuses a stream identifier that is still open.
+    #[error("stream {0} is already open")]
     DuplicateStream(StreamId),
 
     /// A data frame exceeds the receive window left on its stream.
+    #[error("{len} bytes on stream {stream} exceed its window of {window}")]
     WindowExceeded {
         /// The stream.
         stream: StreamId,
@@ -143,53 +147,30 @@ pub enum YamuxError {
     },
 
     /// A window update pushes the send window past 2^32 - 1.
+    #[error("window of stream {0} overflows")]
     WindowOverflow(StreamId),
 
     /// The stream is not open on this session.
+    #[error("stream {0} is not open")]
     UnknownStream(StreamId),
 
     /// The stream was already half-closed by this side.
+    #[error("stream {0} is closed for writing")]
     StreamClosed(StreamId),
 
     /// A go-away was sent or received, so no new stream may open.
+    #[error("session is going away")]
     SessionClosing,
 
     /// Too many outbound streams await the peer's acknowledgement.
+    #[error("too many unacknowledged streams")]
     AckBacklogFull,
 
     /// Stream identifiers of this side are exhausted.
+    #[error("stream identifiers exhausted")]
     StreamIdsExhausted,
 
     /// The stream already holds back as many bytes as the send buffer allows.
+    #[error("send buffer of stream {0} is full")]
     SendBufferFull(StreamId),
 }
-
-impl fmt::Display for YamuxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidVersion(version) => write!(f, "unsupported yamux version {version}"),
-            Self::InvalidFrameType(code) => write!(f, "unknown frame type {code}"),
-            Self::InvalidStreamId(id) => write!(f, "invalid stream identifier {id}"),
-            Self::DuplicateStream(id) => write!(f, "stream {id} is already open"),
-            Self::WindowExceeded {
-                stream,
-                len,
-                window,
-            } => {
-                write!(
-                    f,
-                    "{len} bytes on stream {stream} exceed its window of {window}"
-                )
-            }
-            Self::WindowOverflow(id) => write!(f, "window of stream {id} overflows"),
-            Self::UnknownStream(id) => write!(f, "stream {id} is not open"),
-            Self::StreamClosed(id) => write!(f, "stream {id} is closed for writing"),
-            Self::SessionClosing => f.write_str("session is going away"),
-            Self::AckBacklogFull => f.write_str("too many unacknowledged streams"),
-            Self::StreamIdsExhausted => f.write_str("stream identifiers exhausted"),
-            Self::SendBufferFull(id) => write!(f, "send buffer of stream {id} is full"),
-        }
-    }
-}
-
-impl Error for YamuxError {}

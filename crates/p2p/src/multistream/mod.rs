@@ -25,10 +25,11 @@
 mod dialer;
 mod listener;
 
-use std::{error::Error, fmt, str};
+use std::str;
 
 pub use dialer::{Dialer, Lister};
 pub use listener::Listener;
+use thiserror::Error;
 
 use crate::{
     protobuf::{ProtobufError, split_length_prefixed},
@@ -127,53 +128,38 @@ fn decode_list(mut body: &[u8]) -> Result<Vec<String>, NegotiationError> {
 }
 
 /// A stream that broke the negotiation rules.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum NegotiationError {
     /// A length prefix is malformed or above the message bound.
-    Framing(ProtobufError),
+    #[error("malformed message frame: {0}")]
+    Framing(#[from] ProtobufError),
 
     /// A message does not end with a newline.
+    #[error("message lacks its trailing newline")]
     MissingNewline,
 
     /// A message is not UTF-8.
+    #[error("message is not UTF-8")]
     InvalidUtf8,
 
     /// The peer opened with something other than the protocol header.
+    #[error("unexpected header {0:?}")]
     InvalidHeader(String),
 
     /// The listener refused every proposal.
+    #[error("no protocol in common")]
     NoCommonProtocol,
 
     /// The listener answered a proposal with neither an echo nor a refusal.
+    #[error("unexpected response {0:?}")]
     UnexpectedResponse(String),
 
     /// The dialer kept proposing past the listener's patience.
+    #[error("too many proposals")]
     TooManyProposals,
 
     /// The dialer was given no protocol to propose.
+    #[error("no protocol to propose")]
     NothingToPropose,
 }
-
-impl From<ProtobufError> for NegotiationError {
-    fn from(error: ProtobufError) -> Self {
-        Self::Framing(error)
-    }
-}
-
-impl fmt::Display for NegotiationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Framing(error) => write!(f, "malformed message frame: {error}"),
-            Self::MissingNewline => f.write_str("message lacks its trailing newline"),
-            Self::InvalidUtf8 => f.write_str("message is not UTF-8"),
-            Self::InvalidHeader(header) => write!(f, "unexpected header {header:?}"),
-            Self::NoCommonProtocol => f.write_str("no protocol in common"),
-            Self::UnexpectedResponse(text) => write!(f, "unexpected response {text:?}"),
-            Self::TooManyProposals => f.write_str("too many proposals"),
-            Self::NothingToPropose => f.write_str("no protocol to propose"),
-        }
-    }
-}
-
-impl Error for NegotiationError {}

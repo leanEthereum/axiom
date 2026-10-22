@@ -167,7 +167,10 @@ mod tests {
         assert_eq!(&list[0][1..], sample().deposits.encode().as_slice());
 
         // No requests at all is the empty list, never a list of empty elements.
-        assert!(encode_list(&ExecutionRequests::<Minimal>::default()).is_empty());
+        assert_eq!(
+            encode_list(&ExecutionRequests::<Minimal>::default()),
+            Vec::<Vec<u8>>::new()
+        );
     }
 
     #[test]

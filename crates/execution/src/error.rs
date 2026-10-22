@@ -1,129 +1,75 @@
 //! Errors of the engine API client.
 
-use std::{
-    error::Error,
-    fmt::{self, Write},
-};
+use std::fmt::Write;
 
 use axiom_http::{HttpError, StatusCode};
 use axiom_json::{HexError, ParseError};
 use axiom_ssz::DecodeError;
+use thiserror::Error;
 
 use crate::RpcError;
 
 /// A call to the execution engine that did not produce a typed result.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum EngineError {
     /// The HTTP exchange failed: connection, timeout, or framing.
-    Http(HttpError),
+    #[error("engine transport: {0}")]
+    Http(#[from] HttpError),
 
     /// The engine answered with a status other than 200.
     ///
     /// A 401 or 403 means it rejected the token: check the shared secret and the clocks.
+    #[error("engine replied with HTTP status {0}")]
     Status(StatusCode),
 
     /// The response body is not JSON.
-    Json(ParseError),
+    #[error("engine response is not JSON: {0}")]
+    Json(#[source] ParseError),
 
     /// The response is JSON but not a JSON-RPC 2.0 response to this request.
-    Envelope(EnvelopeError),
+    #[error("engine response is not JSON-RPC: {0}")]
+    Envelope(#[from] EnvelopeError),
 
     /// The engine returned a JSON-RPC error object.
-    Rpc(RpcError),
+    #[error("engine error: {0}")]
+    Rpc(#[from] RpcError),
 
     /// The result does not map onto the expected structure.
-    Wire(WireError),
-}
-
-impl fmt::Display for EngineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Http(error) => write!(f, "engine transport: {error}"),
-            Self::Status(status) => write!(f, "engine replied with HTTP status {status}"),
-            Self::Json(error) => write!(f, "engine response is not JSON: {error}"),
-            Self::Envelope(error) => write!(f, "engine response is not JSON-RPC: {error}"),
-            Self::Rpc(error) => write!(f, "engine error: {error}"),
-            Self::Wire(error) => write!(f, "engine result is malformed: {error}"),
-        }
-    }
-}
-
-impl Error for EngineError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Http(error) => Some(error),
-            Self::Status(_) => None,
-            Self::Json(error) => Some(error),
-            Self::Envelope(error) => Some(error),
-            Self::Rpc(error) => Some(error),
-            Self::Wire(error) => Some(error),
-        }
-    }
-}
-
-impl From<HttpError> for EngineError {
-    fn from(error: HttpError) -> Self {
-        Self::Http(error)
-    }
-}
-
-impl From<RpcError> for EngineError {
-    fn from(error: RpcError) -> Self {
-        Self::Rpc(error)
-    }
-}
-
-impl From<WireError> for EngineError {
-    fn from(error: WireError) -> Self {
-        Self::Wire(error)
-    }
-}
-
-impl From<EnvelopeError> for EngineError {
-    fn from(error: EnvelopeError) -> Self {
-        Self::Envelope(error)
-    }
+    #[error("engine result is malformed: {0}")]
+    Wire(#[from] WireError),
 }
 
 /// A response that breaks the JSON-RPC 2.0 envelope.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum EnvelopeError {
     /// The response is not an object.
+    #[error("response is not an object")]
     NotAnObject,
 
     /// The version member is missing or not "2.0".
+    #[error("jsonrpc member is not \"2.0\"")]
     WrongVersion,
 
     /// The id does not echo the request's id.
+    #[error("id does not match the request")]
     IdMismatch,
 
     /// Neither or both of the result and error members are present.
+    #[error("response needs exactly one of result and error")]
     ResultOrError,
 
     /// The error member lacks an integer code or a string message.
+    #[error("error object lacks a code or message")]
     MalformedError,
 }
-
-impl fmt::Display for EnvelopeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::NotAnObject => "response is not an object",
-            Self::WrongVersion => "jsonrpc member is not \"2.0\"",
-            Self::IdMismatch => "id does not match the request",
-            Self::ResultOrError => "response needs exactly one of result and error",
-            Self::MalformedError => "error object lacks a code or message",
-        })
-    }
-}
-
-impl Error for EnvelopeError {}
 
 /// A JSON value that does not map onto an engine API structure.
 ///
 /// The path locates the value, as in `executionPayload.withdrawals[2].amount`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("{}{kind}", self.location())]
 pub struct WireError {
     /// Member names and indices from the outside in.
     path: Vec<PathSegment>,
@@ -191,19 +137,16 @@ impl WireError {
         }
         out
     }
-}
 
-impl fmt::Display for WireError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// The location with its separator, or nothing for the outermost value.
+    fn location(&self) -> String {
         if self.path.is_empty() {
-            write!(f, "{}", self.kind)
+            String::new()
         } else {
-            write!(f, "{}: {}", self.path(), self.kind)
+            format!("{}: ", self.path())
         }
     }
 }
-
-impl Error for WireError {}
 
 impl From<WireErrorKind> for WireError {
     fn from(kind: WireErrorKind) -> Self {
@@ -212,13 +155,15 @@ impl From<WireErrorKind> for WireError {
 }
 
 /// The rule a JSON value broke.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum WireErrorKind {
     /// A required member is absent or null.
+    #[error("required value is missing")]
     Missing,
 
     /// The value has the wrong JSON type.
+    #[error("expected {expected}, found {found}")]
     Type {
         /// The JSON type the structure requires.
         expected: &'static str,
@@ -227,9 +172,11 @@ pub enum WireErrorKind {
     },
 
     /// A QUANTITY or DATA string is malformed.
+    #[error("{0}")]
     Hex(HexError),
 
     /// A list holds more items or bytes than its type allows.
+    #[error("{actual} items exceed the limit {limit}")]
     TooLong {
         /// The most the type allows.
         limit: usize,
@@ -238,6 +185,7 @@ pub enum WireErrorKind {
     },
 
     /// A fixed-size value has the wrong length.
+    #[error("length {actual}, expected {expected}")]
     WrongLength {
         /// The length the type requires.
         expected: usize,
@@ -246,14 +194,17 @@ pub enum WireErrorKind {
     },
 
     /// A payload status string outside the five the spec defines.
+    #[error("unknown payload status {0:?}")]
     UnknownStatus(String),
 
     /// The execution requests list breaks EIP-7685 ordering or encoding.
+    #[error("{0}")]
     Requests(RequestsError),
 
     /// Lists that must agree in length do not.
     ///
     /// Blob bundles need one commitment per blob and a fixed number of cell proofs per blob.
+    #[error("length {actual} disagrees with the expected {expected}")]
     LengthMismatch {
         /// The length the other lists imply.
         expected: usize,
@@ -262,41 +213,26 @@ pub enum WireErrorKind {
     },
 }
 
-impl fmt::Display for WireErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Missing => f.write_str("required value is missing"),
-            Self::Type { expected, found } => write!(f, "expected {expected}, found {found}"),
-            Self::Hex(error) => write!(f, "{error}"),
-            Self::TooLong { limit, actual } => write!(f, "{actual} items exceed the limit {limit}"),
-            Self::WrongLength { expected, actual } => {
-                write!(f, "length {actual}, expected {expected}")
-            }
-            Self::UnknownStatus(status) => write!(f, "unknown payload status {status:?}"),
-            Self::Requests(error) => write!(f, "{error}"),
-            Self::LengthMismatch { expected, actual } => {
-                write!(f, "length {actual} disagrees with the expected {expected}")
-            }
-        }
-    }
-}
-
 /// An execution requests list that breaks EIP-7685 or the consensus encoding.
 ///
 /// See `get_execution_requests` in the Electra validator spec.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum RequestsError {
     /// An element is empty, without even a type byte.
+    #[error("request element has no type byte")]
     MissingType,
 
     /// A type byte names no known request type.
+    #[error("unknown request type 0x{0:02x}")]
     UnknownType(u8),
 
     /// An element is only a type byte, with no request data after it.
+    #[error("request type 0x{0:02x} has no data")]
     Empty(u8),
 
     /// A type does not strictly exceed the one before it, so the list is unordered or repeats.
+    #[error("request type 0x{current:02x} follows 0x{previous:02x}, not strictly ascending")]
     OutOfOrder {
         /// The type before.
         previous: u8,
@@ -305,22 +241,6 @@ pub enum RequestsError {
     },
 
     /// The request data is not the SSZ list its type requires.
+    #[error("request type 0x{0:02x}: {1}")]
     Ssz(u8, DecodeError),
 }
-
-impl fmt::Display for RequestsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingType => f.write_str("request element has no type byte"),
-            Self::UnknownType(kind) => write!(f, "unknown request type 0x{kind:02x}"),
-            Self::Empty(kind) => write!(f, "request type 0x{kind:02x} has no data"),
-            Self::OutOfOrder { previous, current } => write!(
-                f,
-                "request type 0x{current:02x} follows 0x{previous:02x}, not strictly ascending"
-            ),
-            Self::Ssz(kind, error) => write!(f, "request type 0x{kind:02x}: {error}"),
-        }
-    }
-}
-
-impl Error for RequestsError {}

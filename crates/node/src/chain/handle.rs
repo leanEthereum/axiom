@@ -1,12 +1,12 @@
 //! The chain runs on its own thread; async services reach it through a handle.
 
 use std::{
-    error::Error,
-    fmt, io,
+    io,
     thread::{self, JoinHandle},
 };
 
 use axiom_types::Preset;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
 use super::Chain;
@@ -20,16 +20,9 @@ const QUEUE_DEPTH: usize = 1024;
 type Job<P> = Box<dyn FnOnce(&mut Chain<P>) + Send>;
 
 /// The chain thread is gone, so the request was never run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("chain service stopped")]
 pub struct ChainStopped;
-
-impl fmt::Display for ChainStopped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("chain service stopped")
-    }
-}
-
-impl Error for ChainStopped {}
 
 /// A cloneable way to run work on the chain thread.
 ///

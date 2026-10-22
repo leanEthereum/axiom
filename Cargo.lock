@@ -18,6 +18,7 @@ dependencies = [
  "axiom-telemetry",
  "axiom-types",
  "axiom-yaml",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -29,6 +30,7 @@ dependencies = [
  "axiom-bls12-381",
  "proptest",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -37,6 +39,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -45,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -54,6 +58,7 @@ dependencies = [
  "axiom-kzg",
  "axiom-ssz",
  "axiom-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -67,6 +72,7 @@ dependencies = [
  "axiom-types",
  "proptest",
  "sha2",
+ "thiserror",
  "tokio",
 ]
 
@@ -90,6 +96,7 @@ dependencies = [
  "axiom-state-transition",
  "axiom-types",
  "axiom-yaml",
+ "thiserror",
  "tokio",
 ]
 
@@ -103,6 +110,7 @@ dependencies = [
  "axiom-types",
  "proptest",
  "sha2",
+ "thiserror",
  "tokio",
 ]
 
@@ -114,6 +122,7 @@ dependencies = [
  "axiom-state-transition",
  "axiom-types",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -127,6 +136,7 @@ dependencies = [
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -134,6 +144,7 @@ name = "axiom-http"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "thiserror",
  "tokio",
 ]
 
@@ -143,6 +154,7 @@ version = "0.1.0"
 dependencies = [
  "axiom-ssz",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -153,6 +165,7 @@ dependencies = [
  "axiom-yaml",
  "proptest",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -162,6 +175,7 @@ dependencies = [
  "axiom-bls",
  "axiom-ssz",
  "axiom-types",
+ "thiserror",
 ]
 
 [[package]]
@@ -184,6 +198,7 @@ dependencies = [
  "axiom-telemetry",
  "axiom-types",
  "proptest",
+ "thiserror",
  "tokio",
  "tracing",
 ]
@@ -198,6 +213,7 @@ dependencies = [
  "axiom-types",
  "proptest",
  "sha2",
+ "thiserror",
  "tokio",
 ]
 
@@ -207,6 +223,7 @@ version = "0.1.0"
 dependencies = [
  "axiom-json",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -214,6 +231,7 @@ name = "axiom-snappy"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -222,6 +240,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -232,6 +251,7 @@ dependencies = [
  "axiom-ssz",
  "axiom-types",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -239,6 +259,7 @@ name = "axiom-store"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -247,6 +268,7 @@ version = "0.1.0"
 dependencies = [
  "axiom-http",
  "proptest",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -259,6 +281,7 @@ dependencies = [
  "axiom-ssz",
  "axiom-yaml",
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -266,6 +289,7 @@ name = "axiom-yaml"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -737,6 +761,26 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

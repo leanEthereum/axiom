@@ -17,3 +17,4 @@ workspace = true
 axiom-kzg.workspace = true
 axiom-ssz.workspace = true
 axiom-types.workspace = true
+thiserror.workspace = true

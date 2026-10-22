@@ -1,9 +1,8 @@
 //! Custody assignment: which columns a node keeps, derived from its node identifier.
 
-use std::{error::Error, fmt};
-
 use axiom_ssz::U256;
 use axiom_types::{ChainConfig, ColumnIndex, Preset, Root};
+use thiserror::Error;
 
 /// A node's identifier on the discovery network, a 256-bit number.
 ///
@@ -16,9 +15,10 @@ pub struct NodeId(pub U256);
 pub struct CustodyGroup(pub u64);
 
 /// A custody request the configuration cannot satisfy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum CustodyError {
     /// More groups were asked for than exist.
+    #[error("{requested} custody groups requested, {available} exist")]
     TooManyGroups {
         /// Groups asked for.
         requested: u64,
@@ -26,24 +26,9 @@ pub enum CustodyError {
         available: u64,
     },
     /// A group index is out of range.
+    #[error("custody group {} does not exist", .0.0)]
     UnknownGroup(CustodyGroup),
 }
-
-impl fmt::Display for CustodyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooManyGroups {
-                requested,
-                available,
-            } => {
-                write!(f, "{requested} custody groups requested, {available} exist")
-            }
-            Self::UnknownGroup(group) => write!(f, "custody group {} does not exist", group.0),
-        }
-    }
-}
-
-impl Error for CustodyError {}
 
 impl NodeId {
     /// The groups a node custodies, sorted.

@@ -1,8 +1,9 @@
 //! Peer identifiers: multihashes of encoded public keys.
 
-use std::{error::Error, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::{base58, identity::PublicKey, protobuf::ProtoMessage, varint};
 
@@ -181,30 +182,21 @@ fn decode_base32(text: &str) -> Option<Vec<u8>> {
 }
 
 /// A byte string or text that is not a supported peer identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PeerIdError {
     /// The bytes are not a well-formed multihash of a key.
+    #[error("malformed peer id multihash")]
     InvalidMultihash,
 
     /// The multihash uses a function other than identity or SHA-256.
+    #[error("unsupported multihash code {0:#x}")]
     UnsupportedHash(u64),
 
     /// The text is neither base58btc nor a base32 CIDv1 of a libp2p key.
+    #[error("malformed peer id text")]
     InvalidText,
 }
-
-impl fmt::Display for PeerIdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidMultihash => f.write_str("malformed peer id multihash"),
-            Self::UnsupportedHash(code) => write!(f, "unsupported multihash code {code:#x}"),
-            Self::InvalidText => f.write_str("malformed peer id text"),
-        }
-    }
-}
-
-impl Error for PeerIdError {}
 
 #[cfg(test)]
 mod tests {
