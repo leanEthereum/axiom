@@ -355,7 +355,7 @@ mod tests {
 
     #[test]
     fn metadata_request_is_empty() {
-        assert!(encode_request(Protocol::MetaDataV3, &[]).is_empty());
+        assert_eq!(encode_request(Protocol::MetaDataV3, &[]), Vec::<u8>::new());
         assert_eq!(decode_request(Protocol::MetaDataV3, &[], 1024), Ok(vec![]));
         assert_eq!(
             decode_request(Protocol::MetaDataV3, &[0], 1024),

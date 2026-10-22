@@ -131,7 +131,7 @@ mod tests {
         // First update: 7 global topics, 1 column subnet, 2 attestation subnets.
         let first = subscriptions.update::<Mainnet>(Epoch(0), old);
         assert_eq!(first.join.len(), 10);
-        assert!(first.leave.is_empty());
+        assert_eq!(first.leave, Vec::<GossipTopic>::new());
         // Node zero joins subnets 49 and 50 at epoch 0, per the executable spec.
         assert_eq!(first.attnets, (1 << 49) | (1 << 50));
 

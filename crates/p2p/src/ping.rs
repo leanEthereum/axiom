@@ -92,7 +92,7 @@ mod tests {
         let mut responder = PingResponder::default();
 
         // 20 bytes arrive: not a full block, nothing to echo yet.
-        assert!(responder.receive(&ping.payload()[..20]).is_empty());
+        assert_eq!(responder.receive(&ping.payload()[..20]), Vec::<u8>::new());
         // The other 12 bytes complete the block, which comes back whole.
         let echo = responder.receive(&ping.payload()[20..]);
         assert_eq!(echo, ping.payload());

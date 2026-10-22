@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(table.get(&second.node_id()).map(|e| e.enr.seq()), Some(2));
         // Unverified nodes are never relayed; verified ones are.
         let distance = local.log_distance(&second.node_id());
-        assert!(table.verified_at(distance).is_empty());
+        assert_eq!(table.verified_at(distance), Vec::<Enr>::new());
         table.record_success(&second.node_id());
         assert_eq!(table.verified_at(distance), vec![second.clone()]);
         // The local record is never stored.

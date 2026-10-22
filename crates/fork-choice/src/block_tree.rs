@@ -116,7 +116,6 @@ impl BlockTree {
     }
 
     /// Every block with its root, parents before children.
-    #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = (&Root, &BlockNode)> {
         self.order.iter().map(|root| (root, &self.nodes[root]))
     }
@@ -266,7 +265,7 @@ mod tests {
         let kept: Vec<Root> = tree.iter().map(|(root, _)| *root).collect();
         assert_eq!(kept, [root(2), root(3), root(4)]);
         assert_eq!(tree.children(&root(2)), [root(3), root(4)]);
-        assert!(tree.children(&root(1)).is_empty());
+        assert_eq!(tree.children(&root(1)), []);
     }
 
     #[test]

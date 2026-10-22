@@ -76,7 +76,7 @@ impl Merkleizer {
         if limit <= 1 {
             0
         } else {
-            (usize::BITS - (limit - 1).leading_zeros()) as usize
+            (limit - 1).bit_width() as usize
         }
     }
 

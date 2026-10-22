@@ -60,7 +60,7 @@ pub fn compress_into(input: &[u8], out: &mut Vec<u8>) {
 ///
 /// The table grows with the input up to its cap, rounded up to a power of two.
 const fn table_bits(len: usize) -> u32 {
-    let bits = usize::BITS - len.saturating_sub(1).leading_zeros();
+    let bits = len.saturating_sub(1).bit_width();
     if bits < MIN_TABLE_BITS {
         MIN_TABLE_BITS
     } else if bits > MAX_TABLE_BITS {
@@ -269,7 +269,7 @@ impl Sink<'_> {
             self.push((n as u8) << 2);
         } else {
             // Count the bytes of len - 1: 1 to 4, since fragments stay below 2^32.
-            let extra = (usize::BITS - n.leading_zeros()).div_ceil(8) as usize;
+            let extra = n.bit_width().div_ceil(8) as usize;
             self.push(((59 + extra) as u8) << 2);
             self.extend(&n.to_le_bytes()[..extra]);
         }
