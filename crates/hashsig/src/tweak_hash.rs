@@ -139,16 +139,38 @@ impl TweakHash {
     }
 
     /// One step along a chain: the value at a position from the value before it.
+    #[cfg(test)]
     pub(crate) fn chain_step(&self, epoch: u32, chain: u8, step: u8, value: &Digest) -> Digest {
+        let out =
+            self.chain_step_lanes(&[epoch], chain, step, &DigestLanes::from_digests(&[*value]));
+        out.digest(0, self.hash_len)
+    }
+
+    /// One chain step in N lanes, one epoch per lane, all at the same chain and position.
+    #[inline(always)]
+    pub(crate) fn chain_step_lanes<const N: usize>(
+        &self,
+        epochs: &[u32; N],
+        chain: u8,
+        step: u8,
+        values: &DigestLanes<N>,
+    ) -> DigestLanes<N> {
         // Layout: [value | parameter | tweak | zeros], 7 + 5 + 2 or 8 + 5 + 2 of 16 words.
         let h = self.hash_len;
-        let mut input = [KoalaBear::ZERO; 16];
-        input[..h].copy_from_slice(value.elements());
-        input[h..h + PARAMETER_LEN].copy_from_slice(&self.parameter.0);
-        input[h + PARAMETER_LEN..h + PARAMETER_LEN + TWEAK_LEN]
-            .copy_from_slice(&Tweak::Chain { epoch, chain, step }.elements());
-        let output: [KoalaBear; 8] = POSEIDON1_16.compress(&input);
-        Digest::from_slice(&output[..h])
+        let mut input = [[KoalaBear::ZERO; N]; 16];
+        input[..h].copy_from_slice(&values.0[..h]);
+        for (word, &element) in input[h..h + PARAMETER_LEN]
+            .iter_mut()
+            .zip(&self.parameter.0)
+        {
+            *word = [element; N];
+        }
+        for (lane, &epoch) in epochs.iter().enumerate() {
+            let tweak = Tweak::Chain { epoch, chain, step }.elements();
+            input[h + PARAMETER_LEN][lane] = tweak[0];
+            input[h + PARAMETER_LEN + 1][lane] = tweak[1];
+        }
+        DigestLanes(POSEIDON1_16.compress_lanes(&input))
     }
 
     /// Walks a chain: from a value at one position, the value a number of steps further.
@@ -164,11 +186,24 @@ impl TweakHash {
         steps: usize,
         value: &Digest,
     ) -> Digest {
-        let mut value = *value;
+        let mut lanes = DigestLanes::from_digests(&[*value]);
+        self.walk_lanes(&[epoch], chain, start, steps, &mut lanes);
+        lanes.digest(0, self.hash_len)
+    }
+
+    /// Walks one chain in N lanes, one epoch per lane, all from the same position.
+    #[inline(always)]
+    pub(crate) fn walk_lanes<const N: usize>(
+        &self,
+        epochs: &[u32; N],
+        chain: u8,
+        start: u8,
+        steps: usize,
+        values: &mut DigestLanes<N>,
+    ) {
         for step in 1..=steps {
-            value = self.chain_step(epoch, chain, start + step as u8, &value);
+            *values = self.chain_step_lanes(epochs, chain, start + step as u8, values);
         }
-        value
     }
 
     /// A tree node from its two children.
@@ -187,19 +222,68 @@ impl TweakHash {
 
     /// A Merkle leaf: the hash of all chain ends of one epoch's one-time public key.
     pub(crate) fn leaf(&self, epoch: u32, ends: &[Digest]) -> Digest {
+        let ends: Vec<DigestLanes<1>> = ends
+            .iter()
+            .map(|end| DigestLanes::from_digests(&[*end]))
+            .collect();
+        let [leaf] = self.leaf_lanes(&[epoch], &ends);
+        leaf
+    }
+
+    /// Merkle leaves in N lanes, one epoch per lane, from each chain's ends across lanes.
+    #[inline(always)]
+    pub(crate) fn leaf_lanes<const N: usize>(
+        &self,
+        epochs: &[u32; N],
+        ends: &[DigestLanes<N>],
+    ) -> [Digest; N] {
         let mut sponge = Sponge::new(&self.capacity);
-        sponge.absorb(&self.parameter.0);
-        sponge.absorb(
-            &Tweak::Tree {
+        for &element in &self.parameter.0 {
+            sponge.absorb([element; N]);
+        }
+        let tweaks = epochs.map(|epoch| {
+            Tweak::Tree {
                 level: 0,
                 position: epoch,
             }
-            .elements(),
-        );
-        for end in ends {
-            sponge.absorb(end.elements());
+            .elements()
+        });
+        for word in 0..TWEAK_LEN {
+            sponge.absorb(tweaks.map(|tweak| tweak[word]));
         }
-        sponge.squeeze(self.hash_len)
+        for end in ends {
+            for &word in &end.0[..self.hash_len] {
+                sponge.absorb(word);
+            }
+        }
+        let out = sponge.squeeze();
+        std::array::from_fn(|lane| out.digest(lane, self.hash_len))
+    }
+}
+
+/// N digests stored word by word across lanes: word i of lane l at [i][l].
+///
+/// Words past the digest length are unspecified and never read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DigestLanes<const N: usize>(pub(crate) [[KoalaBear; N]; 8]);
+
+impl<const N: usize> DigestLanes<N> {
+    /// The lanes of N digests.
+    #[inline(always)]
+    pub(crate) fn from_digests(digests: &[Digest; N]) -> Self {
+        let mut lanes = [[KoalaBear::ZERO; N]; 8];
+        for (lane, digest) in digests.iter().enumerate() {
+            for (word, &element) in lanes.iter_mut().zip(digest.elements()) {
+                word[lane] = element;
+            }
+        }
+        Self(lanes)
+    }
+
+    /// The digest of one lane.
+    #[inline(always)]
+    pub(crate) fn digest(&self, lane: usize, hash_len: usize) -> Digest {
+        Digest::from_fn(hash_len, |word| self.0[word][lane])
     }
 }
 
@@ -213,41 +297,46 @@ impl TweakHash {
 ///
 /// Overwriting saves an addition per element in a circuit and keeps the sponge's security.
 #[derive(Debug)]
-struct Sponge {
-    /// The permutation state.
-    state: [KoalaBear; 24],
+struct Sponge<const N: usize> {
+    /// The permutation states, word by word across lanes.
+    state: [[KoalaBear; N]; 24],
     /// Rate elements of the current block already written.
     filled: usize,
 }
 
-impl Sponge {
-    /// A sponge whose capacity starts at a domain separator.
+impl<const N: usize> Sponge<N> {
+    /// Sponges whose capacity starts at a domain separator.
+    #[inline(always)]
     fn new(capacity: &[KoalaBear; CAPACITY]) -> Self {
-        let mut state = [KoalaBear::ZERO; 24];
-        state[..CAPACITY].copy_from_slice(capacity);
+        let mut state = [[KoalaBear::ZERO; N]; 24];
+        for (word, &element) in state.iter_mut().zip(capacity) {
+            *word = [element; N];
+        }
         Self { state, filled: 0 }
     }
 
-    /// Writes elements into the rate, permuting after each full block.
-    fn absorb(&mut self, elements: &[KoalaBear]) {
-        for &element in elements {
-            self.state[CAPACITY + self.filled] = element;
-            self.filled += 1;
-            if self.filled == RATE {
-                POSEIDON1_24.permute(&mut self.state);
-                self.filled = 0;
-            }
+    /// Writes one element per lane into the rate, permuting after each full block.
+    #[inline(always)]
+    fn absorb(&mut self, element: [KoalaBear; N]) {
+        self.state[CAPACITY + self.filled] = element;
+        self.filled += 1;
+        if self.filled == RATE {
+            POSEIDON1_24.permute_lanes(&mut self.state);
+            self.filled = 0;
         }
     }
 
-    /// Pads a partial block with zeros, permutes it, and reads the digest from the rate.
-    fn squeeze(mut self, hash_len: usize) -> Digest {
+    /// Pads a partial block with zeros, permutes it, and reads the digests from the rate.
+    #[inline(always)]
+    fn squeeze(mut self) -> DigestLanes<N> {
         if self.filled > 0 {
-            self.state[CAPACITY + self.filled..].fill(KoalaBear::ZERO);
-            POSEIDON1_24.permute(&mut self.state);
+            self.state[CAPACITY + self.filled..].fill([KoalaBear::ZERO; N]);
+            POSEIDON1_24.permute_lanes(&mut self.state);
         }
         // Every digest is shorter than the rate, so one block suffices.
-        Digest::from_slice(&self.state[CAPACITY..CAPACITY + hash_len])
+        let mut out = [[KoalaBear::ZERO; N]; 8];
+        out.copy_from_slice(&self.state[CAPACITY..CAPACITY + 8]);
+        DigestLanes(out)
     }
 }
 

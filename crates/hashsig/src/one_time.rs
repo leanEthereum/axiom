@@ -14,7 +14,12 @@
 //! Nothing per epoch is stored: a bottom tree is rebuilt from the PRF key when the key needs it.
 
 use crate::{
-    merkle::Subtree, parallel::Threads, prf::PrfKey, scheme::Scheme, tweak_hash::TweakHash,
+    leaf_kernel::{LANES, LeafKernel},
+    merkle::Subtree,
+    parallel::Threads,
+    prf::PrfKey,
+    scheme::Scheme,
+    tweak_hash::{DigestLanes, TweakHash},
     words::Digest,
 };
 
@@ -57,26 +62,42 @@ impl OneTimeKeys {
     }
 
     /// The Merkle leaf of an epoch: its one-time public key, hashed.
+    #[cfg(test)]
     pub(crate) fn leaf(&self, epoch: u32) -> Digest {
-        let last = self.scheme.base - 1;
-        let ends: Vec<Digest> = (0..self.scheme.dimension)
-            .map(|chain| {
-                // Invariant: at most 256 chains, so the index fits a byte.
-                self.hash
-                    .walk(epoch, chain as u8, 0, last, &self.chain_start(epoch, chain))
-            })
-            .collect();
-        self.hash.leaf(epoch, &ends)
+        let [leaf] = self.leaves_lanes(&[epoch]);
+        leaf
     }
 
-    /// Bottom tree number index, its leaves computed on all cores.
+    /// The Merkle leaves of N epochs, which walk each chain index in lockstep, one per lane.
+    #[inline(always)]
+    pub(crate) fn leaves_lanes<const N: usize>(&self, epochs: &[u32; N]) -> [Digest; N] {
+        let last = self.scheme.base - 1;
+        let ends: Vec<DigestLanes<N>> = (0..self.scheme.dimension)
+            .map(|chain| {
+                let starts = epochs.map(|epoch| self.chain_start(epoch, chain));
+                let mut lanes = DigestLanes::from_digests(&starts);
+                // Invariant: at most 256 chains, so the index fits a byte.
+                self.hash
+                    .walk_lanes(epochs, chain as u8, 0, last, &mut lanes);
+                lanes
+            })
+            .collect();
+        self.hash.leaf_lanes(epochs, &ends)
+    }
+
+    /// Bottom tree number index, its leaves computed in SIMD batches on all cores.
     pub(crate) fn bottom_tree(&self, index: u64) -> BottomTree {
         let leaves_per_tree = self.scheme.leaves_per_bottom_tree();
         let first = index * leaves_per_tree;
-        let leaves = Threads::available().map(leaves_per_tree as usize, |offset| {
+        // Invariant: lifetimes of at least 2^8 give bottom trees of at least 16 epochs, a power of two.
+        debug_assert!(leaves_per_tree.is_multiple_of(LANES as u64));
+        let kernel = LeafKernel::detect();
+        let batches = Threads::available().map(leaves_per_tree as usize / LANES, |batch| {
             // Invariant: epochs stay below the lifetime, at most 2^32.
-            self.leaf((first + offset as u64) as u32)
+            let epochs = std::array::from_fn(|lane| (first + (batch * LANES + lane) as u64) as u32);
+            kernel.leaves(self, &epochs)
         });
+        let leaves = batches.into_iter().flatten().collect();
         BottomTree(Subtree::bottom(
             &self.hash,
             self.scheme.log_lifetime,

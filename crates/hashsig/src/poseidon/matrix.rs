@@ -12,14 +12,14 @@ use crate::field::KoalaBear;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DenseMatrix<const WIDTH: usize> {
     /// Canonical entries, row by row.
-    rows: [[u64; WIDTH]; WIDTH],
+    rows: [[u32; WIDTH]; WIDTH],
     /// Whether a row's products sum below 2^63 without splitting, as with small entries.
     narrow: bool,
 }
 
 impl<const WIDTH: usize> DenseMatrix<WIDTH> {
     /// The matrix of canonical entries.
-    pub(super) const fn new(rows: [[u64; WIDTH]; WIDTH]) -> Self {
+    pub(super) const fn new(rows: [[u32; WIDTH]; WIDTH]) -> Self {
         let mut largest = 0;
         let mut i = 0;
         while i < WIDTH {
@@ -44,7 +44,7 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
         while i < WIDTH {
             let mut j = 0;
             while j < WIDTH {
-                rows[i][j] = row[(j + WIDTH - i) % WIDTH] as u64;
+                rows[i][j] = row[(j + WIDTH - i) % WIDTH];
                 j += 1;
             }
             i += 1;
@@ -55,7 +55,7 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
     /// The matrix of field elements.
     pub(super) fn from_elements(elements: &FieldMatrix) -> Self {
         Self::new(std::array::from_fn(|i| {
-            std::array::from_fn(|j| u64::from(elements.at(i, j).to_canonical()))
+            std::array::from_fn(|j| elements.at(i, j).to_canonical())
         }))
     }
 
@@ -64,18 +64,16 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
         FieldMatrix::new(
             self.rows
                 .iter()
-                .map(|row| {
-                    row.iter()
-                        .map(|&entry| KoalaBear::new(entry as u32))
-                        .collect()
-                })
+                .map(|row| row.iter().map(|&entry| KoalaBear::new(entry)).collect())
                 .collect(),
         )
     }
 
-    /// Multiplies a state in place.
+    /// Multiplies N independent states in place, lane by lane.
     ///
     /// # Performance
+    ///
+    /// Every product is 32 by 32 bits into 64, and every sum stays in 64-bit lanes, so the lanes vectorize.
     ///
     /// - Narrow: 16 products below 2^7 * 2^31 sum below 2^42.
     /// - Wide: each form splits into 16-bit halves, whose row sums stay below 2^52.
@@ -83,20 +81,31 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
     /// ```text
     /// sum_j m_j * x_j = sum_j m_j * lo_j + 2^16 * sum_j m_j * hi_j
     /// ```
-    pub(super) fn apply(&self, state: &mut [KoalaBear; WIDTH]) {
-        let input = state.map(|word| u64::from(word.montgomery()));
+    #[inline(always)]
+    pub(super) fn apply<const N: usize>(&self, state: &mut [[KoalaBear; N]; WIDTH]) {
+        let input = state.map(|lanes| lanes.map(KoalaBear::montgomery));
         if self.narrow {
             for (out, row) in state.iter_mut().zip(&self.rows) {
-                let sum: u64 = row.iter().zip(&input).map(|(&m, &x)| m * x).sum();
-                *out = KoalaBear::from_montgomery_sum(sum);
+                let mut sum = [0_u64; N];
+                for (&m, x) in row.iter().zip(&input) {
+                    for (lane, &x) in sum.iter_mut().zip(x) {
+                        *lane += u64::from(m) * u64::from(x);
+                    }
+                }
+                *out = sum.map(KoalaBear::from_montgomery_sum);
             }
         } else {
-            let low = input.map(|x| x & 0xffff);
-            let high = input.map(|x| x >> 16);
+            let low = input.map(|lanes| lanes.map(|x| x & 0xffff));
+            let high = input.map(|lanes| lanes.map(|x| x >> 16));
             for (out, row) in state.iter_mut().zip(&self.rows) {
-                let sum_low: u64 = row.iter().zip(&low).map(|(&m, &x)| m * x).sum();
-                let sum_high: u64 = row.iter().zip(&high).map(|(&m, &x)| m * x).sum();
-                *out = fold(u128::from(sum_low) + (u128::from(sum_high) << 16));
+                let (mut sum_low, mut sum_high) = ([0_u64; N], [0_u64; N]);
+                for ((&m, low), high) in row.iter().zip(&low).zip(&high) {
+                    for lane in 0..N {
+                        sum_low[lane] += u64::from(m) * u64::from(low[lane]);
+                        sum_high[lane] += u64::from(m) * u64::from(high[lane]);
+                    }
+                }
+                *out = std::array::from_fn(|lane| fold_halves(sum_low[lane], sum_high[lane]));
             }
         }
     }
@@ -117,6 +126,21 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
     }
 }
 
+/// The element whose Montgomery form is congruent to low + 2^16 * high, for halves below 2^52.
+///
+/// High's bits from 15 up weigh 2^31 and more, so they fold as in the wide case:
+///
+/// ```text
+/// 2^16 * high = 2^31 * (high >> 15) + 2^16 * (high mod 2^15)
+///             = (2^24 - 1) * (high >> 15) + 2^16 * (high mod 2^15)   mod p
+/// ```
+///
+/// The terms sum below 2^60 + 2^31 + 2^52, inside the Montgomery reduction's range.
+#[inline(always)]
+const fn fold_halves(low: u64, high: u64) -> KoalaBear {
+    KoalaBear::from_montgomery_sum(low + ((high & 0x7fff) << 16) + (high >> 15) * ((1 << 24) - 1))
+}
+
 /// The element whose Montgomery form is congruent to a sum below 2^67.
 ///
 /// # Algorithm
@@ -129,6 +153,7 @@ impl<const WIDTH: usize> DenseMatrix<WIDTH> {
 /// ```
 ///
 /// High is below 2^36, so the folded sum is below 2^61, inside the Montgomery reduction's range.
+#[cfg(test)]
 const fn fold(sum: u128) -> KoalaBear {
     let high = (sum >> 31) as u64;
     let low = (sum as u64) & ((1 << 31) - 1);
@@ -244,30 +269,41 @@ mod tests {
 
     use super::*;
 
+    /// A state viewed as states of one lane each.
+    fn as_lanes<const W: usize>(state: &mut [KoalaBear; W]) -> &mut [[KoalaBear; 1]; W] {
+        // A one-element array has the layout of its element.
+        state
+            .as_mut_slice()
+            .as_chunks_mut::<1>()
+            .0
+            .try_into()
+            .unwrap()
+    }
+
     proptest! {
         #[test]
         fn wide_and_narrow_multiplies_match_the_textbook_sum(
-            small in prop::collection::vec(0_u64..128, 256),
+            small in prop::collection::vec(0_u32..128, 256),
             large in prop::collection::vec(0..KoalaBear::ORDER, 576),
             state16 in prop::array::uniform16(0..KoalaBear::ORDER),
             state24 in prop::collection::vec(0..KoalaBear::ORDER, 24),
         ) {
             // A narrow 16 x 16 matrix and a wide 24 x 24 one, on random states and on all p - 1.
             let narrow = DenseMatrix::<16>::new(std::array::from_fn(|i| std::array::from_fn(|j| small[16 * i + j])));
-            let wide = DenseMatrix::<24>::new(std::array::from_fn(|i| std::array::from_fn(|j| u64::from(large[24 * i + j]))));
+            let wide = DenseMatrix::<24>::new(std::array::from_fn(|i| std::array::from_fn(|j| large[24 * i + j])));
             prop_assert!(narrow.narrow && !wide.narrow);
 
             let largest = KoalaBear::new(KoalaBear::ORDER - 1);
             for state in [state16.map(KoalaBear::new), [largest; 16]] {
                 let (mut fast, mut expected) = (state, state);
-                narrow.apply(&mut fast);
+                narrow.apply(as_lanes(&mut fast));
                 narrow.apply_reference(&mut expected);
                 prop_assert_eq!(fast, expected);
             }
             let state24: [KoalaBear; 24] = std::array::from_fn(|i| KoalaBear::new(state24[i]));
             for state in [state24, [largest; 24]] {
                 let (mut fast, mut expected) = (state, state);
-                wide.apply(&mut fast);
+                wide.apply(as_lanes(&mut fast));
                 wide.apply_reference(&mut expected);
                 prop_assert_eq!(fast, expected);
             }

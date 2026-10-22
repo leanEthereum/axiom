@@ -125,6 +125,7 @@ impl KoalaBear {
     /// # Invariants
     ///
     /// The sum must stay below p * 2^32, about 2^63.
+    #[inline(always)]
     pub(crate) const fn from_montgomery_sum(sum: u64) -> Self {
         // The sum is already the Montgomery form, up to reduction modulo p.
         //
@@ -147,6 +148,7 @@ impl KoalaBear {
     }
 
     /// The sum, usable in constants.
+    #[inline(always)]
     const fn sum(self, other: Self) -> Self {
         // Both forms are below 2^31, so the sum fits a word.
         Self {
@@ -155,6 +157,7 @@ impl KoalaBear {
     }
 
     /// The difference, usable in constants.
+    #[inline(always)]
     const fn difference(self, other: Self) -> Self {
         // A borrow means the difference went negative: add p back, selected by a mask.
         let (difference, borrow) = self.monty.overflowing_sub(other.monty);
@@ -164,6 +167,7 @@ impl KoalaBear {
     }
 
     /// The product, usable in constants.
+    #[inline(always)]
     const fn product(self, other: Self) -> Self {
         // (a * 2^32) * (b * 2^32) * 2^-32 = (a * b) * 2^32.
         Self {
@@ -173,6 +177,7 @@ impl KoalaBear {
 
     /// The cube, the S-box of the hash.
     #[must_use]
+    #[inline(always)]
     pub const fn cube(self) -> Self {
         self.product(self).product(self)
     }
@@ -199,11 +204,13 @@ impl KoalaBear {
 }
 
 /// An all-ones word when the flag holds, zero otherwise.
+#[inline(always)]
 const fn mask(flag: bool) -> u32 {
     0_u32.wrapping_sub(flag as u32)
 }
 
 /// Subtracts p once when the word is at least p, for words below 2p.
+#[inline(always)]
 const fn reduce_once(word: u32) -> u32 {
     // The subtraction borrows exactly when the word is below p, and then the word is kept.
     let (difference, borrow) = word.overflowing_sub(P);
@@ -231,6 +238,7 @@ const fn reduce_word(word: u32) -> u32 {
 /// ```
 ///
 /// The quotient by 2^32 lands in (-p, p), and a masked addition of p fixes a negative one.
+#[inline(always)]
 const fn montgomery_reduce(x: u64) -> u32 {
     let t = (x as u32).wrapping_mul(P_INV);
     let (difference, borrow) = x.overflowing_sub(t as u64 * P as u64);
@@ -246,12 +254,14 @@ impl fmt::Debug for KoalaBear {
 impl Add for KoalaBear {
     type Output = Self;
 
+    #[inline(always)]
     fn add(self, other: Self) -> Self {
         self.sum(other)
     }
 }
 
 impl AddAssign for KoalaBear {
+    #[inline(always)]
     fn add_assign(&mut self, other: Self) {
         *self = self.sum(other);
     }
@@ -260,6 +270,7 @@ impl AddAssign for KoalaBear {
 impl Sub for KoalaBear {
     type Output = Self;
 
+    #[inline(always)]
     fn sub(self, other: Self) -> Self {
         self.difference(other)
     }
@@ -268,12 +279,14 @@ impl Sub for KoalaBear {
 impl Mul for KoalaBear {
     type Output = Self;
 
+    #[inline(always)]
     fn mul(self, other: Self) -> Self {
         self.product(other)
     }
 }
 
 impl MulAssign for KoalaBear {
+    #[inline(always)]
     fn mul_assign(&mut self, other: Self) {
         *self = self.product(other);
     }

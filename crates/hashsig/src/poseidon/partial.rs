@@ -46,14 +46,17 @@ struct SparseRound<const WIDTH: usize> {
 }
 
 impl<const WIDTH: usize> SparseRound<WIDTH> {
-    /// Applies the round in place.
-    fn apply(&self, state: &mut [KoalaBear; WIDTH]) {
-        let first = (state[0] + self.constant).cube();
+    /// Applies the round to N independent states in place.
+    #[inline(always)]
+    fn apply<const N: usize>(&self, state: &mut [[KoalaBear; N]; WIDTH]) {
+        let first = state[0].map(|word| (word + self.constant).cube());
         // Row 0 reads the old words; rows 1 and up add a multiple of word 0 to themselves.
-        let mut out = self.row[0] * first;
-        for ((word, &row), &column) in state.iter_mut().zip(&self.row).zip(&self.column).skip(1) {
-            out += row * *word;
-            *word += column * first;
+        let mut out = first.map(|word| self.row[0] * word);
+        for ((words, &row), &column) in state.iter_mut().zip(&self.row).zip(&self.column).skip(1) {
+            for ((out, word), &first) in out.iter_mut().zip(words.iter_mut()).zip(&first) {
+                *out += row * *word;
+                *word += column * first;
+            }
         }
         state[0] = out;
     }
@@ -154,8 +157,9 @@ impl<const WIDTH: usize> PartialRounds<WIDTH> {
         )
     }
 
-    /// Applies every partial round in place.
-    pub(super) fn apply(&self, state: &mut [KoalaBear; WIDTH]) {
+    /// Applies every partial round to N independent states in place.
+    #[inline(always)]
+    pub(super) fn apply<const N: usize>(&self, state: &mut [[KoalaBear; N]; WIDTH]) {
         for round in &self.rounds {
             round.apply(state);
         }

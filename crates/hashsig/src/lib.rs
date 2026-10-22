@@ -38,6 +38,11 @@
 //! - Herold, Khovratovich, Kudinov, Tessaro, Wagner, "Aborting Random Oracles", eprint 2026/016.
 //! - Grassi, Khovratovich, Rechberger, Roy, Schofnegger, "Poseidon", USENIX Security 2021.
 
+#![allow(
+    clippy::inline_always,
+    reason = "lane-generic hashing must inline whole into each target-feature kernel, or its lanes stay scalar"
+)]
+
 mod codec;
 mod encoding;
 mod entropy;
@@ -45,6 +50,7 @@ mod error;
 mod field;
 mod instantiation;
 mod keys;
+mod leaf_kernel;
 mod merkle;
 mod one_time;
 mod parallel;

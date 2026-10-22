@@ -151,6 +151,16 @@ impl<const WIDTH: usize> Poseidon1<WIDTH> {
 
     /// Applies the permutation in place.
     pub fn permute(&self, state: &mut [KoalaBear; WIDTH]) {
+        let mut lanes = state.map(|word| [word]);
+        self.permute_lanes(&mut lanes);
+        *state = lanes.map(|[word]| word);
+    }
+
+    /// Applies the permutation to N independent states, stored word by word across lanes.
+    ///
+    /// Each lane computes the scalar permutation; the layout lets the compiler run lanes in SIMD registers.
+    #[inline(always)]
+    pub(crate) fn permute_lanes<const N: usize>(&self, state: &mut [[KoalaBear; N]; WIDTH]) {
         // The last initial round multiplies by D_0 * M, which opens the sparse partial rounds.
         let (last, first) = self.initial.split_last().expect("four initial rounds");
         for constants in first {
@@ -179,10 +189,28 @@ impl<const WIDTH: usize> Poseidon1<WIDTH> {
         std::array::from_fn(|i| state[i] + input[i])
     }
 
-    /// The first half of a full round: constants, then the S-box on every word.
-    fn sbox_layer(state: &mut [KoalaBear; WIDTH], constants: &[KoalaBear; WIDTH]) {
-        for (word, &constant) in state.iter_mut().zip(constants) {
-            *word = (*word + constant).cube();
+    /// The compression function over N lanes: the permutation plus its input, the first OUT words.
+    #[inline(always)]
+    pub(crate) fn compress_lanes<const N: usize, const OUT: usize>(
+        &self,
+        input: &[[KoalaBear; N]; WIDTH],
+    ) -> [[KoalaBear; N]; OUT] {
+        const { assert!(OUT <= WIDTH) };
+        let mut state = *input;
+        self.permute_lanes(&mut state);
+        std::array::from_fn(|i| std::array::from_fn(|lane| state[i][lane] + input[i][lane]))
+    }
+
+    /// The first half of a full round: constants, then the S-box on every word of every lane.
+    #[inline(always)]
+    fn sbox_layer<const N: usize>(
+        state: &mut [[KoalaBear; N]; WIDTH],
+        constants: &[KoalaBear; WIDTH],
+    ) {
+        for (words, &constant) in state.iter_mut().zip(constants) {
+            for word in words {
+                *word = (*word + constant).cube();
+            }
         }
     }
 }
