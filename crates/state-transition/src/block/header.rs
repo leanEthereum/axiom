@@ -48,13 +48,12 @@ impl<P: Preset> Operation<P> for BeaconBlockHeader {
             ..self.clone()
         };
 
-        let proposer = state
-            .validators
-            .get(self.proposer_index.as_usize())
-            .ok_or(StateError::UnknownValidator {
+        let proposer = state.validators.get(self.proposer_index.as_usize()).ok_or(
+            StateError::UnknownValidator {
                 index: self.proposer_index,
                 registry_size: state.validators.len(),
-            })?;
+            },
+        )?;
         if proposer.slashed {
             return Err(BlockError::ProposerSlashed(self.proposer_index));
         }

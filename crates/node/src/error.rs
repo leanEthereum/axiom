@@ -1,6 +1,6 @@
 //! Errors of the chain service and of the node around it.
 
-use std::io;
+use std::{io, net::SocketAddr, path::PathBuf};
 
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
@@ -9,7 +9,7 @@ use axiom_p2p::swarm::NetworkError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
-use axiom_types::Root;
+use axiom_types::{CommitteeIndex, Root, Slot, ValidatorIndex};
 use thiserror::Error;
 
 /// Why the chain refused an input or could not persist it.
@@ -37,8 +37,19 @@ pub enum ChainError {
     #[error("no state for block {0}")]
     MissingState(Root),
     /// A vote does not match the committees it names.
-    #[error("invalid vote: {0}")]
-    InvalidVote(&'static str),
+    #[error(
+        "invalid vote of validator {validator} at slot {slot} in committee {committee}: {reason}"
+    )]
+    InvalidVote {
+        /// The validator that cast the vote.
+        validator: ValidatorIndex,
+        /// The slot the vote is for.
+        slot: Slot,
+        /// The committee the vote names.
+        committee: CommitteeIndex,
+        /// The rule the vote breaks.
+        reason: &'static str,
+    },
     /// The chain thread stopped before answering.
     #[error("chain service stopped")]
     Stopped,
@@ -50,7 +61,7 @@ pub enum NodeError {
     /// The chain could not be built or resumed.
     #[error("chain: {0}")]
     Chain(#[from] ChainError),
-    /// A file or socket failed.
+    /// An operating system resource, such as a thread or a runtime, failed.
     #[error("{context}: {error}")]
     Io {
         /// What was being done.
@@ -59,18 +70,58 @@ pub enum NodeError {
         #[source]
         error: io::Error,
     },
+    /// A file failed to read.
+    #[error("{context} {}: {error}", .path.display())]
+    File {
+        /// What was being done.
+        context: &'static str,
+        /// The file.
+        path: PathBuf,
+        /// The operating system's error.
+        #[source]
+        error: io::Error,
+    },
+    /// A server failed to bind its address.
+    #[error("{context} on {address}: {error}")]
+    Bind {
+        /// What was being done.
+        context: &'static str,
+        /// The address asked for.
+        address: SocketAddr,
+        /// The operating system's error.
+        #[source]
+        error: io::Error,
+    },
     /// The genesis or checkpoint file does not decode.
-    #[error("anchor file does not decode: {0}")]
-    Genesis(#[source] DecodeError),
+    #[error("anchor file {} does not decode: {source}", .path.display())]
+    Genesis {
+        /// The anchor file.
+        path: PathBuf,
+        /// The decoder's complaint.
+        #[source]
+        source: DecodeError,
+    },
     /// Neither a database to resume nor a genesis state was given.
     #[error("no database to resume and no genesis or checkpoint given")]
     NoAnchor,
     /// The engine endpoint is unusable.
-    #[error("execution engine: {0}")]
-    Engine(#[source] EngineError),
+    #[error("execution engine at {url}: {source}")]
+    Engine {
+        /// The endpoint as configured.
+        url: String,
+        /// Why the endpoint is unusable.
+        #[source]
+        source: EngineError,
+    },
     /// The JWT secret file does not hold a 32-byte hex secret.
-    #[error("JWT secret: {0}")]
-    Jwt(#[source] JwtError),
+    #[error("JWT secret in {}: {source}", .path.display())]
+    Jwt {
+        /// The secret file.
+        path: PathBuf,
+        /// Why the contents are not a secret.
+        #[source]
+        source: JwtError,
+    },
     /// The node's metrics could not be registered.
     #[error("metrics: {0}")]
     Metrics(#[source] RegistryError),

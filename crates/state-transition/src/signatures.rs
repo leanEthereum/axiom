@@ -67,11 +67,12 @@ impl SignatureBatch {
         if !self.is_enabled() {
             return Ok(());
         }
-        let signature =
-            Signature::from_bytes(&signature.0).map_err(|source| BlockError::MalformedSignature {
+        let signature = Signature::from_bytes(&signature.0).map_err(|source| {
+            BlockError::MalformedSignature {
                 root: message,
                 source,
-            })?;
+            }
+        })?;
         self.sets.push(SignatureSet {
             signature,
             public_key,

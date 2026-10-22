@@ -263,7 +263,9 @@ mod tests {
         proofs.swap(0, 1);
         assert_eq!(
             BlockColumns::new(&block).sidecars(&blobs, &proofs, kzg),
-            Err(ColumnError::InvalidBlobProofs(block.message.hash_tree_root()))
+            Err(ColumnError::InvalidBlobProofs(
+                block.message.hash_tree_root()
+            ))
         );
     }
 
@@ -290,7 +292,7 @@ mod tests {
 
         // Mutation: column 5 drops its only commitment.
         let mut sidecar = sidecars[5].clone();
-        sidecar.kzg_commitments = Default::default();
+        sidecar.kzg_commitments.clear();
         assert_eq!(
             ColumnSidecar(&sidecar).verify_structure(&config),
             Err(ColumnError::NoBlobs(ColumnIndex(5)))
@@ -298,7 +300,7 @@ mod tests {
 
         // Mutation: column 5 drops its only proof, leaving 1 cell and 1 commitment.
         let mut sidecar = sidecars[5].clone();
-        sidecar.kzg_proofs = Default::default();
+        sidecar.kzg_proofs.clear();
         assert_eq!(
             ColumnSidecar(&sidecar).verify_structure(&config),
             Err(ColumnError::LengthMismatch {

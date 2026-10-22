@@ -314,14 +314,14 @@ impl<P: Preset> State<P> {
         delta: Gwei,
     ) -> Result<(), StateError> {
         let registry_size = self.beacon.balances.len();
-        let balance = self
-            .beacon
-            .balances
-            .get_mut(index.as_usize())
-            .ok_or(StateError::UnknownValidator {
-                index,
-                registry_size,
-            })?;
+        let balance =
+            self.beacon
+                .balances
+                .get_mut(index.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size,
+                })?;
         *balance = balance.checked_add(delta).ok_or(StateError::Overflow {
             quantity: "balance",
         })?;
@@ -339,14 +339,14 @@ impl<P: Preset> State<P> {
         delta: Gwei,
     ) -> Result<(), StateError> {
         let registry_size = self.beacon.balances.len();
-        let balance = self
-            .beacon
-            .balances
-            .get_mut(index.as_usize())
-            .ok_or(StateError::UnknownValidator {
-                index,
-                registry_size,
-            })?;
+        let balance =
+            self.beacon
+                .balances
+                .get_mut(index.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size,
+                })?;
         *balance = balance.saturating_sub(delta);
         Ok(())
     }

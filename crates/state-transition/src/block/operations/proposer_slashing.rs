@@ -24,13 +24,14 @@ impl<P: Preset> Operation<P> for ProposerSlashing {
         }
 
         let state = &processor.state.beacon;
-        let validator = state
-            .validators
-            .get(proposer.as_usize())
-            .ok_or(StateError::UnknownValidator {
-                index: proposer,
-                registry_size: state.validators.len(),
-            })?;
+        let validator =
+            state
+                .validators
+                .get(proposer.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index: proposer,
+                    registry_size: state.validators.len(),
+                })?;
         if !validator.is_slashable_at(state.current_epoch()) {
             return Err(invalid("proposer is not slashable"));
         }

@@ -9,7 +9,7 @@ use axiom_types::{
     },
 };
 
-use crate::{GossipError, signing_claim::SigningClaim};
+use crate::{Detail, GossipError, signing_claim::SigningClaim};
 
 /// A state read as the source of signers: keys, sync committees, and signing domains.
 #[derive(Clone, Copy, Debug)]
@@ -36,26 +36,30 @@ impl<'a, P: Preset> Signers<'a, P> {
         let message = &signed.message;
         let data = &message.aggregate.data;
         let state = self.state;
+        let aggregator_detail = Detail::Validator(message.aggregator_index);
         // Committee membership was checked, so the index is in range for an honest message.
         let aggregator = state
             .validators
             .get(message.aggregator_index.as_usize())
-            .ok_or(GossipError::Reject(
-                "aggregator is not a member of the committee",
-            ))?;
+            .ok_or_else(|| {
+                GossipError::reject("aggregator is not a member of the committee")
+                    .with(aggregator_detail)
+            })?;
         // The selection proof signs the slot, and its hash decides who aggregates.
         let selection_domain = state.domain(DOMAIN_SELECTION_PROOF, data.target.epoch);
         if !SigningClaim::new(&data.slot, selection_domain, &message.selection_proof)
             .is_signed_by(&aggregator.pubkey)
         {
-            return Err(GossipError::Reject("invalid selection proof signature"));
+            return Err(
+                GossipError::reject("invalid selection proof signature").with(aggregator_detail)
+            );
         }
         // The outer signature binds the aggregate to the aggregator.
         let aggregate_domain = state.domain(DOMAIN_AGGREGATE_AND_PROOF, data.target.epoch);
         if !SigningClaim::new(message, aggregate_domain, &signed.signature)
             .is_signed_by(&aggregator.pubkey)
         {
-            return Err(GossipError::Reject("invalid aggregator signature"));
+            return Err(GossipError::reject("invalid aggregator signature").with(aggregator_detail));
         }
         Ok(())
     }
@@ -73,6 +77,7 @@ impl<'a, P: Preset> Signers<'a, P> {
         let message = &signed.message;
         let contribution = &message.contribution;
         let epoch = contribution.slot.epoch::<P>();
+        let aggregator_detail = Detail::Validator(message.aggregator_index);
         // The selection proof signs the slot and subcommittee, and its hash decides who aggregates.
         let selection = SyncAggregatorSelectionData {
             slot: contribution.slot,
@@ -84,13 +89,15 @@ impl<'a, P: Preset> Signers<'a, P> {
         if !SigningClaim::new(&selection, selection_domain, &message.selection_proof)
             .is_signed_by(pubkey)
         {
-            return Err(GossipError::Reject("invalid selection proof signature"));
+            return Err(
+                GossipError::reject("invalid selection proof signature").with(aggregator_detail)
+            );
         }
         // The outer signature binds the contribution to the aggregator.
         let contribution_domain = self.state.domain(DOMAIN_CONTRIBUTION_AND_PROOF, epoch);
         if !SigningClaim::new(message, contribution_domain, &signed.signature).is_signed_by(pubkey)
         {
-            return Err(GossipError::Reject("invalid aggregator signature"));
+            return Err(GossipError::reject("invalid aggregator signature").with(aggregator_detail));
         }
         Ok(())
     }

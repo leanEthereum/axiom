@@ -295,13 +295,13 @@ impl<P: Preset> Store<P> {
             return Ok(());
         }
 
-        let parent_state = self
-            .block_states
-            .get(&block.parent_root)
-            .ok_or(ForkChoiceError::UnknownParent {
-                root,
-                parent: block.parent_root,
-            })?;
+        let parent_state =
+            self.block_states
+                .get(&block.parent_root)
+                .ok_or(ForkChoiceError::UnknownParent {
+                    root,
+                    parent: block.parent_root,
+                })?;
         let current = self.current_slot();
         if block.slot > current {
             return Err(ForkChoiceError::FutureBlock {

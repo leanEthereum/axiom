@@ -5,9 +5,7 @@
 
 use axiom_bls::BlsError;
 use axiom_ssz::CapacityError;
-use axiom_types::{
-    Bytes32, Checkpoint, CommitteeIndex, Epoch, Hash32, Root, Slot, ValidatorIndex,
-};
+use axiom_types::{Bytes32, Checkpoint, CommitteeIndex, Epoch, Hash32, Root, Slot, ValidatorIndex};
 use thiserror::Error;
 
 /// A state that violates an invariant the protocol relies on.

@@ -30,10 +30,10 @@ pub enum Published {
 pub enum PublishError {
     /// The blobs or proofs do not match the block's commitments.
     #[error("blob data: {0}")]
-    Columns(ColumnError),
+    Columns(#[source] ColumnError),
     /// The block breaks a gossip rule, so peers would reject it.
     #[error("invalid block: {0}")]
-    Invalid(&'static str),
+    Invalid(#[source] GossipError),
     /// The chain thread has stopped.
     #[error("chain service stopped")]
     ChainStopped,
@@ -118,10 +118,10 @@ impl<P: Preset> Publisher<P> {
             .map_err(|_| PublishError::ChainStopped)?;
         match verdict {
             Ok(()) => {}
-            Err(GossipError::Reject(reason)) => return Err(PublishError::Invalid(reason)),
+            Err(error @ GossipError::Reject { .. }) => return Err(PublishError::Invalid(error)),
             // An ignored block, such as one already seen, is still broadcast and imported.
-            Err(GossipError::Ignore(reason)) => {
-                debug!(reason, "published block ignored by gossip rules");
+            Err(error @ GossipError::Ignore { .. }) => {
+                debug!(%error, "published block ignored by gossip rules");
             }
         }
 

@@ -135,6 +135,12 @@ impl<'a, P: Preset> ChainView<'a, P> {
         self.checkpoint_block(root, self.finalized.epoch) == Some(self.finalized.root)
     }
 
+    /// The slot the current time falls in, for the values an error reports.
+    #[must_use]
+    pub const fn current_slot(&self, now_ms: u64) -> Slot {
+        self.store.slot_clock().slot_at(now_ms)
+    }
+
     /// Whether a slot starts after the current time plus the allowed clock disparity.
     ///
     /// See `is_future_slot` in the phase0 p2p spec.

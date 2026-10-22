@@ -32,7 +32,35 @@ impl<'a> Branch<'a> {
         if proof.verify(leaf, GeneralizedIndex::new(self.gindex), root) {
             Ok(())
         } else {
-            Err(LightClientError::InvalidBranch)
+            Err(LightClientError::InvalidBranch {
+                gindex: self.gindex,
+                root,
+            })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_branch_that_misses_its_root_names_the_position_and_root() {
+        // Generalized index 2 is the left child of the root, so one sibling lifts the leaf.
+        let leaf = Root([1; 32]);
+        let sibling = Bytes32([2; 32]);
+        let nodes = [sibling];
+        let branch = Branch::new(&nodes, 2);
+        let root = Root::hash_pair(&leaf, &Root(sibling.0));
+        assert_eq!(branch.proves(leaf, root), Ok(()));
+
+        // Mutation: a root of all 3s, which no leaf and sibling hash to here.
+        assert_eq!(
+            branch.proves(leaf, Root([3; 32])),
+            Err(LightClientError::InvalidBranch {
+                gindex: 2,
+                root: Root([3; 32]),
+            })
+        );
     }
 }

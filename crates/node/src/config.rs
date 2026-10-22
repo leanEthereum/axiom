@@ -40,12 +40,19 @@ pub struct EngineConfig {
 impl EngineConfig {
     /// Connects to the engine with the shared secret.
     fn connect(&self) -> Result<ExecutionLayer, NodeError> {
-        let text = fs::read_to_string(&self.jwt_secret).map_err(|error| NodeError::Io {
+        let text = fs::read_to_string(&self.jwt_secret).map_err(|error| NodeError::File {
             context: "reading the JWT secret",
+            path: self.jwt_secret.clone(),
             error,
         })?;
-        let secret = JwtSecret::from_hex(&text).map_err(NodeError::Jwt)?;
-        let client = EngineClient::new(&self.url, secret).map_err(NodeError::Engine)?;
+        let secret = JwtSecret::from_hex(&text).map_err(|source| NodeError::Jwt {
+            path: self.jwt_secret.clone(),
+            source,
+        })?;
+        let client = EngineClient::new(&self.url, secret).map_err(|source| NodeError::Engine {
+            url: self.url.clone(),
+            source,
+        })?;
         info!(url = %self.url, "execution engine configured");
         Ok(ExecutionLayer::new(client))
     }
@@ -138,11 +145,15 @@ impl<'a> SszFile<'a> {
 
     /// Reads and decodes the file.
     fn decode<T: Ssz>(self) -> Result<T, NodeError> {
-        let bytes = fs::read(self.path).map_err(|error| NodeError::Io {
+        let bytes = fs::read(self.path).map_err(|error| NodeError::File {
             context: self.context,
+            path: self.path.to_path_buf(),
             error,
         })?;
-        T::decode(&bytes).map_err(NodeError::Genesis)
+        T::decode(&bytes).map_err(|source| NodeError::Genesis {
+            path: self.path.to_path_buf(),
+            source,
+        })
     }
 }
 
@@ -232,8 +243,9 @@ impl NodeConfig {
             let router = BeaconApi::router(handle.clone(), publisher, identity);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
-                .map_err(|error| NodeError::Io {
+                .map_err(|error| NodeError::Bind {
                     context: "binding the beacon API",
+                    address,
                     error,
                 })?;
             info!(%address, "beacon API listening");
@@ -243,8 +255,9 @@ impl NodeConfig {
         if let Some(address) = self.metrics_address {
             let server = MetricsServer::bind(address, registry)
                 .await
-                .map_err(|error| NodeError::Io {
+                .map_err(|error| NodeError::Bind {
                     context: "binding the metrics endpoint",
+                    address,
                     error,
                 })?;
             info!(%address, "metrics listening");

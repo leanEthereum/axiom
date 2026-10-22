@@ -49,13 +49,14 @@ impl ExpectedWithdrawals {
                 break;
             }
             let index = pending.validator_index;
-            let validator = state
-                .validators
-                .get(index.as_usize())
-                .ok_or(StateError::UnknownValidator {
-                    index,
-                    registry_size: state.validators.len(),
-                })?;
+            let validator =
+                state
+                    .validators
+                    .get(index.as_usize())
+                    .ok_or(StateError::UnknownValidator {
+                        index,
+                        registry_size: state.validators.len(),
+                    })?;
             let balance = plan.balance_after(index)?;
             if validator.is_eligible_for_partial_withdrawals::<P>(balance) {
                 let amount = (balance - P::MIN_ACTIVATION_BALANCE).min(pending.amount);
@@ -72,13 +73,14 @@ impl ExpectedWithdrawals {
             if plan.expected.withdrawals.len() as u64 >= P::MAX_WITHDRAWALS_PER_PAYLOAD {
                 break;
             }
-            let validator = state
-                .validators
-                .get(index.as_usize())
-                .ok_or(StateError::UnknownValidator {
-                    index,
-                    registry_size: state.validators.len(),
-                })?;
+            let validator =
+                state
+                    .validators
+                    .get(index.as_usize())
+                    .ok_or(StateError::UnknownValidator {
+                        index,
+                        registry_size: state.validators.len(),
+                    })?;
             let balance = plan.balance_after(index)?;
             let address = validator.withdrawal_address();
             if validator.is_fully_withdrawable(balance, epoch) {
@@ -135,14 +137,15 @@ impl<'a, P: Preset> WithdrawalPlan<'a, P> {
     ///
     /// See `get_balance_after_withdrawals` in the Capella beacon chain spec.
     fn balance_after(&self, index: ValidatorIndex) -> Result<Gwei, StateError> {
-        let balance = *self
-            .state
-            .balances
-            .get(index.as_usize())
-            .ok_or(StateError::UnknownValidator {
-                index,
-                registry_size: self.state.balances.len(),
-            })?;
+        let balance =
+            *self
+                .state
+                .balances
+                .get(index.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size: self.state.balances.len(),
+                })?;
         balance
             .checked_sub(self.withdrawn.get(&index).copied().unwrap_or_default())
             .ok_or(StateError::Overflow {

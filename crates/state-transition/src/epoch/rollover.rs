@@ -93,12 +93,10 @@ impl Rollover {
         let fresh = vec![ParticipationFlags::default(); state.validators.len()];
         state.previous_epoch_participation = mem::replace(
             &mut state.current_epoch_participation,
-            fresh
-                .try_into()
-                .map_err(|source| StateError::Capacity {
-                    list: "current epoch participation",
-                    source,
-                })?,
+            fresh.try_into().map_err(|source| StateError::Capacity {
+                list: "current epoch participation",
+                source,
+            })?,
         );
         Ok(())
     }

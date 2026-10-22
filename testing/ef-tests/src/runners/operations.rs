@@ -51,8 +51,7 @@ impl<P: Preset> Operations<P> {
         stem: &'static str,
         processor: &mut BlockProcessor<'_, P>,
     ) -> Result<Result<(), Rejection>, Failure> {
-        Ok(Self::input::<O>(case, stem)?
-            .and_then(|operation| Ok(processor.apply(&operation)?)))
+        Ok(Self::input::<O>(case, stem)?.and_then(|operation| Ok(processor.apply(&operation)?)))
     }
 }
 

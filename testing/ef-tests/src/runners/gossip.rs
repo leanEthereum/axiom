@@ -118,8 +118,8 @@ impl<'c, P: Preset> GossipCase<'c, P> {
             let verdict = self.validate(&mut validator, &topic, message)?;
             let actual = match verdict {
                 Ok(()) => "valid",
-                Err(GossipError::Ignore(_)) => "ignore",
-                Err(GossipError::Reject(_)) => "reject",
+                Err(GossipError::Ignore { .. }) => "ignore",
+                Err(GossipError::Reject { .. }) => "reject",
             };
             let expected = message
                 .get("expected")

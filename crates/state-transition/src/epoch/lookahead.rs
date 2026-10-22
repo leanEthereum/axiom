@@ -91,12 +91,10 @@ impl Lookahead {
         let aggregate = PublicKey::aggregate(&keys).map_err(StateError::InvalidSyncCommittee)?;
 
         Ok(SyncCommittee {
-            pubkeys: pubkeys
-                .try_into()
-                .map_err(|source| StateError::Capacity {
-                    list: "next sync committee",
-                    source,
-                })?,
+            pubkeys: pubkeys.try_into().map_err(|source| StateError::Capacity {
+                list: "next sync committee",
+                source,
+            })?,
             aggregate_pubkey: BlsPubkey(aggregate.to_bytes()),
         })
     }

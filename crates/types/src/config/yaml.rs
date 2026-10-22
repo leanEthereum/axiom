@@ -55,12 +55,10 @@ impl<'a> ConfigEntry<'a> {
     fn set_count(self, config: &mut ChainConfig) -> Result<bool, ConfigError> {
         let Self { key, value } = self;
         let number = || {
-            value
-                .as_u64()
-                .ok_or_else(|| ConfigError::InvalidValue {
-                    key: key.to_owned(),
-                    expected: "an integer",
-                })
+            value.as_u64().ok_or_else(|| ConfigError::InvalidValue {
+                key: key.to_owned(),
+                expected: "an integer",
+            })
         };
         match key {
             "MIN_GENESIS_ACTIVE_VALIDATOR_COUNT" => {
@@ -181,10 +179,11 @@ impl<'a> ConfigEntry<'a> {
             "MESSAGE_DOMAIN_INVALID_SNAPPY" => config.message_domain_invalid_snappy = bytes4()?,
             "MESSAGE_DOMAIN_VALID_SNAPPY" => config.message_domain_valid_snappy = bytes4()?,
             "DEPOSIT_CONTRACT_ADDRESS" => {
-                config.deposit_contract_address =
-                    ExecutionAddress(value
+                config.deposit_contract_address = ExecutionAddress(
+                    value
                         .as_hex_array::<20>()
-                        .ok_or_else(|| invalid("20 hex bytes"))?);
+                        .ok_or_else(|| invalid("20 hex bytes"))?,
+                );
             }
             "CONFIG_NAME" => {
                 value

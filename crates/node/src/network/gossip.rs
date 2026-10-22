@@ -287,12 +287,12 @@ impl<P: Preset> GossipHandler<P> {
             .await;
         match checked {
             Ok((Ok(()), message)) => (ValidationOutcome::Accept, then(message)),
-            Ok((Err(GossipError::Ignore(reason)), _)) => {
-                debug!(reason, "gossip ignored");
+            Ok((Err(error @ GossipError::Ignore { .. }), _)) => {
+                debug!(%error, "gossip ignored");
                 (ValidationOutcome::Ignore, None)
             }
-            Ok((Err(GossipError::Reject(reason)), _)) => {
-                debug!(reason, "gossip rejected");
+            Ok((Err(error @ GossipError::Reject { .. }), _)) => {
+                debug!(%error, "gossip rejected");
                 (ValidationOutcome::Reject, None)
             }
             // The chain is shutting down; drop the message without blaming the peer.
