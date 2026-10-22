@@ -540,7 +540,7 @@ mod tests {
                 (&mut tampered.chain_values, index - signature.path.len())
             };
             let mut elements = list[at].elements().to_vec();
-            elements[0] = elements[0] + one;
+            elements[0] += one;
             list[at] = Words::from_slice(&elements);
             assert_eq!(
                 scheme.verify(&public, LeafEpoch(21), &[3; 32], &tampered),
