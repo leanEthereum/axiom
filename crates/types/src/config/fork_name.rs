@@ -291,6 +291,17 @@ impl ForkName {
             Self::Fulu | Self::Gloas => true,
         }
     }
+    /// The fork whose version signs a voluntary exit while this fork is in force.
+    ///
+    /// From Deneb on, exits sign under the Capella version forever.
+    /// A signed exit then never expires at a later fork, see EIP-7044.
+    #[must_use]
+    pub const fn voluntary_exit_fork(self) -> Self {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella => self,
+            Self::Deneb | Self::Electra | Self::Fulu | Self::Gloas => Self::Capella,
+        }
+    }
 }
 
 impl fmt::Display for ForkName {
@@ -383,5 +394,27 @@ mod tests {
             .map(ForkName::max_attester_slashings::<Minimal>)
             .to_vec();
         assert_eq!(slashings, [2, 2, 2, 2, 2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn exits_sign_under_capella_from_deneb_on() {
+        // EIP-7044: each fork's exit version, in fork order.
+        let forks: Vec<ForkName> = ForkName::ALL
+            .into_iter()
+            .map(ForkName::voluntary_exit_fork)
+            .collect();
+        assert_eq!(
+            forks,
+            [
+                ForkName::Phase0,
+                ForkName::Altair,
+                ForkName::Bellatrix,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+            ]
+        );
     }
 }

@@ -198,3 +198,9 @@ pub const DOMAIN_BUILDER_DEPOSIT: DomainType = DomainType([0x0e, 0, 0, 0]);
 
 /// Domain prefix reserved for applications built on beacon chain keys.
 pub const DOMAIN_APPLICATION_MASK: DomainType = DomainType([0x00, 0, 0, 0x01]);
+
+/// Domain of builder API messages, such as validator registrations.
+///
+/// It is the application mask itself, so no consensus message can collide with it.
+/// See the Bellatrix builder spec in the builder-specs repository.
+pub const DOMAIN_APPLICATION_BUILDER: DomainType = DOMAIN_APPLICATION_MASK;
