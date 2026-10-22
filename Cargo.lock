@@ -279,6 +279,7 @@ dependencies = [
  "axiom-light-client",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-store",

@@ -13,6 +13,7 @@ use axiom_p2p::{
     eth::MessageIds,
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
+use axiom_slasher::SlasherConfig;
 use axiom_ssz::DecodeError;
 use axiom_telemetry::{MetricsServer, Registry};
 use axiom_types::{
@@ -28,7 +29,7 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainHandle, DiscoverySettings, ExecutionLayer, NodeError,
-    NodeKey, api::ApiServices, network::NetworkIdentity,
+    NodeKey, api::ApiServices, network::NetworkIdentity, slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -183,6 +184,8 @@ pub struct NodeConfig {
     pub network: Option<NetworkSettings>,
     /// How the node builds blocks for its validators.
     pub proposer: ProposerSettings,
+    /// The slasher's history and layout; none runs no slasher.
+    pub slasher: Option<SlasherConfig>,
 }
 
 /// How the node builds blocks for the validators it serves.
@@ -212,6 +215,15 @@ impl NodeConfig {
             .as_ref()
             .ok_or(NodeError::NoAnchor)?
             .open(chain_config, database)
+    }
+
+    /// Starts the slasher, when enabled, with its history beside the chain's, and feeds it the chain.
+    pub(crate) fn attach_slasher<P: Preset>(&self, chain: Chain<P>) -> Result<Chain<P>, NodeError> {
+        let Some(settings) = self.slasher else {
+            return Ok(chain);
+        };
+        let directory = self.data_dir.as_ref().map(|data| data.join("slasher"));
+        Ok(chain.with_slasher(SlasherFeed::start(settings, directory.as_deref())?))
     }
 
     /// Loads or creates the node key, and derives the network identity from it.

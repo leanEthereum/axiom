@@ -9,6 +9,7 @@ use axiom_fork_choice::ForkChoiceError;
 use axiom_light_client::LightClientError;
 use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
+use axiom_slasher::SlasherError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
@@ -124,6 +125,9 @@ pub enum NodeError {
     /// Neither a database to resume nor a genesis state was given.
     #[error("no database to resume and no genesis or checkpoint given")]
     NoAnchor,
+    /// The slasher could not open its history.
+    #[error("slasher: {0}")]
+    Slasher(#[source] SlasherError),
     /// The engine endpoint is unusable.
     #[error("execution engine at {url}: {source}")]
     Engine {
