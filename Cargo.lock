@@ -47,6 +47,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-discv5"
+version = "0.1.0"
+dependencies = [
+ "axiom-crypto",
+ "axiom-das",
+ "axiom-rlp",
+ "axiom-ssz",
+ "axiom-types",
+ "proptest",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "axiom-ef-tests"
 version = "0.1.0"
 dependencies = [
