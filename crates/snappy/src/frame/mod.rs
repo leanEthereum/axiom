@@ -93,10 +93,13 @@ pub fn decompress(input: &[u8], max_len: usize) -> Result<Vec<u8>, SnappyError> 
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
     use chunk::{ChunkType, TYPE_COMPRESSED, TYPE_UNCOMPRESSED};
+    use proptest::prelude::*;
 
     use super::*;
-    use crate::Crc32c;
+    use crate::{Crc32c, raw, raw::tests::arb_data};
 
     /// A stream: identifier, then the given chunks.
     fn stream(chunks: &[&[u8]]) -> Vec<u8> {
@@ -306,5 +309,52 @@ mod tests {
             decompress(&framed, 3),
             Err(SnappyError::TooLarge { len: 4, max: 3 })
         );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2_000))]
+
+        #[test]
+        fn frame_round_trip_through_slices_and_streams(
+            data in arb_data(),
+            piece in 1_usize..5000,
+        ) {
+            // Law: both the one-shot functions and the io adapters invert each other.
+            let framed = compress(&data);
+            prop_assert_eq!(decompress(&framed, data.len()), Ok(data.clone()));
+
+            let mut encoder = FrameEncoder::new(Vec::new());
+            for chunk in data.chunks(piece) {
+                encoder.write_all(chunk).unwrap();
+                // Flushing mid-stream emits short chunks, which must decode the same.
+                encoder.flush().unwrap();
+            }
+            let streamed = encoder.finish().unwrap();
+
+            let mut decoded = Vec::new();
+            FrameDecoder::new(&streamed[..], data.len())
+                .read_to_end(&mut decoded)
+                .unwrap();
+            prop_assert_eq!(decoded, data);
+        }
+
+        #[test]
+        fn frame_bound_is_enforced(data in arb_data().prop_filter("non-empty", |d| !d.is_empty())) {
+            // The total bound fails at the chunk that crosses it.
+            let framed = compress(&data);
+            let result = decompress(&framed, data.len() - 1);
+            let is_too_large = matches!(result, Err(SnappyError::TooLarge { .. }));
+            prop_assert!(is_too_large);
+        }
+
+        #[test]
+        fn garbage_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+            // Law: any bytes decode or fail, never panic, never exceed the bound.
+            if let Ok(out) = raw::decompress(&bytes, 1 << 16) {
+                prop_assert!(out.len() <= 1 << 16);
+            }
+            let _ = decompress(&bytes, 1 << 16);
+            let _ = FrameDecoder::new(&bytes[..], 1 << 16).read_to_end(&mut Vec::new());
+        }
     }
 }

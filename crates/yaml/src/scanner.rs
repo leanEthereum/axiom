@@ -573,3 +573,174 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use crate::{
+        ErrorKind, Yaml,
+        parser::tests::{fail, map, parse, s, seq},
+    };
+
+    #[test]
+    fn colon_without_space_stays_inside_a_plain_scalar() {
+        // "a:1" is one scalar in flow context, and "http://x" one in block context.
+        assert_eq!(parse("{ a:1 }"), map(vec![("a:1", Yaml::Null)]));
+        assert_eq!(parse("url: http://x"), map(vec![("url", s("http://x"))]));
+    }
+
+    #[test]
+    fn plain_scalars_fold_across_lines() {
+        // The light-client update shape: the value starts on the next, deeper line.
+        //
+        //     one break   ->  space
+        //     empty line  ->  newline
+        let text = "\
+update:
+  part_one
+  part two
+
+  part three
+next: 1
+";
+        let expected = map(vec![
+            ("update", s("part_one part two\npart three")),
+            ("next", s("1")),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn single_quotes_escape_by_doubling_and_fold() {
+        // '' is one quote; a break folds to a space and leading spaces drop.
+        let text = "a: 'it''s\n  here'\nb: ''\n";
+        let expected = map(vec![("a", s("it's here")), ("b", s(""))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn double_quotes_decode_every_escape_family() {
+        // Named escapes, hex escapes of three widths, and an escaped line break.
+        let text = r#"a: "\"q\" \\ \t\n\0 \x41\u00e9\U0001F600 \N\_\L\P \/ \e""#;
+        let expected = map(vec![(
+            "a",
+            s("\"q\" \\ \t\n\0 A\u{e9}\u{1f600} \u{85}\u{a0}\u{2028}\u{2029} / \u{1b}"),
+        )]);
+        assert_eq!(parse(text), expected);
+
+        // An escaped break joins lines with no space; an escaped tab survives folding.
+        let text = "a: \"ab\\\n  cd \\t\n  ef\"";
+        assert_eq!(parse(text), map(vec![("a", s("abcd \t ef"))]));
+    }
+
+    #[test]
+    fn comments_are_ignored_but_hashes_inside_words_are_content() {
+        // Full-line, trailing, and in-flow comments, next to a hash that is not one.
+        let text = "\
+# header
+a: 1  # trailing
+b: x#y
+c: [1, # inside
+  2]
+";
+        let expected = map(vec![
+            ("a", s("1")),
+            ("b", s("x#y")),
+            ("c", seq(vec![s("1"), s("2")])),
+        ]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn quoted_keys_and_quoted_core_words() {
+        // Quoted text never resolves: 'true' and "null" stay strings.
+        let text = "'k 1': 'true'\n\"k2\": \"null\"\n";
+        let expected = map(vec![("k 1", s("true")), ("k2", s("null"))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn crlf_line_breaks_and_byte_order_mark() {
+        // Windows line breaks and a leading BOM read like plain newlines.
+        let text = "\u{feff}a: 1\r\nb:\r\n- 2\r\n";
+        let expected = map(vec![("a", s("1")), ("b", seq(vec![s("2")]))]);
+        assert_eq!(parse(text), expected);
+    }
+
+    #[test]
+    fn tabs_separate_tokens_after_the_indentation() {
+        // A tab after the colon is whitespace, not indentation.
+        assert_eq!(parse("a:\t1\n"), map(vec![("a", s("1"))]));
+    }
+
+    #[test]
+    fn tab_in_indentation() {
+        // The tab sits where the nested key's indentation should be.
+        //
+        //     a:
+        //     \tb: 1    <- line 2, column 1
+        assert_eq!(fail("a:\n\tb: 1\n"), (ErrorKind::TabIndentation, 2, 1));
+    }
+
+    #[test]
+    fn unterminated_quotes_point_at_the_opening_quote() {
+        assert_eq!(fail("a: 'abc\n"), (ErrorKind::UnterminatedQuote, 1, 4));
+        assert_eq!(fail("a: \"abc"), (ErrorKind::UnterminatedQuote, 1, 4));
+    }
+
+    #[test]
+    fn bad_escapes() {
+        // An unknown letter, a short hex escape, and a surrogate.
+        assert_eq!(fail(r#""\q""#), (ErrorKind::InvalidEscape('q'), 1, 2));
+        assert_eq!(fail(r#""\x4""#), (ErrorKind::InvalidEscape('x'), 1, 2));
+        assert_eq!(
+            fail(r#""\ud800""#),
+            (ErrorKind::InvalidCodePoint(0xd800), 1, 2)
+        );
+    }
+
+    #[test]
+    fn unexpected_characters_in_flow_and_block() {
+        // A closing brace where a sequence item should start.
+        assert_eq!(fail("a: [1, }]"), (ErrorKind::UnexpectedChar('}'), 1, 8));
+
+        // Two flow items without a comma.
+        assert_eq!(fail("[[1] [2]]"), (ErrorKind::UnexpectedChar('['), 1, 6));
+
+        // Reserved indicators cannot start a scalar.
+        assert_eq!(fail("a: @b"), (ErrorKind::UnexpectedChar('@'), 1, 4));
+    }
+
+    #[test]
+    fn content_after_a_complete_value() {
+        // The quoted scalar ends the value; "y" is left over.
+        assert_eq!(fail("a: 'x' y\n"), (ErrorKind::TrailingContent, 1, 8));
+
+        // A flow collection followed by a colon would be a collection key.
+        assert_eq!(fail("[a]: b\n"), (ErrorKind::TrailingContent, 1, 4));
+    }
+
+    #[test]
+    fn document_marker_inside_quotes_or_flow() {
+        // A marker at column 0 cannot hide inside a scalar or a collection.
+        assert_eq!(
+            fail("'a\n--- b'"),
+            (ErrorKind::UnexpectedDocumentMarker, 2, 1)
+        );
+        assert_eq!(
+            fail("[a,\n--- ]"),
+            (ErrorKind::UnexpectedDocumentMarker, 2, 1)
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20_000))]
+
+        #[test]
+        fn arbitrary_unicode_never_panics(text in any::<String>()) {
+            // Law: multi-byte characters never split a slice inside the scanner.
+            let _ = Yaml::parse(&text);
+        }
+    }
+}

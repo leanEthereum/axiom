@@ -94,6 +94,8 @@ impl Item {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn wrap(item: &[u8]) -> Vec<u8> {
@@ -121,5 +123,29 @@ mod tests {
     fn trailing_bytes_are_refused() {
         // 0x01 is a whole item; 0x02 after it is left over.
         assert_eq!(Item::decode(&[0x01, 0x02]), Err(RlpError::TrailingBytes));
+    }
+
+    /// Arbitrary items: strings up to 80 bytes, lists up to 6 items, 4 levels deep.
+    fn arb_item() -> impl Strategy<Value = Item> {
+        let leaf = prop::collection::vec(any::<u8>(), 0..80).prop_map(Item::String);
+        leaf.prop_recursive(4, 64, 6, |inner| {
+            prop::collection::vec(inner, 0..6).prop_map(Item::List)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn items_round_trip(item in arb_item()) {
+            // Decoding an encoding returns the value.
+            prop_assert_eq!(Item::decode(&item.encode()), Ok(item));
+        }
+
+        #[test]
+        fn accepted_inputs_are_canonical(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
+            // Whatever decodes re-encodes to the same bytes, so the encoding is injective.
+            if let Ok(item) = Item::decode(&bytes) {
+                prop_assert_eq!(item.encode(), bytes);
+            }
+        }
     }
 }

@@ -144,3 +144,22 @@ pub enum HexError {
         actual: usize,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_ssz::U256;
+    use proptest::prelude::*;
+
+    use crate::{Data, Quantity};
+
+    proptest! {
+        #[test]
+        fn hex_decoders_never_panic(text in "(0x)?[0-9a-fA-Fg-z]{0,70}") {
+            // Only the outcome's existence matters here.
+            let _ = u64::from_quantity(&text);
+            let _ = U256::from_quantity(&text);
+            let _ = Vec::<u8>::from_data(&text);
+            let _ = <[u8; 32]>::from_data(&text);
+        }
+    }
+}
