@@ -20,6 +20,7 @@
 mod commitments;
 mod draft;
 mod error;
+mod external;
 mod keyring;
 mod payload;
 mod proposal;
@@ -38,6 +39,7 @@ use axiom_types::{
     phase0::SigningData,
 };
 pub use error::ChainBuilderError;
+pub use external::{BlockAttestations, BlockInputs, UnsignedProposal};
 pub use proposal::Proposal;
 pub use votes::Participation;
 
@@ -251,6 +253,101 @@ impl<P: Preset> ChainBuilder<P> {
         })
     }
 
+    /// Builds the block of a slot around a proposer's reveal and the votes a caller collected.
+    ///
+    /// Nothing is signed and the chain does not move: the caller signs, then applies.
+    /// From Gloas on, the self-built payload's envelope comes back unsigned too.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slot is not after the latest block's, the votes do not fit the block, or the block is invalid.
+    pub fn produce(
+        &self,
+        slot: Slot,
+        inputs: &BlockInputs<P>,
+    ) -> Result<UnsignedProposal<P>, ChainBuilderError> {
+        let mut pre = self.state.clone();
+        pre.process_slots(&self.config, slot)
+            .map_err(|source| ChainBuilderError::Slots { slot, source })?;
+        let draft = Draft::new(&pre, &self.config, &self.keyring, Participation::Silent)?
+            .with_reveal(inputs.randao_reveal);
+
+        // The post-state root, learned from a dry run with a zero root, as for a built block.
+        let mut post = pre.clone();
+        let mut unrooted = draft.block(pre.beacon(), Root::ZERO)?;
+        inputs.attach(&mut unrooted)?;
+        let unrooted = combined::SignedBeaconBlock::from_parts(unrooted, BlsSignature::default());
+        let outcome = post.state_transition(
+            &self.config,
+            &unrooted,
+            Verification::Skip,
+            &KnownVerdict(true),
+        );
+        let state_root = match outcome {
+            Err(TransitionError::StateRootMismatch { computed, .. }) => computed,
+            Err(source) => return Err(ChainBuilderError::Block { slot, source }),
+            Ok(()) => return Err(ChainBuilderError::ZeroStateRoot(slot)),
+        };
+        let mut block = draft.block(pre.beacon(), state_root)?;
+        inputs.attach(&mut block)?;
+
+        // Once payloads separate, the self-built payload is revealed in an envelope.
+        let combined::BeaconBlock::Gloas(gloas_block) = &block else {
+            return Ok(UnsignedProposal {
+                block,
+                envelope: None,
+            });
+        };
+        let fork = post.fork_name();
+        let gloas_state =
+            gloas::BeaconState::from_any(post.beacon()).ok_or(ChainBuilderError::Envelope {
+                slot,
+                source: EnvelopeError::WrongFork(fork),
+            })?;
+        let bid = &gloas_block.body.signed_execution_payload_bid.message;
+        let envelope = draft.payload(bid.parent_block_hash).envelope(
+            gloas_state.payload_expected_withdrawals.clone(),
+            gloas_block.hash_tree_root(),
+            gloas_block.parent_root,
+        );
+        Ok(UnsignedProposal {
+            block,
+            envelope: Some(envelope),
+        })
+    }
+
+    /// Applies a block a proposer signed, and its envelope, with every signature checked.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the block or the envelope is invalid; the chain then does not move.
+    pub fn apply(
+        &mut self,
+        block: &combined::SignedBeaconBlock<P>,
+        envelope: Option<&gloas::SignedExecutionPayloadEnvelope<P>>,
+    ) -> Result<(), ChainBuilderError> {
+        let slot = block.slot();
+        let mut post = self.state.clone();
+        post.state_transition(
+            &self.config,
+            block,
+            Verification::Verify,
+            &KnownVerdict(true),
+        )
+        .map_err(|source| ChainBuilderError::Block { slot, source })?;
+        if let Some(envelope) = envelope {
+            post.verify_execution_payload_envelope(
+                &self.config,
+                envelope,
+                Verification::Verify,
+                &KnownVerdict(true),
+            )
+            .map_err(|source| ChainBuilderError::Envelope { slot, source })?;
+        }
+        self.state = post;
+        Ok(())
+    }
+
     /// The proposer's envelope for its self-built bid, checked against the post-state.
     ///
     /// The withdrawals are those the block fixed in the state.
@@ -301,7 +398,7 @@ mod tests {
     use axiom_ssz::U256;
     use axiom_types::{
         Epoch, ForkName, KzgCommitment, Minimal, Slot, ValidatorIndex, Version,
-        bellatrix::PowBlock, phase0,
+        bellatrix::PowBlock, constants::DOMAIN_RANDAO, phase0,
     };
 
     use super::*;
@@ -657,6 +754,64 @@ mod tests {
                 state: Version([0, 0, 0, 1]),
                 config: Version([0, 0, 0, 0]),
             }
+        );
+    }
+
+    #[test]
+    fn a_produced_block_signed_by_its_proposer_matches_a_built_one() {
+        let Some(genesis) = pyspec_genesis() else {
+            return;
+        };
+        // Fixture state: two builders from one genesis, one building, one producing for a signer.
+        let config = schedule();
+        let mut built = ChainBuilder::<Minimal>::new(config.clone(), genesis.clone()).unwrap();
+        let mut produced = ChainBuilder::<Minimal>::new(config, genesis).unwrap();
+
+        // Slots 1 to 64 run phase0 to Gloas; the signer is the keyring, as a validator client would be.
+        for slot in 1..=64 {
+            let slot = Slot(slot);
+            let mut pre = produced.state().clone();
+            pre.process_slots(produced.config(), slot).unwrap();
+            let proposer = pre.beacon_proposer_index().unwrap();
+            let epoch = slot.epoch::<Minimal>();
+            let reveal = produced
+                .keyring
+                .sign(
+                    proposer,
+                    SigningData::signing_root(&epoch, pre.beacon().domain(DOMAIN_RANDAO, epoch)),
+                )
+                .unwrap();
+            let inputs = BlockInputs {
+                randao_reveal: reveal,
+                attestations: BlockAttestations::None,
+                sync_aggregate: None,
+            };
+            let unsigned = produced.produce(slot, &inputs).unwrap();
+            let root = SigningData {
+                object_root: unsigned.block.hash_tree_root(),
+                domain: pre.beacon().domain(DOMAIN_BEACON_PROPOSER, epoch),
+            }
+            .hash_tree_root();
+            let signature = produced.keyring.sign(proposer, root).unwrap();
+            let block = combined::SignedBeaconBlock::from_parts(unsigned.block, signature);
+            let envelope = unsigned.envelope.map(|message| {
+                let domain = pre.beacon().domain(DOMAIN_BEACON_BUILDER, epoch);
+                let signature = produced
+                    .keyring
+                    .sign(proposer, SigningData::signing_root(&message, domain))
+                    .unwrap();
+                gloas::SignedExecutionPayloadEnvelope { message, signature }
+            });
+
+            // Applying with every signature checked lands on the same block as building.
+            produced.apply(&block, envelope.as_ref()).unwrap();
+            let expected = built.propose().unwrap();
+            assert_eq!(&block, expected.block());
+            assert_eq!(envelope.as_ref(), expected.envelope());
+        }
+        assert_eq!(
+            produced.state().hash_tree_root(),
+            built.state().hash_tree_root()
         );
     }
 }
