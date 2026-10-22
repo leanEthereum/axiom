@@ -2,7 +2,7 @@
 
 use axiom_snappy::SnappyError;
 use axiom_ssz::DecodeError;
-use axiom_types::{Epoch, ForkName};
+use axiom_types::{Epoch, ValidatorIndex};
 use thiserror::Error;
 
 use crate::Geometry;
@@ -96,22 +96,16 @@ pub enum SlasherError {
         id: u32,
     },
 
+    /// A span cell names a target for which the validator has no recorded vote.
+    #[error("validator {validator} has no recorded vote for target epoch {target}")]
+    MissingRecord {
+        /// The validator.
+        validator: ValidatorIndex,
+        /// The target the span cell names.
+        target: Epoch,
+    },
+
     /// One epoch received more distinct votes than a record can number.
     #[error("target epoch {0} ran out of vote numbers")]
     VoteNumbersExhausted(Epoch),
-}
-
-/// Why evidence does not fit a fork's slashing container.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-pub enum EvidenceError {
-    /// A vote has more signers than the fork's indexed attestation may list.
-    #[error("{count} signers exceed the {limit} a {fork} indexed attestation holds")]
-    TooManySigners {
-        /// The fork whose container was asked for.
-        fork: ForkName,
-        /// Signers of the vote.
-        count: usize,
-        /// The container's limit.
-        limit: usize,
-    },
 }

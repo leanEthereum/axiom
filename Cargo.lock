@@ -326,6 +326,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-slasher"
+version = "0.1.0"
+dependencies = [
+ "axiom-snappy",
+ "axiom-ssz",
+ "axiom-store",
+ "axiom-types",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "axiom-snappy"
 version = "0.1.0"
 dependencies = [
