@@ -20,7 +20,7 @@ use crate::{one_time::OneTimeKeys, words::Digest};
 /// Epochs per batch: sixteen 32-bit lanes fill a 512-bit register.
 pub(crate) const LANES: usize = 16;
 
-/// A kernel computing the leaves of LANES epochs.
+/// A kernel computing the leaves of one batch of epochs.
 ///
 /// Kernels compiled for a target feature are unsafe to call where the feature is absent.
 type Kernel = unsafe fn(&OneTimeKeys, &[u32; LANES]) -> [Digest; LANES];
@@ -47,7 +47,7 @@ impl LeafKernel {
         Self { run: portable }
     }
 
-    /// The leaves of LANES epochs.
+    /// The leaves of one batch of epochs.
     pub(crate) fn leaves(self, keys: &OneTimeKeys, epochs: &[u32; LANES]) -> [Digest; LANES] {
         // SAFETY: a kernel is chosen only after its target features are detected on this machine.
         unsafe { (self.run)(keys, epochs) }

@@ -18,7 +18,7 @@
 //! References:
 //!
 //! - Drake, Khovratovich, Kudinov, Wagner, "Hash-Based Multi-Signatures for Post-Quantum Ethereum", eprint 2025/055.
-//! - Drake, Khovratovich, Kudinov, Wagner, "LeanSig for Post-Quantum Ethereum", eprint 2025/1332.
+//! - Drake, Khovratovich, Kudinov, Wagner, technical note on the Ethereum instantiation, eprint 2025/1332.
 //! - Khovratovich, Kudinov, Wagner, "At the Top of the Hypercube", eprint 2025/889.
 //! - Herold, Khovratovich, Kudinov, Tessaro, Wagner, "Aborting Random Oracles", eprint 2026/016.
 

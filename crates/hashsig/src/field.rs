@@ -159,10 +159,11 @@ impl KoalaBear {
     /// The difference, usable in constants.
     #[inline(always)]
     const fn difference(self, other: Self) -> Self {
-        // A borrow means the difference went negative: add p back, selected by a mask.
-        let (difference, borrow) = self.monty.overflowing_sub(other.monty);
+        // A negative difference wraps to 2^32 - k, and adding p gives p - k, the smaller word.
+        // A non-negative one is below p, smaller than itself plus p.
+        let difference = self.monty.wrapping_sub(other.monty);
         Self {
-            monty: difference.wrapping_add(P & mask(borrow)),
+            monty: smaller(difference, difference.wrapping_add(P)),
         }
     }
 
@@ -209,12 +210,19 @@ const fn mask(flag: bool) -> u32 {
     0_u32.wrapping_sub(flag as u32)
 }
 
+/// The smaller of two words.
+///
+/// Compilers lower this select to a conditional move, or to a vector minimum across lanes, never a branch.
+#[inline(always)]
+const fn smaller(a: u32, b: u32) -> u32 {
+    if a < b { a } else { b }
+}
+
 /// Subtracts p once when the word is at least p, for words below 2p.
 #[inline(always)]
 const fn reduce_once(word: u32) -> u32 {
-    // The subtraction borrows exactly when the word is below p, and then the word is kept.
-    let (difference, borrow) = word.overflowing_sub(P);
-    difference.wrapping_add(P & mask(borrow))
+    // Below p, the subtraction wraps above 2^31 + 2^24, so the word itself is the smaller.
+    smaller(word, word.wrapping_sub(P))
 }
 
 /// Reduces any word below p, with two masked subtractions.
@@ -237,12 +245,13 @@ const fn reduce_word(word: u32) -> u32 {
 /// x - t * p is divisible by 2^32, and lies in (-p * 2^32, p * 2^32)
 /// ```
 ///
-/// The quotient by 2^32 lands in (-p, p), and a masked addition of p fixes a negative one.
+/// The low halves of x and t * p are equal, so the quotient is the difference of the high halves.
+/// It lands in (-p, p), and adding p to a negative one is a 32-bit minimum, which vectorizes.
 #[inline(always)]
 const fn montgomery_reduce(x: u64) -> u32 {
     let t = (x as u32).wrapping_mul(P_INV);
-    let (difference, borrow) = x.overflowing_sub(t as u64 * P as u64);
-    ((difference >> 32) as u32).wrapping_add(P & mask(borrow))
+    let difference = ((x >> 32) as u32).wrapping_sub(((t as u64 * P as u64) >> 32) as u32);
+    smaller(difference, difference.wrapping_add(P))
 }
 
 impl fmt::Debug for KoalaBear {
