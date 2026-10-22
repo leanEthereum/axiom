@@ -79,6 +79,7 @@ axiom-types = { path = "crates/types" }
 axiom-state-transition = { path = "crates/state-transition" }
 axiom-fork-choice = { path = "crates/fork-choice" }
 axiom-das = { path = "crates/das" }
+axiom-crypto = { path = "crates/crypto" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"

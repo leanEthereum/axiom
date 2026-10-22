@@ -1,0 +1,20 @@
+[package]
+name = "axiom-crypto"
+description = "Transport cryptography: Keccak, secp256k1, X25519, ChaCha20-Poly1305, AES-GCM, HMAC and HKDF"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
