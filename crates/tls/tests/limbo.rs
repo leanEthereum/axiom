@@ -16,7 +16,7 @@
 //!     $AXIOM_VECTORS/x509-limbo/limbo.json
 //! ```
 
-use std::{collections::BTreeMap, env, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, fs, ops::Range, path::PathBuf};
 
 use axiom_json::{Json, Limits};
 use axiom_tls::{
@@ -276,7 +276,7 @@ fn certificates<'a>(pems: impl Iterator<Item = &'a str>) -> Vec<Vec<u8>> {
 
 /// Reads an RFC 3339 time in UTC: YYYY-MM-DDTHH:MM:SS, then Z or +00:00.
 fn time(text: &str) -> Timestamp {
-    let number = |range: std::ops::Range<usize>| -> u32 { text[range].parse().expect("digits") };
+    let number = |range: Range<usize>| -> u32 { text[range].parse().expect("digits") };
     assert!(
         text.ends_with("+00:00") || text.ends_with('Z'),
         "UTC time {text}"
@@ -348,10 +348,6 @@ fn evaluate(case: &Json) -> Verdict {
 }
 
 #[test]
-#[expect(
-    clippy::print_stderr,
-    reason = "the suite reports its tally to the test output"
-)]
 fn limbo() {
     let Some(suite) = load() else {
         return;
