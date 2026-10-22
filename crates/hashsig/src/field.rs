@@ -176,6 +176,26 @@ impl KoalaBear {
     pub const fn cube(self) -> Self {
         self.product(self).product(self)
     }
+
+    /// The multiplicative inverse, none for zero.
+    ///
+    /// Fermat's little theorem gives x^(p - 2) = x^-1.
+    /// The exponent is public, but the square-and-multiply chain is for public data only.
+    #[must_use]
+    pub(crate) fn inverse(self) -> Option<Self> {
+        if self == Self::ZERO {
+            return None;
+        }
+        let (mut result, mut base, mut exponent) = (Self::ONE, self, P - 2);
+        while exponent > 0 {
+            if exponent & 1 == 1 {
+                result *= base;
+            }
+            base *= base;
+            exponent >>= 1;
+        }
+        Some(result)
+    }
 }
 
 /// An all-ones word when the flag holds, zero otherwise.

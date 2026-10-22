@@ -307,7 +307,7 @@ mod tests {
     use super::*;
     use crate::{
         entropy::SeedStream,
-        instantiation::{HypercubeLifetime, Instantiation},
+        instantiation::{ChunkSize, HypercubeLifetime, Instantiation, Target, TargetSumLifetime},
     };
 
     /// The test lifetime: 2^8 epochs in 16 bottom trees of 16, 4 chains of length 8.
@@ -321,6 +321,22 @@ mod tests {
         KEY.get_or_init(|| {
             scheme()
                 .generate(&mut SeedStream::new(b"properties"), 16..64)
+                .unwrap()
+        })
+    }
+
+    /// A key of lifetime 2^18 with 2-bit chunks, over its first two bottom trees, generated once.
+    fn real_key() -> &'static (PublicKey, SecretKey) {
+        static KEY: OnceLock<(PublicKey, SecretKey)> = OnceLock::new();
+        KEY.get_or_init(|| {
+            let instantiation = Instantiation::TargetSum {
+                lifetime: TargetSumLifetime::Epochs18,
+                chunk: ChunkSize::Two,
+                target: Target::Expected,
+            };
+            instantiation
+                .scheme()
+                .generate(&mut SeedStream::new(b"properties"), 0..1024)
                 .unwrap()
         })
     }
@@ -407,13 +423,14 @@ mod tests {
 
         #[test]
         fn signatures_verify_only_at_their_epoch_and_message(
-            epoch in 16_u32..48,
-            other_epoch in 0_u32..256,
+            epoch in 0_u32..1024,
+            other_epoch in 0_u32..1 << 18,
             message: [u8; 32],
             other_message: [u8; 32],
         ) {
-            let (public, secret) = key();
-            let scheme = scheme();
+            // A real instantiation: the test lifetime's 4 chains of 8 collide too often for this law.
+            let (public, secret) = real_key();
+            let scheme = secret.scheme();
             let signature = secret.sign(LeafEpoch(epoch), &message).unwrap();
 
             // Round trip through bytes, then verification.

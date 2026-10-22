@@ -19,12 +19,20 @@
 //!
 //! # Performance
 //!
-//! The matrix multiply accumulates integer products of Montgomery forms and reduces once per output.
-//! The form is linear: a sum of c_j * (x_j * 2^32) is the form of sum c_j * x_j.
+//! The partial rounds run in their sparse form: a scalar constant and 2 * WIDTH products each.
+//! The full rounds keep the dense matrix, multiplied with one reduction per output.
+//! A property test pins the fast permutation to the textbook one.
 
 mod grain;
+mod matrix;
+mod partial;
 
-use crate::{field::KoalaBear, poseidon::grain::Grain};
+use std::sync::LazyLock;
+
+use crate::{
+    field::KoalaBear,
+    poseidon::{grain::Grain, matrix::DenseMatrix, partial::PartialRounds},
+};
 
 /// Full rounds before and after the partial rounds, R_F / 2 in the Poseidon paper.
 const HALF_FULL_ROUNDS: usize = 4;
@@ -75,18 +83,16 @@ static ROUND_CONSTANTS_24: [[KoalaBear; 24]; 2 * HALF_FULL_ROUNDS + PARTIAL_ROUN
     round_constants(PARTIAL_ROUNDS_24);
 
 /// The width-16 permutation, which compresses one chain step.
-pub static POSEIDON1_16: Poseidon1<16> = Poseidon1 {
-    round_constants: &ROUND_CONSTANTS_16,
-    partial_rounds: PARTIAL_ROUNDS_16,
-    mds_row: MDS_ROW_16,
-};
+///
+/// Its sparse partial rounds are derived once, on first use.
+pub static POSEIDON1_16: LazyLock<Poseidon1<16>> =
+    LazyLock::new(|| Poseidon1::new(&ROUND_CONSTANTS_16, MDS_ROW_16));
 
 /// The width-24 permutation, which merges tree nodes and drives the sponge.
-pub static POSEIDON1_24: Poseidon1<24> = Poseidon1 {
-    round_constants: &ROUND_CONSTANTS_24,
-    partial_rounds: PARTIAL_ROUNDS_24,
-    mds_row: MDS_ROW_24,
-};
+///
+/// Its sparse partial rounds are derived once, on first use.
+pub static POSEIDON1_24: LazyLock<Poseidon1<24>> =
+    LazyLock::new(|| Poseidon1::new(&ROUND_CONSTANTS_24, MDS_ROW_24));
 
 /// The Grain-derived round constants of one instance, rounds in order.
 const fn round_constants<const WIDTH: usize, const ROUNDS: usize>(
@@ -111,29 +117,54 @@ const fn round_constants<const WIDTH: usize, const ROUNDS: usize>(
 }
 
 /// A Poseidon1 permutation over WIDTH field elements.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Poseidon1<const WIDTH: usize> {
-    /// Constants of every round, full and partial alike.
-    round_constants: &'static [[KoalaBear; WIDTH]],
-    /// Number of partial rounds.
-    partial_rounds: usize,
-    /// First row of the circulant MDS matrix, as canonical integers.
-    mds_row: [u32; WIDTH],
+    /// Constants of the initial full rounds.
+    initial: [[KoalaBear; WIDTH]; HALF_FULL_ROUNDS],
+    /// Constants of the terminal full rounds, the first carrying the partial rounds' residual.
+    terminal: [[KoalaBear; WIDTH]; HALF_FULL_ROUNDS],
+    /// The circulant MDS matrix.
+    mds: DenseMatrix<WIDTH>,
+    /// The partial rounds in sparse form.
+    partial: PartialRounds<WIDTH>,
 }
 
 impl<const WIDTH: usize> Poseidon1<WIDTH> {
+    /// The permutation of textbook round constants and a circulant matrix's first row.
+    fn new(round_constants: &[[KoalaBear; WIDTH]], mds_row: [u32; WIDTH]) -> Self {
+        let mds = DenseMatrix::circulant(mds_row);
+        let (initial, rest) = round_constants.split_at(HALF_FULL_ROUNDS);
+        let (partial, terminal) = rest.split_at(rest.len() - HALF_FULL_ROUNDS);
+        let partial = PartialRounds::new(&mds.elements(), partial);
+        let mut terminal: [[KoalaBear; WIDTH]; HALF_FULL_ROUNDS] =
+            terminal.try_into().expect("four terminal rounds");
+        for (constant, &residual) in terminal[0].iter_mut().zip(&partial.residual) {
+            *constant += residual;
+        }
+        Self {
+            initial: initial.try_into().expect("four initial rounds"),
+            terminal,
+            mds,
+            partial,
+        }
+    }
+
     /// Applies the permutation in place.
     pub fn permute(&self, state: &mut [KoalaBear; WIDTH]) {
-        let (first, rest) = self.round_constants.split_at(HALF_FULL_ROUNDS);
-        let (partial, last) = rest.split_at(self.partial_rounds);
+        // The last initial round multiplies by D_0 * M, which opens the sparse partial rounds.
+        let (last, first) = self.initial.split_last().expect("four initial rounds");
         for constants in first {
-            self.full_round(state, constants);
+            Self::sbox_layer(state, constants);
+            self.mds.apply(state);
         }
-        for constants in partial {
-            self.partial_round(state, constants);
-        }
-        for constants in last {
-            self.full_round(state, constants);
+        Self::sbox_layer(state, last);
+        self.partial.entry_matrix.apply(state);
+
+        self.partial.apply(state);
+
+        for constants in &self.terminal {
+            Self::sbox_layer(state, constants);
+            self.mds.apply(state);
         }
     }
 
@@ -148,62 +179,49 @@ impl<const WIDTH: usize> Poseidon1<WIDTH> {
         std::array::from_fn(|i| state[i] + input[i])
     }
 
-    /// A full round: constants, the S-box on every word, then the matrix.
-    fn full_round(&self, state: &mut [KoalaBear; WIDTH], constants: &[KoalaBear; WIDTH]) {
+    /// The first half of a full round: constants, then the S-box on every word.
+    fn sbox_layer(state: &mut [KoalaBear; WIDTH], constants: &[KoalaBear; WIDTH]) {
         for (word, &constant) in state.iter_mut().zip(constants) {
             *word = (*word + constant).cube();
         }
-        self.mix(state);
     }
-
-    /// A partial round: constants on every word, the S-box on the first, then the matrix.
-    fn partial_round(&self, state: &mut [KoalaBear; WIDTH], constants: &[KoalaBear; WIDTH]) {
-        for (word, &constant) in state.iter_mut().zip(constants) {
-            *word += constant;
-        }
-        state[0] = state[0].cube();
-        self.mix(state);
-    }
-
-    /// Multiplies the state by the circulant matrix: out_i = sum_j row_((j - i) mod WIDTH) * x_j.
-    fn mix(&self, state: &mut [KoalaBear; WIDTH]) {
-        let input = state.map(|word| u128::from(word.montgomery()));
-        for (i, out) in state.iter_mut().enumerate() {
-            // Bound: 24 products below 2^31 * 2^31 sum below 2^67, so 128 bits hold them.
-            let mut sum = 0_u128;
-            for (j, &x) in input.iter().enumerate() {
-                sum += u128::from(self.mds_row[(j + WIDTH - i) % WIDTH]) * x;
-            }
-            *out = fold(sum);
-        }
-    }
-}
-
-/// The element whose Montgomery form is congruent to a sum below 2^67.
-///
-/// # Algorithm
-///
-/// The prime's shape gives a cheap first fold, since 2^31 = 2^24 - 1 mod p.
-///
-/// ```text
-/// sum = high * 2^31 + low
-///     = high * (2^24 - 1) + low   mod p
-/// ```
-///
-/// High is below 2^36, so the folded sum is below 2^61, inside the Montgomery reduction's range.
-const fn fold(sum: u128) -> KoalaBear {
-    let high = (sum >> 31) as u64;
-    let low = (sum as u64) & ((1 << 31) - 1);
-    KoalaBear::from_montgomery_sum(high * ((1 << 24) - 1) + low)
 }
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     /// Canonical values to elements.
     fn elements<const N: usize>(values: [u32; N]) -> [KoalaBear; N] {
         values.map(|value| KoalaBear::from_canonical(value).unwrap())
+    }
+
+    /// The textbook permutation: every round adds WIDTH constants and multiplies by the dense matrix.
+    ///
+    /// It is the oracle the sparse partial rounds are pinned to.
+    fn textbook<const WIDTH: usize>(
+        state: &mut [KoalaBear; WIDTH],
+        constants: &[[KoalaBear; WIDTH]],
+        mds_row: [u32; WIDTH],
+    ) {
+        let mds = DenseMatrix::circulant(mds_row);
+        let partial_rounds = constants.len() - 2 * HALF_FULL_ROUNDS;
+        for (round, round_constants) in constants.iter().enumerate() {
+            let full = round < HALF_FULL_ROUNDS || round >= HALF_FULL_ROUNDS + partial_rounds;
+            for (word, &constant) in state.iter_mut().zip(round_constants) {
+                *word += constant;
+            }
+            if full {
+                for word in state.iter_mut() {
+                    *word = word.cube();
+                }
+            } else {
+                state[0] = state[0].cube();
+            }
+            mds.apply_reference(state);
+        }
     }
 
     #[test]
@@ -298,11 +316,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fold_reduces_the_largest_sum() {
-        // The largest sum the width-24 matrix produces: 24 products of p - 1 by p - 1.
-        let p = u128::from(KoalaBear::ORDER);
-        let sum = 24 * (p - 1) * (p - 1);
-        assert_eq!(fold(sum).montgomery(), (sum % p) as u32);
+    proptest! {
+        #[test]
+        fn the_fast_permutation_is_the_textbook_one(
+            state16 in prop::array::uniform16(0..KoalaBear::ORDER),
+            state24 in prop::collection::vec(0..KoalaBear::ORDER, 24),
+        ) {
+            let state16 = state16.map(KoalaBear::new);
+            let (mut fast, mut expected) = (state16, state16);
+            POSEIDON1_16.permute(&mut fast);
+            textbook(&mut expected, &ROUND_CONSTANTS_16, MDS_ROW_16);
+            prop_assert_eq!(fast, expected);
+
+            let state24: [KoalaBear; 24] = std::array::from_fn(|i| KoalaBear::new(state24[i]));
+            let (mut fast, mut expected) = (state24, state24);
+            POSEIDON1_24.permute(&mut fast);
+            textbook(&mut expected, &ROUND_CONSTANTS_24, MDS_ROW_24);
+            prop_assert_eq!(fast, expected);
+        }
     }
 }
