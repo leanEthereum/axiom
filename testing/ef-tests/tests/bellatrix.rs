@@ -2,12 +2,10 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
-//!
-//! The fork choice and sync runners belong to other suites.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic, Suite,
-    Transition,
+    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
+    StoreReplay, Suite, Transition,
     forks::{Altair, Bellatrix},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -207,5 +205,50 @@ fn light_client_mainnet() {
     if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
         // Cases: merkle proofs 3.
         assert_eq!((report.passed, report.skipped.len()), (3, 0));
+    }
+}
+
+#[test]
+fn fork_choice_minimal() {
+    let runner = StoreReplay::<Minimal, Bellatrix>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
+        // Cases: ex ante 3, get head 11, proposer head 3, on block 23, on merge block 4, reorg 8, withholding 2.
+        assert_eq!((report.passed, report.skipped.len()), (54, 0));
+    }
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    let runner = StoreReplay::<Mainnet, Bellatrix>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
+        // Cases: ex ante 5, get head 7, proposer head 3, on block 6, on merge block 4.
+        assert_eq!((report.passed, report.skipped.len()), (25, 0));
+    }
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    let runner = StoreReplay::<Minimal, Bellatrix>::fast_confirmation();
+    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
+        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 10, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
+        assert_eq!((report.passed, report.skipped.len()), (175, 0));
+    }
+}
+
+#[test]
+fn sync_minimal() {
+    let runner = StoreReplay::<Minimal, Bellatrix>::sync();
+    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
+    }
+}
+
+#[test]
+fn sync_mainnet() {
+    let runner = StoreReplay::<Mainnet, Bellatrix>::sync();
+    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
     }
 }

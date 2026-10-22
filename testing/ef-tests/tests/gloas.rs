@@ -7,7 +7,7 @@ use std::{collections::HashMap, fs};
 
 use axiom_ef_tests::{
     Blocks, Case, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
-    Suite, Transition, Vectors,
+    StoreReplay, Suite, Transition, Vectors,
     forks::{Fulu, Gloas},
 };
 use axiom_ssz::Ssz;
@@ -291,5 +291,32 @@ fn light_client_mainnet() {
     if let Some(report) = Suite::run(&runner, "mainnet", "gloas") {
         // Cases: merkle proofs 4.
         assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
+}
+
+#[test]
+fn fork_choice_minimal() {
+    let runner = StoreReplay::<Minimal, Gloas>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
+        // Cases: deposit with reorg 1, ex ante 3, filter node tree variants 3, get head 12, parent payload status 1, on attestation 5, on block 25, on envelope 15, on payload attestation 7, payload data availability 3, payload timeliness 3, reorg 8, should apply proposer boost 4, withholding 2.
+        assert_eq!((report.passed, report.skipped.len()), (92, 0));
+    }
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    let runner = StoreReplay::<Mainnet, Gloas>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "mainnet", "gloas") {
+        // Cases: ex ante 5, get head 8, parent payload status 1, on attestation 5, on block 8, on envelope 15, on payload attestation 7, payload data availability 3, payload timeliness 3.
+        assert_eq!((report.passed, report.skipped.len()), (55, 0));
+    }
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    let runner = StoreReplay::<Minimal, Gloas>::fast_confirmation();
+    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
+        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 20, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
+        assert_eq!((report.passed, report.skipped.len()), (185, 0));
     }
 }

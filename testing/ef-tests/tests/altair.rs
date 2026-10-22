@@ -2,12 +2,10 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
-//!
-//! The fork choice and sync runners belong to other suites.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic, Suite,
-    Transition,
+    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
+    StoreReplay, Suite, Transition,
     forks::{Altair, Phase0},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -167,5 +165,32 @@ fn light_client_mainnet() {
     if let Some(report) = Suite::run(&runner, "mainnet", "altair") {
         // Cases: merkle proofs 3.
         assert_eq!((report.passed, report.skipped.len()), (3, 0));
+    }
+}
+
+#[test]
+fn fork_choice_minimal() {
+    let runner = StoreReplay::<Minimal, Altair>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "minimal", "altair") {
+        // Cases: ex ante 3, get head 11, proposer head 3, on block 23, reorg 8, withholding 2.
+        assert_eq!((report.passed, report.skipped.len()), (50, 0));
+    }
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    let runner = StoreReplay::<Mainnet, Altair>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "mainnet", "altair") {
+        // Cases: ex ante 5, get head 7, proposer head 3, on block 6.
+        assert_eq!((report.passed, report.skipped.len()), (21, 0));
+    }
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    let runner = StoreReplay::<Minimal, Altair>::fast_confirmation();
+    if let Some(report) = Suite::run(&runner, "minimal", "altair") {
+        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 10, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
+        assert_eq!((report.passed, report.skipped.len()), (175, 0));
     }
 }

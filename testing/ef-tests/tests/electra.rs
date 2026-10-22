@@ -5,7 +5,7 @@
 
 use axiom_ef_tests::{
     Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
-    SszStatic, Suite, Transition,
+    SszStatic, StoreReplay, Suite, Transition,
     forks::{Deneb, Electra},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -199,5 +199,50 @@ fn merkle_proof_mainnet() {
     if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
         // Cases: four blob commitment proofs into the block body.
         assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
+}
+
+#[test]
+fn fork_choice_minimal() {
+    let runner = StoreReplay::<Minimal, Electra>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
+        // Cases: deposit with reorg 1, ex ante 3, get head 11, proposer head 3, on block 28, reorg 8, withholding 2.
+        assert_eq!((report.passed, report.skipped.len()), (56, 0));
+    }
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    let runner = StoreReplay::<Mainnet, Electra>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
+        // Cases: ex ante 5, get head 7, proposer head 3, on block 11.
+        assert_eq!((report.passed, report.skipped.len()), (26, 0));
+    }
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    let runner = StoreReplay::<Minimal, Electra>::fast_confirmation();
+    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
+        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 19, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
+        assert_eq!((report.passed, report.skipped.len()), (184, 0));
+    }
+}
+
+#[test]
+fn sync_minimal() {
+    let runner = StoreReplay::<Minimal, Electra>::sync();
+    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
+    }
+}
+
+#[test]
+fn sync_mainnet() {
+    let runner = StoreReplay::<Mainnet, Electra>::sync();
+    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
     }
 }
