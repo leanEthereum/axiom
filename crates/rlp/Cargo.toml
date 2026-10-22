@@ -1,0 +1,18 @@
+[package]
+name = "axiom-rlp"
+description = "Recursive Length Prefix encoding with strict canonical decoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+axiom-json.workspace = true
+proptest.workspace = true
