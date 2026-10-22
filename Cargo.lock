@@ -113,6 +113,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-kzg"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls12-381",
+ "axiom-yaml",
+ "proptest",
+ "sha2",
+]
+
+[[package]]
 name = "axiom-light-client"
 version = "0.1.0"
 dependencies = [
