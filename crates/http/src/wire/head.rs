@@ -12,8 +12,7 @@
 //! Lines end with CRLF; a bare LF or CR inside the head is rejected.
 
 use crate::{
-    BodyLength, Headers, Limits, Method, ProtocolError, StatusCode, Version,
-    headers::{is_token_byte, is_value_byte},
+    BodyLength, Headers, Limits, Method, ProtocolError, StatusCode, Version, charset::Charset,
 };
 
 /// The start line and fields of a request.
@@ -46,7 +45,7 @@ impl RequestHead {
         while buf[skipped..].starts_with(b"\r\n") {
             skipped += 2;
         }
-        let Some((lines, length)) = split_head(&buf[skipped..], limits)? else {
+        let Some((lines, length)) = HeadLines::split(&buf[skipped..], limits)? else {
             return Ok(None);
         };
 
@@ -61,7 +60,7 @@ impl RequestHead {
         // A well-formed token naming no known method earns a 501, anything else a 400.
         let method = match Method::from_bytes(method) {
             Some(method) => method,
-            None if !method.is_empty() && method.iter().all(|&byte| is_token_byte(byte)) => {
+            None if !method.is_empty() && Charset::Token.admits(method) => {
                 return Err(ProtocolError::UnknownMethod);
             }
             None => return Err(ProtocolError::InvalidRequestLine),
@@ -76,7 +75,7 @@ impl RequestHead {
         let target = target.iter().copied().map(char::from).collect();
 
         let version = Version::from_bytes(version).ok_or(ProtocolError::UnsupportedVersion)?;
-        let headers = parse_fields(lines.fields, limits)?;
+        let headers = lines.headers(limits)?;
 
         Ok(Some((
             Self {
@@ -93,13 +92,13 @@ impl RequestHead {
     ///
     /// RFC 9112 section 6.3: chunked coding, else a content length, else no body.
     pub fn body_length(&self) -> Result<BodyLength, ProtocolError> {
-        Ok(framing(&self.headers)?.unwrap_or(BodyLength::Empty))
+        Ok(self.headers.body_framing()?.unwrap_or(BodyLength::Empty))
     }
 
     /// Whether the client wants the connection kept open after the response.
     #[must_use]
     pub fn keep_alive(&self) -> bool {
-        keep_alive(self.version, &self.headers)
+        self.version.persists(&self.headers)
     }
 }
 
@@ -123,7 +122,7 @@ impl ResponseHead {
     ///
     /// The head and the bytes it spans, or nothing while the head is incomplete.
     pub fn parse(buf: &[u8], limits: &Limits) -> Result<Option<(Self, usize)>, ProtocolError> {
-        let Some((lines, length)) = split_head(buf, limits)? else {
+        let Some((lines, length)) = HeadLines::split(buf, limits)? else {
             return Ok(None);
         };
 
@@ -144,7 +143,7 @@ impl ResponseHead {
         let well_formed = code.len() == 3
             && code.iter().all(u8::is_ascii_digit)
             && (reason.is_empty() || reason[0] == b' ')
-            && reason.iter().all(|&byte| is_value_byte(byte));
+            && Charset::FieldValue.admits(reason);
         if !well_formed {
             return Err(ProtocolError::InvalidStatusLine);
         }
@@ -153,7 +152,7 @@ impl ResponseHead {
             .fold(0_u16, |value, digit| value * 10 + u16::from(digit - b'0'));
         let status = StatusCode::new(code).ok_or(ProtocolError::InvalidStatusLine)?;
 
-        let headers = parse_fields(lines.fields, limits)?;
+        let headers = lines.headers(limits)?;
         Ok(Some((
             Self {
                 version,
@@ -183,13 +182,16 @@ impl ResponseHead {
         if code == 304 {
             return Ok(BodyLength::Empty);
         }
-        Ok(framing(&self.headers)?.unwrap_or(BodyLength::UntilClose))
+        Ok(self
+            .headers
+            .body_framing()?
+            .unwrap_or(BodyLength::UntilClose))
     }
 
     /// Whether the server keeps the connection open after this response.
     #[must_use]
     pub fn keep_alive(&self) -> bool {
-        keep_alive(self.version, &self.headers)
+        self.version.persists(&self.headers)
     }
 }
 
@@ -201,150 +203,85 @@ struct HeadLines<'a> {
     fields: &'a [u8],
 }
 
-/// Finds the empty line that ends a head.
-///
-/// # Returns
-///
-/// The head's lines and its length with the terminator, or nothing while it is incomplete.
-fn split_head<'a>(
-    buf: &'a [u8],
-    limits: &Limits,
-) -> Result<Option<(HeadLines<'a>, usize)>, ProtocolError> {
-    // Search only within the limit, so a huge buffer costs no more than a full one.
-    let window = &buf[..buf.len().min(limits.max_head_bytes)];
-    let Some(end) = window.windows(4).position(|four| four == b"\r\n\r\n") else {
-        // No terminator yet: wait for more bytes, unless the limit is already reached.
-        return if buf.len() >= limits.max_head_bytes {
-            Err(ProtocolError::HeadTooLarge)
-        } else {
-            Ok(None)
+impl<'a> HeadLines<'a> {
+    /// Finds the empty line that ends a head.
+    ///
+    /// # Returns
+    ///
+    /// The head's lines and its length with the terminator, or nothing while it is incomplete.
+    fn split(buf: &'a [u8], limits: &Limits) -> Result<Option<(Self, usize)>, ProtocolError> {
+        // Search only within the limit, so a huge buffer costs no more than a full one.
+        let window = &buf[..buf.len().min(limits.max_head_bytes)];
+        let Some(end) = window.windows(4).position(|four| four == b"\r\n\r\n") else {
+            // No terminator yet: wait for more bytes, unless the limit is already reached.
+            return if buf.len() >= limits.max_head_bytes {
+                Err(ProtocolError::HeadTooLarge)
+            } else {
+                Ok(None)
+            };
         };
-    };
 
-    // The start line runs to the first CRLF; fields fill the rest, minus the empty line.
-    //
-    //     start\r\n field\r\n field\r\n \r\n
-    //     ^^^^^     ^^^^^^^^^^^^^^^^^^^^ fields
-    let head = &buf[..end + 2];
-    let start_end = head
-        .windows(2)
-        .position(|two| two == b"\r\n")
-        .unwrap_or(end);
-    Ok(Some((
-        HeadLines {
-            start: &head[..start_end],
-            fields: &head[start_end + 2..],
-        },
-        end + 4,
-    )))
-}
-
-/// Parses field lines, each ending with CRLF.
-fn parse_fields(mut fields: &[u8], limits: &Limits) -> Result<Headers, ProtocolError> {
-    let mut headers = Headers::new();
-    while !fields.is_empty() {
-        // Each line ends at its CRLF; the head splitter guarantees the last one has it.
-        let Some(line_end) = fields.windows(2).position(|two| two == b"\r\n") else {
-            return Err(ProtocolError::InvalidHeader);
-        };
-        let line = &fields[..line_end];
-        fields = &fields[line_end + 2..];
-
-        // Count before parsing, so a flood of fields stops at the limit.
-        if headers.len() == limits.max_headers {
-            return Err(ProtocolError::TooManyHeaders);
-        }
-
-        // name ":" OWS value OWS
+        // The start line runs to the first CRLF; fields fill the rest, minus the empty line.
         //
-        // The name must be a nonempty token.
-        // That rejects whitespace before the colon and obsolete line folding,
-        // as RFC 9112 section 5.1 and 5.2 require of a server.
-        let Some(colon) = line.iter().position(|&byte| byte == b':') else {
-            return Err(ProtocolError::InvalidHeader);
-        };
-        let (name, value) = (&line[..colon], &line[colon + 1..]);
-        if name.is_empty() || !name.iter().all(|&byte| is_token_byte(byte)) {
-            return Err(ProtocolError::InvalidHeader);
-        }
-
-        // Strip optional whitespace around the value, then check what remains.
-        let value = value.trim_ascii();
-        if !value.iter().all(|&byte| is_value_byte(byte)) {
-            return Err(ProtocolError::InvalidHeader);
-        }
-        // Bytes from 0x80 up are allowed on the wire but must form UTF-8 here.
-        let value = str::from_utf8(value).map_err(|_| ProtocolError::InvalidHeader)?;
-
-        // A token is ASCII, so this conversion keeps every byte.
-        let name: String = name.iter().copied().map(char::from).collect();
-        headers.append(&name, value);
-    }
-    Ok(headers)
-}
-
-/// The framing the fields declare, if any.
-///
-/// Both declarations at once are refused rather than resolved.
-/// RFC 9112 section 6.3 allows that, and it shuts the door on request smuggling.
-fn framing(headers: &Headers) -> Result<Option<BodyLength>, ProtocolError> {
-    let length = content_length(headers)?;
-    let mut codings = headers.get_all("transfer-encoding").peekable();
-
-    if codings.peek().is_none() {
-        // No transfer coding: the content length frames the body, if present.
-        return Ok(length.map(BodyLength::Fixed));
-    }
-    if length.is_some() {
-        return Err(ProtocolError::ConflictingLength);
+        //     start\r\n field\r\n field\r\n \r\n
+        //     ^^^^^     ^^^^^^^^^^^^^^^^^^^^ fields
+        let head = &buf[..end + 2];
+        let start_end = head
+            .windows(2)
+            .position(|two| two == b"\r\n")
+            .unwrap_or(end);
+        Ok(Some((
+            Self {
+                start: &head[..start_end],
+                fields: &head[start_end + 2..],
+            },
+            end + 4,
+        )))
     }
 
-    // Exactly one coding, chunked, across all transfer-encoding fields.
-    let mut list = codings
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|item| !item.is_empty());
-    match (list.next(), list.next()) {
-        (Some(coding), None) if coding.eq_ignore_ascii_case("chunked") => {
-            Ok(Some(BodyLength::Chunked))
-        }
-        _ => Err(ProtocolError::UnsupportedTransferEncoding),
-    }
-}
+    /// Parses the field lines, each ending with CRLF.
+    fn headers(&self, limits: &Limits) -> Result<Headers, ProtocolError> {
+        let mut fields = self.fields;
+        let mut headers = Headers::new();
+        while !fields.is_empty() {
+            // Each line ends at its CRLF; the head splitter guarantees the last one has it.
+            let Some(line_end) = fields.windows(2).position(|two| two == b"\r\n") else {
+                return Err(ProtocolError::InvalidHeader);
+            };
+            let line = &fields[..line_end];
+            fields = &fields[line_end + 2..];
 
-/// The declared content length, when present.
-///
-/// Repeated values are allowed only when identical, per RFC 9112 section 6.3 rule 5.
-fn content_length(headers: &Headers) -> Result<Option<u64>, ProtocolError> {
-    let mut length = None;
-    // A field may repeat, and one field may hold a comma-separated list.
-    for item in headers
-        .get_all("content-length")
-        .flat_map(|value| value.split(','))
-    {
-        let item = item.trim();
-        // Digits only; a sign, a space, or hex is malformed.
-        if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(ProtocolError::InvalidContentLength);
-        }
-        let value: u64 = item
-            .parse()
-            .map_err(|_| ProtocolError::InvalidContentLength)?;
-        match length {
-            Some(previous) if previous != value => return Err(ProtocolError::ConflictingLength),
-            _ => length = Some(value),
-        }
-    }
-    Ok(length)
-}
+            // Count before parsing, so a flood of fields stops at the limit.
+            if headers.len() == limits.max_headers {
+                return Err(ProtocolError::TooManyHeaders);
+            }
 
-/// Whether a connection persists after the message, per RFC 9112 section 9.3.
-fn keep_alive(version: Version, headers: &Headers) -> bool {
-    match version {
-        // HTTP/1.1 persists unless a party says close.
-        Version::Http11 => !headers.has_token("connection", "close"),
-        // HTTP/1.0 closes unless a party asks to keep alive.
-        Version::Http10 => headers.has_token("connection", "keep-alive"),
+            // name ":" OWS value OWS
+            //
+            // The name must be a nonempty token.
+            // That rejects whitespace before the colon and obsolete line folding,
+            // as RFC 9112 section 5.1 and 5.2 require of a server.
+            let Some(colon) = line.iter().position(|&byte| byte == b':') else {
+                return Err(ProtocolError::InvalidHeader);
+            };
+            let (name, value) = (&line[..colon], &line[colon + 1..]);
+            if name.is_empty() || !Charset::Token.admits(name) {
+                return Err(ProtocolError::InvalidHeader);
+            }
+
+            // Strip optional whitespace around the value, then check what remains.
+            let value = value.trim_ascii();
+            if !Charset::FieldValue.admits(value) {
+                return Err(ProtocolError::InvalidHeader);
+            }
+            // Bytes from 0x80 up are allowed on the wire but must form UTF-8 here.
+            let value = str::from_utf8(value).map_err(|_| ProtocolError::InvalidHeader)?;
+
+            // A token is ASCII, so this conversion keeps every byte.
+            let name: String = name.iter().copied().map(char::from).collect();
+            headers.append(&name, value);
+        }
+        Ok(headers)
     }
 }
 
