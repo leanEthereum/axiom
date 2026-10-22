@@ -1769,6 +1769,7 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
         //     block 3 published        parent 2 unknown: B looks up 2, then 1
         let settings = |listen_address, boot_nodes| NetworkSettings {
             quic_port: None,
+            subscribe_all_subnets: false,
             target_peers: 64,
             port_mapping: PortMappingSettings::default(),
             listen_address,
@@ -1777,7 +1778,7 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
             discovery: None,
         };
         let node_config = |network, http, metrics| NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             http_address: Some(http),
             metrics_address: metrics,
             network: Some(network),
@@ -1912,7 +1913,7 @@ fn the_validator_monitor_reports_watched_votes_blocks_and_misses() {
         let api = free_address();
         let metrics = free_address();
         let node_config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             http_address: Some(api),
             metrics_address: Some(metrics),
             monitor: MonitorSettings {
