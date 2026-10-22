@@ -212,6 +212,28 @@ impl Multiaddr {
         }
     }
 
+    /// The socket address of a QUIC version 1 address, ignoring a trailing peer layer.
+    #[must_use]
+    pub const fn quic_socket_addr(&self) -> Option<SocketAddr> {
+        match self.protocols.as_slice() {
+            [Protocol::Ip4(ip), Protocol::Udp(port), Protocol::QuicV1]
+            | [
+                Protocol::Ip4(ip),
+                Protocol::Udp(port),
+                Protocol::QuicV1,
+                Protocol::P2p(_),
+            ] => Some(SocketAddr::new(IpAddr::V4(*ip), *port)),
+            [Protocol::Ip6(ip), Protocol::Udp(port), Protocol::QuicV1]
+            | [
+                Protocol::Ip6(ip),
+                Protocol::Udp(port),
+                Protocol::QuicV1,
+                Protocol::P2p(_),
+            ] => Some(SocketAddr::new(IpAddr::V6(*ip), *port)),
+            _ => None,
+        }
+    }
+
     /// The binary encoding.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -230,6 +252,18 @@ impl Multiaddr {
             protocols.push(Protocol::read(&mut bytes)?);
         }
         Ok(Self { protocols })
+    }
+
+    /// The QUIC version 1 address of a UDP socket.
+    #[must_use]
+    pub fn from_quic(addr: SocketAddr) -> Self {
+        let ip = match addr.ip() {
+            IpAddr::V4(ip) => Protocol::Ip4(ip),
+            IpAddr::V6(ip) => Protocol::Ip6(ip),
+        };
+        Self {
+            protocols: vec![ip, Protocol::Udp(addr.port()), Protocol::QuicV1],
+        }
     }
 
     /// The address of a TCP socket.
@@ -425,6 +459,27 @@ mod tests {
         assert_eq!(Multiaddr::from_bytes(&expected), Ok(addr.clone()));
         // A QUIC address is not a TCP socket.
         assert_eq!(addr.tcp_socket_addr(), None);
+    }
+
+    #[test]
+    fn quic_socket_addresses() {
+        // The QUIC form of a socket round-trips through its socket address.
+        let socket: SocketAddr = "192.0.2.7:9000".parse().unwrap();
+        let address = Multiaddr::from_quic(socket);
+        assert_eq!(address.to_string(), "/ip4/192.0.2.7/udp/9000/quic-v1");
+        assert_eq!(address.quic_socket_addr(), Some(socket));
+        assert_eq!(address.tcp_socket_addr(), None);
+
+        // A trailing peer layer is ignored; IPv6 works the same way.
+        let peer = PeerId::from_public_key(&PublicKey::secp256k1([2; 33]));
+        let with_peer = address.with(Protocol::P2p(peer));
+        assert_eq!(with_peer.quic_socket_addr(), Some(socket));
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        assert_eq!(Multiaddr::from_quic(v6).quic_socket_addr(), Some(v6));
+
+        // Plain UDP without the QUIC layer is not a QUIC address.
+        let udp: Multiaddr = "/ip4/192.0.2.7/udp/9000".parse().unwrap();
+        assert_eq!(udp.quic_socket_addr(), None);
     }
 
     #[test]

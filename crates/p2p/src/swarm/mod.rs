@@ -1,4 +1,4 @@
-//! The tokio adapter: TCP connections, upgrades, and one task per connection.
+//! The tokio adapter: TCP and QUIC connections, upgrades, and one task per connection.
 //!
 //! # Overview
 //!
@@ -7,14 +7,15 @@
 //! - A handle sends commands: dial, publish, subscribe, request, respond, disconnect.
 //! - An event stream reports peers, gossip messages, requests, and responses.
 //!
-//! Three kinds of task run below the node:
+//! Four kinds of task run below the node:
 //!
 //! - The swarm task owns the gossipsub router and the request tables.
 //!   It takes commands from the handle and emits events to the node.
 //! - A connection task runs per peer, with its yamux session and stream handlers.
 //!   It sends events up to the swarm task, and takes commands from it.
 //!   It writes sealed frames to the socket.
-//! - A reader task per connection reads the socket and hands plaintext to the connection task.
+//! - A reader task per TCP connection reads the socket and hands plaintext to the connection task.
+//! - With QUIC enabled, an endpoint task routes the UDP socket's datagrams to connection tasks.
 //!
 //! Every task waits on a single channel, so no task ever selects over several futures.
 //! The swarm task owns the router; its clock is the time since the swarm started.
@@ -42,6 +43,8 @@
 mod connection;
 mod driver;
 mod events;
+mod quic;
+mod transport;
 mod upgrade;
 
 use std::{
@@ -56,7 +59,7 @@ use std::{
 pub use events::{EventLimits, NetworkEvents};
 use thiserror::Error;
 use tokio::{
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     sync::{mpsc, oneshot},
 };
 
@@ -73,7 +76,9 @@ use crate::{
     identity::{Keypair, PeerId},
     multiaddr::{Multiaddr, MultiaddrError},
     multistream::NegotiationError,
+    quic::{Endpoint, QuicConfig},
     secure::{SecureError, SecurityUpgrade, noise::NoiseConfig},
+    tls::{TlsError, TlsIdentity},
     yamux,
 };
 
@@ -84,6 +89,8 @@ pub struct NetworkConfig {
     pub identity: Keypair,
     /// The TCP address to listen on; port zero picks a free port.
     pub listen_addr: Multiaddr,
+    /// The QUIC address to listen and dial from, or nothing to run TCP alone.
+    pub quic_listen_addr: Option<Multiaddr>,
     /// The security protocol: Noise, or plaintext in tests.
     pub security: Arc<dyn SecurityUpgrade>,
     /// Gossipsub parameters.
@@ -129,6 +136,7 @@ impl NetworkConfig {
         Self {
             identity,
             listen_addr: Multiaddr::from_tcp(([127, 0, 0, 1], 0).into()),
+            quic_listen_addr: None,
             security,
             gossipsub: GossipsubConfig::default(),
             scoring: None,
@@ -302,6 +310,9 @@ pub enum NetworkError {
     /// The security handshake failed.
     #[error("security handshake failed: {0}")]
     Security(#[from] SecureError),
+    /// The TLS certificate for QUIC could not be made.
+    #[error("TLS identity failed: {0}")]
+    Tls(#[from] TlsError),
     /// The peer closed the connection.
     #[error("connection closed")]
     ConnectionClosed,
@@ -368,6 +379,8 @@ pub struct NetworkHandle {
     local_peer: PeerId,
     /// The bound listen address.
     listen_addr: Multiaddr,
+    /// The bound QUIC address, when QUIC listens.
+    quic_listen_addr: Option<Multiaddr>,
     /// The next outbound request identifier.
     next_request: Arc<AtomicU64>,
 }
@@ -385,7 +398,13 @@ impl NetworkHandle {
         &self.listen_addr
     }
 
-    /// Dials a TCP address; a trailing peer layer is checked during the handshake.
+    /// The bound QUIC address, with the actual port, when QUIC listens.
+    #[must_use]
+    pub const fn quic_listen_addr(&self) -> Option<&Multiaddr> {
+        self.quic_listen_addr.as_ref()
+    }
+
+    /// Dials a TCP or QUIC address; a trailing peer layer is checked during the handshake.
     pub async fn dial(&self, address: Multiaddr) -> Result<(), NetworkError> {
         self.send(Command::Dial(address)).await
     }
@@ -470,7 +489,7 @@ impl NetworkHandle {
     }
 }
 
-/// Starts the network: binds the listener and spawns the swarm.
+/// Starts the network: binds the listeners and spawns the swarm.
 ///
 /// Must be called from within a tokio runtime.
 pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvents), NetworkError> {
@@ -483,17 +502,44 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
     let local_peer = config.identity.peer_id();
     let (input_tx, input_rx) = mpsc::channel(config.swarm_queue.max(1));
     let queue = events::EventQueue::new(config.event_limits);
+
+    // QUIC: one UDP socket, an endpoint with this node's libp2p certificate, and its tasks.
+    let mut listen_addrs = vec![listen_addr.clone()];
+    let mut quic_listen_addr = None;
+    let mut quic_shared = None;
+    let mut quic_tasks = Vec::new();
+    if let Some(address) = &config.quic_listen_addr {
+        let socket = address
+            .quic_socket_addr()
+            .ok_or_else(|| NetworkError::UnsupportedAddress(address.clone()))?;
+        let socket = UdpSocket::bind(socket).await?;
+        let bound = Multiaddr::from_quic(socket.local_addr()?);
+        let identity = TlsIdentity::generate(&config.identity, quic::os_entropy()?)?;
+        let endpoint = Endpoint::new(
+            Arc::new(QuicConfig::new(Arc::new(identity))),
+            quic::os_entropy()?,
+        );
+        let (shared, tasks) =
+            quic::QuicShared::start(socket, endpoint, input_tx.clone(), config.connection_queue);
+        listen_addrs.push(bound.clone());
+        quic_listen_addr = Some(bound);
+        quic_shared = Some(shared);
+        quic_tasks.extend(tasks);
+    }
+
     driver::Swarm::new(
         config,
-        listen_addr.clone(),
+        listen_addrs,
         input_tx.clone(),
         Arc::clone(&queue),
+        quic_shared,
     )
-    .spawn(listener, input_rx);
+    .spawn(listener, quic_tasks, input_rx);
     let handle = NetworkHandle {
         commands: input_tx,
         local_peer,
         listen_addr,
+        quic_listen_addr,
         next_request: Arc::new(AtomicU64::new(1)),
     };
     Ok((handle, NetworkEvents::new(queue)))
