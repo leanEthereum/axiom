@@ -200,13 +200,22 @@ impl Cli {
         usage
     }
 
-    /// The preset and chain configuration a network name or a config file names.
+    /// The preset and chain configuration a network name, a network directory, or a config file names.
     ///
     /// A config file wins over the network name.
+    /// A network directory excludes both, as on the beacon node.
     pub(crate) fn choose_chain(
         network: Option<&str>,
+        testnet_dir: Option<&Path>,
         config: Option<&Path>,
     ) -> Result<(PresetName, ChainConfig), CliError> {
+        if let Some(directory) = testnet_dir {
+            if network.is_some() || config.is_some() {
+                return Err(CliError::ConflictingNetworks);
+            }
+            let network = Network::load(directory)?;
+            return Ok((network.preset, network.chain));
+        }
         if let Some(path) = config {
             let text = fs::read_to_string(path).map_err(|source| CliError::ConfigFile {
                 path: path.to_owned(),
@@ -245,5 +254,50 @@ impl Cli {
         literal
             .parse()
             .expect("default addresses are valid literals")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, process};
+
+    use super::*;
+
+    #[test]
+    fn a_network_directory_names_the_chain_of_every_command() {
+        // Fixture state: a minimal-preset devnet directory with its two required files.
+        let directory = env::temp_dir().join(format!("axiom-cli-devnet-{}", process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("config.yaml"),
+            "PRESET_BASE: minimal\nCONFIG_NAME: devnet\n",
+        )
+        .unwrap();
+        fs::write(directory.join("deposit_contract_block.txt"), "0\n").unwrap();
+
+        // The directory alone picks the preset and the chain from its config file.
+        let chosen = Cli::choose_chain(None, Some(&directory), None).unwrap();
+        assert_eq!(
+            chosen,
+            (
+                PresetName::Minimal,
+                ChainConfig {
+                    config_name: "devnet".to_owned(),
+                    ..ChainConfig::minimal()
+                }
+            )
+        );
+
+        // Beside a network name or a config file it is ambiguous, as on the beacon node.
+        assert!(matches!(
+            Cli::choose_chain(Some("minimal"), Some(&directory), None),
+            Err(CliError::ConflictingNetworks)
+        ));
+        let config = directory.join("config.yaml");
+        assert!(matches!(
+            Cli::choose_chain(None, Some(&directory), Some(&config)),
+            Err(CliError::ConflictingNetworks)
+        ));
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

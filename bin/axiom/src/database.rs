@@ -214,7 +214,7 @@ impl DatabaseFlags {
                 let network = Network::load(&directory)?;
                 (network.preset, network.chain)
             }
-            (None, Some(path), _) => Cli::choose_chain(None, Some(&path))?,
+            (None, Some(path), _) => Cli::choose_chain(None, None, Some(&path))?,
             (None, None, name) => {
                 let network = Network::built_in(name.unwrap_or_default())?;
                 (network.preset, network.chain)

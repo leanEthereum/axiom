@@ -187,7 +187,7 @@ impl ChainFlags {
             (Some(directory), None, None) => Ok(Network::load(directory)?),
             // A bare configuration names a chain but none of its boot nodes or genesis.
             (None, Some(path), _) => {
-                let (preset, chain) = Cli::choose_chain(None, Some(path))?;
+                let (preset, chain) = Cli::choose_chain(None, None, Some(path))?;
                 Ok(Network {
                     preset,
                     chain,

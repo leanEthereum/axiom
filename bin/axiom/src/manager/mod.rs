@@ -67,6 +67,7 @@ OPTIONS (create):
     --compounding                    0x02 credentials, with --eth1-withdrawal-address
     --pbkdf2                         encrypt with PBKDF2 instead of scrypt
     --network <NAME>                 a built-in network, as for the beacon node [default: mainnet]
+    --testnet-dir <DIR>              a network's directory, as for the beacon node
     --config <FILE>                  chain config YAML
 
 OPTIONS (settings, for create and for import of one keystore):
@@ -279,7 +280,7 @@ struct ManagerFlags {
 
 impl ManagerFlags {
     /// Flags that take a value.
-    const VALUED: [&'static str; 26] = [
+    const VALUED: [&'static str; 27] = [
         "--output-path",
         "--mnemonic-path",
         "--first-index",
@@ -287,6 +288,7 @@ impl ManagerFlags {
         "--deposit-gwei",
         "--eth1-withdrawal-address",
         "--network",
+        "--testnet-dir",
         "--config",
         "--suggested-fee-recipient",
         "--gas-limit",
@@ -485,8 +487,11 @@ impl Manager {
         match command.as_str() {
             "-h" | "--help" | "help" => Ok(Self::Help),
             "create" => {
-                let (_, chain) =
-                    Cli::choose_chain(flags.text("--network"), flags.path("--config").as_deref())?;
+                let (_, chain) = Cli::choose_chain(
+                    flags.text("--network"),
+                    flags.path("--testnet-dir").as_deref(),
+                    flags.path("--config").as_deref(),
+                )?;
                 let withdrawal_address = flags.address("--eth1-withdrawal-address")?;
                 if flags.has(Switch::Compounding) && withdrawal_address.is_none() {
                     return Err(CliError::Requires {
@@ -604,6 +609,25 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> Result<Manager, CliError> {
         Manager::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+    }
+
+    #[test]
+    fn a_network_directory_is_read_for_the_chain() {
+        // A directory that does not exist fails on its config file, so the flag reached the chain.
+        assert!(matches!(
+            parse(&[
+                "create",
+                "--output-path",
+                "o",
+                "--mnemonic-path",
+                "m",
+                "--count",
+                "1",
+                "--testnet-dir",
+                "/nonexistent/axiom-devnet",
+            ]),
+            Err(CliError::Network(_))
+        ));
     }
 
     #[test]

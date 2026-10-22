@@ -65,6 +65,7 @@ OPTIONS (key generation):
     --amount <GWEI>              deposit amount [default: 32000000000]
     --pbkdf2                     encrypt with PBKDF2 instead of scrypt
     --network <NAME>             a built-in network, as for the beacon node [default: mainnet]
+    --testnet-dir <DIR>          a network's directory, as for the beacon node
     --config <FILE>              chain config YAML
 
 OPTIONS (slashing protection):
@@ -757,6 +758,8 @@ struct AccountFlags {
     pbkdf2: bool,
     /// Network name.
     network: Option<String>,
+    /// Network directory.
+    testnet_dir: Option<PathBuf>,
     /// Config file.
     config: Option<PathBuf>,
     /// Database directory.
@@ -812,6 +815,7 @@ impl AccountFlags {
                 "--amount" => flags.amount = Some(Gwei(parsed("--amount", value("--amount")?)?)),
                 "--pbkdf2" => flags.pbkdf2 = true,
                 "--network" => flags.network = Some(value("--network")?),
+                "--testnet-dir" => flags.testnet_dir = Some(value("--testnet-dir")?.into()),
                 "--config" => flags.config = Some(value("--config")?.into()),
                 "--database" => flags.database = Some(value("--database")?.into()),
                 "--file" => flags.file = Some(value("--file")?.into()),
@@ -856,7 +860,11 @@ impl AccountFlags {
 
     /// The chain the flags name.
     fn chain(&self) -> Result<(PresetName, ChainConfig), CliError> {
-        Cli::choose_chain(self.network.as_deref(), self.config.as_deref())
+        Cli::choose_chain(
+            self.network.as_deref(),
+            self.testnet_dir.as_deref(),
+            self.config.as_deref(),
+        )
     }
 
     /// The key generation the flags describe.
@@ -961,6 +969,23 @@ mod tests {
 
     fn parse(arguments: &[&str]) -> Result<Account, CliError> {
         Account::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+    }
+
+    #[test]
+    fn a_network_directory_is_read_for_the_chain() {
+        // A directory that does not exist fails on its config file, so the flag reached the chain.
+        assert!(matches!(
+            parse(&[
+                "new-mnemonic",
+                "--password-file",
+                "pw",
+                "--output",
+                "keys",
+                "--testnet-dir",
+                "/nonexistent/axiom-devnet",
+            ]),
+            Err(CliError::Network(_))
+        ));
     }
 
     #[test]
