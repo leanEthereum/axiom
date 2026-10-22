@@ -4,6 +4,7 @@ mod attestation;
 mod bid;
 mod block;
 mod block_contents;
+mod builder_preferences;
 mod data_column;
 mod envelope;
 mod execution;

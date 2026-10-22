@@ -17,6 +17,7 @@ mod ids;
 mod light_client;
 mod liveness;
 mod node;
+mod payloads;
 mod pool;
 mod preparation;
 mod query;
@@ -45,6 +46,7 @@ use self::{
     light_client::LightClientRoutes,
     liveness::LivenessRoutes,
     node::NodeRoutes,
+    payloads::PayloadRoutes,
     pool::PoolRoutes,
     preparation::PreparationRoutes,
     registry::RegistryRoutes,
@@ -237,6 +239,7 @@ impl BeaconApi {
         let routes = PreparationRoutes::register(routes);
         let routes = LivenessRoutes::register(routes);
         let routes = PoolRoutes::register(routes);
+        let routes = PayloadRoutes::register(routes);
         DebugRoutes::register(routes).finish()
     }
 }

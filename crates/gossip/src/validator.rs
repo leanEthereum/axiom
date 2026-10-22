@@ -1714,9 +1714,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     .with(validator_detail),
             );
         }
-        self.seen
-            .proposer_preferences
-            .insert(key, preferences.clone());
+        self.seen.proposer_preferences.insert(key, signed.clone());
         Ok(())
     }
 
@@ -1823,6 +1821,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             .seen
             .proposer_preferences
             .get(&(bid.slot, dependent_root))
+            .map(|signed| &signed.message)
         else {
             return Err(
                 GossipError::ignore("matching proposer preferences have not been seen")

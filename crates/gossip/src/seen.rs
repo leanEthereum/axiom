@@ -6,7 +6,7 @@ use axiom_ssz::Ssz;
 use axiom_types::{
     BlobIndex, BuilderIndex, ColumnIndex, CommitteeIndex, Epoch, Gwei, Hash32, KzgCommitment,
     Preset, Root, Slot, SubnetId, ValidatorIndex, fulu::PartialDataColumnHeader,
-    gloas::ProposerPreferences,
+    gloas::SignedProposerPreferences,
 };
 
 /// Deduplication state of gossip validation.
@@ -59,8 +59,8 @@ pub struct Seen {
     pub execution_payload_bids: HashSet<(Slot, Hash32, Root, BuilderIndex)>,
     /// The highest forwarded bid value for each slot, parent payload, and parent block.
     pub best_execution_payload_bid: HashMap<(Slot, Hash32, Root), Gwei>,
-    /// Forwarded proposer preferences, by proposal slot and shuffling dependent root.
-    pub proposer_preferences: HashMap<(Slot, Root), ProposerPreferences>,
+    /// Forwarded signed proposer preferences, by proposal slot and shuffling dependent root.
+    pub proposer_preferences: HashMap<(Slot, Root), SignedProposerPreferences>,
 }
 
 /// What a validated partial column header tells about its block.

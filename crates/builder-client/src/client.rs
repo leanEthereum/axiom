@@ -9,6 +9,7 @@ use axiom_types::{
     BlsPubkey, ForkName, Hash32, Preset, Slot,
     bellatrix::SignedValidatorRegistrationV1,
     combined::{SignedBlindedBeaconBlock, SignedBuilderBid},
+    gloas::BuilderPreferencesRequest,
 };
 
 use crate::{BuilderError, RelayTimeouts, RevealedPayload, versioned::Versioned};
@@ -148,6 +149,31 @@ impl RelayClient {
             .with_body("application/json", body.to_string().into_bytes());
         let response = self.send(&request, self.timeouts.register).await?;
         Self::expect(&response, StatusCode::OK)
+    }
+
+    /// Hands a proposer's preferences to the builder: the submitBuilderPreferences endpoint.
+    ///
+    /// The builder checks the signed authentication against the proposer's key.
+    /// It answers 202 once it holds the preferences for the slot the authentication names.
+    /// See the builder preferences of the Gloas builder spec of the builder API.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a transport error, or any status other than 202.
+    pub async fn submit_builder_preferences(
+        &self,
+        proposer: BlsPubkey,
+        request: &BuilderPreferencesRequest,
+    ) -> Result<(), BuilderError> {
+        let target = self.target(&format!("/eth/v1/builder/builder_preferences/{proposer}"));
+        let request = Request::new(Method::Post, &target)
+            .with_header("eth-consensus-version", ForkName::Gloas.as_str())
+            .with_body(
+                "application/json",
+                request.to_json().to_string().into_bytes(),
+            );
+        let response = self.send(&request, self.timeouts.register).await?;
+        Self::expect(&response, StatusCode::ACCEPTED)
     }
 
     /// Asks the relay for its best bid: the getHeader endpoint.

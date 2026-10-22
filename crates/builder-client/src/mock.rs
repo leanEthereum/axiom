@@ -15,6 +15,7 @@ use axiom_types::{
     BlsPubkey, ForkName, Hash32, Preset, Slot,
     bellatrix::SignedValidatorRegistrationV1,
     combined::{SignedBlindedBeaconBlock, SignedBuilderBid},
+    gloas::BuilderPreferencesRequest,
 };
 use tokio::{sync::oneshot, task::JoinHandle, time::sleep};
 
@@ -85,6 +86,8 @@ struct MockState {
     headers: Mutex<Vec<HeaderRequest>>,
     /// Blinded blocks received, in arrival order.
     submissions: Mutex<Vec<Submission>>,
+    /// Builder preferences received, with their proposer, in arrival order.
+    preferences: Mutex<Vec<(BlsPubkey, BuilderPreferencesRequest)>>,
 }
 
 impl MockRelay {
@@ -102,6 +105,7 @@ impl MockRelay {
         let register = Arc::clone(&state);
         let header = Arc::clone(&state);
         let reveal = Arc::clone(&state);
+        let preferences = Arc::clone(&state);
         let router = Router::new()
             .route(Method::Get, "/eth/v1/builder/status", move |_| {
                 let state = Arc::clone(&status);
@@ -125,6 +129,14 @@ impl MockRelay {
                 move |request| {
                     let state = Arc::clone(&reveal);
                     async move { state.reveal(&request) }
+                },
+            )
+            .route(
+                Method::Post,
+                "/eth/v1/builder/builder_preferences/{proposer_pubkey}",
+                move |request| {
+                    let state = Arc::clone(&preferences);
+                    async move { state.preferences(&request) }
                 },
             );
 
@@ -209,6 +221,12 @@ impl MockRelay {
             .collect()
     }
 
+    /// The builder preferences received, with the proposer each names, in arrival order.
+    #[must_use]
+    pub fn builder_preferences(&self) -> Vec<(BlsPubkey, BuilderPreferencesRequest)> {
+        MockState::lock(&self.state.preferences).clone()
+    }
+
     /// Stops the server and waits for it to drain.
     pub async fn stop(mut self) {
         if let Some(stop) = self.stop.take() {
@@ -275,6 +293,35 @@ impl MockState {
             }
             Some(Err(error)) => Self::error(StatusCode::BAD_REQUEST, &error.to_string()),
             None => Self::error(StatusCode::BAD_REQUEST, "body is not a JSON array"),
+        }
+    }
+
+    /// Serves the builder preferences endpoint: one JSON request for the proposer in the path.
+    fn preferences(&self, request: &Request) -> Response {
+        let proposer = request
+            .param("proposer_pubkey")
+            .and_then(|key| <[u8; 48]>::from_data(key).ok())
+            .map(BlsPubkey);
+        let Some(proposer) = proposer else {
+            return Self::error(StatusCode::BAD_REQUEST, "malformed proposer key");
+        };
+        if request.headers.get("eth-consensus-version") != Some(ForkName::Gloas.as_str()) {
+            return Self::error(
+                StatusCode::BAD_REQUEST,
+                "missing or wrong consensus version",
+            );
+        }
+        let decoded = Json::parse(&request.body)
+            .map_err(|error| error.to_string())
+            .and_then(|json| {
+                BuilderPreferencesRequest::from_json(&json).map_err(|error| error.to_string())
+            });
+        match decoded {
+            Ok(preferences) => {
+                Self::lock(&self.preferences).push((proposer, preferences));
+                Response::new(StatusCode::ACCEPTED)
+            }
+            Err(error) => Self::error(StatusCode::BAD_REQUEST, &error),
         }
     }
 
