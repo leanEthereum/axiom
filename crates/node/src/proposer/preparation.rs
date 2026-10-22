@@ -58,6 +58,11 @@ impl Preparations {
         }
     }
 
+    /// Whether any validator asked the node to prepare its proposals.
+    pub(crate) fn any_prepared(&self) -> bool {
+        !self.fee_recipients.is_empty()
+    }
+
     /// Whether a validator asked the node to prepare its proposals.
     pub(crate) fn is_prepared(&self, validator: ValidatorIndex) -> bool {
         self.fee_recipients.contains_key(&validator)

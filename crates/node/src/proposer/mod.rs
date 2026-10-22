@@ -225,7 +225,12 @@ impl<P: Preset> ProposerService<P> {
     /// Starts the engine building the payload of the next slot, when its proposer prepared.
     ///
     /// Building ahead gives the engine the whole slot to fill the payload.
+    /// Electing the proposer advances the head state to the slot, which costs the chain thread.
+    /// So with no validator prepared at all, the chain is not visited.
     pub async fn prepare_next(&self, slot: Slot) {
+        if !self.preparations().any_prepared() {
+            return;
+        }
         let reorgs = self.reorgs;
         let gathered = self
             .chain
@@ -466,5 +471,62 @@ impl<P: Preset> ProposerService<P> {
     /// The builds started ahead, through the same kind of lock.
     fn builds(&self) -> MutexGuard<'_, HashMap<(Slot, Root), PayloadId>> {
         self.builds.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, time::Duration};
+
+    use axiom_types::{ChainConfig, Minimal, combined, phase0};
+    use tokio::{runtime::Builder, sync::oneshot, time::timeout};
+
+    use super::*;
+    use crate::{Chain, ChainDatabase, ManualClock};
+
+    #[test]
+    fn nothing_is_prepared_without_a_prepared_validator() {
+        // Fixture state: a chain thread held busy by a job that waits for the test.
+        // Any visit to the chain then waits too, so a visit shows as a timeout.
+        let config = ChainConfig::minimal();
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let genesis = combined::BeaconState::Phase0(phase0::BeaconState::<Minimal>::default());
+        let chain = Chain::from_genesis(config, genesis, database).unwrap();
+        let (chain, _thread) = ChainHandle::spawn(chain).unwrap();
+        let (release, held) = mpsc::channel::<()>();
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let (started, holding) = oneshot::channel::<()>();
+        let busy = chain.clone();
+        runtime.spawn(async move {
+            busy.run(move |_| {
+                let _waiting = started.send(());
+                held.recv()
+            })
+            .await
+        });
+        runtime.block_on(holding).unwrap();
+        let proposer = ProposerService::new(
+            chain,
+            Arc::new(ExecutionLayer::disconnected()),
+            Arc::new(ManualClock::at(0)),
+            ExecutionAddress::ZERO,
+            None,
+        );
+        let wait = Duration::from_millis(200);
+
+        // Nobody prepared: the call returns at once, without the chain.
+        let skipped =
+            runtime.block_on(async { timeout(wait, proposer.prepare_next(Slot(1_000))).await });
+        assert_eq!(skipped, Ok(()));
+
+        // Once a validator prepared, the same call needs the chain and waits on it.
+        proposer.prepare([(ValidatorIndex(0), ExecutionAddress([1; 20]))]);
+        let visited =
+            runtime.block_on(async { timeout(wait, proposer.prepare_next(Slot(1_000))).await });
+        assert!(
+            visited.is_err(),
+            "a prepared validator makes the call visit the chain"
+        );
+        release.send(()).unwrap();
     }
 }
