@@ -33,6 +33,21 @@ pub enum PayloadArrival {
     Revealed,
 }
 
+impl PayloadArrival {
+    /// Whether a block with its payload here has a variant under its pending node.
+    ///
+    /// The full variant exists once the payload is in hand, and an embedded payload has no empty one.
+    /// See `get_node_children` in the Gloas fork choice spec.
+    #[must_use]
+    pub const fn offers(self, payload: NodePayload) -> bool {
+        match payload {
+            NodePayload::Empty => !matches!(self, Self::Embedded),
+            NodePayload::Full => !matches!(self, Self::Awaited),
+            NodePayload::Pending => false,
+        }
+    }
+}
+
 /// What the fork choice keeps of a block.
 ///
 /// Only the fields the rules read: its place in the tree, its slot, its proposer, and its payload.
@@ -377,28 +392,15 @@ impl BlockTree {
             })
     }
 
-    /// The node a vote supports.
+    /// The node a vote supports, or nothing for a vote on a block outside the tree.
     ///
-    /// A vote from the block's own slot cannot have seen the payload, so it supports the block.
-    /// A later vote supports the variant whose payload it claims to have seen.
-    /// A block from before Gloas has only its full variant, whatever the vote says.
     /// See `get_supported_node` in the Gloas fork choice spec.
     #[must_use]
     pub fn supported_node(&self, message: &LatestMessage) -> Option<ForkChoiceNode> {
         let block = self.nodes.get(&message.root)?;
-        let payload = match block.payload {
-            PayloadArrival::Embedded => NodePayload::Full,
-            PayloadArrival::Awaited | PayloadArrival::Revealed if block.slot >= message.slot => {
-                NodePayload::Pending
-            }
-            PayloadArrival::Awaited | PayloadArrival::Revealed if message.payload_present => {
-                NodePayload::Full
-            }
-            PayloadArrival::Awaited | PayloadArrival::Revealed => NodePayload::Empty,
-        };
         Some(ForkChoiceNode {
             root: message.root,
-            payload,
+            payload: message.supported_payload(block.slot, block.payload),
         })
     }
 

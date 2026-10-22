@@ -1,12 +1,13 @@
-//! Timings of a mainnet-sized Fulu state: its root after a slot's edits, its clone, and an epoch.
+//! Timings of a mainnet-sized state: its root after a slot's edits, its clone, and an epoch.
 //!
 //! The registry size defaults to one million validators, close to mainnet.
 //! Set `AXIOM_BENCH_VALIDATORS` to change it, and `AXIOM_BENCH_EPOCH_VALIDATORS` for the epoch.
+//! The epoch runs under Fulu and under Gloas, whose epoch draws proposers and payload committees.
 
 use std::{env, hint::black_box};
 
 use axiom_ssz::{Length, Ssz};
-use axiom_state_transition::State;
+use axiom_state_transition::{State, SwapOrNot};
 use axiom_types::{
     BlsPubkey, Bytes32, ChainConfig, Epoch, ForkName, Gwei, Mainnet, ParticipationFlags, Preset,
     Root, Slot,
@@ -171,6 +172,12 @@ fn main() {
     let config = ChainConfig::mainnet().with_forks_at_genesis(ForkName::Fulu);
     let wrapped = State::new(fixture(epoch_count));
     let target = (START_EPOCH + 1).start_slot::<Mainnet>();
+    // Fixture state: the same registry upgraded to Gloas, its payload committees drawn.
+    let gloas_config = ChainConfig::mainnet().with_forks_at_genesis(ForkName::Gloas);
+    let mut gloas = State::new(fixture(epoch_count));
+    gloas
+        .upgrade(&gloas_config)
+        .expect("a Fulu state upgrades to Gloas");
     {
         let mut group = criterion.benchmark_group(format!("slots, {epoch_count} validators"));
         group.sample_size(10);
@@ -185,6 +192,22 @@ fn main() {
                 },
                 BatchSize::LargeInput,
             );
+        });
+        group.bench_function("process slots across a Gloas epoch", |b| {
+            b.iter_batched(
+                || gloas.clone(),
+                |mut advanced| {
+                    advanced
+                        .process_slots(&gloas_config, target)
+                        .expect("empty slots always apply");
+                    advanced
+                },
+                BatchSize::LargeInput,
+            );
+        });
+        group.bench_function("shuffle the registry", |b| {
+            let shuffle = SwapOrNot::new(Bytes32([0x5a; 32]), Mainnet::SHUFFLE_ROUND_COUNT);
+            b.iter(|| shuffle.permutation(black_box(epoch_count as u64)));
         });
         group.finish();
     }

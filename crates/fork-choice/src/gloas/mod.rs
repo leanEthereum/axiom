@@ -9,7 +9,11 @@
 
 mod head;
 mod ptc;
+mod tiebreak;
+mod tree_ghost;
 
 pub(crate) use head::BoostParent;
 pub use head::PayloadGhost;
 pub use ptc::{PayloadVotes, PtcVotes};
+pub(crate) use tiebreak::PayloadTiebreak;
+pub(crate) use tree_ghost::{PayloadMark, TreePayloadGhost};

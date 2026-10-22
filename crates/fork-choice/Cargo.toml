@@ -20,4 +20,9 @@ axiom-types.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "head"
+harness = false

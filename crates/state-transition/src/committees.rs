@@ -42,19 +42,15 @@ impl EpochCommittees {
     /// No fork changed how committees are formed, so the state of any fork will do.
     #[must_use]
     pub fn compute<S: CoreState + ?Sized>(state: &S, epoch: Epoch) -> Self {
-        let active = state.active_validator_indices(epoch);
+        // Position j of the shuffled list holds the active validator the shuffle sends there.
+        let mut shuffled = state.active_validator_indices(epoch);
         let seed = state.seed(epoch, DOMAIN_BEACON_ATTESTER);
-        let permutation =
-            SwapOrNot::new(seed, S::Preset::SHUFFLE_ROUND_COUNT).permutation(active.len() as u64);
+        SwapOrNot::new(seed, S::Preset::SHUFFLE_ROUND_COUNT).shuffle(&mut shuffled);
 
         Self {
             epoch,
-            // Position j of the shuffled list holds the active validator the shuffle sends there.
-            shuffled: permutation
-                .into_iter()
-                .map(|image| active[image as usize])
-                .collect(),
-            committees_per_slot: Self::count_per_slot::<S::Preset>(active.len()),
+            committees_per_slot: Self::count_per_slot::<S::Preset>(shuffled.len()),
+            shuffled,
             slots_per_epoch: S::Preset::SLOTS_PER_EPOCH,
         }
     }

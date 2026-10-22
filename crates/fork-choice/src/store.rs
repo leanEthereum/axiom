@@ -21,9 +21,11 @@ use crate::{
     Ghost, LatestMessage, NodePayload, PayloadStatus, PayloadVotes, VoteOrder, Votes,
     bellatrix::PowChain,
     checkpoints::Checkpoints,
-    gloas::{BoostParent, PayloadGhost, PtcVotes},
+    gloas::{BoostParent, PayloadGhost, PtcVotes, TreePayloadGhost},
     proposer_head::LateHeadReorg,
     timeliness::Timeliness,
+    tree_ghost::TreeGhost,
+    weight_tree::WeightTree,
 };
 
 /// Everything the fork choice rule reads: blocks, states, votes, checkpoints, and time.
@@ -43,6 +45,10 @@ use crate::{
 ///
 /// The head is a pure function of the store, see `get_head` in the phase0 fork choice spec.
 /// Head selection runs on a view of the store through its justified state.
+///
+/// A weight tree keeps every node's attestation score current as votes change.
+/// A head then costs the changed votes and one pass over the blocks, not a recount.
+/// Debug builds check every head against the recount.
 ///
 /// Blocks and states of every fork live side by side, behind the combined enums.
 /// The fork of the current slot picks the head rule, once, at the boundary.
@@ -80,6 +86,8 @@ pub struct Store<P: Preset> {
     pub(crate) ptc: PtcVotes,
     /// Proof-of-work blocks the merge transition check reads.
     pub(crate) pow_chain: PowChain,
+    /// Attestation scores of every node, kept current as votes change.
+    pub(crate) weight_tree: WeightTree,
 }
 
 impl<P: Preset> Store<P> {
@@ -118,6 +126,7 @@ impl<P: Preset> Store<P> {
         if anchor_block.fork_name().separates_payloads() {
             ptc.open::<P>(anchor_root);
         }
+        let anchor_node = BlockNode::of(anchor_block, ExecutionStatus::Valid);
 
         Ok(Self {
             config,
@@ -125,10 +134,7 @@ impl<P: Preset> Store<P> {
             time_ms,
             checkpoints: Checkpoints::at(checkpoint),
             proposer_boost_root: Root::ZERO,
-            blocks: BlockTree::new(
-                anchor_root,
-                BlockNode::of(anchor_block, ExecutionStatus::Valid),
-            ),
+            blocks: BlockTree::new(anchor_root, anchor_node),
             block_states: HashMap::from([(anchor_root, state.clone())]),
             block_timeliness: HashMap::from([(anchor_root, Timeliness::ANCHOR)]),
             checkpoint_states: HashMap::from([(checkpoint, state)]),
@@ -136,6 +142,7 @@ impl<P: Preset> Store<P> {
             unrealized_justifications: HashMap::from([(anchor_root, checkpoint)]),
             ptc,
             pow_chain: PowChain::default(),
+            weight_tree: WeightTree::new(anchor_root, &anchor_node),
         })
     }
 
@@ -231,6 +238,40 @@ impl<P: Preset> Store<P> {
         }
     }
 
+    /// Whether a block's voting source agrees with the store's justified checkpoint.
+    ///
+    /// A source two epochs stale still counts, so the chain can recover from a late justification.
+    /// See `filter_block_tree` in the phase0 fork choice spec.
+    pub(crate) fn agrees_with_justified(&self, root: Root) -> bool {
+        let justified = self.checkpoints.justified();
+        let current_epoch = self.current_epoch();
+        justified.epoch == Epoch::GENESIS
+            || self.voting_source(root).is_some_and(|source| {
+                source.epoch == justified.epoch || source.epoch + 2 >= current_epoch
+            })
+    }
+
+    /// Whether a weak parent's proposer sent a rival block in time for the payload committee.
+    ///
+    /// Such an early equivocation withholds the boost from the parent's child.
+    /// See `should_apply_proposer_boost` in the Gloas fork choice spec.
+    pub(crate) fn has_early_equivocation(
+        &self,
+        parent_root: Root,
+        parent: &BlockNode,
+        boosted_slot: Slot,
+    ) -> bool {
+        self.blocks.iter().any(|(root, block)| {
+            *root != parent_root
+                && block.proposer_index == parent.proposer_index
+                && block.slot + 1 == boosted_slot
+                && self
+                    .block_timeliness
+                    .get(root)
+                    .is_some_and(|timeliness| timeliness.ptc)
+        })
+    }
+
     /// The store seen through its justified checkpoint state, block by block.
     ///
     /// # Errors
@@ -285,6 +326,21 @@ impl<P: Preset> Store<P> {
     ///
     /// Fails when the justified checkpoint's state is missing.
     pub fn head(&mut self) -> Result<ForkChoiceNode, ForkChoiceError> {
+        let head = self.tree_head();
+        // Debug builds recount every vote, so any drift of the weight tree fails loudly.
+        if cfg!(debug_assertions) {
+            let recounted = self.recounted_head();
+            assert_eq!(head, recounted, "the weight tree head equals the recount");
+        }
+        head
+    }
+
+    /// The head, recounting every vote: the reference the weight tree is pinned to.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the justified checkpoint's state is missing.
+    pub(crate) fn recounted_head(&mut self) -> Result<ForkChoiceNode, ForkChoiceError> {
         if self.weighs_payloads() {
             return Ok(self.payload_ghost()?.head());
         }
@@ -302,6 +358,25 @@ impl<P: Preset> Store<P> {
     ///
     /// Fails when the justified checkpoint's state is missing.
     pub fn viable_leaves_and_weights(
+        &mut self,
+    ) -> Result<Vec<(ForkChoiceNode, Gwei)>, ForkChoiceError> {
+        let leaves = self.tree_leaves_and_weights();
+        if cfg!(debug_assertions) {
+            let recounted = self.recounted_leaves_and_weights();
+            assert_eq!(
+                leaves, recounted,
+                "the weight tree leaves equal the recount"
+            );
+        }
+        leaves
+    }
+
+    /// Leaves of the viable tree with their weights, recounting every vote.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the justified checkpoint's state is missing.
+    pub(crate) fn recounted_leaves_and_weights(
         &mut self,
     ) -> Result<Vec<(ForkChoiceNode, Gwei)>, ForkChoiceError> {
         if self.weighs_payloads() {
@@ -360,6 +435,12 @@ impl<P: Preset> Store<P> {
             .config
             .fork_at(slot.epoch::<P>())
             .fixes_proposers_ahead();
+        self.refresh_weights()?;
+        let head_score = self.weight_tree.score(&head.root, NodePayload::Pending);
+        let parent_score = self
+            .weight_tree
+            .score(&head_block.parent_root, NodePayload::Pending);
+        let committee = self.weight_tree.committee();
         let ghost = self.ghost()?;
         let reorg = LateHeadReorg {
             ghost,
@@ -369,6 +450,9 @@ impl<P: Preset> Store<P> {
             parent_block,
             head_committees: &head_committees,
             boundary_sensitive,
+            head_score,
+            parent_score,
+            committee,
         };
         Ok(reorg.parent_for(slot))
     }
@@ -543,6 +627,8 @@ impl<P: Preset> Store<P> {
             self.ptc.open::<P>(root);
         }
         self.blocks.insert(root, node);
+        self.weight_tree
+            .insert(root, &node, self.blocks.parent_payload(&root));
         self.block_states.insert(root, state);
         self.unrealized_justifications.insert(root, justified);
     }
@@ -550,6 +636,7 @@ impl<P: Preset> Store<P> {
     /// Records that a block's payload envelope was verified elsewhere.
     pub fn insert_validated_payload(&mut self, root: Root) {
         self.blocks.reveal_payload(root);
+        self.weight_tree.reveal(&root);
     }
 
     /// Accepts an attestation's votes.
@@ -681,6 +768,7 @@ impl<P: Preset> Store<P> {
             )
             .map_err(|source| ForkChoiceError::InvalidEnvelope { root, source })?;
         self.blocks.reveal_payload(root);
+        self.weight_tree.reveal(&root);
         Ok(())
     }
 
@@ -753,6 +841,7 @@ impl<P: Preset> Store<P> {
     /// See "How to apply latestValidHash" in the Bellatrix optimistic sync spec.
     pub fn invalidate_after(&mut self, parent: Root, latest_valid_hash: Option<Hash32>) {
         self.blocks.invalidate_after(parent, latest_valid_hash);
+        self.weight_tree.sync_validity(&self.blocks);
     }
 
     /// Records that the engine validated a block's payload, after an optimistic import.
@@ -776,6 +865,7 @@ impl<P: Preset> Store<P> {
 
         // The finalized block becomes the new anchor of the tree.
         let dropped = self.blocks.retain_subtree(finalized.root);
+        self.weight_tree.retain(&self.blocks, &self.votes);
         for root in &dropped {
             self.block_states.remove(root);
             self.block_timeliness.remove(root);
@@ -815,6 +905,123 @@ impl<P: Preset> Store<P> {
         self.checkpoint_states
             .get_mut(&checkpoint)
             .ok_or(ForkChoiceError::MissingState(checkpoint.root))
+    }
+
+    /// Settles the changed votes into the weight tree, under the justified state's balances.
+    ///
+    /// # Returns
+    ///
+    /// Position of the justified block in the tree, if it is there.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the justified checkpoint's state is missing.
+    fn refresh_weights(&mut self) -> Result<Option<usize>, ForkChoiceError> {
+        let justified = self.checkpoints.justified();
+        self.checkpoint_state(justified)?;
+        let state = self
+            .checkpoint_states
+            .get(&justified)
+            .ok_or(ForkChoiceError::MissingState(justified.root))?;
+        self.weight_tree
+            .refresh(justified, state.beacon(), &mut self.votes);
+        Ok(self.weight_tree.index(&justified.root))
+    }
+
+    /// The head, read off the weight tree.
+    ///
+    /// A justified block outside the tree only follows a prune past it; the recount answers then.
+    pub(crate) fn tree_head(&mut self) -> Result<ForkChoiceNode, ForkChoiceError> {
+        let Some(justified) = self.refresh_weights()? else {
+            return self.recounted_head();
+        };
+        if self.weighs_payloads() {
+            let boost = self.applies_payload_boost()?;
+            let marks = self.weight_tree.take_payload_marks();
+            let view = TreePayloadGhost::new(self, justified, boost, marks);
+            let head = view.head();
+            let marks = view.into_marks();
+            self.weight_tree.return_payload_marks(marks);
+            return Ok(head);
+        }
+        let marks = self.weight_tree.take_block_marks();
+        let view = TreeGhost::new(self, justified, marks);
+        let root = view.head();
+        let marks = view.into_marks();
+        self.weight_tree.return_block_marks(marks);
+        Ok(ForkChoiceNode {
+            root,
+            payload: NodePayload::Full,
+        })
+    }
+
+    /// Viable leaves and their weights, read off the weight tree.
+    pub(crate) fn tree_leaves_and_weights(
+        &mut self,
+    ) -> Result<Vec<(ForkChoiceNode, Gwei)>, ForkChoiceError> {
+        let Some(justified) = self.refresh_weights()? else {
+            return self.recounted_leaves_and_weights();
+        };
+        if self.weighs_payloads() {
+            let boost = self.applies_payload_boost()?;
+            let marks = self.weight_tree.take_payload_marks();
+            let view = TreePayloadGhost::new(self, justified, boost, marks);
+            let leaves = view.viable_leaves_and_weights();
+            let marks = view.into_marks();
+            self.weight_tree.return_payload_marks(marks);
+            return Ok(leaves);
+        }
+        let marks = self.weight_tree.take_block_marks();
+        let view = TreeGhost::new(self, justified, marks);
+        let leaves = view
+            .viable_leaves_and_weights()
+            .into_iter()
+            .map(|(root, weight)| {
+                let node = ForkChoiceNode {
+                    root,
+                    payload: NodePayload::Full,
+                };
+                (node, weight)
+            })
+            .collect();
+        let marks = view.into_marks();
+        self.weight_tree.return_block_marks(marks);
+        Ok(leaves)
+    }
+
+    /// Whether the boosted block keeps its boost under the Gloas rule, read off the weight tree.
+    ///
+    /// The rule is the reference view's; only the parent's score comes from the tree.
+    /// See `should_apply_proposer_boost` in the Gloas fork choice spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the boosted block's parent state or the justified state is missing.
+    fn applies_payload_boost(&mut self) -> Result<bool, ForkChoiceError> {
+        let Some(boosted) = self.blocks.get(&self.proposer_boost_root).copied() else {
+            return Ok(false);
+        };
+        let Some((parent_root, parent)) = self.boost_parent() else {
+            return Ok(true);
+        };
+        let committees = self
+            .block_states
+            .get_mut(&parent_root)
+            .ok_or(ForkChoiceError::MissingState(parent_root))?
+            .committees(parent.slot.epoch::<P>())?;
+        let justified = self.checkpoints.justified();
+        let state = self
+            .checkpoint_states
+            .get(&justified)
+            .ok_or(ForkChoiceError::MissingState(justified.root))?;
+        let score = self.weight_tree.score(&parent_root, NodePayload::Pending);
+        let threshold = self
+            .weight_tree
+            .committee()
+            .percent(self.config.reorg_head_weight_threshold);
+        let weak =
+            Ghost::new(self, state.beacon()).is_weak(score, threshold, parent.slot, &committees);
+        Ok(!weak || !self.has_early_equivocation(parent_root, &parent, boosted.slot))
     }
 
     /// Whether the fork of the current slot weighs payloads apart from blocks.
@@ -867,8 +1074,7 @@ impl<P: Preset> Store<P> {
         let mut state = parent_state.clone();
         // An invalid verdict condemns optimistic ancestors too, even though this block is refused.
         if let PayloadStatus::Invalid { latest_valid_hash } = payload {
-            self.blocks
-                .invalidate_after(block.parent_root(), latest_valid_hash);
+            self.invalidate_after(block.parent_root(), latest_valid_hash);
         }
         state
             .state_transition(&self.config, signed_block, verification, &payload)
@@ -1048,7 +1254,10 @@ impl<P: Preset> Store<P> {
         let justified = state.beacon().current_justified_checkpoint();
         let finalized = state.beacon().finalized_checkpoint();
 
-        self.blocks.insert(root, BlockNode::of(block, status));
+        let node = BlockNode::of(block, status);
+        self.blocks.insert(root, node);
+        self.weight_tree
+            .insert(root, &node, self.blocks.parent_payload(&root));
         self.block_states.insert(root, state);
         let timeliness = Timeliness::of(
             self.clock,

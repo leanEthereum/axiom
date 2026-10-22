@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{Gwei, Preset, Root, accessors::CoreState};
 
+use super::PayloadTiebreak;
 use crate::{BlockNode, ExecutionStatus, ForkChoiceNode, Ghost, NodePayload, PayloadArrival};
 
 /// The parent of the boosted block, when it is from the slot just before.
@@ -214,23 +215,22 @@ impl<'a, P: Preset> PayloadGhost<'a, P> {
         let Some(parent) = boost_parent else {
             return true;
         };
-        let scores = self.ghost.attestation_scores();
+        let score = self
+            .ghost
+            .attestation_scores()
+            .get(&parent.root)
+            .copied()
+            .unwrap_or_default();
+        let threshold = self
+            .ghost
+            .committee_fraction(store.config.reorg_head_weight_threshold);
         if !self
             .ghost
-            .is_weak(&scores, parent.root, parent.block.slot, parent.committees)
+            .is_weak(score, threshold, parent.block.slot, parent.committees)
         {
             return true;
         }
-        let early_equivocation = store.blocks.iter().any(|(root, block)| {
-            *root != parent.root
-                && block.proposer_index == parent.block.proposer_index
-                && block.slot + 1 == boosted.slot
-                && store
-                    .block_timeliness
-                    .get(root)
-                    .is_some_and(|timeliness| timeliness.ptc)
-        });
-        !early_equivocation
+        !store.has_early_equivocation(parent.root, &parent.block, boosted.slot)
     }
 
     /// Adds the proposer score to the boosted block and to every node it descends from.
@@ -352,60 +352,22 @@ impl<'a, P: Preset> PayloadGhost<'a, P> {
 
     /// Whether a node decides the payload of the block of the previous slot.
     ///
-    /// Votes that settle that payload by weight cannot have arrived yet.
     /// See `is_previous_slot_payload_decision` in the Gloas fork choice spec.
     fn is_previous_slot_payload_decision(&self, node: ForkChoiceNode) -> bool {
         let store = self.ghost.store();
-        node.payload != NodePayload::Pending
-            && store
-                .blocks
-                .get(&node.root)
-                .is_some_and(|block| block.slot + 1 == store.current_slot())
+        store.blocks.get(&node.root).is_some_and(|block| {
+            PayloadTiebreak::new(store).is_previous_slot_decision(node.payload, block.slot)
+        })
     }
 
     /// The tiebreak between the variants of one block.
     ///
-    /// For the previous slot's block, the full variant wins only if the payload should extend.
-    /// Otherwise the empty variant wins, so a missing payload is never built on by default.
     /// See `get_payload_status_tiebreaker` in the Gloas fork choice spec.
     fn tiebreaker(&self, node: ForkChoiceNode) -> u8 {
-        if !self.is_previous_slot_payload_decision(node) {
-            return node.payload.code();
-        }
-        match node.payload {
-            NodePayload::Empty => 1,
-            NodePayload::Full if self.should_extend_payload(node.root) => 2,
-            NodePayload::Full | NodePayload::Pending => 0,
-        }
-    }
-
-    /// Whether the chain should go on with the payload of the previous slot's block.
-    ///
-    /// # Overview
-    ///
-    /// A payload the committee saw on time, with its data, is extended.
-    /// Otherwise it is still extended unless the boosted proposal builds on the empty variant.
-    ///
-    /// This protects an honest builder from a proposer that withholds the boost.
-    /// The builder revealed on time, so its payload stays canonical.
-    ///
-    /// See `should_extend_payload` in the Gloas fork choice spec.
-    fn should_extend_payload(&self, root: Root) -> bool {
         let store = self.ghost.store();
-        let Some(block) = store.blocks.get(&root) else {
-            return false;
-        };
-        if !block.is_payload_verified() {
-            return false;
+        match store.blocks.get(&node.root) {
+            Some(block) => PayloadTiebreak::new(store).tiebreaker(node, block.slot),
+            None => node.payload.code(),
         }
-        let committee_backs_it = store.ptc.payload_timeliness(&root, block, true)
-            && store.ptc.payload_data_availability(&root, block, true);
-        let boost_root = store.proposer_boost_root();
-        committee_backs_it
-            || boost_root == Root::ZERO
-            || store.blocks.get(&boost_root).is_none_or(|boosted| {
-                boosted.parent_root != root
-                    || store.blocks.parent_payload(&boost_root) == Some(NodePayload::Full)
-            })
     }
 }

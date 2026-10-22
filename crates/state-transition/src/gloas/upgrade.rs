@@ -1,6 +1,8 @@
 //! The upgrade from Fulu to Gloas.
 
-use axiom_ssz::{BitVector, PersistentProgressiveList, ProgressiveList, Ssz, Vector};
+use axiom_ssz::{
+    BitVector, PersistentProgressiveList, PersistentVector, ProgressiveList, Ssz, Vector,
+};
 use axiom_types::{
     BuilderIndex, ChainConfig, ExecutionAddress, Gwei, Preset,
     accessors::CoreState,
@@ -107,7 +109,7 @@ impl<P: Preset> Upgrade for BeaconState<P> {
             builder_pending_withdrawals: PersistentProgressiveList::default(),
             latest_execution_payload_bid,
             payload_expected_withdrawals: ProgressiveList::default(),
-            ptc_window: Vector::default(),
+            ptc_window: PersistentVector::default(),
         };
 
         let mut state = CachedState::new(&mut post, caches);

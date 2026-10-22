@@ -1,6 +1,9 @@
 //! LMD-GHOST safety of one block: whether its support beats every adversarial scenario.
 
-use std::collections::HashSet;
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+};
 
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{
@@ -13,7 +16,9 @@ use crate::{ForkChoiceError, ForkChoiceNode, Ghost, Store, committee_weight::Com
 /// The store, weighed by a balance source, under the head's committee shuffling.
 ///
 /// Every safety quantity of the fast confirmation rule reads exactly these three things.
-#[derive(Clone, Copy, Debug)]
+///
+/// The store does not change while the rule runs, so the support of every block is counted once.
+#[derive(Clone, Debug)]
 pub(super) struct Safety<'a, P: Preset> {
     /// The store.
     store: &'a Store<P>,
@@ -21,6 +26,8 @@ pub(super) struct Safety<'a, P: Preset> {
     balance_source: &'a BeaconState<P>,
     /// The head, whose chain fixes the committees.
     head: Root,
+    /// Attestation score of every block under the balance source, counted on first use.
+    scores: OnceCell<HashMap<Root, Gwei>>,
 }
 
 impl<'a, P: Preset> Safety<'a, P> {
@@ -34,6 +41,7 @@ impl<'a, P: Preset> Safety<'a, P> {
             store,
             balance_source,
             head,
+            scores: OnceCell::new(),
         }
     }
 
@@ -41,8 +49,9 @@ impl<'a, P: Preset> Safety<'a, P> {
     ///
     /// See `is_one_confirmed` in the phase0 fast confirmation spec.
     pub(super) fn is_one_confirmed(&self, root: Root) -> Result<bool, ForkChoiceError> {
-        let support = Ghost::new(self.store, self.balance_source)
-            .attestation_scores()
+        let support = self
+            .scores
+            .get_or_init(|| Ghost::new(self.store, self.balance_source).attestation_scores())
             .get(&root)
             .copied()
             .unwrap_or_default();
