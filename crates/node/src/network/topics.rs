@@ -87,10 +87,10 @@ impl Subscriptions {
         }
     }
 
-    /// Joins every attestation and sync committee subnet, as aggregating services need.
+    /// Joins every attestation and sync committee subnet when asked, as aggregating services need.
     #[must_use]
-    pub(crate) const fn subscribing_all(mut self) -> Self {
-        self.all_subnets = true;
+    pub(crate) const fn subscribing_all(mut self, all: bool) -> Self {
+        self.all_subnets = all;
         self
     }
 
@@ -233,7 +233,7 @@ mod tests {
         let config = ChainConfig::mainnet().with_forks_at_genesis(ForkName::Fulu);
         let mut subscriptions =
             Subscriptions::new(NodeId(U256::ZERO), config, Root::ZERO, &BTreeSet::new())
-                .subscribing_all();
+                .subscribing_all(true);
 
         // 9 global topics, all 64 attestation subnets, and all 4 sync committee subnets.
         let change = subscriptions.update::<Mainnet>(Epoch(10));
@@ -256,7 +256,7 @@ mod tests {
             Root::ZERO,
             &BTreeSet::new(),
         )
-        .subscribing_all();
+        .subscribing_all(true);
 
         // 5 global topics and all 64 attestation subnets.
         let change = subscriptions.update::<Minimal>(Epoch(0));

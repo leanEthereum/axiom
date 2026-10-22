@@ -282,19 +282,13 @@ impl<P: Preset> NetworkService<P> {
             backfill_outcomes: Some(backfill_outcomes),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
-            subscriptions: {
-                let subscriptions = Subscriptions::new(
-                    identity.node_id,
-                    config.clone(),
-                    genesis_validators_root,
-                    &custody,
-                );
-                if subscribe_all_subnets {
-                    subscriptions.subscribing_all()
-                } else {
-                    subscriptions
-                }
-            },
+            subscriptions: Subscriptions::new(
+                identity.node_id,
+                config.clone(),
+                genesis_validators_root,
+                &custody,
+            )
+            .subscribing_all(subscribe_all_subnets),
             network,
             chain,
             clock,

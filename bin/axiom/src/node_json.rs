@@ -178,7 +178,9 @@ impl NodeJson<'_> {
                     ])
                 }),
             ),
+            ("quic_port", Json::from(network.quic_port.map(u64::from))),
             ("target_peers", Json::from(network.target_peers as u64)),
+            ("nat", Json::from(network.port_mapping.enabled)),
             (
                 "subscribe_all_subnets",
                 Json::from(network.subscribe_all_subnets),
