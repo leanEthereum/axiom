@@ -15,6 +15,19 @@ version = "0.1.0"
 [[package]]
 name = "axiom-bls"
 version = "0.1.0"
+dependencies = [
+ "axiom-bls12-381",
+ "proptest",
+ "sha2",
+]
+
+[[package]]
+name = "axiom-bls12-381"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sha2",
+]
 
 [[package]]
 name = "axiom-das"
