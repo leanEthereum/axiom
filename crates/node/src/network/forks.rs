@@ -1,5 +1,6 @@
 //! Every fork digest a chain's schedule produces, and the fork each one names.
 
+use axiom_p2p::eth::MessageIds;
 use axiom_types::{ChainConfig, Epoch, ForkDigest, ForkName, Root};
 
 /// The fork digests of a chain, from genesis through every scheduled fork and blob step.
@@ -42,6 +43,15 @@ impl ForkDigests {
             .map_or(ForkDigest([0; 4]), |(digest, ..)| *digest)
     }
 
+    /// The gossip message identifier rules of the chain, one per digest.
+    pub(crate) fn message_ids(&self) -> MessageIds {
+        MessageIds::new(
+            self.entries
+                .iter()
+                .map(|(digest, fork, _)| (*digest, *fork)),
+        )
+    }
+
     /// The fork a digest names, if the schedule produces it.
     pub(crate) fn fork_of(&self, digest: ForkDigest) -> Option<ForkName> {
         self.entries
@@ -53,6 +63,8 @@ impl ForkDigests {
 
 #[cfg(test)]
 mod tests {
+    use axiom_p2p::eth::{GossipKind, GossipTopic};
+
     use super::*;
 
     #[test]
@@ -81,5 +93,36 @@ mod tests {
         );
         // A digest of another chain names nothing.
         assert_eq!(digests.fork_of(ForkDigest([0; 4])), None);
+    }
+
+    #[test]
+    fn message_ids_follow_the_schedule() {
+        // Fixture state: phase0 at genesis, Altair at 1.
+        let config = ChainConfig::minimal().with_fork_epoch(ForkName::Altair, Epoch(1));
+        let root = Root([3; 32]);
+        let ids = ForkDigests::new(&config, root).message_ids();
+        let topic = |epoch| {
+            GossipTopic {
+                fork_digest: config.fork_digest(root, Epoch(epoch)),
+                kind: GossipKind::BeaconBlock,
+            }
+            .topic()
+        };
+        // Five bytes that are not snappy, so both formulas hash them raw.
+        let data = [0xff; 5];
+
+        // The phase0 topic hashes the payload alone: SHA256(00000000 || data)[:20].
+        let digest = Root::sha256(&[[0, 0, 0, 0].as_slice(), &data].concat());
+        assert_eq!(ids.id(&topic(0), &data).0, digest.0[..20]);
+
+        // The Altair topic hashes the topic too, as a schedule-free rule does for every topic.
+        assert_eq!(
+            ids.id(&topic(1), &data),
+            MessageIds::default().id(&topic(1), &data)
+        );
+        assert_ne!(
+            ids.id(&topic(0), &data),
+            MessageIds::default().id(&topic(0), &data)
+        );
     }
 }

@@ -3,7 +3,9 @@
 mod discovery;
 mod forks;
 mod gossip;
+mod handshake;
 mod identity;
+mod record;
 mod requests;
 mod responder;
 mod server;
@@ -25,30 +27,27 @@ use axiom_das::NodeId;
 use axiom_discv5::driver::Discv5Events;
 use axiom_p2p::{
     Multiaddr, PeerId,
-    eth::{
-        GossipKind, GossipTopic,
-        reqresp::{Protocol, ResponseCode, Status, StatusV1},
-    },
-    swarm::{NetworkEvent, NetworkEvents, NetworkHandle, RequestId},
+    eth::{GossipKind, GossipTopic, reqresp::StatusVersion},
+    swarm::{NetworkEvent, NetworkEvents, NetworkHandle},
 };
-use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Preset, Root, Slot, SlotClock};
+use axiom_types::{ChainConfig, ColumnIndex, Preset, Root, SlotClock};
 use tokio::{
-    sync::{Semaphore, mpsc::UnboundedReceiver},
+    sync::{Semaphore, mpsc::UnboundedReceiver, watch},
     task, time,
 };
 use tracing::{debug, info, warn};
 
 pub use self::{discovery::DiscoverySettings, identity::NodeKey};
 pub(crate) use self::{
-    discovery::{Discovery, LocalRecord},
+    discovery::{Discovery, RecordSetup},
+    forks::ForkDigests,
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
 use self::{
-    forks::ForkDigests,
     gossip::GossipHandler,
+    handshake::Handshakes,
     server::RequestServer,
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
@@ -133,8 +132,8 @@ pub(crate) struct NetworkService<P: Preset> {
     subscriptions: Subscriptions,
     /// What peers are told about this node.
     metadata: Arc<LocalMetadata>,
-    /// Peers with a status request in flight.
-    handshakes: Vec<(RequestId, PeerId)>,
+    /// Status requests in flight, and the version each peer speaks.
+    handshakes: Handshakes,
     /// Connected peers, for the peer count and status refreshes.
     peers: BTreeSet<PeerId>,
     /// Peer counts and gossip outcomes.
@@ -152,8 +151,8 @@ pub(crate) struct NetworkService<P: Preset> {
 pub(crate) struct NodeIdentity {
     /// The libp2p peer identifier.
     pub(crate) peer_id: String,
-    /// The discovery record, in text form.
-    pub(crate) enr: Option<String>,
+    /// The discovery record in text form, kept current as it changes.
+    pub(crate) enr: Option<watch::Receiver<String>>,
     /// The libp2p listen address.
     pub(crate) p2p_address: String,
     /// The discovery UDP address.
@@ -249,7 +248,7 @@ impl<P: Preset> NetworkService<P> {
             clock,
             slots,
             metadata,
-            handshakes: Vec::new(),
+            handshakes: Handshakes::default(),
             peers: BTreeSet::new(),
             metrics,
             discovery,
@@ -272,10 +271,7 @@ impl<P: Preset> NetworkService<P> {
     pub(crate) fn identity(&self) -> NodeIdentity {
         NodeIdentity {
             peer_id: self.network.local_peer().to_string(),
-            enr: self
-                .discovery
-                .as_ref()
-                .map(|discovery| discovery.enr().to_string()),
+            enr: self.discovery.as_ref().map(Discovery::published),
             p2p_address: self.network.listen_addr().to_string(),
             discovery_address: self.discovery.as_ref().map(|discovery| {
                 // The multiaddr form of a UDP socket, as the identity route lists it.
@@ -374,6 +370,10 @@ impl<P: Preset> NetworkService<P> {
             != change.attnets
         {
             self.metadata.seq_number.fetch_add(1, Ordering::Relaxed);
+        }
+        // The record states the same subnets, and the fork of the wall-clock epoch.
+        if let Some(discovery) = &mut self.discovery {
+            discovery.refresh(epoch, change.attnets).await;
         }
 
         self.publish_light_client().await;
@@ -474,6 +474,7 @@ impl<P: Preset> NetworkService<P> {
             }
             NetworkEvent::PeerDisconnected { peer } => {
                 self.peers.remove(&peer);
+                self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 self.sync.on_disconnect(&peer).await;
             }
@@ -498,7 +499,9 @@ impl<P: Preset> NetworkService<P> {
                 payload,
             } => {
                 // An inbound status is also the peer's half of the handshake.
-                if let Some(status) = Self::inbound_status(protocol, &payload) {
+                if let Some(status) =
+                    StatusVersion::of(protocol).and_then(|version| version.decode(&payload).ok())
+                {
                     self.sync.on_status(peer.clone(), status).await;
                 }
                 // Answers run in their own tasks, so one slow query never blocks the loop.
@@ -511,18 +514,11 @@ impl<P: Preset> NetworkService<P> {
                     drop(permit);
                 });
             }
-            NetworkEvent::Response {
-                request,
-                peer,
-                chunk,
-            } => {
-                if let Some(position) = self.handshakes.iter().position(|(id, _)| *id == request) {
-                    self.handshakes.swap_remove(position);
-                    match Status::decode(&chunk.payload) {
-                        Ok(status) if chunk.code == ResponseCode::Success => {
-                            self.sync.on_status(peer, status).await;
-                        }
-                        _ => debug!(%peer, "peer sent no usable status"),
+            NetworkEvent::Response { request, chunk, .. } => {
+                if let Some((peer, status)) = self.handshakes.answered(request, &chunk) {
+                    match status {
+                        Some(status) => self.sync.on_status(peer, status).await,
+                        None => debug!(%peer, "peer sent no usable status"),
                     }
                 } else if self.sync.owns(request) {
                     self.sync.on_chunk(request, &chunk);
@@ -535,7 +531,10 @@ impl<P: Preset> NetworkService<P> {
                 error,
             } => {
                 debug!(%peer, %error, "request failed");
-                self.handshakes.retain(|(id, _)| *id != request);
+                // A peer that refused the newest status version gets the older one right away.
+                if let Some(peer) = self.handshakes.failed(request, &error) {
+                    self.send_status(peer).await;
+                }
                 self.sync.on_failure(request).await;
             }
             NetworkEvent::ConnectionFailed { address, error } => {
@@ -545,38 +544,19 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
-    /// The status in an inbound status request, of either version.
-    ///
-    /// A first-version status names no earliest slot, so it reads as genesis.
-    fn inbound_status(protocol: Protocol, payload: &[u8]) -> Option<Status> {
-        match protocol {
-            Protocol::StatusV2 => Status::decode(payload).ok(),
-            Protocol::StatusV1 => StatusV1::decode(payload).ok().map(|status| Status {
-                fork_digest: status.fork_digest,
-                finalized_root: status.finalized_root,
-                finalized_epoch: status.finalized_epoch,
-                head_root: status.head_root,
-                head_slot: status.head_slot,
-                earliest_available_slot: Slot::GENESIS,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Opens the status handshake with a peer.
-    ///
-    /// The second version goes out whatever the fork: every current client answers it.
+    /// Opens the status handshake with a peer, in the newest version it has not refused.
     async fn send_status(&mut self, peer: PeerId) {
         let status = match self.server.status().await {
             Ok(status) => status,
             Err(error) => return warn!(%error, "no status to send"),
         };
+        let version = self.handshakes.version_for(&peer);
         match self
             .network
-            .send_request(peer.clone(), Protocol::StatusV2, status.encode())
+            .send_request(peer.clone(), version.protocol(), version.encode(&status))
             .await
         {
-            Ok(request) => self.handshakes.push((request, peer)),
+            Ok(request) => self.handshakes.sent(request, peer, version),
             Err(error) => warn!(%error, "could not send status"),
         }
     }

@@ -22,3 +22,6 @@ axiom-ssz.workspace = true
 axiom-state-transition.workspace = true
 axiom-types.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+axiom-bls12-381.workspace = true

@@ -7,7 +7,7 @@ use std::sync::{
 
 use axiom_p2p::{
     PeerId,
-    eth::reqresp::{MetaData, Protocol, ResponseChunk, ResponseCode, Status},
+    eth::reqresp::{MetaData, Protocol, ResponseChunk, ResponseCode, Status, StatusVersion},
     swarm::{InboundRequestId, NetworkHandle},
 };
 use axiom_ssz::{BitVector, Ssz};
@@ -34,12 +34,6 @@ pub(crate) struct LocalMetadata {
     /// Custody group count advertised to peers.
     pub(crate) custody_group_count: u64,
 }
-
-/// Bytes of a status in its first version: the second version appends one field.
-///
-/// Both are fixed-size containers, so the older encoding is a prefix of the newer.
-/// See Status v1 in the phase0 p2p spec and Status v2 in the Fulu p2p spec.
-const STATUS_V1_BYTES: usize = 84;
 
 /// Bytes of metadata in its second version: the third version appends one field.
 ///
@@ -110,16 +104,8 @@ impl<P: Preset> RequestServer<P> {
         payload: Vec<u8>,
     ) -> Result<Vec<ResponseChunk>, ResponseChunk> {
         match protocol {
-            Protocol::StatusV2 | Protocol::StatusV1 => {
-                let status = self.status().await.map_err(|error| {
-                    ResponseChunk::error(ResponseCode::ServerError, &error.to_string())
-                })?;
-                let mut bytes = status.encode();
-                if protocol == Protocol::StatusV1 {
-                    bytes.truncate(STATUS_V1_BYTES);
-                }
-                Ok(vec![ResponseChunk::success(None, bytes)])
-            }
+            Protocol::StatusV2 => self.status_answer(StatusVersion::V2).await,
+            Protocol::StatusV1 => self.status_answer(StatusVersion::V1).await,
             Protocol::PingV1 => {
                 let seq = self.metadata.seq_number.load(Ordering::Relaxed);
                 Ok(vec![ResponseChunk::success(None, seq.encode())])
@@ -199,6 +185,18 @@ impl<P: Preset> RequestServer<P> {
                     .await
             }
         }
+    }
+
+    /// The node's status, in the shape of the version the peer asked under.
+    async fn status_answer(
+        &self,
+        version: StatusVersion,
+    ) -> Result<Vec<ResponseChunk>, ResponseChunk> {
+        let status = self
+            .status()
+            .await
+            .map_err(|error| ResponseChunk::error(ResponseCode::ServerError, &error.to_string()))?;
+        Ok(vec![ResponseChunk::success(None, version.encode(&status))])
     }
 
     /// Runs a light client query that answers one chunk, or none when the data is missing.

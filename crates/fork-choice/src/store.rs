@@ -418,6 +418,52 @@ impl<P: Preset> Store<P> {
         self.pow_chain.insert(block);
     }
 
+    /// The proof-of-work block a merge block's payload builds on, when the block is one.
+    ///
+    /// Gives nothing when the parent's state is unknown, since the import refuses such a block.
+    #[must_use]
+    pub fn merge_parent_hash(&self, block: &combined::BeaconBlock<P>) -> Option<Hash32> {
+        let parent_state = self.block_states.get(&block.parent_root())?;
+        Self::merge_parent_of(block, parent_state)
+    }
+
+    /// The proof-of-work parent of a block that fork choice must check as a merge block.
+    ///
+    /// A merge block is the first to carry a payload, so its parent's state is still pre-merge.
+    /// Only Bellatrix checks it.
+    /// See `validate_merge_block` in the Bellatrix fork choice spec.
+    fn merge_parent_of(
+        block: &combined::BeaconBlock<P>,
+        parent_state: &State<P>,
+    ) -> Option<Hash32> {
+        let is_merge_block = block.fork_name().validates_merge_block()
+            && !parent_state.beacon().is_merge_transition_complete()
+            && block.carries_execution_payload();
+        is_merge_block.then(|| block.execution_hashes().parent_block_hash)
+    }
+
+    /// Checks a merge block's proof-of-work parent, under the rule its payload verdict selects.
+    ///
+    /// An unvalidated payload takes the optimistic rule, which excuses an unknown terminal block.
+    fn validate_merge_block(
+        &self,
+        slot: Slot,
+        parent_hash: Hash32,
+        payload: PayloadStatus,
+    ) -> Result<(), ForkChoiceError> {
+        match payload {
+            PayloadStatus::NotValidated => self.pow_chain.validate_optimistic_merge_block::<P>(
+                &self.config,
+                slot,
+                self.current_slot(),
+                parent_hash,
+            ),
+            PayloadStatus::Valid | PayloadStatus::Invalid { .. } => self
+                .pow_chain
+                .validate_merge_block::<P>(&self.config, slot, parent_hash),
+        }
+    }
+
     /// Accepts a block: checks its place in the tree, runs it, and records its post-state.
     ///
     /// A Gloas block takes the Gloas handler; every earlier fork shares one.
@@ -795,6 +841,7 @@ impl<P: Preset> Store<P> {
     /// 2. Check the data availability verdict, from Deneb on.
     /// 3. Run the state transition on the parent's state.
     /// 4. In Bellatrix, check a merge block builds on the terminal proof-of-work block.
+    ///    An unvalidated merge block takes the optimistic sync rule instead.
     /// 5. Record the block, its timeliness, the boost, and its checkpoints.
     ///
     /// See `on_block` in the phase0, Bellatrix, Deneb, and Fulu fork choice specs.
@@ -815,9 +862,7 @@ impl<P: Preset> Store<P> {
             return Err(ForkChoiceError::DataUnavailable(root));
         }
         // A merge block's payload builds on the last proof-of-work block, which must be terminal.
-        let is_merge_block = block.fork_name().validates_merge_block()
-            && !parent_state.beacon().is_merge_transition_complete()
-            && block.carries_execution_payload();
+        let merge_parent = Self::merge_parent_of(&block, parent_state);
 
         let mut state = parent_state.clone();
         // An invalid verdict condemns optimistic ancestors too, even though this block is refused.
@@ -831,12 +876,8 @@ impl<P: Preset> Store<P> {
                 root,
                 source: Box::new(source),
             })?;
-        if is_merge_block {
-            self.pow_chain.validate_merge_block::<P>(
-                &self.config,
-                block.slot(),
-                block.execution_hashes().parent_block_hash,
-            )?;
+        if let Some(parent_hash) = merge_parent {
+            self.validate_merge_block(block.slot(), parent_hash, payload)?;
         }
 
         let status = if payload == PayloadStatus::Valid {

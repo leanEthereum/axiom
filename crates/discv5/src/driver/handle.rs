@@ -5,7 +5,7 @@ use std::{io, net::SocketAddr};
 use axiom_crypto::secp256k1::SecretKey;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{Command, Driver, DriverStopped, Input};
+use super::{Command, Driver, DriverStopped, Input, RecordUpdateError};
 use crate::{
     distance::LogDistance,
     enr::Enr,
@@ -181,6 +181,21 @@ impl Discv5 {
             reply,
         })
         .await
+    }
+
+    /// Replaces the local record, which PONG, NODES, and handshakes serve from then on.
+    ///
+    /// Peers see the higher sequence number in the next PONG and fetch the new record.
+    /// Other clones of this handle keep reporting the record they last saw.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the driver has stopped or the record names another node.
+    pub async fn set_local_enr(&mut self, enr: Enr) -> Result<(), RecordUpdateError> {
+        self.ask(|reply| Command::SetLocalEnr(enr.clone(), reply))
+            .await??;
+        self.local_enr = enr;
+        Ok(())
     }
 
     /// The records in the routing table.

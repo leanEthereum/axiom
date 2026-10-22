@@ -18,6 +18,7 @@ mod blobs;
 mod forkchoice;
 mod get_payload;
 mod payload;
+mod pow_block;
 mod primitives;
 mod reader;
 mod requests;

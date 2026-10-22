@@ -299,7 +299,7 @@ impl Router {
                 max: self.cx.config.max_transmit_size,
             });
         }
-        let id = (self.cx.config.message_id)(&message.topic, &message.data);
+        let id = self.cx.config.message_id.id(&message.topic, &message.data);
         if self.seen.contains(&id) {
             return Err(PublishError::Duplicate { id });
         }
@@ -496,7 +496,7 @@ impl Router {
         if !self.subscriptions.contains(&message.topic) {
             return;
         }
-        let id = (self.cx.config.message_id)(&message.topic, &message.data);
+        let id = self.cx.config.message_id.id(&message.topic, &message.data);
         // Any delivery fulfils the IWANT promises made for this message.
         self.gossip.promises.fulfil(&id);
 

@@ -210,6 +210,24 @@ impl ForkName {
         }
     }
 
+    /// Whether a gossip message identifier on the fork's topics hashes the topic too.
+    ///
+    /// Altair added the topic, so one payload on two forks' topics gets two identifiers.
+    /// See "Topics and messages" in the phase0 and Altair p2p specs.
+    #[must_use]
+    pub const fn message_id_hashes_topic(self) -> bool {
+        match self {
+            Self::Phase0 => false,
+            Self::Altair
+            | Self::Bellatrix
+            | Self::Capella
+            | Self::Deneb
+            | Self::Electra
+            | Self::Fulu
+            | Self::Gloas => true,
+        }
+    }
+
     /// The form the fork's blob data travels in.
     #[must_use]
     pub const fn blob_data(self) -> BlobData {

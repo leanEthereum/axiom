@@ -496,7 +496,7 @@ impl<P: Preset> GossipHandler<P> {
     async fn apply(&self, accepted: Accepted<P>) {
         let outcome = match accepted {
             Accepted::Block(block) => {
-                let payload = self.execution.verdict(&block).await;
+                let payload = self.execution.verdict(&self.chain, &block).await;
                 // Gossip admits a block up to the clock disparity early; it waits for its slot.
                 let slot = block.slot();
                 if let Ok(start) = self.chain.run(move |chain| chain.slot_start_ms(slot)).await {

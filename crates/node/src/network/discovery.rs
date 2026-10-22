@@ -6,18 +6,21 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
 
+use axiom_crypto::secp256k1::SecretKey;
 use axiom_discv5::{
     Csprng, Enr, NodeId,
     driver::{Discv5, Discv5Events},
-    enr::EnrForkId,
     service::{Config, EnrFilter, Event},
 };
 use axiom_p2p::{Multiaddr, PeerId, PublicKey};
-use axiom_ssz::BitVector;
 use axiom_types::{ChainConfig, Epoch, ForkDigest, Root};
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
-use super::NodeKey;
+use super::{
+    NodeKey,
+    record::{LocalRecord, RecordEntries},
+};
 
 /// Records a lookup asks for: enough to fill the peer table in a few rounds.
 const LOOKUP_PEERS: usize = 16;
@@ -38,14 +41,12 @@ pub struct DiscoverySettings {
     pub boot_enrs: Vec<Enr>,
 }
 
-/// What the node's record states, fixed at startup.
+/// What the node's record states at startup.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LocalRecord {
+pub(crate) struct RecordSetup {
     /// The libp2p TCP port peers dial.
     pub(crate) tcp_port: u16,
-    /// The fork digest of the current epoch.
-    pub(crate) fork_digest: ForkDigest,
-    /// The current epoch.
+    /// The wall-clock epoch.
     pub(crate) epoch: Epoch,
     /// The genesis validators root.
     pub(crate) genesis_validators_root: Root,
@@ -64,12 +65,21 @@ pub(crate) struct LocalRecord {
 /// 1. With few peers, the service looks up a random target, keeping only records on this fork.
 /// 2. It dials each found record's TCP endpoint once.
 ///
-/// The record is built once at startup.
-/// It does not yet follow subnet rotations or forks, so it can go stale on a long run.
+/// The record follows the chain: each fork, blob step, and subnet rotation re-signs it.
 #[derive(Debug)]
 pub(crate) struct Discovery {
     /// The discv5 driver.
     discv5: Discv5,
+    /// The node's record and the consensus entries it states.
+    record: LocalRecord,
+    /// The key that signs the record.
+    key: SecretKey,
+    /// The chain configuration, for the fork schedule.
+    config: ChainConfig,
+    /// The root that, with each fork version, gives the fork digests.
+    genesis_validators_root: Root,
+    /// The record in text form, for readers outside the network loop.
+    published: watch::Sender<String>,
     /// Upkeeps since the running lookup started, if one is running.
     searching: Option<u32>,
     /// Records handed out for dialing since the last lookup started.
@@ -88,12 +98,17 @@ impl Discovery {
         key: &NodeKey,
         settings: &DiscoverySettings,
         config: &ChainConfig,
-        record: LocalRecord,
+        setup: RecordSetup,
     ) -> io::Result<(Self, Discv5Events)> {
-        let enr = Self::record(key, settings, config, record)?;
+        let record = Self::record(key, settings, config, setup)?;
         let bind = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, settings.udp_port));
-        let (discv5, events) =
-            Discv5::start(key.secret().clone(), enr, Config::default(), bind).await?;
+        let (discv5, events) = Discv5::start(
+            key.secret().clone(),
+            record.enr().clone(),
+            Config::default(),
+            bind,
+        )
+        .await?;
         for boot in &settings.boot_enrs {
             if discv5.add_enr(boot.clone()).await.is_err() {
                 warn!("discovery stopped while adding boot records");
@@ -105,12 +120,36 @@ impl Discovery {
         Ok((
             Self {
                 discv5,
+                published: watch::Sender::new(record.enr().to_string()),
+                record,
+                key: key.secret().clone(),
+                config: config.clone(),
+                genesis_validators_root: setup.genesis_validators_root,
                 searching: None,
                 dialed: HashSet::new(),
                 rng: Csprng::from_seed(seed),
             },
             events,
         ))
+    }
+
+    /// Re-signs the record when its consensus entries change, and hands it to discv5.
+    ///
+    /// The entries follow the wall-clock epoch, as the p2p specs ask.
+    pub(crate) async fn refresh(&mut self, epoch: Epoch, attnets: u64) {
+        let entries = RecordEntries::at(&self.config, self.genesis_validators_root, epoch, attnets);
+        match self.record.update(entries, &self.key) {
+            Ok(false) => {}
+            Ok(true) => match self.discv5.set_local_enr(self.record.enr().clone()).await {
+                Ok(()) => {
+                    let text = self.record.enr().to_string();
+                    info!(enr = %text, "discovery record updated");
+                    self.published.send_replace(text);
+                }
+                Err(error) => warn!(%error, "could not update the discovery record"),
+            },
+            Err(error) => warn!(%error, "could not sign the discovery record"),
+        }
     }
 
     /// Starts a lookup for peers on a fork, unless one is already running.
@@ -149,9 +188,9 @@ impl Discovery {
         }
     }
 
-    /// The node's signed record.
-    pub(crate) const fn enr(&self) -> &Enr {
-        self.discv5.local_enr()
+    /// The node's record in text form, kept current as it changes.
+    pub(crate) fn published(&self) -> watch::Receiver<String> {
+        self.published.subscribe()
     }
 
     /// The UDP address discv5 is bound to.
@@ -175,52 +214,31 @@ impl Discovery {
             .then(|| (peer, Multiaddr::from_tcp(address)))
     }
 
-    /// The node's signed record.
+    /// The node's first signed record.
     ///
     /// See "The discovery domain: discv5" in the phase0, Altair, and Fulu p2p specs.
     fn record(
         key: &NodeKey,
         settings: &DiscoverySettings,
         config: &ChainConfig,
-        record: LocalRecord,
-    ) -> io::Result<Enr> {
-        // The next fork, regular or blob-only, and the version in force once it comes.
-        let next_epoch = config.next_fork_epoch(record.epoch);
-        let next_version = if next_epoch == Epoch::FAR_FUTURE {
-            config.fork_version_at(record.epoch)
-        } else {
-            config.fork_version_at(next_epoch)
-        };
-        // With no fork scheduled, the next digest is all zeros.
-        let next_digest = if next_epoch == Epoch::FAR_FUTURE {
-            ForkDigest::ZERO
-        } else {
-            config.fork_digest(record.genesis_validators_root, next_epoch)
-        };
-        let mut attnets = BitVector::default();
-        for index in 0..64 {
-            attnets.set(index, record.attnets >> index & 1 == 1);
-        }
-
-        let mut builder = Enr::builder()
+        setup: RecordSetup,
+    ) -> io::Result<LocalRecord> {
+        let mut base = Enr::builder()
             .seq(1)
-            .tcp4(record.tcp_port)
+            .tcp4(setup.tcp_port)
             .udp4(settings.udp_port)
-            .fork_id(&EnrForkId {
-                fork_digest: record.fork_digest,
-                next_fork_version: next_version,
-                next_fork_epoch: next_epoch,
-            })
-            .attnets(&attnets)
-            .syncnets(&BitVector::default())
-            .custody_group_count(record.custody_group_count)
-            .next_fork_digest(next_digest);
+            .custody_group_count(setup.custody_group_count);
         // Without a known public address, peers learn this node's address from its packets.
         if let Some(address) = settings.enr_address {
-            builder = builder.ip4(address);
+            base = base.ip4(address);
         }
-        builder
-            .build(key.secret())
+        let entries = RecordEntries::at(
+            config,
+            setup.genesis_validators_root,
+            setup.epoch,
+            setup.attnets,
+        );
+        LocalRecord::new(base, entries, key.secret())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
     }
 }

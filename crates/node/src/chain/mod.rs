@@ -42,13 +42,6 @@ use crate::ChainError;
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
 
-/// Sync committee periods of light client data kept behind finality.
-///
-/// A bootstrap embeds a whole sync committee, and one is kept per finalized epoch.
-/// Two periods keep a day or more of bootstraps and updates on mainnet in a few megabytes.
-/// The full node spec asks for more, back to the oldest block served; this node keeps less.
-const LIGHT_CLIENT_PERIODS_KEPT: u64 = 2;
-
 /// The node's view of the beacon chain.
 ///
 /// # Overview
@@ -334,6 +327,7 @@ impl<P: Preset> Chain<P> {
         if self.store.current_epoch() != epoch {
             // Messages from two epochs ago can no longer be gossiped, so forget them.
             self.gossip.seen.prune::<P>(self.store.current_epoch());
+            self.prune_light_client();
         }
         self.metrics
             .clock_slot
@@ -371,11 +365,9 @@ impl<P: Preset> Chain<P> {
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
         info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
+        // Every block's update is kept; the head change below decides whether it is served.
+        self.offer_update(root, block);
         self.update_head()?;
-        // Only canonical blocks feed light clients; a block that is not the head may never be.
-        if self.head.root == root {
-            self.offer_update(root, block);
-        }
         Ok(root)
     }
 
@@ -586,7 +578,7 @@ impl<P: Preset> Chain<P> {
         }
     }
 
-    /// Derives the light client update a new head signs for its parent, and keeps it if better.
+    /// Derives the light client update a new block signs for its parent, and offers it.
     ///
     /// Updates are routine to fail: phase0 has no committee, and few signers prove nothing.
     /// So a failure is logged and never stops the import.
@@ -611,7 +603,7 @@ impl<P: Preset> Chain<P> {
                 &attested,
                 finalized_block.as_ref(),
             )?;
-            Ok(self.light_client.offer_update(update)?)
+            Ok(self.light_client.offer_update(root, update)?)
         });
         if let Err(error) = created {
             debug!(%root, %error, "no light client update from the block");
@@ -766,6 +758,19 @@ impl<P: Preset> Chain<P> {
         self.store.on_pow_block(block);
     }
 
+    /// The terminal proof-of-work block to fetch from the engine before importing a block.
+    ///
+    /// Only a Bellatrix merge block needs one, and only when no terminal block hash is fixed by hand.
+    /// A fixed hash settles the check without any lookup.
+    /// See `validate_merge_block` in the Bellatrix fork choice spec.
+    #[must_use]
+    pub fn terminal_block_lookup(&self, block: &combined::SignedBeaconBlock<P>) -> Option<Hash32> {
+        if self.config().terminal_block_hash != Hash32::ZERO {
+            return None;
+        }
+        self.store.merge_parent_hash(&block.message())
+    }
+
     /// Applies the engine's later verdict on a block imported optimistically.
     ///
     /// # Errors
@@ -806,6 +811,12 @@ impl<P: Preset> Chain<P> {
         let reorg = (head.root != previous.root
             && !self.store.blocks().is_ancestor(head.root, previous.root))
         .then(|| self.reorg_depth(previous, head));
+
+        // Light clients are served from the new canonical chain, before finality settles it.
+        if head.root != previous.root {
+            let canonical = self.canonical_since_finality(head.root);
+            self.light_client.follow(canonical);
+        }
 
         // Invariant: finality reaches the disk before the head moves.
         // A failed write leaves the head as it was, so the next update tries again.
@@ -876,17 +887,62 @@ impl<P: Preset> Chain<P> {
         self.database
             .finalize(previous, finalized, state, &chain, &orphans)?;
 
-        // A finalized checkpoint block is what light clients bootstrap from.
-        if let Some(block) = self.database.block(finalized.root)? {
-            self.offer_bootstrap(finalized.root, &block);
+        // Light clients bootstrap from finalized epoch boundary blocks.
+        // Their states leave the store below, so the bootstraps are made now.
+        let boundaries: BTreeSet<Root> = (previous.epoch.0 + 1..=finalized.epoch.0)
+            .filter_map(|epoch| {
+                let start = Epoch(epoch).start_slot::<P>();
+                // The chain runs from the new finalized block back, so the first match is the latest.
+                chain
+                    .iter()
+                    .find(|(slot, _)| *slot <= start)
+                    .map(|(_, root)| *root)
+            })
+            .collect();
+        for root in boundaries {
+            if let Some(block) = self.database.block(root)? {
+                self.offer_bootstrap(root, &block);
+            }
         }
-        let kept = LIGHT_CLIENT_PERIODS_KEPT * P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
-        let earliest = Epoch(finalized.epoch.0.saturating_sub(kept));
-        self.light_client.prune(earliest.start_slot::<P>());
+        if let Some((slot, _)) = chain.first() {
+            self.light_client.settle(*slot);
+        }
+        self.prune_light_client();
 
         // Only now that the disk agrees, drop the excluded blocks from memory.
         self.store.prune();
         Ok(())
+    }
+
+    /// Blocks of a head's chain that the fork choice still holds, from the head back.
+    fn canonical_since_finality(&self, head: Root) -> Vec<Root> {
+        let blocks = self.store.blocks();
+        let mut chain = Vec::new();
+        let mut current = head;
+        while let Some(node) = blocks.get(&current) {
+            chain.push(current);
+            current = node.parent_root;
+        }
+        chain
+    }
+
+    /// Drops light client data older than the window peers may ask for.
+    ///
+    /// The window spans the epochs a node must serve blocks for, from Altair on.
+    /// Bootstraps share their committee keys with the states, so each costs little memory.
+    /// See the serving ranges of the Altair light client full node spec.
+    fn prune_light_client(&mut self) {
+        let config = self.store.config();
+        let window = config.min_epochs_for_block_requests();
+        let earliest = self
+            .store
+            .current_epoch()
+            .0
+            .saturating_sub(window)
+            .max(config.altair_fork_epoch.0);
+        // Without Altair scheduled, the far future epoch saturates rather than overflows.
+        let earliest = Slot(earliest.saturating_mul(P::SLOTS_PER_EPOCH));
+        self.light_client.prune(earliest);
     }
 
     /// Blocks on the old head's chain after the common ancestor with the new head.

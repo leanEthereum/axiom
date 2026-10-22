@@ -10,15 +10,17 @@ use std::{
 
 use axiom_http::{Method, Request, Response, Router, Server, ServerConfig, StatusCode};
 use axiom_json::{Json, Object};
+use axiom_types::bellatrix::PowBlock;
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use crate::{Claims, JwtSecret, RpcError};
+use crate::{Claims, JsonCodec, JwtSecret, RpcError};
 
 /// A scripted engine on a loopback port.
 ///
 /// # Overview
 ///
 /// Tests set a canned reply per method, then point a client at the engine's URL.
+/// A reply may also be bound to exact parameters, such as one block hash.
 /// The engine records each authenticated call, so tests can check the exact parameters sent.
 ///
 /// Each call runs in three steps:
@@ -75,13 +77,24 @@ impl Reply {
     }
 }
 
+/// A canned reply and the calls it answers.
+#[derive(Clone, Debug)]
+struct Script {
+    /// The method answered.
+    method: String,
+    /// The exact parameters answered, or nothing to answer every call of the method.
+    params: Option<Vec<Json>>,
+    /// The answer.
+    reply: Reply,
+}
+
 /// State shared between the handle and the server task.
 #[derive(Debug)]
 struct MockState {
     /// The secret every token must be signed with.
     secret: JwtSecret,
-    /// Canned replies by method; a later entry for the same method wins.
-    replies: Mutex<Vec<(String, Reply)>>,
+    /// Canned replies; a later entry for the same calls wins.
+    replies: Mutex<Vec<Script>>,
     /// Calls in arrival order.
     calls: Mutex<Vec<RecordedCall>>,
 }
@@ -132,12 +145,25 @@ impl MockEngine {
 
     /// Answers every later call of a method with a result.
     pub fn reply(&self, method: &str, result: Json) {
-        self.state.set(method, Reply::Result(result));
+        self.state.set(method, None, Reply::Result(result));
     }
 
     /// Answers every later call of a method with an error object.
     pub fn reply_error(&self, method: &str, error: RpcError) {
-        self.state.set(method, Reply::Error(error));
+        self.state.set(method, None, Reply::Error(error));
+    }
+
+    /// Answers later calls of a method with exactly these parameters.
+    ///
+    /// Such a reply takes precedence over one for every call of the method.
+    pub fn reply_to(&self, method: &str, params: Vec<Json>, result: Json) {
+        self.state.set(method, Some(params), Reply::Result(result));
+    }
+
+    /// Serves a proof-of-work block to lookups of its hash, as eth_getBlockByHash.
+    pub fn serve_pow_block(&self, block: &PowBlock) {
+        let params = vec![block.block_hash.to_json(), Json::Bool(false)];
+        self.reply_to("eth_getBlockByHash", params, block.to_json());
     }
 
     /// The authenticated calls received so far, in arrival order.
@@ -162,14 +188,33 @@ impl MockState {
     }
 
     /// Stores a canned reply.
-    fn set(&self, method: &str, reply: Reply) {
-        self.replies().push((method.to_owned(), reply));
+    fn set(&self, method: &str, params: Option<Vec<Json>>, reply: Reply) {
+        self.replies().push(Script {
+            method: method.to_owned(),
+            params,
+            reply,
+        });
+    }
+
+    /// The canned reply to a call: the latest for its exact parameters, else the latest for any.
+    fn script(&self, method: &str, params: &[Json]) -> Option<Reply> {
+        let replies = self.replies();
+        let of_method = || {
+            replies
+                .iter()
+                .rev()
+                .filter(|script| script.method == method)
+        };
+        of_method()
+            .find(|script| script.params.as_deref() == Some(params))
+            .or_else(|| of_method().find(|script| script.params.is_none()))
+            .map(|script| script.reply.clone())
     }
 
     /// The canned replies, locked.
     ///
     /// Poisoning is ignored: a panicking test thread leaves the list intact.
-    fn replies(&self) -> MutexGuard<'_, Vec<(String, Reply)>> {
+    fn replies(&self) -> MutexGuard<'_, Vec<Script>> {
         self.replies.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -210,26 +255,18 @@ impl MockState {
             .map(<[Json]>::to_vec)
             .unwrap_or_default();
 
-        // Phase 3: record the call, then answer from the script.
+        // Phase 3: answer from the script, then record the call.
+        let reply = self.script(method, &params).unwrap_or_else(|| {
+            Reply::Error(RpcError::new(
+                RpcError::METHOD_NOT_FOUND,
+                "Method not found",
+            ))
+        });
         self.calls().push(RecordedCall {
             method: method.to_owned(),
             params,
             issued_at: claims.issued_at,
         });
-        let reply = self
-            .replies()
-            .iter()
-            .rev()
-            .find(|(name, _)| name == method)
-            .map_or_else(
-                || {
-                    Reply::Error(RpcError::new(
-                        RpcError::METHOD_NOT_FOUND,
-                        "Method not found",
-                    ))
-                },
-                |(_, reply)| reply.clone(),
-            );
         reply.into_response(id)
     }
 }

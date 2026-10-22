@@ -4,7 +4,7 @@
 use std::{
     env, fs,
     net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::Arc,
     time::Duration,
@@ -13,20 +13,34 @@ use std::{
 use axiom_discv5::Enr;
 use axiom_ef_tests::{
     Case, Vectors,
-    chain_builder::{ChainBuilder, PYSPEC_GENESIS, Proposal},
+    chain_builder::{ChainBuilder, PYSPEC_GENESIS, Participation, Proposal},
 };
+use axiom_execution::{CAPABILITIES, JsonCodec, JwtSecret, mock::MockEngine};
+use axiom_fork_choice::bellatrix::SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY;
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::Json;
+use axiom_kzg::{Blob as KzgBlob, Kzg};
+use axiom_light_client::{
+    Header,
+    combined::{
+        Format, LightClientBootstrap, LightClientFinalityUpdate, LightClientOptimisticUpdate,
+        LightClientStore, LightClientUpdate,
+    },
+};
 use axiom_node::{
-    AnchorSource, DiscoverySettings, ManualClock, NetworkSettings, Node, NodeConfig, NodeError,
+    AnchorSource, DiscoverySettings, EngineConfig, ManualClock, NetworkSettings, Node, NodeConfig,
+    NodeError,
 };
 use axiom_p2p::Multiaddr;
-use axiom_ssz::Ssz;
+use axiom_ssz::{Ssz, U256};
 use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{
-    ChainConfig, Epoch, ForkName, Minimal,
+    ChainConfig, Epoch, ForkName, Hash32, KzgCommitment, KzgProof, Minimal, Slot,
     accessors::CoreState,
+    bellatrix::PowBlock,
     combined,
+    deneb::{self, Blob},
+    electra,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
 };
 use tokio::{
@@ -130,6 +144,41 @@ impl Drop for Fixture {
     }
 }
 
+/// Blobs with their commitments and one opening proof per blob, as a proposer holds them.
+#[derive(Clone, Debug, Default)]
+struct BlobBundle {
+    /// The blobs.
+    blobs: Vec<Blob<Minimal>>,
+    /// The commitment to each blob.
+    commitments: Vec<KzgCommitment>,
+    /// The proof that opens each commitment to its blob.
+    proofs: Vec<KzgProof>,
+}
+
+impl BlobBundle {
+    /// One blob per seed, whose first two field elements are the seed and its successor.
+    fn from_seeds(seeds: &[u8]) -> Self {
+        let kzg = Kzg::mainnet();
+        let mut bundle = Self::default();
+        for &seed in seeds {
+            let mut bytes = Blob::<Minimal>::default().as_ref().to_vec();
+            bytes[31] = seed;
+            bytes[63] = seed + 1;
+            let blob = KzgBlob::from_bytes(&bytes).expect("small elements are canonical");
+            let commitment = kzg.blob_to_kzg_commitment(&blob);
+            let proof = kzg
+                .compute_blob_kzg_proof(&blob, &commitment)
+                .expect("a computed commitment is a point");
+            bundle
+                .blobs
+                .push(Blob::<Minimal>::try_from(bytes.as_slice()).expect("a blob's size"));
+            bundle.commitments.push(KzgCommitment(commitment.0));
+            bundle.proofs.push(KzgProof(proof.0));
+        }
+        bundle
+    }
+}
+
 /// A node running in the test's runtime, with a client for its API.
 struct TestNode {
     /// The beacon API client.
@@ -193,14 +242,61 @@ impl TestNode {
         Self { client, stop, task }
     }
 
+    /// Publishes a block of any fork over the API, without blobs.
+    async fn publish_any(&self, block: &combined::SignedBeaconBlock<Minimal>) -> Response {
+        self.publish_with_blobs(block, &BlobBundle::default()).await
+    }
+
     /// Publishes a block of any fork over the API, in the format the fork's route takes.
     ///
-    /// A Fulu block travels in its block contents; every other fork's block travels alone.
-    async fn publish_any(&self, block: &combined::SignedBeaconBlock<Minimal>) -> Response {
+    /// From Deneb to Fulu a block travels in its block contents, with the bundle's blobs.
+    /// Every other fork's block travels alone.
+    async fn publish_with_blobs(
+        &self,
+        block: &combined::SignedBeaconBlock<Minimal>,
+        bundle: &BlobBundle,
+    ) -> Response {
         let body = match block {
+            combined::SignedBeaconBlock::Deneb(signed) => deneb::SignedBlockContents {
+                signed_block: signed.clone(),
+                kzg_proofs: bundle
+                    .proofs
+                    .clone()
+                    .try_into()
+                    .expect("the proofs fit the list"),
+                blobs: bundle
+                    .blobs
+                    .clone()
+                    .try_into()
+                    .expect("the blobs fit the list"),
+            }
+            .encode(),
+            combined::SignedBeaconBlock::Electra(signed) => electra::SignedBlockContents {
+                signed_block: signed.clone(),
+                kzg_proofs: bundle
+                    .proofs
+                    .clone()
+                    .try_into()
+                    .expect("the proofs fit the list"),
+                blobs: bundle
+                    .blobs
+                    .clone()
+                    .try_into()
+                    .expect("the blobs fit the list"),
+            }
+            .encode(),
             combined::SignedBeaconBlock::Fulu(signed) => SignedBlockContents {
                 signed_block: signed.clone(),
-                ..SignedBlockContents::default()
+                kzg_proofs: bundle
+                    .proofs
+                    .clone()
+                    .try_into()
+                    .expect("the proofs fit the list"),
+                blobs: bundle
+                    .blobs
+                    .clone()
+                    .try_into()
+                    .expect("the blobs fit the list"),
             }
             .encode(),
             other => other.encode(),
@@ -264,6 +360,51 @@ impl TestNode {
         Json::parse(&response.body).map_err(|error| format!("{path}: {error}"))
     }
 
+    /// An SSZ route's answer, or why the route did not answer.
+    async fn ssz_body(&self, path: &str) -> Result<Response, String> {
+        let request =
+            Request::new(Method::Get, path).with_header("accept", "application/octet-stream");
+        let response = self
+            .client
+            .send(&request)
+            .await
+            .map_err(|error| format!("{path}: {error}"))?;
+        if response.status != StatusCode::OK {
+            return Err(format!(
+                "{path}: {}: {}",
+                response.status,
+                body_text(&response)
+            ));
+        }
+        Ok(response)
+    }
+
+    /// An SSZ route's body and the fork it is tagged with, or why the route did not answer.
+    async fn ssz(&self, path: &str) -> Result<(Vec<u8>, ForkName), String> {
+        let response = self.ssz_body(path).await?;
+        let fork = response
+            .headers
+            .get("eth-consensus-version")
+            .and_then(ForkName::from_name)
+            .ok_or_else(|| format!("{path}: no fork tag"))?;
+        Ok((response.body, fork))
+    }
+
+    /// The latest optimistic update, as its attested and signature slots.
+    async fn optimistic_slots(&self) -> (Slot, Slot) {
+        let (bytes, fork) = self
+            .ssz("/eth/v1/beacon/light_client/optimistic_update")
+            .await
+            .expect("the node serves an optimistic update");
+        let LightClientOptimisticUpdate::Altair(update) =
+            LightClientOptimisticUpdate::<Minimal>::decode(&bytes, fork)
+                .expect("the update decodes")
+        else {
+            panic!("an Altair chain serves Altair updates");
+        };
+        (update.attested_header.beacon.slot, update.signature_slot)
+    }
+
     /// The head block's root, as the header route reports it.
     async fn head_root(&self) -> Option<String> {
         let header = self.json("/eth/v1/beacon/headers/head").await.ok()?;
@@ -321,6 +462,16 @@ async fn wait_for_head_within(node: &TestNode, expected: &str, attempts: u32) ->
 /// A response body as text, for failure messages.
 fn body_text(response: &Response) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
+}
+
+/// A response's status, and the message of the error body the API sends with it.
+fn api_error(response: &Response) -> (StatusCode, Option<String>) {
+    let message = Json::parse(&response.body).ok().and_then(|body| {
+        body.get("message")
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+    });
+    (response.status, message)
 }
 
 #[test]
@@ -589,11 +740,23 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
     });
 }
 
+/// The terminal total difficulty of the multi-fork chain.
+///
+/// The terminal block sits exactly on it, and its parent one short.
+const TERMINAL_TOTAL_DIFFICULTY: u64 = 1000;
+
+/// The parent of the terminal proof-of-work block, a stand-in hash.
+const TERMINAL_PARENT: Hash32 = Hash32([0x7d; 32]);
+
 /// The fork schedule of the multi-fork chain: Altair at epoch 1, then one fork per epoch.
 ///
 /// Gloas starts at epoch 7, the last fork, so the chain ends with payloads in envelopes.
+/// The merge happens with the first Bellatrix block, at slot 16.
 fn every_fork() -> ChainConfig {
-    let mut config = ChainConfig::minimal();
+    let mut config = ChainConfig {
+        terminal_total_difficulty: U256::from_u64(TERMINAL_TOTAL_DIFFICULTY),
+        ..ChainConfig::minimal()
+    };
     for (epoch, fork) in (1..).zip(ForkName::ALL.into_iter().skip(1)) {
         config = config.with_fork_epoch(fork, Epoch(epoch));
     }
@@ -603,13 +766,11 @@ fn every_fork() -> ChainConfig {
 /// Slots of the multi-fork chain: every slot of the eight forks' epochs, and one more Gloas epoch.
 const EVERY_FORK_SLOTS: u64 = 9 * 8;
 
-#[test]
-fn a_node_syncs_from_genesis_through_every_fork() {
-    let Some(vectors) = Vectors::locate() else {
-        return;
-    };
-    // Fixture state: the pyspec phase0 genesis, 64 validators with the test keys.
-    // Forks follow each other an epoch apart, phase0 at 0 through Gloas at 7.
+/// Slot of the merge block: the first slot of Bellatrix, at epoch 2.
+const MERGE_SLOT: u64 = 16;
+
+/// A builder of the multi-fork chain at the pyspec phase0 genesis.
+fn every_fork_builder(vectors: &Vectors) -> ChainBuilder<Minimal> {
     let config = every_fork();
     let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
     let genesis_bytes = genesis_case
@@ -617,8 +778,83 @@ fn a_node_syncs_from_genesis_through_every_fork() {
         .expect("case has a genesis state");
     let genesis = combined::BeaconState::<Minimal>::decode_at(&genesis_bytes, &config)
         .expect("genesis decodes as phase0");
-    let genesis_time = genesis.genesis_time();
-    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
+    ChainBuilder::new(config, genesis).expect("pyspec genesis")
+}
+
+/// A scratch directory holding a builder's genesis file, and that file's path.
+fn write_genesis(name: &str, builder: &ChainBuilder<Minimal>) -> (PathBuf, PathBuf) {
+    let directory = env::temp_dir().join(format!("axiom-{name}-{}", process::id()));
+    fs::create_dir_all(&directory).expect("temporary directory is writable");
+    let genesis_path = directory.join("genesis.ssz");
+    fs::write(&genesis_path, builder.genesis_bytes()).expect("temporary directory is writable");
+    (directory, genesis_path)
+}
+
+/// Milliseconds at the start of a slot of a builder's chain.
+fn slot_start_ms(builder: &ChainBuilder<Minimal>, slot: u64) -> u64 {
+    (builder.genesis().genesis_time() + 6 * slot) * 1000
+}
+
+/// A mock engine that calls every payload valid, and the node configuration that reaches it.
+///
+/// It knows two proof-of-work blocks: the terminal one, and its parent one short of the threshold.
+/// Every other block is unknown to it.
+async fn valid_engine(terminal: Hash32, secret_file: &Path) -> (MockEngine, EngineConfig) {
+    let secret = JwtSecret::new([0x42; 32]);
+    fs::write(secret_file, "42".repeat(32)).expect("temporary directory is writable");
+    let mock = MockEngine::start(secret)
+        .await
+        .expect("a loopback port is free");
+
+    let valid = Json::parse(r#"{"status":"VALID","latestValidHash":null,"validationError":null}"#)
+        .expect("valid JSON");
+    let updated = Json::from([("payloadStatus", valid.clone()), ("payloadId", Json::Null)]);
+    for method in CAPABILITIES {
+        if method.starts_with("engine_newPayload") {
+            mock.reply(method, valid.clone());
+        } else if method.starts_with("engine_forkchoiceUpdated") {
+            mock.reply(method, updated.clone());
+        }
+    }
+    mock.reply("eth_getBlockByHash", Json::Null);
+    mock.serve_pow_block(&PowBlock {
+        block_hash: terminal,
+        parent_hash: TERMINAL_PARENT,
+        total_difficulty: U256::from_u64(TERMINAL_TOTAL_DIFFICULTY),
+    });
+    mock.serve_pow_block(&PowBlock {
+        block_hash: TERMINAL_PARENT,
+        parent_hash: Hash32::ZERO,
+        total_difficulty: U256::from_u64(TERMINAL_TOTAL_DIFFICULTY - 1),
+    });
+
+    let config = EngineConfig {
+        url: mock.url().to_owned(),
+        jwt_secret: secret_file.to_path_buf(),
+    };
+    (mock, config)
+}
+
+/// The hashes a mock engine was asked to look up, in order.
+fn pow_lookups(engine: &MockEngine) -> Vec<Json> {
+    engine
+        .calls()
+        .into_iter()
+        .filter(|call| call.method == "eth_getBlockByHash")
+        .map(|call| call.params[0].clone())
+        .collect()
+}
+
+#[test]
+fn a_node_syncs_from_genesis_through_every_fork() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis, 64 validators with the test keys.
+    // Forks follow each other an epoch apart, phase0 at 0 through Gloas at 7.
+    let mut builder = every_fork_builder(&vectors);
+    let config = builder.config().clone();
+    let terminal = builder.terminal_block_hash();
 
     // Every slot from 1 to 72 gets a block; Gloas blocks also get their envelope.
     let proposals: Vec<Proposal<Minimal>> = (0..EVERY_FORK_SLOTS)
@@ -630,24 +866,28 @@ fn a_node_syncs_from_genesis_through_every_fork() {
     let tip = proposals.last().expect("72 blocks").block().block_root();
     let tip = format!("{tip}");
 
-    let directory = env::temp_dir().join(format!("axiom-every-fork-{}", process::id()));
-    fs::create_dir_all(&directory).expect("temporary directory is writable");
-    let genesis_path = directory.join("genesis.ssz");
-    fs::write(&genesis_path, &genesis_bytes).expect("temporary directory is writable");
+    let (directory, genesis_path) = write_genesis("every-fork", &builder);
     // The clock stands at slot 73, so every block is in the past.
-    let now_ms = (genesis_time + 6 * (EVERY_FORK_SLOTS + 1)) * 1000;
+    let now_ms = slot_start_ms(&builder, EVERY_FORK_SLOTS + 1);
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.block_on(async {
+        // Each node has its own engine, which calls every payload valid.
+        // Both engines know the terminal block at difficulty 1000 and its parent at 999.
+        let (a_engine, a_engine_config) =
+            valid_engine(terminal, &directory.join("a-jwt.hex")).await;
+        let (b_engine, b_engine_config) =
+            valid_engine(terminal, &directory.join("b-jwt.hex")).await;
         let settings = |listen_address, boot_nodes| NetworkSettings {
             listen_address,
             boot_nodes,
             custody_group_count: 4,
             discovery: None,
         };
-        let node_config = |network| NodeConfig {
+        let node_config = |network, engine| NodeConfig {
             anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
             network: Some(network),
+            engine: Some(engine),
             ..NodeConfig::default()
         };
 
@@ -659,7 +899,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             config.clone(),
             NodeConfig {
                 http_address: Some(a_api),
-                ..node_config(settings(a_address, Vec::new()))
+                ..node_config(settings(a_address, Vec::new()), a_engine_config)
             },
             a_api,
         )
@@ -678,7 +918,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             config.clone(),
             NodeConfig {
                 http_address: Some(b_api),
-                ..node_config(settings(free_address(), vec![boot]))
+                ..node_config(settings(free_address(), vec![boot]), b_engine_config)
             },
             b_api,
         )
@@ -707,8 +947,346 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             );
         }
 
+        // Before importing the merge block of slot 16, B asked its engine for the terminal block.
+        // The terminal block at 1000 led to its parent at 999, and nothing else was looked up.
+        let expected = vec![terminal.to_json(), TERMINAL_PARENT.to_json()];
+        assert_eq!(pow_lookups(&b_engine), expected);
+        // Every payload came back valid, so B's head is fully verified.
+        let syncing = b.json("/eth/v1/node/syncing").await.unwrap();
+        let optimistic = syncing
+            .get("data")
+            .and_then(|data| data.get("is_optimistic"));
+        assert_eq!(optimistic.and_then(Json::as_bool), Some(false));
+
+        b.stop().await;
+        a.stop().await;
+        b_engine.stop().await;
+        a_engine.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_node_without_an_engine_imports_an_old_merge_block_optimistically() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the multi-fork chain up to its merge block, at slot 16.
+    let mut builder = every_fork_builder(&vectors);
+    let config = builder.config().clone();
+    let proposals: Vec<Proposal<Minimal>> = (0..MERGE_SLOT)
+        .map(|_| builder.propose().expect("each block extends the chain"))
+        .collect();
+    let merge = proposals.last().expect("16 blocks").block();
+    assert_eq!(merge.fork_name(), ForkName::Bellatrix);
+    let merge_root = format!("{}", merge.block_root());
+
+    // Timing: the clock stands at slot 144, 128 slots after the merge block.
+    // An unvalidated merge block may import only once that old.
+    let (directory, genesis_path) = write_genesis("old-merge", &builder);
+    let now_ms = slot_start_ms(&builder, MERGE_SLOT + SAFE_SLOTS_TO_IMPORT_OPTIMISTICALLY);
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let address = free_address();
+        let node_config = NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            http_address: Some(address),
+            ..NodeConfig::default()
+        };
+        let node = TestNode::start_with(now_ms, config, node_config, address).await;
+
+        // No engine knows the terminal block, yet the merge block imports and becomes the head.
+        node.publish_chain(&proposals).await;
+        assert_eq!(node.head_root().await.as_deref(), Some(merge_root.as_str()));
+
+        // Its payload was never validated, so the node follows the chain optimistically.
+        let syncing = node.json("/eth/v1/node/syncing").await.unwrap();
+        let optimistic = syncing
+            .get("data")
+            .and_then(|data| data.get("is_optimistic"));
+        assert_eq!(optimistic.and_then(Json::as_bool), Some(true));
+        node.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
+}
+
+/// Slot the light client chain's clock stands at, the start of epoch 11.
+///
+/// Its canonical blocks fill slots 1 to 87, so slot 88 is still empty.
+const LIGHT_CLIENT_NOW: u64 = 88;
+
+/// Splits the body of the updates route into its updates.
+///
+/// Each chunk is an 8-byte little-endian length, a fork digest, then the update.
+fn update_chunks(mut body: &[u8]) -> Vec<LightClientUpdate<Minimal>> {
+    let mut updates = Vec::new();
+    while !body.is_empty() {
+        let (length, rest) = body.split_at(8);
+        let length =
+            u64::from_le_bytes(length.try_into().expect("eight bytes make a length")) as usize;
+        let (chunk, rest) = rest.split_at(length);
+        // Every block of this chain is Altair's, so the digest only needs to be present.
+        updates.push(
+            LightClientUpdate::decode(&chunk[4..], ForkName::Altair).expect("each chunk decodes"),
+        );
+        body = rest;
+    }
+    updates
+}
+
+#[test]
+fn a_node_serves_light_client_data_that_follows_its_canonical_chain() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis, with Altair from epoch 1 and no later fork.
+    // Every validator attests and every sync committee seat signs, so the chain finalizes.
+    let config = ChainConfig::minimal().with_fork_epoch(ForkName::Altair, Epoch(1));
+    let genesis_bytes = Case::new(vectors.consensus().join(PYSPEC_GENESIS))
+        .ssz_bytes("state")
+        .expect("case has a genesis state");
+    let genesis = combined::BeaconState::<Minimal>::decode_at(&genesis_bytes, &config).unwrap();
+    let genesis_time = genesis.genesis_time();
+    let genesis_validators_root = genesis.genesis_validators_root();
+
+    // Branch a: full votes on slots 1 to 85, then two blocks only the sync committee signs.
+    //
+    //     a: 1 .. 85 (full), 86 and 87 (sync signatures, no attestations)
+    //     b: 1 .. 85 (the same blocks), then 88, skipping 86 and 87
+    //
+    // Blocks 86 and 87 add no fork choice weight, so b's timely block at 88 takes the head.
+    let full = |config: &ChainConfig| {
+        ChainBuilder::<Minimal>::new(config.clone(), genesis.clone())
+            .unwrap()
+            .with_participation(Participation::Full)
+    };
+    let mut a_builder = full(&config);
+    let mut a: Vec<Proposal<Minimal>> = (1..=85).map(|_| a_builder.propose().unwrap()).collect();
+    let mut a_builder = a_builder.with_participation(Participation::SyncOnly);
+    a.extend((86..=87).map(|_| a_builder.propose().unwrap()));
+    let mut b_builder = full(&config);
+    let b_shared: Vec<Proposal<Minimal>> = (1..=85).map(|_| b_builder.propose().unwrap()).collect();
+    assert_eq!(b_shared.last(), a.get(84));
+    let b_tip = b_builder.propose_at(Slot(LIGHT_CLIENT_NOW)).unwrap();
+
+    let directory = env::temp_dir().join(format!("axiom-light-client-{}", process::id()));
+    fs::create_dir_all(&directory).expect("temporary directory is writable");
+    let genesis_path = directory.join("genesis.ssz");
+    fs::write(&genesis_path, &genesis_bytes).expect("temporary directory is writable");
+    let now_ms = (genesis_time + 6 * LIGHT_CLIENT_NOW) * 1000;
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let address = free_address();
+        let node_config = NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            http_address: Some(address),
+            ..NodeConfig::default()
+        };
+        let node = TestNode::start_with(now_ms, config.clone(), node_config, address).await;
+        node.publish_chain(&a).await;
+
+        // The head is block 87, which signs for block 86.
+        assert_eq!(node.optimistic_slots().await, (Slot(86), Slot(87)));
+
+        // Two periods of 64 slots have a best update each.
+        // Period 0's earliest update with finality attests 32, when epoch 2 finalized.
+        // Period 1's earliest whose finalized header is in period 1 attests 80, finalizing slot 64.
+        let response = node
+            .ssz_body("/eth/v1/beacon/light_client/updates?start_period=0&count=2")
+            .await
+            .unwrap();
+        let updates = update_chunks(&response.body);
+        let attested: Vec<Slot> = updates
+            .iter()
+            .map(LightClientUpdate::context_slot)
+            .collect();
+        assert_eq!(attested, [Slot(32), Slot(80)]);
+
+        // A light client trusts block 8, the first Altair epoch boundary, and fetches its bootstrap.
+        let trusted = a[7].block().block_root();
+        let (bytes, fork) = node
+            .ssz(&format!("/eth/v1/beacon/light_client/bootstrap/{trusted}"))
+            .await
+            .unwrap();
+        assert_eq!(fork, ForkName::Altair);
+        let bootstrap = LightClientBootstrap::decode(&bytes, fork).unwrap();
+        let mut store =
+            LightClientStore::initialize(Format::Altair, &config, trusted, bootstrap).unwrap();
+
+        // Both updates verify against the committees the bootstrap and period 0 prove.
+        // The client then trusts slot 64 as finalized, and slot 80 as its optimistic head.
+        for update in updates {
+            store
+                .process_update(
+                    &config,
+                    update,
+                    Slot(LIGHT_CLIENT_NOW),
+                    genesis_validators_root,
+                )
+                .unwrap();
+        }
+        assert_eq!(store.finalized_header().beacon().slot, Slot(64));
+        assert_eq!(store.optimistic_header().beacon().slot, Slot(80));
+
+        // The finality update of the head proves slot 64 too.
+        let (bytes, fork) = node
+            .ssz("/eth/v1/beacon/light_client/finality_update")
+            .await
+            .unwrap();
+        let LightClientFinalityUpdate::Altair(finality) =
+            LightClientFinalityUpdate::<Minimal>::decode(&bytes, fork).unwrap()
+        else {
+            panic!("an Altair chain serves Altair updates");
+        };
+        assert_eq!(
+            (
+                finality.attested_header.beacon.slot,
+                finality.finalized_header.beacon.slot
+            ),
+            (Slot(86), Slot(64))
+        );
+
+        // Branch b's block at 88 arrives on time, and its proposer boost takes the head.
+        let response = node.publish_any(b_tip.block()).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        let b_root = format!("{}", b_tip.block().block_root());
+        assert_eq!(node.head_root().await, Some(b_root));
+
+        // Blocks 86 and 87 are orphaned, so their newer updates are no longer served.
+        // Block 88 signs for block 85, the head's parent.
+        assert_eq!(node.optimistic_slots().await, (Slot(85), Slot(88)));
+
+        node.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
+}
+
+/// Publishes two blocks with blobs to node A, and checks node B range-syncs blocks and blobs.
+///
+/// The genesis is the anchor of a fork choice case of the fork, with every fork up to it active.
+fn publish_blobs_and_sync(fork: ForkName) {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    let config = ChainConfig::minimal().with_forks_at_genesis(fork);
+    let case = Case::new(vectors.consensus().join(format!(
+        "minimal/{fork}/fork_choice/get_head/pyspec_tests/chain_no_attestations"
+    )));
+    let genesis_bytes = case
+        .ssz_bytes("anchor_state")
+        .expect("case has an anchor state");
+    let genesis = combined::BeaconState::<Minimal>::decode_at(&genesis_bytes, &config)
+        .expect("anchor state decodes in its fork");
+    let genesis_time = genesis.genesis_time();
+    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec keys");
+
+    // Fixture state: block 1 commits to 2 blobs, block 2 to 1 blob.
+    let bundles = [
+        BlobBundle::from_seeds(&[1, 3]),
+        BlobBundle::from_seeds(&[5]),
+    ];
+    let blocks: Vec<combined::SignedBeaconBlock<Minimal>> = bundles
+        .iter()
+        .map(|bundle| {
+            builder
+                .propose_with_blobs(&bundle.commitments)
+                .expect("each block extends the chain")
+                .block()
+                .clone()
+        })
+        .collect();
+    assert!(blocks.iter().all(|block| block.fork_name() == fork));
+    let tip = format!("{}", blocks[1].block_root());
+
+    let directory = env::temp_dir().join(format!("axiom-blobs-{fork}-{}", process::id()));
+    fs::create_dir_all(&directory).expect("temporary directory is writable");
+    let genesis_path = directory.join("genesis.ssz");
+    fs::write(&genesis_path, &genesis_bytes).expect("temporary directory is writable");
+    // The clock stands at slot 3, so both blocks are in the past.
+    let now_ms = (genesis_time + 6 * 3) * 1000;
+
+    let runtime = Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime starts");
+    runtime.block_on(async {
+        let start = |listen_address, boot_nodes| {
+            let api = free_address();
+            let network = NetworkSettings {
+                listen_address,
+                boot_nodes,
+                custody_group_count: 4,
+                discovery: None,
+            };
+            let node_config = NodeConfig {
+                anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+                http_address: Some(api),
+                network: Some(network),
+                ..NodeConfig::default()
+            };
+            TestNode::start_with(now_ms, config.clone(), node_config, api)
+        };
+        let a_address = free_address();
+        let a = start(a_address, Vec::new()).await;
+
+        // Mutation: block 1 carries the proofs of its 2 blobs swapped.
+        // The batch check fails, so nothing is broadcast or imported.
+        let mut swapped = bundles[0].clone();
+        swapped.proofs.swap(0, 1);
+        let response = a.publish_with_blobs(&blocks[0], &swapped).await;
+        let root = blocks[0].block_root();
+        let message = format!("blob data: blob proofs of block {root} do not verify");
+        assert_eq!(
+            api_error(&response),
+            (StatusCode::BAD_REQUEST, Some(message))
+        );
+
+        // Mutation: block 1 travels with its first blob only, 1 of 2.
+        let mut short = bundles[0].clone();
+        short.blobs.pop();
+        short.proofs.pop();
+        let response = a.publish_with_blobs(&blocks[0], &short).await;
+        let message = format!("blob data: block {root} commits to 2 blobs, but 1 are offered");
+        assert_eq!(
+            api_error(&response),
+            (StatusCode::BAD_REQUEST, Some(message))
+        );
+
+        // Each block imports at once with its blobs, so A's head is block 2.
+        for (block, bundle) in blocks.iter().zip(&bundles) {
+            let response = a.publish_with_blobs(block, bundle).await;
+            assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        }
+        assert_eq!(a.head_root().await.as_deref(), Some(tip.as_str()));
+
+        // Node B knows only genesis and range-syncs from A.
+        // Both blocks are inside the retention window, so B imports each only with its blobs.
+        // Reaching the tip shows A served all 3 sidecars and B verified them.
+        let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port())
+            .parse()
+            .expect("a TCP address is a multiaddress");
+        let b = start(free_address(), vec![boot]).await;
+        let head = wait_for_head(&b, &tip).await;
+        assert_eq!(
+            head.as_deref(),
+            Some(tip.as_str()),
+            "node B never synced the {fork} blocks with their blobs"
+        );
+
         b.stop().await;
         a.stop().await;
     });
     let _ignored = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn a_node_publishes_deneb_blobs_and_a_peer_syncs_them() {
+    publish_blobs_and_sync(ForkName::Deneb);
+}
+
+#[test]
+fn a_node_publishes_electra_blobs_and_a_peer_syncs_them() {
+    publish_blobs_and_sync(ForkName::Electra);
 }

@@ -669,7 +669,7 @@ impl<P: Preset> BatchWorker<P> {
         for (position, block) in blocks.into_iter().enumerate() {
             let root = block.block_root();
             let block = Arc::new(block);
-            let payload = self.execution.verdict(&block).await;
+            let payload = self.execution.verdict(&self.chain, &block).await;
             match self
                 .chain
                 .run(move |chain| chain.submit_block(block, payload))

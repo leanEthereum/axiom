@@ -192,7 +192,12 @@ impl Swarm {
             protocols: ProtocolVersion::ALL
                 .iter()
                 .map(|version| version.protocol_id())
-                .chain(Protocol::ALL.iter().map(|protocol| protocol.protocol_id()))
+                .chain(
+                    config
+                        .protocols
+                        .iter()
+                        .map(|protocol| protocol.protocol_id()),
+                )
                 .chain([identify::PROTOCOL, ping::PROTOCOL])
                 .map(str::to_owned)
                 .collect(),
@@ -205,7 +210,11 @@ impl Swarm {
             connection_queue: config.connection_queue,
         });
         Self {
-            router: Router::new(config.gossipsub, config.scoring.clone(), config.seed),
+            router: Router::new(
+                config.gossipsub.clone(),
+                config.scoring.clone(),
+                config.seed,
+            ),
             limiter: config.rate_limiter.clone(),
             config,
             shared,

@@ -108,7 +108,7 @@ impl Mesh {
 
     /// Keeps one mesh between D_low and D_high, healthy and with enough outbound peers.
     pub(super) fn maintain(&mut self, topic: &Topic, ticks: u64, cx: &mut Context, now: Duration) {
-        let config = cx.config;
+        let config = cx.config.clone();
 
         // Step 1: negative-score peers leave without peer exchange.
         let negative: Vec<PeerId> = self
@@ -342,7 +342,7 @@ impl Mesh {
 
     /// Picks the mesh members that survive an oversubscription prune.
     fn select_survivors(&self, topic: &Topic, cx: &mut Context, now: Duration) -> Vec<PeerId> {
-        let config = cx.config;
+        let config = cx.config.clone();
         // Shuffle before the stable sort, so equal scores break ties at random.
         let mut members: Vec<PeerId> = self.peers(topic).cloned().collect();
         cx.rng.shuffle(&mut members);

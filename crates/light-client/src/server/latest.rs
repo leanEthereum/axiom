@@ -46,10 +46,3 @@ pub(super) struct Latest<T> {
     /// Its slots and participation.
     pub(super) summary: Summary,
 }
-
-impl<T> Latest<T> {
-    /// Whether an update with a summary is more recent than this one.
-    pub(super) fn is_older_than(&self, summary: Summary) -> bool {
-        summary.recency() > self.summary.recency()
-    }
-}

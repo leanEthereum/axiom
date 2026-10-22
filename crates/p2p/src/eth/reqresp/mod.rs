@@ -17,6 +17,7 @@ mod error;
 mod limiter;
 mod messages;
 mod protocol;
+mod status_version;
 
 pub use codec::{
     MAX_ERROR_MESSAGE_LEN, RequestDecoder, ResponseChunk, ResponseCode, ResponseDecoder,
@@ -25,3 +26,4 @@ pub use error::ReqRespError;
 pub use limiter::{Quota, RateLimited, RateLimiter};
 pub use messages::{Attnets, GoodbyeReason, MetaData, Status, StatusV1, Syncnets};
 pub use protocol::Protocol;
+pub use status_version::StatusVersion;

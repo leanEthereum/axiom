@@ -9,9 +9,10 @@ use axiom_execution::{
     BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2, CAPABILITIES, EngineClient,
     EngineError, ForkchoiceState, ForkchoiceUpdated, ForkchoiceVersion, GetBlobsResponse,
     GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3, GetPayloadResponseV4,
-    GetPayloadResponseV5, GetPayloadResponseV6, JwtSecret, NewPayload, PayloadAttributes,
-    PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3, PayloadAttributesV4, PayloadId,
-    PayloadStatus, PayloadStatusKind, RpcError, SyncStatus, WireError, WireErrorKind,
+    GetPayloadResponseV5, GetPayloadResponseV6, JsonCodec, JwtSecret, NewPayload,
+    PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
+    PayloadAttributesV4, PayloadId, PayloadStatus, PayloadStatusKind, RpcError, SyncStatus,
+    WireError, WireErrorKind,
     mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
@@ -998,6 +999,95 @@ fn wrong_secret_is_rejected_before_any_call() {
 
         // The engine recorded nothing: authentication precedes the call.
         assert_eq!(engine.calls(), Vec::<RecordedCall>::new());
+        engine.stop().await;
+    });
+}
+
+/// The parameters of a lookup of a block hash.
+fn lookup(hash: Hash32) -> Vec<Json> {
+    vec![hash.to_json(), Json::Bool(false)]
+}
+
+#[test]
+fn pow_blocks_are_looked_up_by_hash() {
+    run(async {
+        let (engine, client) = connect().await;
+        // Fixture state: the engine knows block 0xbb.., child of 0xaa.., at total difficulty 1000.
+        let known = bellatrix::PowBlock {
+            block_hash: Hash32([0xbb; 32]),
+            parent_hash: Hash32([0xaa; 32]),
+            total_difficulty: U256::from_u64(1000),
+        };
+        engine.serve_pow_block(&known);
+        // Every other hash is unknown, which the engine answers with null.
+        engine.reply("eth_getBlockByHash", Json::Null);
+
+        // The known block comes back whole, asked for by hash with transaction hashes only.
+        assert_eq!(
+            client.pow_block(Hash32([0xbb; 32])).await.unwrap(),
+            Some(known.clone())
+        );
+        assert_eq!(engine.calls()[0].params, lookup(Hash32([0xbb; 32])));
+
+        // Block 0xcc.. is unknown.
+        assert_eq!(client.pow_block(Hash32([0xcc; 32])).await.unwrap(), None);
+        engine.stop().await;
+    });
+}
+
+#[test]
+fn a_pow_block_reply_must_be_the_block_asked_for() {
+    run(async {
+        let (engine, client) = connect().await;
+        // Mutation: the engine answers a lookup of 0xdd.. with block 0xbb...
+        let other = bellatrix::PowBlock {
+            block_hash: Hash32([0xbb; 32]),
+            parent_hash: Hash32([0xaa; 32]),
+            total_difficulty: U256::from_u64(1000),
+        };
+        engine.reply_to(
+            "eth_getBlockByHash",
+            lookup(Hash32([0xdd; 32])),
+            other.to_json(),
+        );
+
+        let error = client.pow_block(Hash32([0xdd; 32])).await.unwrap_err();
+
+        // Both hashes are named.
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "asked for block {}, the engine returned block {}",
+                Hash32([0xdd; 32]),
+                Hash32([0xbb; 32])
+            )
+        );
+        assert!(matches!(error, EngineError::BlockMismatch { .. }));
+        engine.stop().await;
+    });
+}
+
+#[test]
+fn a_pow_block_without_its_total_difficulty_is_malformed() {
+    run(async {
+        let (engine, client) = connect().await;
+        // Mutation: block 0xee.. in the current schema, which dropped the total difficulty.
+        let partial = format!(
+            r#"{{"hash":"0x{}","parentHash":"0x{}"}}"#,
+            "ee".repeat(32),
+            "aa".repeat(32)
+        );
+        engine.reply("eth_getBlockByHash", json(&partial));
+
+        let error = client.pow_block(Hash32([0xee; 32])).await.unwrap_err();
+
+        let EngineError::Wire(error) = error else {
+            panic!("expected a wire error, got {error}");
+        };
+        assert_eq!(
+            error,
+            WireError::new(WireErrorKind::Missing).in_member("totalDifficulty")
+        );
         engine.stop().await;
     });
 }

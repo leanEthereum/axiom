@@ -26,7 +26,7 @@ pub mod score;
 mod seen;
 mod types;
 
-pub use config::{GossipsubConfig, MessageIdFn};
+pub use config::GossipsubConfig;
 pub use router::{GossipsubEvent, PublishError, Router};
 pub use rpc::{
     ControlMessage, Graft, IDontWant, IHave, IWant, PeerInfo, Prune, RawMessage, Rpc, SubOpts,

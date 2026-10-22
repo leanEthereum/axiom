@@ -7,7 +7,7 @@ use std::{
 
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
 use axiom_json::{Json, Limits as JsonLimits};
-use axiom_types::{ForkName, Preset, VersionedHash};
+use axiom_types::{ForkName, Hash32, Preset, VersionedHash, bellatrix::PowBlock};
 
 use crate::{
     Claims, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState, ForkchoiceUpdated,
@@ -288,6 +288,34 @@ impl EngineClient {
     pub async fn chain_id(&self) -> Result<u64, EngineError> {
         self.call_typed("eth_chainId", Vec::new(), LOOKUP_TIMEOUT)
             .await
+    }
+
+    /// Looks up a proof-of-work block by hash: eth_getBlockByHash.
+    ///
+    /// The merge transition check reads the terminal block and its parent this way.
+    /// The engine port serves this method beside the engine methods.
+    /// See `get_pow_block` in the Bellatrix fork choice spec.
+    ///
+    /// # Returns
+    ///
+    /// The block, or nothing when the engine does not know the hash.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, when the block is malformed, and when it is another block.
+    pub async fn pow_block(&self, hash: Hash32) -> Result<Option<PowBlock>, EngineError> {
+        // The second parameter asks for transaction hashes rather than whole transactions.
+        let params = vec![hash.to_json(), Json::Bool(false)];
+        let block: Option<PowBlock> = self
+            .call_typed("eth_getBlockByHash", params, LOOKUP_TIMEOUT)
+            .await?;
+        match block {
+            Some(block) if block.block_hash != hash => Err(EngineError::BlockMismatch {
+                requested: hash,
+                returned: block.block_hash,
+            }),
+            found => Ok(found),
+        }
     }
 
     /// Whether the engine is still syncing: eth_syncing.

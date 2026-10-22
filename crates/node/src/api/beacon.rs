@@ -5,10 +5,7 @@ use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
-    BlobData, ForkName, Preset, Root,
-    accessors::CoreState,
-    combined::{BeaconState, SignedBeaconBlock},
-    fulu::SignedBlockContents,
+    ForkName, Preset, Root, accessors::CoreState, combined::BeaconState,
     gloas::SignedExecutionPayloadEnvelope,
 };
 use tracing::warn;
@@ -184,7 +181,7 @@ impl BeaconRoutes {
     /// The proposal in a publish request's body, decoded in the fork it names.
     ///
     /// The fork comes from the consensus version header, or else from the clock.
-    /// A Fulu block travels with its blobs; any other block travels alone.
+    /// From Deneb to Fulu a block travels with its blobs; any other block travels alone.
     async fn proposal<P: Preset>(
         context: &ApiContext<P>,
         request: &Request,
@@ -200,12 +197,8 @@ impl BeaconRoutes {
                     .await?
             }
         };
-        let malformed = |error| ApiError::bad_request(format!("malformed {fork} block: {error}"));
-        let proposal = if fork.blob_data() == BlobData::BlockColumns {
-            Proposal::Columns(SignedBlockContents::<P>::decode(&request.body).map_err(malformed)?)
-        } else {
-            Proposal::Block(SignedBeaconBlock::<P>::decode(&request.body, fork).map_err(malformed)?)
-        };
+        let proposal = Proposal::<P>::decode(&request.body, fork)
+            .map_err(|error| ApiError::bad_request(format!("malformed {fork} block: {error}")))?;
         // A block must belong to the fork its slot falls in, whatever the header says.
         let slot = proposal.slot();
         let expected = context

@@ -49,6 +49,7 @@
 //!     BlobsBundleV1, BlobAndProofV1   cancun.md           blobs with one proof each
 //!     BlobsBundleV2, BlobAndProofV2   osaka.md            blobs with cell proofs
 //!     executionRequests               prague.md, EIP-7685 requests list codec
+//!     eth_getBlockByHash              eth/block.yaml      the proof-of-work block of the merge
 //!     JWT HS256                       authentication.md   secret, token, verification
 //!     QUANTITY and DATA               common.md           hex encodings, in the JSON crate
 //! ```

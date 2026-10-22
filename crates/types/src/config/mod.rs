@@ -582,6 +582,16 @@ impl ChainConfig {
             .unwrap_or(Epoch::FAR_FUTURE)
     }
 
+    /// Epochs for which peers must serve blocks.
+    ///
+    /// A client syncing from a checkpoint this old cannot be fooled by exited validators.
+    /// The window covers the withdrawability delay and half a churn period.
+    /// See `compute_min_epochs_for_block_requests` in the phase0 p2p spec.
+    #[must_use]
+    pub const fn min_epochs_for_block_requests(&self) -> u64 {
+        self.min_validator_withdrawability_delay + self.churn_limit_quotient / 2
+    }
+
     /// Epochs for which peers must serve blob data of a form.
     ///
     /// Older data may be gone, so a node imports older blocks without sampling it.
@@ -630,6 +640,17 @@ mod tests {
             config.domain(domain_type, Epoch(1), root),
             Domain::compute(domain_type, config.altair_fork_version, root)
         );
+    }
+
+    #[test]
+    fn blocks_are_served_for_the_withdrawability_delay_and_half_a_churn_period() {
+        // Mainnet: 256 + 65536 / 2 = 33024 epochs, the spec's MIN_EPOCHS_FOR_BLOCK_REQUESTS.
+        assert_eq!(
+            ChainConfig::mainnet().min_epochs_for_block_requests(),
+            33_024
+        );
+        // Minimal: 256 + 32 / 2 = 272 epochs.
+        assert_eq!(ChainConfig::minimal().min_epochs_for_block_requests(), 272);
     }
 
     #[test]

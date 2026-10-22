@@ -8,6 +8,7 @@
 mod beacon;
 mod debug;
 mod ids;
+mod light_client;
 mod node;
 mod reply;
 
@@ -20,6 +21,7 @@ use axiom_types::{Preset, Root, Slot};
 use self::{
     beacon::BeaconRoutes,
     debug::DebugRoutes,
+    light_client::LightClientRoutes,
     node::NodeRoutes,
     reply::{ApiError, Freshness, Routes},
 };
@@ -99,6 +101,7 @@ impl BeaconApi {
         let routes = Routes::new(Router::new(), context);
         let routes = NodeRoutes::register(routes);
         let routes = BeaconRoutes::register(routes);
+        let routes = LightClientRoutes::register(routes);
         DebugRoutes::register(routes).finish()
     }
 }

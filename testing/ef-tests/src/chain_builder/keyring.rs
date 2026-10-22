@@ -54,4 +54,44 @@ impl Keyring {
             })?;
         Ok(BlsSignature(key.sign(&signing_root.0).to_bytes()))
     }
+
+    /// The aggregate signature of several validators over one signing root.
+    ///
+    /// A member listed twice signs twice, as a sync committee seat held twice does.
+    ///
+    /// # Algorithm
+    ///
+    /// Signing is linear in the secret key, so the aggregate is one signature:
+    ///
+    /// ```text
+    /// sum_i (sk_i * H(m)) = (sum_i sk_i) * H(m)
+    /// ```
+    ///
+    /// With secret i + 1 for validator i, the summed secret is a small integer.
+    /// See `Aggregate` in the BLS signature draft, section 2.8.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a member has no key, or when no member signs.
+    pub(crate) fn sign_together(
+        &self,
+        members: &[ValidatorIndex],
+        signing_root: Root,
+    ) -> Result<BlsSignature, ChainBuilderError> {
+        let mut secret: u64 = 0;
+        for &index in members {
+            if index.as_usize() >= self.keys.len() {
+                return Err(ChainBuilderError::NoKey {
+                    index,
+                    keys: self.keys.len(),
+                });
+            }
+            // Invariant: at most 2^20 members with secrets below 2^20 sum far below 2^64.
+            secret += index.0 + 1;
+        }
+        let mut bytes = [0; 32];
+        bytes[24..].copy_from_slice(&secret.to_be_bytes());
+        let key = SecretKey::from_bytes(&bytes).map_err(|_| ChainBuilderError::NoSigners)?;
+        Ok(BlsSignature(key.sign(&signing_root.0).to_bytes()))
+    }
 }

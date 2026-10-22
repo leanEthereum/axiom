@@ -1,7 +1,7 @@
 //! Why a chain could not be built.
 
 use axiom_state_transition::{StateError, TransitionError, gloas::EnvelopeError};
-use axiom_types::{Slot, ValidatorIndex, Version};
+use axiom_types::{ForkName, Slot, ValidatorIndex, Version};
 use thiserror::Error;
 
 /// A genesis the builder cannot sign for, or a block it failed to build.
@@ -30,6 +30,34 @@ pub enum ChainBuilderError {
         index: ValidatorIndex,
         /// Keys derived at genesis.
         keys: usize,
+    },
+    /// An aggregate signature was asked of no signer.
+    #[error("an aggregate signature needs at least one signer")]
+    NoSigners,
+    /// The state holds no root for a slot a vote names.
+    #[error("the state holds no block root for slot {0}")]
+    NoBlockRoot(Slot),
+    /// A committee has more members than an attestation has bits.
+    #[error("{count} attesters exceed the {limit} bits of an attestation")]
+    TooManyAttesters {
+        /// Members attesting together.
+        count: usize,
+        /// Bits an attestation holds.
+        limit: usize,
+    },
+    /// A block body has fewer attestation places than the attestations built.
+    #[error("{count} attestations exceed the {limit} a block carries")]
+    TooManyAttestations {
+        /// Attestations built.
+        count: usize,
+        /// Attestations a block carries.
+        limit: usize,
+    },
+    /// A sync committee seat holds a key no validator has.
+    #[error("sync committee seat {seat} holds a key no validator has")]
+    UnknownSyncMember {
+        /// The seat in the committee.
+        seat: usize,
     },
     /// Advancing the state to the next slot failed.
     #[error("advancing to slot {slot} failed: {source}")]
@@ -67,6 +95,24 @@ pub enum ChainBuilderError {
         /// Withdrawals due at the slot.
         count: usize,
         /// Withdrawals one payload carries.
+        limit: usize,
+    },
+    /// Blob commitments were asked of a block whose body holds none.
+    #[error("the {fork} block of slot {slot} holds no blob commitments in its body")]
+    NoBlobCommitments {
+        /// The slot of the block.
+        slot: Slot,
+        /// The fork of the block.
+        fork: ForkName,
+    },
+    /// The blob commitments overflow the list a block body holds.
+    #[error("{count} blob commitments for slot {slot}, a block body holds at most {limit}")]
+    TooManyCommitments {
+        /// The slot of the block.
+        slot: Slot,
+        /// Commitments asked for.
+        count: usize,
+        /// Commitments one body holds.
         limit: usize,
     },
     /// The envelope built for a Gloas block does not reveal its bid.

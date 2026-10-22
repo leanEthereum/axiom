@@ -5,7 +5,7 @@ use std::fmt::Write;
 use axiom_http::{HttpError, StatusCode};
 use axiom_json::{HexError, Json, ParseError};
 use axiom_ssz::DecodeError;
-use axiom_types::ForkName;
+use axiom_types::{ForkName, Hash32};
 use thiserror::Error;
 
 use crate::{ForkchoiceVersion, RpcError};
@@ -47,6 +47,15 @@ pub enum EngineError {
         fork: ForkName,
         /// The method family, such as engine_getBlobs.
         family: &'static str,
+    },
+
+    /// The engine answered a block lookup with another block.
+    #[error("asked for block {requested}, the engine returned block {returned}")]
+    BlockMismatch {
+        /// The hash looked up.
+        requested: Hash32,
+        /// The hash of the block returned.
+        returned: Hash32,
     },
 
     /// The build attributes are of another version than the fork's fork choice method.

@@ -1,10 +1,7 @@
-//! The Ethereum gossip encoding: snappy blocks, size bounds, and message identifiers.
+//! The Ethereum gossip encoding: snappy blocks and size bounds.
 
 use axiom_snappy::{SnappyError, raw};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-
-use crate::gossipsub::{MESSAGE_ID_LEN, MessageId, Topic};
 
 /// MAX_PAYLOAD_SIZE of the Fulu configuration: 10 MiB, for gossip payloads and RPC chunks.
 pub const MAX_PAYLOAD_SIZE: u64 = 10 * 1024 * 1024;
@@ -59,39 +56,6 @@ impl GossipEncoding {
         let max = usize::try_from(self.max_payload_size).unwrap_or(usize::MAX);
         raw::decompress(data, max).map_err(GossipDecodeError::Snappy)
     }
-
-    /// The identifier of a gossip message, as Altair and later forks define it.
-    ///
-    /// ```text
-    /// valid snappy:    SHA256(VALID_DOMAIN   || len(topic) as u64 LE || topic || decompressed)[:20]
-    /// invalid snappy:  SHA256(INVALID_DOMAIN || len(topic) as u64 LE || topic || raw data)[:20]
-    /// ```
-    ///
-    /// Two cases exist because distinct compressions may decode to one payload.
-    /// Hashing the decompressed bytes gives them one identifier.
-    /// The spec decides validity under MAX_PAYLOAD_SIZE, whatever the configured limit.
-    /// See `specs/altair/p2p-interface.md`, topics and messages.
-    #[must_use]
-    pub fn message_id(topic: &Topic, data: &[u8]) -> MessageId {
-        let topic = topic.as_str().as_bytes();
-        let mut hasher = Sha256::new();
-        // A payload that decompresses within the bound is hashed decompressed.
-        let decompressed = raw::decompressed_len(data)
-            .ok()
-            .filter(|&len| len as u64 <= MAX_PAYLOAD_SIZE)
-            .and_then(|_| raw::decompress(data, MAX_PAYLOAD_SIZE as usize).ok());
-        match &decompressed {
-            Some(_) => hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY),
-            None => hasher.update(MESSAGE_DOMAIN_INVALID_SNAPPY),
-        }
-        hasher.update((topic.len() as u64).to_le_bytes());
-        hasher.update(topic);
-        hasher.update(decompressed.as_deref().unwrap_or(data));
-        let digest = hasher.finalize();
-        let mut id = [0u8; MESSAGE_ID_LEN];
-        id.copy_from_slice(&digest[..MESSAGE_ID_LEN]);
-        MessageId(id)
-    }
 }
 
 impl Default for GossipEncoding {
@@ -123,38 +87,6 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-
-    #[test]
-    fn message_id_of_valid_snappy() {
-        let topic = Topic::new("/eth2/00000000/beacon_block/ssz_snappy");
-        let payload = b"block".repeat(4);
-        let data = GossipEncoding::default().encode(&payload);
-
-        // Recompute the spec formula by hand.
-        //
-        //     SHA256(01000000 || 38 as u64 LE || topic || payload)[:20]
-        let mut preimage = vec![0x01, 0, 0, 0];
-        preimage.extend_from_slice(&38u64.to_le_bytes());
-        preimage.extend_from_slice(topic.as_str().as_bytes());
-        preimage.extend_from_slice(&payload);
-        let expected = &Sha256::digest(&preimage)[..20];
-        assert_eq!(GossipEncoding::message_id(&topic, &data).0, expected);
-    }
-
-    #[test]
-    fn message_id_of_invalid_snappy() {
-        let topic = Topic::new("t");
-        // 0xff 0xff 0xff 0xff 0xff is a truncated varint preamble: not snappy.
-        let data = [0xff; 5];
-        let mut preimage = vec![0, 0, 0, 0];
-        preimage.extend_from_slice(&1u64.to_le_bytes());
-        preimage.push(b't');
-        preimage.extend_from_slice(&data);
-        assert_eq!(
-            GossipEncoding::message_id(&topic, &data).0,
-            &Sha256::digest(&preimage)[..20]
-        );
-    }
 
     #[test]
     fn size_bounds() {
@@ -192,7 +124,6 @@ mod tests {
         #[test]
         fn garbage_never_panics(data in proptest::collection::vec(any::<u8>(), 0..256)) {
             let _ = GossipEncoding::new(1024).decode(&data);
-            let _ = GossipEncoding::message_id(&Topic::new("t"), &data);
         }
     }
 }

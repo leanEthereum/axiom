@@ -1,4 +1,4 @@
-//! Two tokio nodes over real UDP sockets: handshake, PING/PONG, FINDNODE, and TALKREQ.
+//! Two tokio nodes over real UDP sockets: handshake, PING/PONG, FINDNODE, TALKREQ, and record updates.
 
 use std::{
     net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
@@ -8,8 +8,8 @@ use std::{
 use axiom_crypto::secp256k1::SecretKey;
 use axiom_discv5::{
     Enr, LogDistance,
-    driver::{Discv5, Discv5Events},
-    service::{Config, Event},
+    driver::{Discv5, Discv5Events, RecordUpdateError},
+    service::{Config, Event, ServiceError},
 };
 use tokio::{runtime::Builder, time::timeout};
 
@@ -44,18 +44,80 @@ async fn wait_for<T>(events: &mut Discv5Events, filter: impl Fn(Event) -> Option
     }
 }
 
-#[test]
-fn ping_find_node_and_talk_over_udp() {
-    // A single-threaded runtime: both drivers interleave on one thread.
+/// Runs a scenario on a single-threaded runtime, where both drivers interleave on one thread.
+fn run(scenario: impl Future<Output = ()>) {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime builds");
     runtime.block_on(async {
-        timeout(Duration::from_secs(20), scenario())
+        timeout(Duration::from_secs(20), scenario)
             .await
             .expect("scenario completes in time");
     });
+}
+
+#[test]
+fn ping_find_node_and_talk_over_udp() {
+    run(scenario());
+}
+
+#[test]
+fn an_updated_record_reaches_peers() {
+    run(record_update());
+}
+
+/// Alice re-signs her record; bob learns of it through PONG and fetches it.
+async fn record_update() {
+    let (mut alice, _alice_events) = node(1).await;
+    let (bob, mut bob_events) = node(2).await;
+    let alice_v1 = alice.local_enr().clone();
+
+    // Alice moves to sequence 2 with one more entry, signed by her own key.
+    let key = SecretKey::from_bytes(&[1; 32]).expect("valid key");
+    let alice_v2 = alice_v1
+        .to_builder()
+        .uint(b"cgc", 4)
+        .build(&key)
+        .expect("record fits");
+    alice
+        .set_local_enr(alice_v2.clone())
+        .await
+        .expect("driver up");
+    assert_eq!(alice.local_enr(), &alice_v2);
+
+    // Bob still holds sequence 1; alice's PONG announces sequence 2.
+    bob.ping(alice_v1.clone()).await.expect("driver up");
+    let announced = wait_for(&mut bob_events, |event| match event {
+        Event::Pong { node, enr_seq, .. } => Some((node, enr_seq)),
+        _ => None,
+    })
+    .await;
+    assert_eq!(announced, (alice_v1.node_id(), 2));
+
+    // FINDNODE at distance zero now returns the new record.
+    bob.find_node(alice_v1, vec![LogDistance::ZERO])
+        .await
+        .expect("driver up");
+    let found = wait_for(&mut bob_events, |event| match event {
+        Event::NodesFound { enrs, .. } => Some(enrs),
+        _ => None,
+    })
+    .await;
+    assert_eq!(found, vec![alice_v2.clone()]);
+
+    // Bob's record under alice's handle is refused, and alice keeps hers.
+    let refused = alice.set_local_enr(bob.local_enr().clone()).await;
+    assert_eq!(
+        refused,
+        Err(RecordUpdateError::Refused(ServiceError::KeyMismatch {
+            record: bob.local_enr().node_id(),
+            local: alice_v2.node_id(),
+        }))
+    );
+    assert_eq!(alice.local_enr(), &alice_v2);
+    alice.shutdown();
+    bob.shutdown();
 }
 
 /// The whole exchange, phase by phase.

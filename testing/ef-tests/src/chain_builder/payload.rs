@@ -2,7 +2,7 @@
 
 use axiom_ssz::Ssz;
 use axiom_types::{
-    Bytes32, Gwei, Hash32, Preset, Root, Slot,
+    Bytes32, ChainConfig, Gwei, Hash32, Preset, Root, Slot, bellatrix,
     capella::{self, Withdrawal},
     constants::{BUILDER_INDEX_SELF_BUILD, G2_POINT_AT_INFINITY},
     deneb, gloas,
@@ -16,10 +16,15 @@ use crate::chain_builder::ChainBuilderError;
 /// The test engine accepts every payload, so any value passes.
 const GAS_LIMIT: u64 = 30_000_000;
 
+/// A stand-in hash for the terminal proof-of-work block, when none is fixed by hand.
+///
+/// Payload hashes are digests of their slot, which a repeated byte does not match in practice.
+const TERMINAL_BLOCK_HASH: Hash32 = Hash32([0x7e; 32]);
+
 /// What the consensus rules check of a payload, fixed by the state at its slot.
 ///
 /// Every other field keeps its default, as the test engine accepts every payload.
-/// See `process_execution_payload` in the Capella, Deneb, and Electra specs.
+/// See `process_execution_payload` in the Bellatrix, Capella, Deneb, and Electra specs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PayloadParts {
     /// The slot the payload is built for.
@@ -39,6 +44,31 @@ impl PayloadParts {
     /// A SHA-256 digest of the slot is unique per slot and never zero in practice.
     pub(crate) fn block_hash(self) -> Hash32 {
         Hash32(Root::sha256(&self.slot.0.to_le_bytes()).0)
+    }
+
+    /// The terminal proof-of-work block the merge payload builds on.
+    ///
+    /// A hand-fixed terminal block hash wins, as fork choice then demands it.
+    /// See `validate_merge_block` in the Bellatrix fork choice spec.
+    pub(crate) fn terminal_block_hash(config: &ChainConfig) -> Hash32 {
+        if config.terminal_block_hash == Hash32::ZERO {
+            TERMINAL_BLOCK_HASH
+        } else {
+            config.terminal_block_hash
+        }
+    }
+
+    /// The Bellatrix payload, which has no withdrawals.
+    pub(crate) fn bellatrix<P: Preset>(self) -> bellatrix::ExecutionPayload<P> {
+        bellatrix::ExecutionPayload {
+            parent_hash: self.parent_hash,
+            prev_randao: self.prev_randao,
+            block_number: self.slot.0,
+            gas_limit: GAS_LIMIT,
+            timestamp: self.timestamp,
+            block_hash: self.block_hash(),
+            ..bellatrix::ExecutionPayload::default()
+        }
     }
 
     /// The Capella payload, carrying the withdrawals the state expects.

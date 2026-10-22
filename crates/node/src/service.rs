@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 use crate::{
     ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey, Publisher,
     network::{
-        AttestationSubnets, Discovery, LocalRecord, NetworkIdentity, NetworkService, NetworkSetup,
-        NodeIdentity,
+        AttestationSubnets, Discovery, ForkDigests, NetworkIdentity, NetworkService, NetworkSetup,
+        NodeIdentity, RecordSetup,
     },
     race::Either,
     tasks::{EngineFollower, Ticker},
@@ -63,12 +63,13 @@ impl<P: Preset> StartedChain<'_, P> {
             .await
             .map_err(|_| NodeError::ChainStopped)?;
 
-        let (network, events) = settings.start_p2p(&key).await?;
+        // Phase0 topics identify messages by payload alone, later forks by topic too.
+        let message_ids = ForkDigests::new(&config, genesis_validators_root).message_ids();
+        let (network, events) = settings.start_p2p(&key, message_ids).await?;
         let discovery = match &settings.discovery {
             Some(discovery) => {
-                let record = LocalRecord {
+                let record = RecordSetup {
                     tcp_port: settings.listen_address.port(),
-                    fork_digest: config.fork_digest(genesis_validators_root, epoch),
                     epoch,
                     genesis_validators_root,
                     attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),

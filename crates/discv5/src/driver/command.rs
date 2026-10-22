@@ -9,7 +9,7 @@ use crate::{
     enr::Enr,
     message::RequestId,
     node_id::NodeId,
-    service::{EnrFilter, LookupId},
+    service::{EnrFilter, LookupId, ServiceError},
     table::InsertOutcome,
 };
 
@@ -55,6 +55,8 @@ pub(crate) enum Command {
         /// Where the lookup id goes.
         reply: oneshot::Sender<LookupId>,
     },
+    /// Replace the local record.
+    SetLocalEnr(Enr, oneshot::Sender<Result<(), ServiceError>>),
     /// Report the routing table's records.
     TableEntries(oneshot::Sender<Vec<Enr>>),
     /// Stop the driver.

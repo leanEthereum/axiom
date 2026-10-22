@@ -11,6 +11,7 @@ use axiom_execution::{EngineClient, JwtSecret};
 use axiom_http::{Server, ServerConfig};
 use axiom_p2p::{
     Multiaddr,
+    eth::MessageIds,
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
 use axiom_ssz::DecodeError;
@@ -76,14 +77,16 @@ pub struct NetworkSettings {
 }
 
 impl NetworkSettings {
-    /// Starts the libp2p stack under the node's key.
+    /// Starts the libp2p stack under the node's key, with the chain's gossip message identifiers.
     pub(crate) async fn start_p2p(
         &self,
         key: &NodeKey,
+        message_ids: MessageIds,
     ) -> Result<(NetworkHandle, NetworkEvents), NodeError> {
         // Noise secures every connection under the node's secp256k1 identity.
         let mut p2p = NetworkConfig::new(key.keypair()).map_err(NodeError::Network)?;
         p2p.listen_addr = Multiaddr::from_tcp(self.listen_address);
+        p2p.gossipsub.message_id = message_ids;
         swarm::start(p2p).await.map_err(NodeError::Network)
     }
 }
