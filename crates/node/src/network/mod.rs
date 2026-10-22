@@ -4,6 +4,7 @@ mod discovery;
 mod gossip;
 mod identity;
 mod requests;
+mod responder;
 mod server;
 mod subnets;
 mod sync;
