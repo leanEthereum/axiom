@@ -333,7 +333,6 @@ dependencies = [
  "axiom-ssz",
  "axiom-store",
  "axiom-types",
- "criterion",
  "proptest",
  "sha2",
  "thiserror",
