@@ -50,11 +50,13 @@ impl<P: Preset> StartedChain<'_, P> {
         let proposer = ProposerService::new(
             self.handle.clone(),
             Arc::clone(execution),
+            Arc::clone(clock),
             settings.default_fee_recipient,
             relays,
         )
         .with_breaker(settings.builder_fallback.breaker::<P>())
-        .with_graffiti(settings.graffiti);
+        .with_graffiti(settings.graffiti)
+        .with_reorgs(settings.reorgs);
         let proposer = Arc::new(if settings.always_prepare_payload {
             proposer.preparing_always()
         } else {
@@ -305,7 +307,7 @@ impl<P: Preset> Node<P> {
                 Arc::clone(&clock),
                 network.as_ref().map(|(p2p, _)| p2p.clone()),
             )),
-            proposer,
+            proposer: Arc::clone(&proposer),
             identity,
             events: streams,
         };
@@ -316,8 +318,9 @@ impl<P: Preset> Node<P> {
 
         // Background loops run until aborted.
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
-        let follower =
-            task::spawn(EngineFollower::new(handle.clone(), events, execution, schedule).run());
+        let follower = task::spawn(
+            EngineFollower::new(handle.clone(), events, execution, proposer, schedule).run(),
+        );
 
         // An operator who only wants the chain synced stops the node once it is.
         let synced = SyncWatcher::new(handle.clone(), slots).stop(config.shutdown_after_sync);

@@ -49,6 +49,6 @@ pub use events::{
 };
 pub use genesis::{EmbeddedGenesis, GenesisDownload, GenesisState};
 pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
-pub use proposer::{BlockOrder, ProposerError, ProposerService};
+pub use proposer::{BlockOrder, ProposerError, ProposerReorgs, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

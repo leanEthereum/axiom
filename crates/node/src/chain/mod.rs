@@ -6,6 +6,7 @@ mod gossip;
 mod handle;
 mod head;
 mod history;
+mod queued_votes;
 mod settings;
 
 use std::{
@@ -57,6 +58,7 @@ pub use history::{
     HistorySegment, ProposerKeys, Reconstruction, SegmentContext, SegmentError, StateReplay,
     VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
+use queued_votes::QueuedVotes;
 pub use settings::{ChainSettings, SidecarPruning};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -121,6 +123,8 @@ pub struct Chain<P: Preset> {
     fast_confirmation: Option<FastConfirmation>,
     /// The epoch the last sidecar pruning round ended, if one has since the node started.
     sidecars_pruned: Option<Epoch>,
+    /// Votes of the current slot, counted from the next one.
+    queued_votes: QueuedVotes,
 }
 
 impl<P: Preset> Chain<P> {
@@ -230,6 +234,7 @@ impl<P: Preset> Chain<P> {
             settings: ChainSettings::default(),
             fast_confirmation: None,
             sidecars_pruned: None,
+            queued_votes: QueuedVotes::default(),
         })
     }
 
@@ -339,14 +344,33 @@ impl<P: Preset> Chain<P> {
         Ok(self.store.head()?)
     }
 
-    /// Whether a proposal at a slot builds on the head's payload.
+    /// Whether a proposal at a slot builds on the payload of the node it extends.
     ///
     /// # Errors
     ///
-    /// Fails when the head is not in the store.
-    pub fn builds_on_full(&mut self, slot: Slot) -> Result<bool, ChainError> {
+    /// Fails when the node is not in the store.
+    pub fn builds_on_full(&self, parent: ForkChoiceNode, slot: Slot) -> Result<bool, ChainError> {
+        Ok(self.store.should_build_on_full(parent, slot)?)
+    }
+
+    /// The node a proposer at a slot builds on: the head, or the parent of a late, weak head.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head still holds the proposer boost, or the store lacks a state.
+    pub fn proposer_head(&mut self, slot: Slot) -> Result<ForkChoiceNode, ChainError> {
         let head = self.store.head()?;
-        Ok(self.store.should_build_on_full(head, slot)?)
+        Ok(self.store.proposer_head(head, slot)?)
+    }
+
+    /// The parent the engine should follow instead of a late head the next proposer may orphan.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store lacks the head, its parent, or a state.
+    pub fn forkchoice_override(&mut self) -> Result<Option<ForkChoiceNode>, ChainError> {
+        let head = self.store.head()?;
+        Ok(self.store.forkchoice_override(head)?)
     }
 
     /// The light client data the chain serves.
@@ -554,6 +578,7 @@ impl<P: Preset> Chain<P> {
             {
                 debug!(%error, "fast confirmation skipped this slot");
             }
+            self.count_queued_votes();
             // The slasher checks what it gathered once a slot, and returns what it found.
             let epoch = self.store.current_epoch();
             let found = self.slasher.as_mut().map(|slasher| {
@@ -1093,6 +1118,7 @@ impl<P: Preset> Chain<P> {
     ///
     /// The head is not recomputed: votes arrive by the thousand each slot.
     /// The next tick or block, or an explicit update, picks up their weight.
+    /// A vote of the current slot is held, and counted once the slot has passed.
     ///
     /// # Errors
     ///
@@ -1105,9 +1131,35 @@ impl<P: Preset> Chain<P> {
         if let Some(slasher) = &mut self.slasher {
             slasher.vote(&self.store, vote);
         }
-        self.store
-            .on_attestation(vote, false, Verification::Verify)?;
-        Ok(())
+        self.count_vote(vote.clone())
+    }
+
+    /// Counts a vote in the fork choice, or holds it until its slot has passed.
+    fn count_vote(&mut self, vote: CommitteeVote) -> Result<(), ChainError> {
+        match self
+            .store
+            .on_attestation(&vote, false, Verification::Verify)
+        {
+            Err(ForkChoiceError::AttestationFromFuture { .. }) => {
+                self.queued_votes.push(vote);
+                Ok(())
+            }
+            counted => Ok(counted?),
+        }
+    }
+
+    /// Counts the held votes whose slot has passed.
+    ///
+    /// A vote refused now, say for a block pruned meanwhile, is only logged: gossip accepted it.
+    fn count_queued_votes(&mut self) {
+        for vote in self.queued_votes.release(self.store.current_slot()) {
+            if let Err(error) = self
+                .store
+                .on_attestation(&vote, false, Verification::Verify)
+            {
+                debug!(slot = %vote.data.slot, %error, "held vote not counted");
+            }
+        }
     }
 
     /// Refuses a vote that would make the node advance a state through too many empty slots.
@@ -1177,9 +1229,7 @@ impl<P: Preset> Chain<P> {
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
-        self.store
-            .on_attestation(&aggregate, false, Verification::Verify)?;
-        Ok(())
+        self.count_vote(aggregate)
     }
 
     /// Committees of an epoch as the head state shuffles them.

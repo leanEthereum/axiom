@@ -37,6 +37,7 @@ use axiom_types::{
     constants::{DOMAIN_BEACON_BUILDER, DOMAIN_BEACON_PROPOSER},
     gloas,
     phase0::SigningData,
+    vote::CommitteeVote,
 };
 pub use error::ChainBuilderError;
 pub use external::{BlockAttestations, BlockInputs, UnsignedProposal};
@@ -45,6 +46,7 @@ pub use votes::Participation;
 
 use crate::chain_builder::{
     commitments::BlobCommitments, draft::Draft, keyring::Keyring, payload::PayloadParts,
+    votes::Votes,
 };
 
 /// The phase0 genesis of the minimal preset, under the consensus spec vectors' root.
@@ -251,6 +253,23 @@ impl<P: Preset> ChainBuilder<P> {
             block,
             envelope: Box::new(envelope),
         })
+    }
+
+    /// The vote each committee of a slot casts for the latest block at that slot, signed by all.
+    ///
+    /// The votes see the chain as it stands, before any later block.
+    /// They travel alone, as aggregates on the network do, rather than in a block.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slot is before the latest block's, or a voted root is out of reach.
+    pub fn committee_votes(&self, slot: Slot) -> Result<Vec<CommitteeVote>, ChainBuilderError> {
+        let mut after = self.state.clone();
+        let next = slot + 1;
+        after
+            .process_slots(&self.config, next)
+            .map_err(|source| ChainBuilderError::Slots { slot: next, source })?;
+        Votes::committee_votes(&after, slot, &self.keyring)
     }
 
     /// Builds the block of a slot around a proposer's reveal and the votes a caller collected.

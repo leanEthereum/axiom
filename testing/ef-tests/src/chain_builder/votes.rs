@@ -11,6 +11,7 @@ use axiom_types::{
     constants::{DOMAIN_BEACON_ATTESTER, DOMAIN_SYNC_COMMITTEE, G2_POINT_AT_INFINITY},
     electra, gloas,
     phase0::{self, AttestationData, SigningData},
+    vote::{CommitteeVote, PayloadClaim},
 };
 
 use crate::chain_builder::{ChainBuilderError, keyring::Keyring};
@@ -96,6 +97,32 @@ impl Votes {
                 sync_signature: CommitteeVotes::sync_signature(state, voted, keyring)?,
             },
         })
+    }
+
+    /// Each committee's vote on a slot, as a committee vote that travels alone.
+    ///
+    /// A vote of the voted block's own slot claims nothing about its payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state is not past the slot, or a voted root is out of reach.
+    pub(crate) fn committee_votes<P: Preset>(
+        state: &State<P>,
+        voted: Slot,
+        keyring: &Keyring,
+    ) -> Result<Vec<CommitteeVote>, ChainBuilderError> {
+        let votes = CommitteeVotes::new(state, voted, keyring)?;
+        Ok(votes
+            .committees
+            .into_iter()
+            .map(|committee| CommitteeVote {
+                committees: vec![committee.data.index],
+                bits: vec![true; committee.size],
+                data: committee.data,
+                signature: committee.signature,
+                payload: PayloadClaim::Silent,
+            })
+            .collect())
     }
 
     /// One attestation per committee, as phase0 to Deneb blocks carry them.

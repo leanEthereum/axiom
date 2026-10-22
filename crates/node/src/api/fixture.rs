@@ -55,8 +55,13 @@ impl TestApi {
             Arc::clone(&clock) as Arc<dyn Clock>,
             None,
         );
-        let proposer =
-            ProposerService::new(chain.clone(), execution, ExecutionAddress::default(), None);
+        let proposer = ProposerService::new(
+            chain.clone(),
+            execution,
+            Arc::clone(&clock) as Arc<dyn Clock>,
+            ExecutionAddress::default(),
+            None,
+        );
         // No hub runs, so an event stream request finds it stopped.
         let (_hub, _sender, events) = EventHub::new();
         let services = ApiServices {

@@ -33,8 +33,8 @@ use tracing::{info, warn};
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, ChainSettings, CheckpointServer,
     Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState, NodeError, NodeKey,
-    PortMappingSettings, StorageMode, WeakSubjectivity, WeakSubjectivityError, api::ApiServices,
-    genesis::GenesisSync, network::NetworkIdentity, slasher::SlasherFeed,
+    PortMappingSettings, ProposerReorgs, StorageMode, WeakSubjectivity, WeakSubjectivityError,
+    api::ApiServices, genesis::GenesisSync, network::NetworkIdentity, slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -342,6 +342,8 @@ pub struct ProposerSettings {
     pub prepare_lookahead: Option<Duration>,
     /// Whether payloads are prepared for every slot, not only for prepared proposers.
     pub always_prepare_payload: bool,
+    /// Whether proposals orphan a late, weak head.
+    pub reorgs: ProposerReorgs,
 }
 
 /// How the node talks to builders.

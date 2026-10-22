@@ -59,52 +59,130 @@ pub(crate) struct LateHeadReorg<'a, P: Preset> {
 impl<P: Preset> LateHeadReorg<'_, P> {
     /// The node a proposer at a slot should build on.
     pub(crate) fn parent_for(&self, slot: Slot) -> ForkChoiceNode {
-        let store = self.ghost.store();
-        let head = self.head.root;
-        let parent_root = self.parent.root;
-        let config = store.config();
-
-        let head_late = !store
-            .block_timeliness
-            .get(&head)
-            .is_some_and(|timeliness| timeliness.attestation);
-        // Before Fulu, a reorg at an epoch boundary could change the slot's proposer.
-        let shuffling_stable = !self.boundary_sensitive || !slot.is_epoch_start::<P>();
-        let ffg_competitive = store.unrealized_justifications.get(&head)
-            == store.unrealized_justifications.get(&parent_root);
-        let finalization_ok = slot.epoch::<P>() - store.finalized_checkpoint().epoch
-            <= config.reorg_max_epochs_since_finalization;
-        let clock = store.slot_clock();
-        let proposing_on_time = clock.time_into_slot_ms(store.time_ms())
-            <= clock.component_ms(config.proposer_reorg_cutoff_bps);
-        let parent_slot_ok = self.parent_block.slot + 1 == self.head_block.slot;
         let current_time_ok = self.head_block.slot + 1 == slot;
-        let single_slot_reorg = parent_slot_ok && current_time_ok;
+        let single_slot_reorg = self.parent_slot_ok() && current_time_ok;
+        let head_weak = self.head_weak();
+        let proposer_equivocation = self
+            .ghost
+            .store()
+            .blocks
+            .has_proposer_equivocation(self.head.root);
 
-        let head_weak = self.ghost.is_weak(
-            self.head_score,
-            self.committee.percent(config.reorg_head_weight_threshold),
-            self.head_block.slot,
-            self.head_committees,
-        );
-        // Threshold: strictly above the parent threshold, whatever the parent's payload status.
-        // See `is_parent_strong` in the phase0 and Gloas fork choice specs.
-        let parent_strong =
-            self.parent_score > self.committee.percent(config.reorg_parent_weight_threshold);
-        let proposer_equivocation = store.blocks.has_proposer_equivocation(head);
-
-        let reorg = head_late
-            && shuffling_stable
-            && ffg_competitive
-            && finalization_ok
-            && proposing_on_time
+        let reorg = self.head_late()
+            && self.shuffling_stable(slot)
+            && self.ffg_competitive()
+            && self.finalization_ok(slot)
+            && self.proposing_on_time()
             && single_slot_reorg
             && head_weak
-            && parent_strong;
+            && self.parent_strong();
         if reorg || (head_weak && current_time_ok && proposer_equivocation) {
             self.parent
         } else {
             self.head
         }
+    }
+
+    /// Whether the engine should follow the parent rather than the head, at a slot.
+    ///
+    /// It mirrors the reorg rule for the slot after the head, with two differences:
+    ///
+    /// - during the head's own slot, the weights are not checked,
+    /// - in the next slot, the proposer must still be on time.
+    ///
+    /// The head's slot is too early for weights: its votes only count from the next slot on.
+    /// See `should_override_forkchoice_update` in the Bellatrix fork choice spec of v1.4.0.
+    pub(crate) fn overrides_update(&self, current_slot: Slot) -> bool {
+        let proposal_slot = self.head_block.slot + 1;
+        let current_time_ok = self.head_block.slot == current_slot
+            || (proposal_slot == current_slot && self.proposing_on_time());
+        // Votes of the head's slot are not applied yet, so weak and strong cannot be told.
+        let weights_ok =
+            current_slot <= self.head_block.slot || (self.head_weak() && self.parent_strong());
+        self.head_late()
+            && self.shuffling_stable(proposal_slot)
+            && self.ffg_competitive()
+            && self.finalization_ok(proposal_slot)
+            && self.parent_slot_ok()
+            && current_time_ok
+            && weights_ok
+    }
+
+    /// Whether the head arrived after the attestation deadline of its slot.
+    ///
+    /// See `is_head_late` in the phase0 fork choice spec.
+    fn head_late(&self) -> bool {
+        !self
+            .ghost
+            .store()
+            .block_timeliness
+            .get(&self.head.root)
+            .is_some_and(|timeliness| timeliness.attestation)
+    }
+
+    /// Whether a proposal at the slot keeps its proposer, whichever parent it builds on.
+    ///
+    /// Before Fulu, a reorg at an epoch boundary could change the slot's proposer.
+    /// See `is_shuffling_stable` in the phase0 fork choice spec.
+    const fn shuffling_stable(&self, slot: Slot) -> bool {
+        !self.boundary_sensitive || !slot.is_epoch_start::<P>()
+    }
+
+    /// Whether the parent would realize the same justification as the head.
+    ///
+    /// See `is_ffg_competitive` in the phase0 fork choice spec.
+    fn ffg_competitive(&self) -> bool {
+        let justifications = &self.ghost.store().unrealized_justifications;
+        justifications.get(&self.head.root) == justifications.get(&self.parent.root)
+    }
+
+    /// Whether the chain finalized recently enough, seen from the slot.
+    ///
+    /// See `is_finalization_ok` in the phase0 fork choice spec.
+    fn finalization_ok(&self, slot: Slot) -> bool {
+        let store = self.ghost.store();
+        slot.epoch::<P>() - store.finalized_checkpoint().epoch
+            <= store.config().reorg_max_epochs_since_finalization
+    }
+
+    /// Whether the store's clock is still before the reorg cutoff of its slot.
+    ///
+    /// See `is_proposing_on_time` in the phase0 fork choice spec.
+    const fn proposing_on_time(&self) -> bool {
+        let store = self.ghost.store();
+        let clock = store.slot_clock();
+        clock.time_into_slot_ms(store.time_ms())
+            <= clock.component_ms(store.config().proposer_reorg_cutoff_bps)
+    }
+
+    /// Whether the head directly follows its parent's slot, so a reorg spans one slot.
+    fn parent_slot_ok(&self) -> bool {
+        self.parent_block.slot + 1 == self.head_block.slot
+    }
+
+    /// Whether the head drew too few votes to resist the next proposer's boost.
+    ///
+    /// See `is_head_weak` in the phase0 fork choice spec.
+    fn head_weak(&self) -> bool {
+        let threshold = self
+            .committee
+            .percent(self.ghost.store().config().reorg_head_weight_threshold);
+        self.ghost.is_weak(
+            self.head_score,
+            threshold,
+            self.head_block.slot,
+            self.head_committees,
+        )
+    }
+
+    /// Whether the parent drew enough votes that the head's missing votes are not being withheld.
+    ///
+    /// Threshold: strictly above the parent threshold, whatever the parent's payload status.
+    /// See `is_parent_strong` in the phase0 and Gloas fork choice specs.
+    fn parent_strong(&self) -> bool {
+        self.parent_score
+            > self
+                .committee
+                .percent(self.ghost.store().config().reorg_parent_weight_threshold)
     }
 }

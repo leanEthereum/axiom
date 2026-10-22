@@ -6,18 +6,19 @@ use axiom_block_production::{BlockProducer, ParentPayload, PayloadRequest, Produ
 use axiom_builder_client::ChainHealth;
 use axiom_state_transition::State;
 use axiom_types::{
-    BlsPubkey, ForkName, Preset, Slot, ValidatorIndex,
+    BlsPubkey, ForkName, Hash32, Preset, Root, Slot, ValidatorIndex,
     accessors::{BuilderState, CoreState, ForkState},
     combined,
     gloas::{self, SignedExecutionPayloadBid},
 };
 
-use crate::{Chain, ExecutionHead, ProposerError};
+use super::ProposerReorgs;
+use crate::{Chain, ChainError, ExecutionHead, ProposerError};
 
-/// The head a proposal builds on, its proposer, and the payload it asks the engine for.
+/// The block a proposal builds on, its proposer, and the payload it asks the engine for.
 #[derive(Clone, Debug)]
 pub(crate) struct ProposalContext<P: Preset> {
-    /// The head's post-state, which the block extends.
+    /// The post-state of the block the proposal extends: the head, or a late head's parent.
     pub(crate) state: State<P>,
     /// The fork of the proposal's slot.
     pub(crate) fork: ForkName,
@@ -40,10 +41,16 @@ pub(crate) struct ProposalContext<P: Preset> {
 impl<P: Preset> ProposalContext<P> {
     /// Reads the context of a proposal at a slot from the chain.
     ///
+    /// The proposal extends the head, or the parent of a late head when reorgs are on.
+    ///
     /// # Errors
     ///
-    /// Fails when the slot is not after the head, or the head's state cannot reach it.
-    pub(crate) fn gather(chain: &mut Chain<P>, slot: Slot) -> Result<Self, ProposerError> {
+    /// Fails when the slot is not after the head, or the parent's state cannot reach it.
+    pub(crate) fn gather(
+        chain: &mut Chain<P>,
+        slot: Slot,
+        reorgs: ProposerReorgs,
+    ) -> Result<Self, ProposerError> {
         let head = chain.head();
         if slot <= head.slot {
             return Err(ProposerError::SlotOutOfRange {
@@ -51,9 +58,14 @@ impl<P: Preset> ProposalContext<P> {
                 head: head.slot,
             });
         }
+        let extended = reorgs.parent(chain, slot)?;
         let config = chain.config().clone();
         let fork = config.fork_at(slot.epoch::<P>());
-        let state = chain.head_state()?.clone();
+        let state = chain
+            .store()
+            .block_state(&extended.root)
+            .ok_or(ChainError::MissingState(extended.root))?
+            .clone();
         let mut advanced = state.clone();
         advanced
             .process_slots(&config, slot)
@@ -69,11 +81,11 @@ impl<P: Preset> ProposalContext<P> {
             .unwrap_or_default();
 
         // Gloas builds on the parent's payload only where fork choice says so.
-        let builds_on_full = fork.separates_payloads() && chain.builds_on_full(slot)?;
+        let builds_on_full = fork.separates_payloads() && chain.builds_on_full(extended, slot)?;
         let parent = if builds_on_full {
             let requests = chain
                 .database()
-                .envelope(head.root)?
+                .envelope(extended.root)?
                 .map(|envelope| envelope.message.execution_requests)
                 .unwrap_or_default();
             ParentPayload::Full(requests)
@@ -83,10 +95,14 @@ impl<P: Preset> ProposalContext<P> {
 
         let execution = if advanced.beacon().is_merge_transition_complete() {
             // A Gloas payload extends the parent's payload, or the payload the parent extended.
+            // Earlier, the block's post-state records the latest payload hash.
             let head_hash = match gloas::BeaconState::<P>::from_any(advanced.beacon()) {
                 Some(gloas) if builds_on_full => gloas.latest_execution_payload_bid().block_hash,
                 Some(gloas) => gloas.latest_execution_payload_bid().parent_block_hash,
-                None => head.execution.head,
+                None => state
+                    .beacon()
+                    .latest_execution_block_hash()
+                    .unwrap_or(Hash32::ZERO),
             };
             let producer = BlockProducer::new(&config, chain.pool());
             let request = producer.payload_request(&state, slot, &parent)?;
@@ -102,11 +118,11 @@ impl<P: Preset> ProposalContext<P> {
             chain
                 .pool()
                 .bids()
-                .best(slot, head.root, execution_head.head)
+                .best(slot, extended.root, execution_head.head)
                 .cloned()
         });
         let parent_gas_limit = Self::latest_gas_limit(state.beacon());
-        let health = Self::health(chain, slot);
+        let health = Self::health(chain, extended.root, slot);
         Ok(Self {
             state,
             fork,
@@ -120,13 +136,13 @@ impl<P: Preset> ProposalContext<P> {
         })
     }
 
-    /// The slots of the canonical blocks of the last epoch, and the finalized epoch.
-    fn health(chain: &Chain<P>, slot: Slot) -> ChainHealth {
+    /// The slots of the last epoch's blocks on the parent's chain, and the finalized epoch.
+    fn health(chain: &Chain<P>, parent: Root, slot: Slot) -> ChainHealth {
         let head = chain.head();
         let blocks = chain.store().blocks();
         let oldest = Slot(slot.0.saturating_sub(P::SLOTS_PER_EPOCH));
         let mut block_slots = BTreeSet::new();
-        let mut root = head.root;
+        let mut root = parent;
         while let Some(node) = blocks.get(&root) {
             if node.slot < oldest {
                 break;

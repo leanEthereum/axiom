@@ -202,7 +202,13 @@ impl BeaconApi {
             Arc::new(SystemClock),
             None,
         );
-        let proposer = ProposerService::new(chain.clone(), execution, ExecutionAddress::ZERO, None);
+        let proposer = ProposerService::new(
+            chain.clone(),
+            execution,
+            Arc::new(SystemClock),
+            ExecutionAddress::ZERO,
+            None,
+        );
         // A hub that never runs: no stream ever opens.
         let (_hub, _sender, events) = EventHub::new();
         let context = ApiContext {
