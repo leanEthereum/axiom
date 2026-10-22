@@ -52,7 +52,7 @@ use self::{
     handshake::Handshakes,
     peers::PeerBook,
     server::RequestServer,
-    sync::{BatchOutcome, RangeSync},
+    sync::{BackfillOutcome, BackfillSync, BatchOutcome, RangeSync},
     topics::Subscriptions,
 };
 use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
@@ -127,6 +127,10 @@ pub(crate) struct NetworkService<P: Preset> {
     sync: RangeSync<P>,
     /// Processed batches, until the run loop takes them.
     sync_outcomes: Option<UnboundedReceiver<BatchOutcome>>,
+    /// Backfill below the stored history.
+    backfill: BackfillSync<P>,
+    /// Processed backfill batches, until the run loop takes them.
+    backfill_outcomes: Option<UnboundedReceiver<BackfillOutcome>>,
     /// Inbound requests answered at once.
     requests: Arc<Semaphore>,
     /// Gossip messages in validation at once.
@@ -224,6 +228,12 @@ impl<P: Preset> NetworkService<P> {
             config.clone(),
             Arc::clone(&forks),
         );
+        let (backfill, backfill_outcomes) = BackfillSync::new(
+            chain.clone(),
+            network.clone(),
+            config.clone(),
+            Arc::clone(&forks),
+        );
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
             attnets: AtomicU64::new(0),
@@ -247,6 +257,8 @@ impl<P: Preset> NetworkService<P> {
             )),
             sync,
             sync_outcomes: Some(sync_outcomes),
+            backfill,
+            backfill_outcomes: Some(backfill_outcomes),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
             subscriptions: Subscriptions::new(
@@ -303,6 +315,7 @@ impl<P: Preset> NetworkService<P> {
         let mut upkeep = time::interval(Duration::from_millis(self.slots.slot_duration_ms()));
         let mut discovered = self.discovery_events.take();
         let mut outcomes = self.sync_outcomes.take();
+        let mut backfilled = self.backfill_outcomes.take();
         loop {
             // Without discovery, its branch simply never completes.
             let found = async {
@@ -318,7 +331,16 @@ impl<P: Preset> NetworkService<P> {
                     None => pending().await,
                 }
             };
-            let others = Either::race(found, Either::race(processed, upkeep.tick()));
+            let backfill = async {
+                match &mut backfilled {
+                    Some(receiver) => receiver.recv().await,
+                    None => pending().await,
+                }
+            };
+            let others = Either::race(
+                found,
+                Either::race(processed, Either::race(backfill, upkeep.tick())),
+            );
             match Either::race(events.next(), others).await {
                 Either::Left(Some(event)) => self.handle(event).await,
                 Either::Left(None) => break,
@@ -344,7 +366,15 @@ impl<P: Preset> NetworkService<P> {
                     self.sync.on_outcome(outcome).await;
                 }
                 Either::Right(Either::Right(Either::Left(None))) => outcomes = None,
-                Either::Right(Either::Right(Either::Right(_))) => self.maintain().await,
+                Either::Right(Either::Right(Either::Right(Either::Left(Some(outcome))))) => {
+                    self.backfill.on_outcome(outcome).await;
+                }
+                Either::Right(Either::Right(Either::Right(Either::Left(None)))) => {
+                    backfilled = None;
+                }
+                Either::Right(Either::Right(Either::Right(Either::Right(_)))) => {
+                    self.maintain().await;
+                }
             }
         }
         if let Some(discovery) = &self.discovery {
@@ -498,6 +528,7 @@ impl<P: Preset> NetworkService<P> {
                 self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 self.sync.on_disconnect(&peer).await;
+                self.backfill.on_disconnect(&peer).await;
             }
             NetworkEvent::GossipMessage {
                 id, topic, data, ..
@@ -524,6 +555,7 @@ impl<P: Preset> NetworkService<P> {
                     StatusVersion::of(protocol).and_then(|version| version.decode(&payload).ok())
                 {
                     self.sync.on_status(peer.clone(), status).await;
+                    self.backfill.on_status(peer.clone(), status).await;
                 }
                 // Answers run in their own tasks, so one slow query never blocks the loop.
                 let Ok(permit) = Arc::clone(&self.requests).acquire_owned().await else {
@@ -538,14 +570,22 @@ impl<P: Preset> NetworkService<P> {
             NetworkEvent::Response { request, chunk, .. } => {
                 if let Some((peer, status)) = self.handshakes.answered(request, &chunk) {
                     match status {
-                        Some(status) => self.sync.on_status(peer, status).await,
+                        Some(status) => {
+                            self.sync.on_status(peer.clone(), status).await;
+                            self.backfill.on_status(peer, status).await;
+                        }
                         None => debug!(%peer, "peer sent no usable status"),
                     }
                 } else if self.sync.owns(request) {
                     self.sync.on_chunk(request, &chunk);
+                } else if self.backfill.owns(request) {
+                    self.backfill.on_chunk(request, &chunk);
                 }
             }
-            NetworkEvent::ResponseEnded { request, .. } => self.sync.on_end(request).await,
+            NetworkEvent::ResponseEnded { request, .. } => {
+                self.sync.on_end(request).await;
+                self.backfill.on_end(request).await;
+            }
             NetworkEvent::RequestFailed {
                 request,
                 peer,
@@ -557,6 +597,7 @@ impl<P: Preset> NetworkService<P> {
                     self.send_status(peer).await;
                 }
                 self.sync.on_failure(request).await;
+                self.backfill.on_failure(request).await;
             }
             NetworkEvent::ConnectionFailed { address, error } => {
                 debug!(%address, %error, "connection failed");
