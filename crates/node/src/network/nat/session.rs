@@ -2,16 +2,14 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use axiom_discv5::Csprng;
 use tracing::{debug, info};
 
 use super::{
-    CodecError, Forwarding, Listener, MappedEndpoint, MappingProtocol, NatError, NatMetrics,
-    control::ControlSocket, pcp_session::PcpSession, pmp_session::PmpSession,
-    upnp_session::UpnpSession,
+    Forwarding, Listener, MappedEndpoint, MappingProtocol, NatError, NatMetrics,
+    control::ControlSocket, pmp_session::PmpSession, upnp_session::UpnpSession,
 };
 
-/// Seconds a PCP or NAT-PMP mapping is asked to live.
+/// Seconds a NAT-PMP mapping is asked to live.
 ///
 /// RFC 6886 section 3.3 recommends two hours.
 pub(crate) const REQUESTED_LIFETIME: u32 = 7200;
@@ -29,7 +27,7 @@ pub(crate) const DELETE_ATTEMPTS: u32 = 2;
 /// Where the gateway's servers are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GatewayTargets {
-    /// The PCP and NAT-PMP server: port 5351 of the default gateway, when one is known.
+    /// The NAT-PMP server: port 5351 of the default gateway, when one is known.
     pub(crate) port_control: Option<SocketAddr>,
     /// Where SSDP searches go: the multicast group outside tests.
     pub(crate) ssdp: SocketAddr,
@@ -40,8 +38,6 @@ pub(crate) struct GatewayTargets {
 /// The forwardings one gateway keeps for the node.
 #[derive(Debug)]
 pub(crate) enum Session {
-    /// Over PCP.
-    Pcp(PcpSession),
     /// Over NAT-PMP.
     Pmp(PmpSession),
     /// Over UPnP IGD.
@@ -49,9 +45,7 @@ pub(crate) enum Session {
 }
 
 impl Session {
-    /// Asks the gateway for every forwarding: PCP first, NAT-PMP if PCP is unknown, then UPnP.
-    ///
-    /// RFC 6886 section 1.1 asks clients to try PCP and fall back on an unsupported-version answer.
+    /// Asks the gateway for every forwarding: NAT-PMP on the default gateway, then UPnP.
     ///
     /// # Errors
     ///
@@ -59,28 +53,16 @@ impl Session {
     pub(crate) async fn establish(
         targets: GatewayTargets,
         listeners: &[(Listener, u16)],
-        rng: &mut Csprng,
         metrics: &NatMetrics,
     ) -> Result<Self, NatError> {
-        // Phase 1: PCP, and NAT-PMP when the server answers that it speaks version 0.
+        // Phase 1: NAT-PMP, which needs the default gateway's address.
         if let Some(server) = targets.port_control {
             let socket = ControlSocket::connect(server).await?;
-            match PcpSession::establish(socket, listeners.to_vec(), rng.bytes()).await {
-                Ok(session) => return Ok(Self::Pcp(session)),
-                Err(NatError::Codec(CodecError::UnsupportedVersion { version: 0 })) => {
-                    debug!("gateway speaks NAT-PMP, not PCP");
-                    let socket = ControlSocket::connect(server).await?;
-                    match PmpSession::establish(socket, listeners.to_vec()).await {
-                        Ok(session) => return Ok(Self::Pmp(session)),
-                        Err(error) => {
-                            metrics.failed(MappingProtocol::NatPmp);
-                            debug!(%error, "NAT-PMP mapping failed");
-                        }
-                    }
-                }
+            match PmpSession::establish(socket, listeners.to_vec()).await {
+                Ok(session) => return Ok(Self::Pmp(session)),
                 Err(error) => {
-                    metrics.failed(MappingProtocol::Pcp);
-                    debug!(%error, "PCP mapping failed");
+                    metrics.failed(MappingProtocol::NatPmp);
+                    debug!(%error, "NAT-PMP mapping failed");
                 }
             }
         }
@@ -98,7 +80,6 @@ impl Session {
     /// The protocol in use.
     pub(crate) const fn protocol(&self) -> MappingProtocol {
         match self {
-            Self::Pcp(_) => MappingProtocol::Pcp,
             Self::Pmp(_) => MappingProtocol::NatPmp,
             Self::Upnp(_) => MappingProtocol::Upnp,
         }
@@ -107,7 +88,6 @@ impl Session {
     /// The external address and the ports granted.
     pub(crate) fn endpoint(&self) -> MappedEndpoint {
         match self {
-            Self::Pcp(session) => session.endpoint(),
             Self::Pmp(session) => session.endpoint(),
             Self::Upnp(session) => session.endpoint(),
         }
@@ -119,7 +99,6 @@ impl Session {
     /// A permanent UPnP lease is renewed on the usual lease schedule, to survive a gateway reboot.
     pub(crate) fn renew_after(&self) -> Duration {
         let granted = match self {
-            Self::Pcp(session) => session.granted(),
             Self::Pmp(session) => session.granted(),
             Self::Upnp(session) => session.granted(),
         };
@@ -138,7 +117,6 @@ impl Session {
     /// Fails when the gateway stops answering, or grants nothing.
     pub(crate) async fn renew(&mut self) -> Result<(), NatError> {
         match self {
-            Self::Pcp(session) => session.renew().await,
             Self::Pmp(session) => session.renew().await,
             Self::Upnp(session) => session.renew().await,
         }
@@ -148,7 +126,6 @@ impl Session {
     pub(crate) async fn release(self) {
         let protocol = self.protocol();
         match self {
-            Self::Pcp(session) => session.release().await,
             Self::Pmp(session) => session.release().await,
             Self::Upnp(session) => session.release().await,
         }

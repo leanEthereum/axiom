@@ -14,16 +14,6 @@ pub(crate) enum Transport {
 }
 
 impl Transport {
-    /// The IANA protocol number, as PCP carries it.
-    ///
-    /// See RFC 6887 section 11.1 and the IANA protocol numbers registry.
-    pub(crate) const fn protocol_number(self) -> u8 {
-        match self {
-            Self::Tcp => 6,
-            Self::Udp => 17,
-        }
-    }
-
     /// The NAT-PMP mapping opcode: 1 maps UDP, 2 maps TCP.
     ///
     /// See RFC 6886 section 3.3.
@@ -116,7 +106,7 @@ impl ListenPorts {
 
 /// The longest lifetime a renewal schedule trusts.
 ///
-/// RFC 6887 section 15 caps an absurd lifetime at a sane value, such as 24 hours.
+/// A gateway may grant any 32-bit lifetime; a day bounds how long a lost mapping goes unnoticed.
 const MAX_LIFETIME: u32 = 24 * 3600;
 
 /// One forwarding the gateway granted.

@@ -1,11 +1,11 @@
-//! Fake gateways on localhost for the driver tests: a PCP or NAT-PMP server, and a UPnP device.
+//! Fake gateways on localhost for the driver tests: a NAT-PMP server, and a UPnP device.
 //!
 //! Each fake keeps its forwarding table and a log of every request, for tests to assert on.
 
 use std::{
     collections::BTreeMap,
     future::pending,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
@@ -21,21 +21,6 @@ pub(crate) const EXTERNAL_IP: Ipv4Addr = Ipv4Addr::new(81, 2, 3, 4);
 /// What a fake port control server saw, one entry per request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ControlRequest {
-    /// A PCP request the server refused with its own version 0.
-    Unsupported,
-    /// A PCP MAP request.
-    PcpMap {
-        /// The IANA protocol number.
-        protocol: u8,
-        /// The local port.
-        internal: u16,
-        /// The external port suggested.
-        suggested_port: u16,
-        /// The external address suggested.
-        suggested_ip: Ipv4Addr,
-        /// The lifetime asked for.
-        lifetime: u32,
-    },
     /// A NAT-PMP external address request.
     PmpAddress,
     /// A NAT-PMP mapping request.
@@ -54,8 +39,6 @@ pub(crate) enum ControlRequest {
 /// The fake server's state.
 #[derive(Debug)]
 pub(crate) struct ControlState {
-    /// Whether it speaks PCP; otherwise it speaks NAT-PMP only.
-    speaks_pcp: bool,
     /// The lifetime it grants.
     lifetime: u32,
     /// The epoch at the last reset.
@@ -70,7 +53,7 @@ pub(crate) struct ControlState {
     pub(crate) requests: Vec<ControlRequest>,
 }
 
-/// A PCP or NAT-PMP server on a localhost port.
+/// A NAT-PMP server on a localhost port.
 #[derive(Debug)]
 pub(crate) struct FakePortControl {
     /// Where it listens.
@@ -81,17 +64,12 @@ pub(crate) struct FakePortControl {
 
 impl FakePortControl {
     /// Starts a server that grants a lifetime, and reboots after a number of requests if asked.
-    pub(crate) async fn start(
-        speaks_pcp: bool,
-        lifetime: u32,
-        reboot_after: Option<usize>,
-    ) -> Self {
+    pub(crate) async fn start(lifetime: u32, reboot_after: Option<usize>) -> Self {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("bind");
         let addr = socket.local_addr().expect("address");
         let state = Arc::new(Mutex::new(ControlState {
-            speaks_pcp,
             lifetime,
             epoch_base: 1000,
             reset_at: time::Instant::now(),
@@ -142,16 +120,9 @@ impl ControlState {
 
     /// Answers one request, then reboots if this was the last before the reboot.
     fn answer(&mut self, request: &[u8]) -> Option<Vec<u8>> {
-        let reply = match (request.first()?, self.speaks_pcp) {
-            (2, true) => self.pcp_map(request),
-            (2, false) => {
-                self.requests.push(ControlRequest::Unsupported);
-                // A NAT-PMP server names its own version 0 with result 1.
-                let mut reply = vec![0, 0x80 | request.get(1)?, 0, 1];
-                reply.extend_from_slice(&self.epoch().to_be_bytes());
-                Some(reply)
-            }
-            (0, _) => self.pmp(request),
+        // Only version 0 is spoken; anything else goes unanswered.
+        let reply = match request.first()? {
+            0 => self.pmp(request),
             _ => None,
         };
         if self.reboot_after == Some(self.requests.len()) {
@@ -163,33 +134,7 @@ impl ControlState {
         reply
     }
 
-    /// Grants or deletes a PCP mapping, on port 10000 above the internal one.
-    fn pcp_map(&mut self, request: &[u8]) -> Option<Vec<u8>> {
-        let lifetime = u32::from_be_bytes(request.get(4..8)?.try_into().ok()?);
-        let protocol = *request.get(36)?;
-        let internal = u16::from_be_bytes(request.get(40..42)?.try_into().ok()?);
-        let suggested_port = u16::from_be_bytes(request.get(42..44)?.try_into().ok()?);
-        let suggested: [u8; 16] = request.get(44..60)?.try_into().ok()?;
-        self.requests.push(ControlRequest::PcpMap {
-            protocol,
-            internal,
-            suggested_port,
-            suggested_ip: Ipv6Addr::from(suggested).to_ipv4_mapped()?,
-            lifetime,
-        });
-        let (external, granted) = self.update(protocol, internal, lifetime);
-        let mut reply = vec![2, 0x81, 0, 0];
-        reply.extend_from_slice(&granted.to_be_bytes());
-        reply.extend_from_slice(&self.epoch().to_be_bytes());
-        reply.extend_from_slice(&[0; 12]);
-        reply.extend_from_slice(request.get(24..40)?);
-        reply.extend_from_slice(&internal.to_be_bytes());
-        reply.extend_from_slice(&external.to_be_bytes());
-        reply.extend_from_slice(&EXTERNAL_IP.to_ipv6_mapped().octets());
-        Some(reply)
-    }
-
-    /// Answers a NAT-PMP address or mapping request.
+    /// Answers a NAT-PMP address or mapping request, mapping 10000 above the internal port.
     fn pmp(&mut self, request: &[u8]) -> Option<Vec<u8>> {
         let opcode = *request.get(1)?;
         let mut reply = vec![0, 0x80 | opcode, 0, 0];

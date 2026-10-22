@@ -94,18 +94,18 @@ mod tests {
 
     #[test]
     fn metrics_render_under_their_names() {
-        // One PCP mapping alive, one UPnP failure, a known address behind 12 networks.
+        // One NAT-PMP mapping alive, one UPnP failure, a known address behind 12 networks.
         let registry = Registry::new();
         let metrics = NatMetrics::register(&registry).expect("names are free");
-        metrics.set_active(MappingProtocol::Pcp, true);
-        metrics.renewed(MappingProtocol::Pcp);
+        metrics.set_active(MappingProtocol::NatPmp, true);
+        metrics.renewed(MappingProtocol::NatPmp);
         metrics.failed(MappingProtocol::Upnp);
         metrics.set_address_known(true);
         metrics.set_address_votes(12);
         let text = registry.render();
         for line in [
-            "nat_port_mapping_active{protocol=\"pcp\"} 1",
-            "nat_port_mapping_renewals_total{protocol=\"pcp\"} 1",
+            "nat_port_mapping_active{protocol=\"nat_pmp\"} 1",
+            "nat_port_mapping_renewals_total{protocol=\"nat_pmp\"} 1",
             "nat_port_mapping_failures_total{protocol=\"upnp\"} 1",
             "nat_external_address_known 1",
             "nat_external_address_votes 12",

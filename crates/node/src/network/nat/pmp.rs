@@ -277,11 +277,11 @@ mod tests {
                 actual: 129,
             })
         );
-        // A PCP version byte with a success code.
-        let mut pcp = ok;
-        pcp[0] = 2;
+        // Version 2 with a success code: another protocol.
+        let mut other = ok;
+        other[0] = 2;
         assert_eq!(
-            tcp.decode_response(&pcp),
+            tcp.decode_response(&other),
             Err(CodecError::WrongVersion {
                 expected: 0,
                 actual: 2,

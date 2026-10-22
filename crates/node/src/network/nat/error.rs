@@ -20,14 +20,6 @@ pub(crate) enum CodecError {
         /// Bytes received.
         actual: usize,
     },
-    /// A PCP message length breaks the framing rules.
-    ///
-    /// See RFC 6887 section 8.3: 24 to 1100 bytes, a multiple of 4.
-    #[error("PCP message of {length} bytes is not a multiple of 4 between 24 and 1100")]
-    BadLength {
-        /// Bytes received.
-        length: usize,
-    },
     /// The version byte names another protocol.
     #[error("version {actual} where {expected} was expected")]
     WrongVersion {
@@ -58,17 +50,6 @@ pub(crate) enum CodecError {
         /// The result code.
         code: u16,
     },
-    /// A PCP response answers another request: its nonce, protocol, or port differ.
-    #[error("PCP response for protocol {protocol} port {internal} answers another request")]
-    Unmatched {
-        /// The internal port the response names.
-        internal: u16,
-        /// The protocol number the response names.
-        protocol: u8,
-    },
-    /// A PCP address is IPv6, where only IPv4 is mapped.
-    #[error("PCP address is not an IPv4-mapped address")]
-    NotIpv4,
 }
 
 /// Why the port mapper could not reach, ask, or understand a gateway.

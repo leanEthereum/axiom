@@ -44,13 +44,12 @@ pub struct VoteConfig {
 impl Default for VoteConfig {
     fn default() -> Self {
         Self {
-            // Threshold: ten public networks must agree.
+            // Threshold: ten public networks must agree, the value deployed discv5 nodes use.
             // An attacker must answer from ten distinct /24s the node chose to ping.
-            // At one liveness PING every 10 s, a node with a healthy table gets there in minutes.
             threshold: 10,
-            // Timing: twenty minutes span about 120 liveness checks at one every 10 s.
-            // That is far more than the threshold needs, yet a stale address fades within the hour.
-            lifetime: Duration::from_mins(20),
+            // Timing: two minutes, the deployed default; a short window follows a renumbering fast.
+            // Ten votes in two minutes needs PONGs from at least one peer every 12 s.
+            lifetime: Duration::from_mins(2),
             // A routing table holds at most 256 buckets of 16; votes come only from pinged peers.
             capacity: 512,
         }

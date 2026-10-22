@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 use super::{
     CodecError, Forwarding, Listener, MappedEndpoint, MappingProtocol, NatError,
     control::ControlSocket,
-    epoch::{EpochRule, GatewayEpoch},
+    epoch::GatewayEpoch,
     pmp::{PmpRequest, PmpResponse},
     session::{DELETE_ATTEMPTS, REQUESTED_LIFETIME},
 };
@@ -151,7 +151,7 @@ impl PmpSession {
     /// Whether an answer's epoch shows the gateway lost its state since the last answer.
     fn lost_state(&mut self, answer: PmpResponse) -> bool {
         self.epoch
-            .lost_state(EpochRule::NatPmp, self.started.elapsed(), answer.epoch())
+            .lost_state(self.started.elapsed(), answer.epoch())
     }
 
     /// Maps one listener, suggesting the port it held before.

@@ -5,7 +5,7 @@
 //! A node behind a NAT is reachable only if peers learn an address the NAT forwards.
 //! Two sources tell the node that address:
 //!
-//! - The gateway, when port mapping is on: PCP, then NAT-PMP, then UPnP IGD.
+//! - The gateway, when port mapping is on: NAT-PMP, then UPnP IGD.
 //! - Peers, through discv5: each PONG names the endpoint its sender saw.
 //!
 //! The record then states the confirmed address and the forwarded ports.
@@ -13,7 +13,7 @@
 //!
 //! The pure codecs live apart from the tokio driver:
 //!
-//! - Pure: the NAT-PMP and PCP messages, epochs, routes, XML, SSDP, SOAP, descriptions.
+//! - Pure: the NAT-PMP messages, epochs, routes, XML, SSDP, SOAP, descriptions.
 //! - Effects: the control socket, the three sessions, and the mapper task.
 
 mod control;
@@ -25,8 +25,6 @@ mod external;
 mod fake;
 mod mapper;
 mod metrics;
-mod pcp;
-mod pcp_session;
 mod pmp;
 mod pmp_session;
 mod port;
@@ -52,15 +50,13 @@ pub(crate) use self::{
 /// Off by default: a gateway mapping opens the home network, so the operator opts in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PortMappingSettings {
-    /// Asks the gateway over PCP, NAT-PMP, or UPnP.
+    /// Asks the gateway over NAT-PMP or UPnP.
     pub enabled: bool,
 }
 
 /// The protocol a gateway speaks for port mapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum MappingProtocol {
-    /// The Port Control Protocol, RFC 6887.
-    Pcp,
     /// The NAT Port Mapping Protocol, RFC 6886.
     NatPmp,
     /// UPnP Internet Gateway Device.
@@ -71,7 +67,6 @@ impl MappingProtocol {
     /// The metric label.
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::Pcp => "pcp",
             Self::NatPmp => "nat_pmp",
             Self::Upnp => "upnp",
         }
@@ -81,7 +76,6 @@ impl MappingProtocol {
 impl fmt::Display for MappingProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Pcp => "PCP",
             Self::NatPmp => "NAT-PMP",
             Self::Upnp => "UPnP",
         })

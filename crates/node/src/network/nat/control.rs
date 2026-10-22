@@ -1,7 +1,6 @@
-//! The UDP exchange with a gateway's port control server, shared by PCP and NAT-PMP.
+//! The UDP exchange with a gateway's NAT-PMP server.
 
 use std::{
-    io,
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
 };
@@ -10,7 +9,7 @@ use tokio::{net::UdpSocket, time};
 
 use super::{CodecError, NatError};
 
-/// The port PCP and NAT-PMP servers listen on, per RFC 6887 section 19.1 and RFC 6886 section 3.
+/// The port NAT-PMP servers listen on, per RFC 6886 section 3.1.
 pub(crate) const PORT_CONTROL_PORT: u16 = 5351;
 
 /// The wait for the first answer; each retry doubles it.
@@ -24,8 +23,8 @@ const FIRST_WAIT: Duration = Duration::from_millis(250);
 /// The RFC's nine tries over 64 s suit a client with no fallback; this one tries UPnP next.
 const ATTEMPTS: u32 = 5;
 
-/// The largest datagram read: the PCP limit of RFC 6887 section 7.
-const MAX_DATAGRAM: usize = 1100;
+/// The largest datagram read: a NAT-PMP answer is at most 16 bytes, so more is never one.
+const MAX_DATAGRAM: usize = 64;
 
 /// A UDP socket connected to one gateway's port control server.
 ///
@@ -35,8 +34,6 @@ const MAX_DATAGRAM: usize = 1100;
 pub(crate) struct ControlSocket {
     /// The socket, connected to the server.
     socket: UdpSocket,
-    /// The local address the gateway sees, which PCP states in every request.
-    local: Ipv4Addr,
 }
 
 impl ControlSocket {
@@ -44,7 +41,7 @@ impl ControlSocket {
     ///
     /// # Errors
     ///
-    /// Fails when the socket cannot bind or connect, or the route is not IPv4.
+    /// Fails when the socket cannot bind or connect.
     pub(crate) async fn connect(server: SocketAddr) -> Result<Self, NatError> {
         let io = |context| move |error| NatError::Io { context, error };
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
@@ -54,25 +51,7 @@ impl ControlSocket {
             .connect(server)
             .await
             .map_err(io("connecting to the port control server"))?;
-        // The kernel picks the source address of the route to the gateway on connect.
-        let local = match socket
-            .local_addr()
-            .map_err(io("reading the local address"))?
-        {
-            SocketAddr::V4(local) => *local.ip(),
-            SocketAddr::V6(_) => {
-                return Err(NatError::Io {
-                    context: "reading the local address",
-                    error: io::Error::new(io::ErrorKind::Unsupported, "not IPv4"),
-                });
-            }
-        };
-        Ok(Self { socket, local })
-    }
-
-    /// The local address the gateway sees.
-    pub(crate) const fn local_ip(&self) -> Ipv4Addr {
-        self.local
+        Ok(Self { socket })
     }
 
     /// Sends a request until an answer decodes, doubling the wait each time.

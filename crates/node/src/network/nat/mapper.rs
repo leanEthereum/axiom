@@ -2,7 +2,6 @@
 
 use std::{fs, net::SocketAddr, time::Duration};
 
-use axiom_discv5::Csprng;
 use tokio::{
     sync::{oneshot, watch},
     task, time,
@@ -129,14 +128,9 @@ impl MapperTask {
     ///
     /// No failure ends the task: the node runs on without mappings and tries again later.
     async fn run(self, mut stop: oneshot::Receiver<()>) {
-        let mut rng = match Csprng::os_seed() {
-            Ok(seed) => Csprng::from_seed(seed),
-            Err(error) => return warn!(%error, "port mapping needs randomness; it stays off"),
-        };
         loop {
             // Phase 1: find a protocol the gateway speaks; a stop meanwhile abandons the attempt.
-            let establishing =
-                Session::establish(self.targets, &self.listeners, &mut rng, &self.metrics);
+            let establishing = Session::establish(self.targets, &self.listeners, &self.metrics);
             let session = match Either::race(&mut stop, establishing).await {
                 Either::Left(_) => return,
                 Either::Right(Ok(session)) => session,
@@ -258,33 +252,6 @@ mod tests {
             .expect("bind")
     }
 
-    /// A PCP mapping request for 7200 s, as the fake logs it.
-    fn pcp(
-        protocol: u8,
-        internal: u16,
-        suggested_port: u16,
-        suggested_ip: Ipv4Addr,
-    ) -> ControlRequest {
-        ControlRequest::PcpMap {
-            protocol,
-            internal,
-            suggested_port,
-            suggested_ip,
-            lifetime: 7200,
-        }
-    }
-
-    /// A PCP deletion: zero lifetime, nothing suggested.
-    fn pcp_delete(protocol: u8, internal: u16) -> ControlRequest {
-        ControlRequest::PcpMap {
-            protocol,
-            internal,
-            suggested_port: 0,
-            suggested_ip: Ipv4Addr::UNSPECIFIED,
-            lifetime: 0,
-        }
-    }
-
     /// A NAT-PMP mapping request as the fake logs it.
     fn pmp(opcode: u8, internal: u16, suggested: u16) -> ControlRequest {
         ControlRequest::PmpMap {
@@ -295,12 +262,22 @@ mod tests {
         }
     }
 
+    /// A NAT-PMP deletion: zero lifetime, nothing suggested.
+    fn pmp_delete(opcode: u8, internal: u16) -> ControlRequest {
+        ControlRequest::PmpMap {
+            opcode,
+            internal,
+            suggested: 0,
+            lifetime: 0,
+        }
+    }
+
     #[test]
-    fn pcp_maps_renews_and_deletes() {
+    fn nat_pmp_maps_renews_and_deletes() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            // Fixture state: a PCP server granting 2 s, on port 10000 above each internal port.
-            let gateway = FakePortControl::start(true, 2, None).await;
+            // Fixture state: a NAT-PMP gateway granting 2 s, on port 10000 above each internal port.
+            let gateway = FakePortControl::start(2, None).await;
             let search = silent().await;
             let registry = Registry::new();
             let metrics = NatMetrics::register(&registry).expect("names are free");
@@ -311,7 +288,7 @@ mod tests {
                 FAST,
             );
 
-            // Phase 1: the three forwardings, reported with the server's address.
+            // Phase 1: the three forwardings, reported with the gateway's address.
             assert_eq!(
                 first_report(&mapper).await,
                 MappedEndpoint {
@@ -322,18 +299,19 @@ mod tests {
                 }
             );
 
-            // Phase 2: at half the 2 s lifetime, each renewal suggests what was granted.
-            gateway.wait_for(6).await;
-            let any = Ipv4Addr::UNSPECIFIED;
+            // Phase 2: at half the 2 s lifetime, each renewal suggests the port granted.
+            gateway.wait_for(8).await;
             assert_eq!(
-                gateway.state().requests[..6],
+                gateway.state().requests[..8],
                 [
-                    pcp(6, 9000, 9000, any),
-                    pcp(17, 9001, 9001, any),
-                    pcp(17, 9002, 9002, any),
-                    pcp(6, 9000, 19000, EXTERNAL_IP),
-                    pcp(17, 9001, 19001, EXTERNAL_IP),
-                    pcp(17, 9002, 19002, EXTERNAL_IP),
+                    ControlRequest::PmpAddress,
+                    pmp(2, 9000, 9000),
+                    pmp(1, 9001, 9001),
+                    pmp(1, 9002, 9002),
+                    ControlRequest::PmpAddress,
+                    pmp(2, 9000, 19000),
+                    pmp(1, 9001, 19001),
+                    pmp(1, 9002, 19002),
                 ]
             );
 
@@ -350,16 +328,16 @@ mod tests {
             assert_eq!(
                 state.requests[state.requests.len() - 3..],
                 [
-                    pcp_delete(6, 9000),
-                    pcp_delete(17, 9001),
-                    pcp_delete(17, 9002),
+                    pmp_delete(2, 9000),
+                    pmp_delete(1, 9001),
+                    pmp_delete(1, 9002)
                 ]
             );
             drop(state);
             let text = registry.render();
             assert!(
                 text.lines()
-                    .any(|line| line == "nat_port_mapping_active{protocol=\"pcp\"} 0")
+                    .any(|line| line == "nat_port_mapping_active{protocol=\"nat_pmp\"} 0")
             );
         });
     }
@@ -369,8 +347,8 @@ mod tests {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             // Fixture state: a NAT-PMP-only gateway granting 2 s.
-            // Mutation: it reboots right after answering request 7, in the middle of a renewal.
-            let gateway = FakePortControl::start(false, 2, Some(7)).await;
+            // Mutation: it reboots right after answering request 6, in the middle of a renewal.
+            let gateway = FakePortControl::start(2, Some(6)).await;
             let search = silent().await;
             let mapper = PortMapper::spawn_with(
                 targets(Some(gateway.addr), search.local_addr().expect("address")),
@@ -387,13 +365,11 @@ mod tests {
                     quic: Some(19002),
                 }
             );
-            gateway.wait_for(12).await;
+            gateway.wait_for(11).await;
             let state = gateway.state();
             assert_eq!(
-                state.requests[..12],
+                state.requests[..11],
                 [
-                    // PCP first; the gateway answers that it speaks version 0.
-                    ControlRequest::Unsupported,
                     ControlRequest::PmpAddress,
                     pmp(2, 9000, 9000),
                     pmp(1, 9001, 9001),
@@ -421,7 +397,7 @@ mod tests {
     fn upnp_takes_over_when_no_port_control_server_answers() {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            // Fixture state: nothing listens on the PCP port; a UPnP gateway answers searches.
+            // Fixture state: nothing listens on the NAT-PMP port; a UPnP gateway answers searches.
             let closed = silent().await.local_addr().expect("address");
             let device = FakeUpnp::start(false).await;
             let registry = Registry::new();
@@ -469,11 +445,11 @@ mod tests {
             );
             assert_eq!(state.table, BTreeMap::new());
             drop(state);
-            // The PCP attempt failed once, and counted.
+            // The NAT-PMP attempt failed once, and counted.
             let text = registry.render();
             assert!(
                 text.lines()
-                    .any(|line| line == "nat_port_mapping_failures_total{protocol=\"pcp\"} 1")
+                    .any(|line| line == "nat_port_mapping_failures_total{protocol=\"nat_pmp\"} 1")
             );
         });
     }
