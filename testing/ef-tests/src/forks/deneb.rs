@@ -1,9 +1,11 @@
 //! The vectors of Deneb, which adds blobs.
 
+use axiom_gossip::{BlobSubnets, GossipValidator};
+use axiom_kzg::Kzg;
 use axiom_types::{ForkName, Preset, deneb};
 
 use super::{Capella, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Case, Failure, FieldNames, GossipMessage, Verdict};
 
 /// The Deneb fork.
 ///
@@ -48,6 +50,28 @@ impl SpecFork for Deneb {
     type State<P: Preset> = deneb::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = deneb::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = deneb::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        match topic {
+            "blob_sidecar" => {
+                let limits = BlobSubnets::deneb(validator.config());
+                Ok(validator.blob_sidecar(
+                    &message.decode::<deneb::BlobSidecar<P>>()?,
+                    message.now_ms(),
+                    message.subnet(),
+                    limits,
+                    Kzg::mainnet(),
+                ))
+            }
+            _ => Capella::gossip(topic, message, validator),
+        }
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

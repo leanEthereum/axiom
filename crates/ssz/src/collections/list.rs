@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::elements::Elements;
-use crate::{CapacityError, DecodeError, Length, Root, Ssz};
+use crate::{CapacityError, DecodeError, GeneralizedIndex, Length, MerkleProof, Root, Ssz};
 
 /// A sequence of at most `N` elements, the spec's `List[T, N]`.
 ///
@@ -206,6 +206,25 @@ impl<T: Ssz, N: Length> Ssz for List<T, N> {
     fn hash_tree_root(&self) -> Root {
         Elements::root(&self.items, N::LEN).mix_in_length(self.items.len())
     }
+
+    /// Proves a node: the length on the right of the root, the elements' tree on the left.
+    fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
+        let data = Elements::root(&self.items, N::LEN);
+        let length_chunk = Root::from_partial(&(self.items.len() as u64).to_le_bytes());
+        match index.get() {
+            1 => Some((
+                Root::hash_pair(&data, &length_chunk),
+                MerkleProof::default(),
+            )),
+            3 => Some((length_chunk, MerkleProof { branch: vec![data] })),
+            _ => {
+                let inner = index.relative_to(GeneralizedIndex::new(2))?;
+                let (leaf, mut proof) = Elements::prove(&self.items, N::LEN, inner)?;
+                proof.branch.push(length_chunk);
+                Some((leaf, proof))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -314,7 +333,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_proof_reaches_into_an_element() {
+        // Fixture state: two inner lists under a limit of 4, so the data tree has depth 2.
+        let inner = |values: Vec<u16>| List::<u16, Const<4>>::try_from(values).unwrap();
+        let list = List::<List<u16, Const<4>>, Const<4>>::try_from(vec![
+            inner(vec![7]),
+            inner(vec![8, 9]),
+        ])
+        .unwrap();
+
+        // Index 2 is the data tree; its leaf 1 at depth 2 is 2 * 4 + 1 = 9.
+        let (leaf, proof) = list.prove(GeneralizedIndex::new(9)).unwrap();
+        assert_eq!(leaf, inner(vec![8, 9]).hash_tree_root());
+        assert!(proof.verify(leaf, GeneralizedIndex::new(9), list.hash_tree_root()));
+
+        // Index 9 * 2 + 1 = 19 is that element's length chunk: two values.
+        let (leaf, proof) = list.prove(GeneralizedIndex::new(19)).unwrap();
+        assert_eq!(leaf, Root::from_partial(&2_u64.to_le_bytes()));
+        assert!(proof.verify(leaf, GeneralizedIndex::new(19), list.hash_tree_root()));
+    }
+
     proptest! {
+        #[test]
+        fn every_proven_node_verifies(
+            values in proptest::collection::vec(proptest::collection::vec(any::<u16>(), 0..4), 0..4)
+        ) {
+            let inner: Vec<List<u16, Const<4>>> =
+                values.into_iter().map(|v| List::try_from(v).unwrap()).collect();
+            let list = List::<List<u16, Const<4>>, Const<4>>::try_from(inner).unwrap();
+            let root = list.hash_tree_root();
+
+            // Every index down to the inner lists' chunks: depth 1 + 2 + 1 = 4.
+            for raw in 1..32 {
+                let index = GeneralizedIndex::new(raw);
+                if let Some((leaf, proof)) = list.prove(index) {
+                    prop_assert!(proof.verify(leaf, index, root), "index {raw}");
+                }
+            }
+        }
+
         #[test]
         fn nested_list_round_trips(
             values in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..8), 0..8)

@@ -4,7 +4,8 @@
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, Operations, Rewards, SszStatic, Suite, Transition,
+    Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
+    SszStatic, Suite, Transition,
     forks::{Deneb, Electra},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -145,4 +146,58 @@ fn transition_mainnet() {
         "mainnet",
         "electra",
     );
+}
+
+#[test]
+fn networking_minimal() {
+    Suite::run(
+        &Networking::<Minimal, Electra>::default(),
+        "minimal",
+        "electra",
+    );
+}
+
+#[test]
+fn networking_mainnet() {
+    Suite::run(
+        &Networking::<Mainnet, Electra>::default(),
+        "mainnet",
+        "electra",
+    );
+}
+
+#[test]
+fn light_client_minimal() {
+    let runner = LightClient::<Minimal, Electra>::default();
+    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
+        // Cases: sync 5, update ranking 1, merkle proofs 4, data collection 1.
+        assert_eq!((report.passed, report.skipped.len()), (11, 0));
+    }
+}
+
+#[test]
+fn light_client_mainnet() {
+    let runner = LightClient::<Mainnet, Electra>::default();
+    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
+        // Cases: merkle proofs 4.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
+}
+
+#[test]
+fn merkle_proof_minimal() {
+    let runner = MerkleProofs::<Minimal, Electra>::merkle_proof();
+    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
+        // Cases: four blob commitment proofs into the block body.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
+}
+
+#[test]
+fn merkle_proof_mainnet() {
+    let runner = MerkleProofs::<Mainnet, Electra>::merkle_proof();
+    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
+        // Cases: four blob commitment proofs into the block body.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
 }

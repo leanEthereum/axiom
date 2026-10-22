@@ -23,6 +23,7 @@ pub use epoch_processing::EpochProcessing;
 pub use fork::Fork;
 pub use fork_choice::StoreReplay;
 pub use genesis::Genesis;
+pub use gossip::{GossipMessage, Verdict};
 pub use light_client::LightClient;
 pub use merkle_proof::MerkleProofs;
 pub use networking::Networking;

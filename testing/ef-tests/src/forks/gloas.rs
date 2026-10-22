@@ -1,14 +1,16 @@
 //! The vectors of Gloas, which enshrines proposer-builder separation.
 
+use axiom_gossip::GossipValidator;
+use axiom_kzg::Kzg;
 use axiom_state_transition::{
     electra::block::Exit,
     fulu::block::QueuedDeposit,
     gloas::block::{CommittedWithdrawals, IncludedAttestation, ParentPayload},
 };
-use axiom_types::{ForkName, Preset, gloas};
+use axiom_types::{ColumnIndex, ForkName, Preset, gloas};
 
-use super::{Fulu, SpecFork};
-use crate::{Applied, Case, Failure, FieldNames, OperationInput};
+use super::{Capella, Fulu, SpecFork};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Gloas fork.
 ///
@@ -71,6 +73,43 @@ impl SpecFork for Gloas {
     type State<P: Preset> = gloas::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = gloas::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = gloas::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        let now = message.now_ms();
+        Ok(match topic {
+            "data_column_sidecar" => validator.gloas_data_column_sidecar(
+                &message.decode::<gloas::DataColumnSidecar<P>>()?,
+                now,
+                message.subnet(),
+                Kzg::mainnet(),
+            ),
+            "partial_data_column_sidecar" => validator.gloas_partial_data_column_sidecar(
+                &message.decode::<gloas::PartialDataColumnSidecar<P>>()?,
+                &message.decode_field::<gloas::PartialDataColumnGroupId>("group_id")?,
+                ColumnIndex(message.number("column_index")),
+                Kzg::mainnet(),
+            ),
+            "execution_payload" => validator.execution_payload_envelope(
+                &message.decode::<gloas::SignedExecutionPayloadEnvelope<P>>()?,
+            ),
+            "payload_attestation_message" => validator.payload_attestation_message(
+                &message.decode::<gloas::PayloadAttestationMessage>()?,
+                now,
+            ),
+            "execution_payload_bid" => validator
+                .execution_payload_bid(&message.decode::<gloas::SignedExecutionPayloadBid>()?, now),
+            "proposer_preferences" => validator
+                .proposer_preferences(&message.decode::<gloas::SignedProposerPreferences>()?, now),
+            // Columns follow the bid now; the other topics are Capella's.
+            _ => return Capella::gossip(topic, message, validator),
+        })
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

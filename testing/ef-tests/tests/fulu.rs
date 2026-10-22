@@ -149,32 +149,48 @@ fn chain_replay_mainnet() {
 
 #[test]
 fn networking_minimal() {
-    Suite::run(&Networking::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&Networking::<Minimal, Fulu>::default(), "minimal", "fulu");
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(&Networking::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&Networking::<Mainnet, Fulu>::default(), "mainnet", "fulu");
 }
 
 #[test]
 fn merkle_proof_minimal() {
-    Suite::run(&MerkleProofs::<Minimal>::merkle_proof(), "minimal", "fulu");
+    let runner = MerkleProofs::<Minimal, Fulu>::merkle_proof();
+    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
+        // Cases: four blob commitment proofs into the block body.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
 }
 
 #[test]
 fn merkle_proof_mainnet() {
-    Suite::run(&MerkleProofs::<Mainnet>::merkle_proof(), "mainnet", "fulu");
+    let runner = MerkleProofs::<Mainnet, Fulu>::merkle_proof();
+    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
+        // Cases: four blob commitment proofs into the block body.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
 }
 
 #[test]
 fn light_client_minimal() {
-    Suite::run(&LightClient::<Minimal>::default(), "minimal", "fulu");
+    let runner = LightClient::<Minimal, Fulu>::default();
+    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
+        // Cases: sync 6, update ranking 1, merkle proofs 4, data collection 1.
+        assert_eq!((report.passed, report.skipped.len()), (12, 0));
+    }
 }
 
 #[test]
 fn light_client_mainnet() {
-    Suite::run(&LightClient::<Mainnet>::default(), "mainnet", "fulu");
+    let runner = LightClient::<Mainnet, Fulu>::default();
+    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
+        // Cases: merkle proofs 4.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
 }
 
 #[test]

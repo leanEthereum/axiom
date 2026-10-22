@@ -1,20 +1,21 @@
 //! The validators a state expects to sign gossip, and the checks of their signatures.
 
 use axiom_types::{
-    BlsPubkey, Preset, ValidatorIndex,
+    BlsPubkey, BlsSignature, Preset, ValidatorIndex,
     accessors::CoreState,
     combined::BeaconState,
     constants::{
         DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER, DOMAIN_CONTRIBUTION_AND_PROOF,
         DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, SYNC_COMMITTEE_SUBNET_COUNT,
     },
-    fulu::{
-        Attestation, IndexedAttestation, SignedAggregateAndProof, SignedContributionAndProof,
-        SyncAggregatorSelectionData,
-    },
+    fulu::{AttestationData, SignedContributionAndProof, SyncAggregatorSelectionData},
 };
 
-use crate::{Detail, GossipError, signing_claim::SigningClaim};
+use crate::{
+    Detail, GossipError,
+    signing_claim::SigningClaim,
+    vote::{Aggregate, IndexedVote, SignedAggregate},
+};
 
 /// A state read as the source of signers: keys, sync committees, and signing domains.
 #[derive(Clone, Copy, Debug)]
@@ -36,23 +37,23 @@ impl<'a, P: Preset> Signers<'a, P> {
     /// Rejects an unknown aggregator or an invalid signature.
     pub(crate) fn verify_aggregator(
         self,
-        signed: &SignedAggregateAndProof<P>,
+        signed: &impl SignedAggregate,
     ) -> Result<(), GossipError> {
-        let message = &signed.message;
-        let data = &message.aggregate.data;
+        let data = signed.aggregate().data();
         let state = self.state;
-        let aggregator_detail = Detail::Validator(message.aggregator_index);
+        let aggregator_index = signed.aggregator_index();
+        let aggregator_detail = Detail::Validator(aggregator_index);
         // Committee membership was checked, so the index is in range for an honest message.
         let aggregator = state
             .validators()
-            .get(message.aggregator_index.as_usize())
+            .get(aggregator_index.as_usize())
             .ok_or_else(|| {
                 GossipError::reject("aggregator is not a member of the committee")
                     .with(aggregator_detail)
             })?;
         // The selection proof signs the slot, and its hash decides who aggregates.
         let selection_domain = state.domain(DOMAIN_SELECTION_PROOF, data.target.epoch);
-        if !SigningClaim::new(&data.slot, selection_domain, &message.selection_proof)
+        if !SigningClaim::new(&data.slot, selection_domain, signed.selection_proof())
             .is_signed_by(&aggregator.pubkey)
         {
             return Err(
@@ -61,7 +62,7 @@ impl<'a, P: Preset> Signers<'a, P> {
         }
         // The outer signature binds the aggregate to the aggregator.
         let aggregate_domain = state.domain(DOMAIN_AGGREGATE_AND_PROOF, data.target.epoch);
-        if !SigningClaim::new(message, aggregate_domain, &signed.signature)
+        if !SigningClaim::new(signed.message(), aggregate_domain, signed.signature())
             .is_signed_by(&aggregator.pubkey)
         {
             return Err(GossipError::reject("invalid aggregator signature").with(aggregator_detail));
@@ -140,11 +141,12 @@ impl<'a, P: Preset> Signers<'a, P> {
             .collect()
     }
 
-    /// Whether attesters, in any order and with repeats, signed an aggregate together.
+    /// Whether attesters, in any order and with repeats, signed a vote together.
     pub(crate) fn attested(
         self,
         mut attesters: Vec<ValidatorIndex>,
-        aggregate: &Attestation<P>,
+        data: &AttestationData,
+        signature: &BlsSignature,
     ) -> bool {
         attesters.sort_unstable();
         attesters.dedup();
@@ -153,13 +155,13 @@ impl<'a, P: Preset> Signers<'a, P> {
             .iter()
             .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
-        let domain = state.domain(DOMAIN_BEACON_ATTESTER, aggregate.data.target.epoch);
-        SigningClaim::new(&aggregate.data, domain, &aggregate.signature).is_signed_by_all(&keys)
+        let domain = state.domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
+        SigningClaim::new(data, domain, signature).is_signed_by_all(&keys)
     }
 
     /// Whether an indexed attestation has sorted unique indices and a valid signature.
-    pub(crate) fn is_valid_indexed_attestation(self, attestation: &IndexedAttestation<P>) -> bool {
-        let indices = &attestation.attesting_indices;
+    pub(crate) fn is_valid_indexed_attestation(self, vote: IndexedVote<'_>) -> bool {
+        let indices = vote.indices;
         if indices.is_empty() || !indices.windows(2).all(|pair| pair[0] < pair[1]) {
             return false;
         }
@@ -168,7 +170,7 @@ impl<'a, P: Preset> Signers<'a, P> {
             .iter()
             .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
-        let domain = state.domain(DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch);
-        SigningClaim::new(&attestation.data, domain, &attestation.signature).is_signed_by_all(&keys)
+        let domain = state.domain(DOMAIN_BEACON_ATTESTER, vote.data.target.epoch);
+        SigningClaim::new(vote.data, domain, vote.signature).is_signed_by_all(&keys)
     }
 }

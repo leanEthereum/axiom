@@ -1,9 +1,10 @@
 //! The vectors of Capella, which adds withdrawals.
 
+use axiom_gossip::GossipValidator;
 use axiom_types::{ForkName, Preset, capella};
 
 use super::{Bellatrix, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Case, Failure, FieldNames, GossipMessage, Verdict};
 
 /// The Capella fork.
 ///
@@ -48,6 +49,22 @@ impl SpecFork for Capella {
     type State<P: Preset> = capella::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = capella::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = capella::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        match topic {
+            "bls_to_execution_change" => Ok(validator.bls_to_execution_change(
+                &message.decode::<capella::SignedBlsToExecutionChange>()?,
+                message.now_ms(),
+            )),
+            _ => Bellatrix::gossip(topic, message, validator),
+        }
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

@@ -61,6 +61,7 @@ impl SpecFork for Phase0 {
             other => Err(Failure(format!("unsupported operation {other} in phase0"))),
         }
     }
+    type BeaconBlockBody<P: Preset> = phase0::BeaconBlockBody<P>;
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

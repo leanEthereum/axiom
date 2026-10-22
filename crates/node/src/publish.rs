@@ -12,7 +12,7 @@ use axiom_p2p::{
 use axiom_ssz::Ssz;
 use axiom_types::{
     Preset, Root,
-    fulu::{DataColumnSidecar, SignedBeaconBlock, SignedBlockContents},
+    fulu::{BeaconState, DataColumnSidecar, SignedBeaconBlock, SignedBlockContents},
 };
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -113,7 +113,9 @@ impl<P: Preset> Publisher<P> {
         let verdict = self
             .chain
             .run(move |chain| {
-                chain.validate_gossip(|validator| validator.beacon_block(&checked, now))
+                chain.validate_gossip(|validator| {
+                    validator.beacon_block::<BeaconState<P>>(&checked, now)
+                })
             })
             .await
             .map_err(|_| PublishError::ChainStopped)?;

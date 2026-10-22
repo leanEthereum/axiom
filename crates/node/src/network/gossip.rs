@@ -14,9 +14,9 @@ use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     Preset, SubnetId,
     fulu::{
-        AttesterSlashing, DataColumnSidecar, ProposerSlashing, SignedAggregateAndProof,
-        SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof,
-        SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
+        AttesterSlashing, BeaconState, DataColumnSidecar, ProposerSlashing,
+        SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
+        SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
     },
 };
 use tokio::time;
@@ -137,7 +137,7 @@ impl<P: Preset> GossipHandler<P> {
                 self.check(
                     data,
                     move |validator, block: &SignedBeaconBlock<P>| {
-                        validator.beacon_block(block, now)
+                        validator.beacon_block::<BeaconState<P>>(block, now)
                     },
                     |block| Some(Accepted::Block(Arc::new(block))),
                 )
@@ -147,7 +147,7 @@ impl<P: Preset> GossipHandler<P> {
                 self.check(
                     data,
                     move |validator, aggregate: &SignedAggregateAndProof<P>| {
-                        validator.aggregate_and_proof(aggregate, now)
+                        validator.aggregate_and_proof::<BeaconState<P>>(aggregate, now)
                     },
                     |aggregate| Some(Accepted::Aggregate(Box::new(aggregate))),
                 )
@@ -157,7 +157,11 @@ impl<P: Preset> GossipHandler<P> {
                 self.check(
                     data,
                     move |validator, attestation: &SingleAttestation| {
-                        validator.beacon_attestation(attestation, now, SubnetId(subnet))
+                        validator.beacon_attestation::<BeaconState<P>>(
+                            attestation,
+                            now,
+                            SubnetId(subnet),
+                        )
                     },
                     |attestation| Some(Accepted::Single(Box::new(attestation))),
                 )
@@ -206,7 +210,7 @@ impl<P: Preset> GossipHandler<P> {
                 self.check(
                     data,
                     move |validator, exit: &SignedVoluntaryExit| {
-                        validator.voluntary_exit(exit, now)
+                        validator.voluntary_exit::<BeaconState<P>>(exit, now)
                     },
                     |_| None,
                 )

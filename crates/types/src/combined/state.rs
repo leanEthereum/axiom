@@ -1,6 +1,6 @@
 //! A beacon state of any fork.
 
-use axiom_ssz::{CapacityError, DecodeError, Root, Ssz};
+use axiom_ssz::{CapacityError, DecodeError, GeneralizedIndex, MerkleProof, Root, Ssz};
 
 use crate::{
     ChainConfig, ForkName, Gwei, Hash32, Preset, Slot,
@@ -52,6 +52,24 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state.hash_tree_root(),
             Self::Fulu(state) => state.hash_tree_root(),
             Self::Gloas(state) => state.hash_tree_root(),
+        }
+    }
+
+    /// The node at a generalized index and its proof up to the state root.
+    ///
+    /// Light client data proves sync committees and the finalized root this way.
+    /// Returns nothing when the index is outside the state's tree.
+    #[must_use]
+    pub fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
+        match self {
+            Self::Phase0(state) => state.prove(index),
+            Self::Altair(state) => state.prove(index),
+            Self::Bellatrix(state) => state.prove(index),
+            Self::Capella(state) => state.prove(index),
+            Self::Deneb(state) => state.prove(index),
+            Self::Electra(state) => state.prove(index),
+            Self::Fulu(state) => state.prove(index),
+            Self::Gloas(state) => state.prove(index),
         }
     }
 

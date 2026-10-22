@@ -3,10 +3,11 @@
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 //!
-//! The fork choice, light client, networking, and sync runners belong to other suites.
+//! The fork choice and sync runners belong to other suites.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, Operations, Rewards, SszStatic, Suite, Transition,
+    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic, Suite,
+    Transition,
     forks::{Altair, Bellatrix},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -171,4 +172,40 @@ fn transition_mainnet() {
         "mainnet",
         "bellatrix",
     );
+}
+
+#[test]
+fn networking_minimal() {
+    Suite::run(
+        &Networking::<Minimal, Bellatrix>::default(),
+        "minimal",
+        "bellatrix",
+    );
+}
+
+#[test]
+fn networking_mainnet() {
+    Suite::run(
+        &Networking::<Mainnet, Bellatrix>::default(),
+        "mainnet",
+        "bellatrix",
+    );
+}
+
+#[test]
+fn light_client_minimal() {
+    let runner = LightClient::<Minimal, Bellatrix>::default();
+    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
+        // Cases: sync 11, update ranking 1, merkle proofs 3, data collection 3.
+        assert_eq!((report.passed, report.skipped.len()), (18, 0));
+    }
+}
+
+#[test]
+fn light_client_mainnet() {
+    let runner = LightClient::<Mainnet, Bellatrix>::default();
+    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
+        // Cases: merkle proofs 3.
+        assert_eq!((report.passed, report.skipped.len()), (3, 0));
+    }
 }

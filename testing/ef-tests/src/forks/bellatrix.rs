@@ -1,5 +1,6 @@
 //! The vectors of Bellatrix, the merge with the execution layer.
 
+use axiom_gossip::GossipValidator;
 use axiom_state_transition::{
     KnownVerdict,
     altair::block::{FlaggedAttestation, ParticipantDeposit},
@@ -8,7 +9,7 @@ use axiom_state_transition::{
 use axiom_types::{ForkName, Preset, bellatrix};
 
 use super::{Altair, SpecFork};
-use crate::{Applied, Case, Failure, FieldNames, OperationInput};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Bellatrix fork.
 ///
@@ -50,6 +51,16 @@ impl SpecFork for Bellatrix {
     type State<P: Preset> = bellatrix::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = bellatrix::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = bellatrix::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        Altair::gossip(topic, message, validator)
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

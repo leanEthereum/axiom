@@ -3,7 +3,7 @@
 use std::fmt;
 
 use axiom_das::ColumnError;
-use axiom_types::{Epoch, Root, Slot, ValidatorIndex};
+use axiom_types::{BuilderIndex, Epoch, Root, Slot, ValidatorIndex};
 
 /// What a failed rule looked at, so a log line shows why the rule failed.
 ///
@@ -43,6 +43,8 @@ pub enum Detail {
     },
     /// The validator the rule concerns.
     Validator(ValidatorIndex),
+    /// The builder the rule concerns.
+    Builder(BuilderIndex),
     /// The block the rule concerns.
     Block(Root),
     /// A data column sidecar check, with the values it compared.
@@ -62,6 +64,7 @@ impl fmt::Display for Detail {
             Self::Bound { value, bound } => write!(f, ": {value} against the bound {bound}"),
             Self::Mismatch { actual, expected } => write!(f, ": {actual}, expected {expected}"),
             Self::Validator(index) => write!(f, ": validator {index}"),
+            Self::Builder(index) => write!(f, ": builder {index}"),
             Self::Block(root) => write!(f, ": block {root}"),
             Self::Column(error) => write!(f, ": {error}"),
         }

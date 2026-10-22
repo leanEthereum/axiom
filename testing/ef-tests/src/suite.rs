@@ -180,20 +180,23 @@ impl Suite {
 
     /// Runs every case, panicking with a report when any fails.
     ///
+    /// Returns the tally, so a test can pin the number of cases, or nothing when the vectors are absent.
+    ///
     /// # Panics
     ///
     /// Panics when a case fails, listing every failure.
     #[expect(clippy::print_stderr, reason = "the report is the test's output")]
-    pub fn run(runner: &impl Runner, preset: &str, fork: &str) {
+    pub fn run(runner: &impl Runner, preset: &str, fork: &str) -> Option<Report> {
         let Some(suite) = Self::new(preset, fork, runner.name()) else {
             eprintln!(
                 "skipping {preset}/{fork}/{}: vectors not found, run `make -C testing/ef-tests`",
                 runner.name()
             );
-            return;
+            return None;
         };
         let report = suite.execute(runner);
         Self::conclude(&format!("{preset}/{fork}/{}", runner.name()), &report);
+        Some(report)
     }
 
     /// Prints the tally, then panics when any case failed.

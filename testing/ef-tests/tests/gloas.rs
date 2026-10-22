@@ -6,8 +6,8 @@
 use std::{collections::HashMap, fs};
 
 use axiom_ef_tests::{
-    Blocks, Case, EpochProcessing, Fork, Operations, Rewards, SszStatic, Suite, Transition,
-    Vectors,
+    Blocks, Case, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
+    Suite, Transition, Vectors,
     forks::{Fulu, Gloas},
 };
 use axiom_ssz::Ssz;
@@ -264,4 +264,32 @@ fn envelopes_verify_against_their_block_state() {
     // 15 cases per preset, one of which sends an envelope for a block the store never saw.
     assert_eq!(check_envelopes::<Minimal>(&vectors, "minimal"), 14);
     assert_eq!(check_envelopes::<Mainnet>(&vectors, "mainnet"), 14);
+}
+
+#[test]
+fn networking_minimal() {
+    Suite::run(&Networking::<Minimal, Gloas>::default(), "minimal", "gloas");
+}
+
+#[test]
+fn networking_mainnet() {
+    Suite::run(&Networking::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+}
+
+#[test]
+fn light_client_minimal() {
+    let runner = LightClient::<Minimal, Gloas>::default();
+    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
+        // Cases: sync 4, update ranking 1, merkle proofs 4, data collection 1.
+        assert_eq!((report.passed, report.skipped.len()), (10, 0));
+    }
+}
+
+#[test]
+fn light_client_mainnet() {
+    let runner = LightClient::<Mainnet, Gloas>::default();
+    if let Some(report) = Suite::run(&runner, "mainnet", "gloas") {
+        // Cases: merkle proofs 4.
+        assert_eq!((report.passed, report.skipped.len()), (4, 0));
+    }
 }

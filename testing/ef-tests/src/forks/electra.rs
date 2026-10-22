@@ -1,13 +1,15 @@
 //! The vectors of Electra, which adds larger validators and execution requests.
 
+use axiom_gossip::{BlobSubnets, GossipValidator};
+use axiom_kzg::Kzg;
 use axiom_state_transition::{
     KnownVerdict,
     electra::block::{BridgeDeposit, Exit, PayloadExecution, PayloadWithdrawals, RequestedDeposit},
 };
 use axiom_types::{ForkName, Preset, electra};
 
-use super::{Deneb, SpecFork};
-use crate::{Applied, Case, Failure, FieldNames, OperationInput};
+use super::{Capella, Deneb, SpecFork};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Electra fork.
 ///
@@ -61,6 +63,29 @@ impl SpecFork for Electra {
     type State<P: Preset> = electra::BeaconState<P>;
 
     type SignedBeaconBlock<P: Preset> = electra::SignedBeaconBlock<P>;
+
+    type BeaconBlockBody<P: Preset> = electra::BeaconBlockBody<P>;
+
+    fn gossip<P: Preset>(
+        topic: &str,
+        message: &GossipMessage<'_>,
+        validator: &mut GossipValidator<'_, '_, P>,
+    ) -> Result<Verdict, Failure> {
+        match topic {
+            "blob_sidecar" => {
+                let limits = BlobSubnets::electra(validator.config());
+                Ok(validator.blob_sidecar(
+                    &message.decode::<electra::BlobSidecar<P>>()?,
+                    message.now_ms(),
+                    message.subnet(),
+                    limits,
+                    Kzg::mainnet(),
+                ))
+            }
+            // Electra kept the remaining topics of Capella.
+            _ => Capella::gossip(topic, message, validator),
+        }
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

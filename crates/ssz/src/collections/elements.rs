@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use crate::{
-    BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, DecodeError, Merkleizer, ProgressiveMerkleizer, Root,
-    Ssz, offset::Offset,
+    BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, DecodeError, GeneralizedIndex, MerkleProof,
+    Merkleizer, ProgressiveMerkleizer, Root, Ssz, ZeroHashes, offset::Offset,
 };
 
 /// The rules for a run of same-typed elements, which vectors and lists share.
@@ -89,6 +89,71 @@ impl<T: Ssz> Elements<T> {
                 merkleizer.finish()
             }
         }
+    }
+
+    /// Proves a node of the tree of a run of elements, sized for the limit.
+    ///
+    /// The tree's leaves are chunks of packed basic elements, or one root per composite element.
+    /// A node below a composite element's leaf is proven inside the element first.
+    /// Returns nothing for a node in the zero padding past the last element.
+    pub(crate) fn prove(
+        items: &[T],
+        limit: usize,
+        index: GeneralizedIndex,
+    ) -> Option<(Root, MerkleProof)> {
+        let (leaves, depth) = match T::PACKED_SIZE {
+            Some(size) => {
+                let mut packed = Vec::with_capacity(size * items.len());
+                for item in items {
+                    item.encode_to(&mut packed);
+                }
+                let chunks = packed
+                    .chunks(BYTES_PER_CHUNK)
+                    .map(Root::from_partial)
+                    .collect::<Vec<_>>();
+                let depth = Merkleizer::depth_for((limit * size).div_ceil(BYTES_PER_CHUNK));
+                (chunks, depth)
+            }
+            None => (
+                items.iter().map(Ssz::hash_tree_root).collect(),
+                Merkleizer::depth_for(limit),
+            ),
+        };
+        if index.depth() as usize <= depth {
+            // A node of the tree itself: the root of the leaves below it.
+            let height = depth - index.depth() as usize;
+            let first = (index.position() as usize) << height;
+            let node = match leaves.get(first..) {
+                Some(below) if !below.is_empty() => {
+                    let mut merkleizer = Merkleizer::with_depth(height);
+                    for leaf in below.iter().take(1 << height) {
+                        merkleizer.push(*leaf);
+                    }
+                    merkleizer.finish()
+                }
+                // Past the last element the tree holds zero subtrees.
+                _ => ZeroHashes::at(height),
+            };
+            // Its proof is the upper part of the proof of the first leaf below it.
+            let mut proof = MerkleProof::generate(&leaves, depth, first);
+            proof.branch.drain(..height);
+            return Some((node, proof));
+        }
+
+        // A node inside one element's own tree.
+        let (position, inner) = (0..leaves.len()).find_map(|position| {
+            index
+                .relative_to(GeneralizedIndex::at(depth, position as u64))
+                .map(|inner| (position, inner))
+        })?;
+        if T::PACKED_SIZE.is_some() {
+            return None;
+        }
+        let (leaf, mut proof) = items.get(position)?.prove(inner)?;
+        proof
+            .branch
+            .extend(MerkleProof::generate(&leaves, depth, position).branch);
+        Some((leaf, proof))
     }
 
     /// Root of a run of elements, in a progressive tree that grows with the length.

@@ -5,8 +5,8 @@
 //! The fork choice and networking vectors run in their own suites.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Genesis, Operations, PendingAttestationRewards, Shuffling, SszStatic,
-    Suite, forks::Phase0,
+    Blocks, EpochProcessing, Genesis, Networking, Operations, PendingAttestationRewards, Shuffling,
+    SszStatic, Suite, forks::Phase0,
 };
 use axiom_types::{Mainnet, Minimal};
 
@@ -126,4 +126,22 @@ fn shuffling_mainnet() {
 fn genesis_minimal() {
     // Only the minimal preset ships genesis vectors.
     Suite::run(&Genesis::<Minimal>::default(), "minimal", "phase0");
+}
+
+#[test]
+fn networking_minimal() {
+    Suite::run(
+        &Networking::<Minimal, Phase0>::default(),
+        "minimal",
+        "phase0",
+    );
+}
+
+#[test]
+fn networking_mainnet() {
+    Suite::run(
+        &Networking::<Mainnet, Phase0>::default(),
+        "mainnet",
+        "phase0",
+    );
 }

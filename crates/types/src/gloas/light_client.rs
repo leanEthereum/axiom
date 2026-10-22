@@ -153,22 +153,6 @@ impl<P: Preset> Container for LightClientUpdate<P> {
     }
 }
 
-impl<P: Preset> LightClientUpdate<P> {
-    /// Whether the update carries a next sync committee.
-    #[must_use]
-    pub fn is_sync_committee_update(&self) -> bool {
-        self.next_sync_committee_branch
-            .iter()
-            .any(|node| node.0 != [0; 32])
-    }
-
-    /// Whether the update proves a finalized header.
-    #[must_use]
-    pub fn is_finality_update(&self) -> bool {
-        self.finality_branch.iter().any(|node| node.0 != [0; 32])
-    }
-}
-
 /// A signed head with a finality proof.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LightClientFinalityUpdate<P: Preset> {
