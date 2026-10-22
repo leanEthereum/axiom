@@ -1,5 +1,6 @@
 //! The visitors that turn a field walk into each SSZ operation.
 
+use super::Layout;
 use crate::{
     BYTES_PER_LENGTH_OFFSET, FieldVisitor, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz,
     offset::Offset,
@@ -8,23 +9,10 @@ use crate::{
 /// Keeps the visitor trait closed to this crate.
 pub trait Sealed {}
 
-/// Checks a visited field against the declared sizes, in debug builds.
-fn check_declared<T: Ssz>(fields: &[Option<usize>], index: usize) {
-    debug_assert!(
-        index < fields.len(),
-        "container visits more fields than it declares"
-    );
-    debug_assert_eq!(
-        fields[index],
-        T::FIXED_SIZE,
-        "field {index} does not match its declared size"
-    );
-}
-
 /// Sums the encoded length of every field.
 pub(super) struct LengthCounter {
     /// Fixed sizes as declared.
-    fields: &'static [Option<usize>],
+    layout: Layout,
     /// Fields seen so far.
     index: usize,
     /// Bytes counted so far.
@@ -33,9 +21,9 @@ pub(super) struct LengthCounter {
 
 impl LengthCounter {
     /// Counter at the first field.
-    pub(super) const fn new(fields: &'static [Option<usize>]) -> Self {
+    pub(super) const fn new(layout: Layout) -> Self {
         Self {
-            fields,
+            layout,
             index: 0,
             total: 0,
         }
@@ -51,7 +39,7 @@ impl Sealed for LengthCounter {}
 
 impl FieldVisitor for LengthCounter {
     fn field<T: Ssz>(&mut self, value: &T) {
-        check_declared::<T>(self.fields, self.index);
+        self.layout.check::<T>(self.index);
         // A variable field costs its offset plus its body.
         self.total += match T::FIXED_SIZE {
             Some(size) => size,
@@ -66,7 +54,7 @@ pub(super) struct FixedPartWriter<'a> {
     /// The output buffer.
     out: &'a mut Vec<u8>,
     /// Fixed sizes as declared.
-    fields: &'static [Option<usize>],
+    layout: Layout,
     /// Fields seen so far.
     index: usize,
     /// Offset the next variable field's body will start at.
@@ -75,16 +63,12 @@ pub(super) struct FixedPartWriter<'a> {
 
 impl<'a> FixedPartWriter<'a> {
     /// Writer whose first variable body starts right after the fixed part.
-    pub(super) const fn new(
-        out: &'a mut Vec<u8>,
-        fields: &'static [Option<usize>],
-        fixed_part_len: usize,
-    ) -> Self {
+    pub(super) const fn new(out: &'a mut Vec<u8>, layout: Layout) -> Self {
         Self {
             out,
-            fields,
+            layout,
             index: 0,
-            next_offset: fixed_part_len,
+            next_offset: layout.fixed_part_len(),
         }
     }
 }
@@ -93,7 +77,7 @@ impl Sealed for FixedPartWriter<'_> {}
 
 impl FieldVisitor for FixedPartWriter<'_> {
     fn field<T: Ssz>(&mut self, value: &T) {
-        check_declared::<T>(self.fields, self.index);
+        self.layout.check::<T>(self.index);
         if T::FIXED_SIZE.is_some() {
             value.encode_to(self.out);
         } else {
@@ -132,7 +116,7 @@ impl FieldVisitor for VariablePartWriter<'_> {
 /// Merkleizes field roots as they are visited.
 pub(super) struct RootMerkleizer {
     /// Fixed sizes as declared.
-    fields: &'static [Option<usize>],
+    layout: Layout,
     /// Fields seen so far.
     index: usize,
     /// The tree over the field roots.
@@ -141,17 +125,17 @@ pub(super) struct RootMerkleizer {
 
 impl RootMerkleizer {
     /// Merkleizer with one leaf slot per declared field.
-    pub(super) fn new(fields: &'static [Option<usize>]) -> Self {
+    pub(super) fn new(layout: Layout) -> Self {
         Self {
-            fields,
+            layout,
             index: 0,
-            merkleizer: Merkleizer::with_limit(fields.len()),
+            merkleizer: Merkleizer::with_limit(layout.len()),
         }
     }
 
     /// The container's root.
     pub(super) fn finish(self) -> Root {
-        debug_assert_eq!(self.index, self.fields.len(), "container skipped a field");
+        debug_assert_eq!(self.index, self.layout.len(), "container skipped a field");
         self.merkleizer.finish()
     }
 }
@@ -160,7 +144,7 @@ impl Sealed for RootMerkleizer {}
 
 impl FieldVisitor for RootMerkleizer {
     fn field<T: Ssz>(&mut self, value: &T) {
-        check_declared::<T>(self.fields, self.index);
+        self.layout.check::<T>(self.index);
         self.merkleizer.push(value.hash_tree_root());
         self.index += 1;
     }

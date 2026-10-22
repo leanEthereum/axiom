@@ -1,5 +1,6 @@
 //! Decoding a container one field at a time.
 
+use super::Layout;
 use crate::{BYTES_PER_LENGTH_OFFSET, DecodeError, Ssz, offset::Offset};
 
 /// Hands out a container's fields in declaration order.
@@ -25,32 +26,26 @@ pub struct FieldDecoder<'a> {
     /// The whole container encoding.
     bytes: &'a [u8],
     /// Fixed sizes as declared.
-    fields: &'static [Option<usize>],
+    layout: Layout,
     /// Index of the next field to decode.
     index: usize,
     /// Position of the next field in the fixed part.
     cursor: usize,
-    /// Length of the fixed part.
-    fixed_part_len: usize,
 }
 
 impl<'a> FieldDecoder<'a> {
     /// Decoder over a container encoding, after checking its overall shape.
-    pub(crate) fn new(
-        bytes: &'a [u8],
-        fields: &'static [Option<usize>],
-        fixed_part_len: usize,
-    ) -> Result<Self, DecodeError> {
+    pub(super) fn new(bytes: &'a [u8], layout: Layout) -> Result<Self, DecodeError> {
+        let fixed_part_len = layout.fixed_part_len();
         let decoder = Self {
             bytes,
-            fields,
+            layout,
             index: 0,
             cursor: 0,
-            fixed_part_len,
         };
 
         // A container without variable fields is exactly its fixed part.
-        let Some(first_variable) = fields.iter().position(Option::is_none) else {
+        let Some(first_variable) = layout.next_variable(0) else {
             if bytes.len() != fixed_part_len {
                 return Err(DecodeError::InvalidLength {
                     expected: fixed_part_len,
@@ -68,7 +63,7 @@ impl<'a> FieldDecoder<'a> {
         }
 
         // Invariant: the first offset points right past the fixed part, leaving no gap.
-        let first_offset = Offset::read(bytes, decoder.position_of(first_variable))?;
+        let first_offset = Offset::read(bytes, layout.position_of(first_variable))?;
         if first_offset != fixed_part_len {
             return Err(DecodeError::FirstOffsetMismatch {
                 expected: fixed_part_len,
@@ -85,12 +80,7 @@ impl<'a> FieldDecoder<'a> {
     ///
     /// Fails when the field's bytes do not decode, or its offsets are malformed.
     pub fn field<T: Ssz>(&mut self) -> Result<T, DecodeError> {
-        debug_assert_eq!(
-            self.fields.get(self.index).copied().flatten(),
-            T::FIXED_SIZE,
-            "field {} does not match its declared size",
-            self.index
-        );
+        self.layout.check::<T>(self.index);
 
         let value = match T::FIXED_SIZE {
             Some(size) => T::decode(&self.bytes[self.cursor..self.cursor + size])?,
@@ -113,22 +103,17 @@ impl<'a> FieldDecoder<'a> {
     }
 
     /// Confirms every declared field was decoded, in debug builds.
-    pub(crate) fn finish(self) {
-        debug_assert_eq!(self.index, self.fields.len(), "container skipped a field");
-        debug_assert_eq!(self.cursor, self.fixed_part_len);
+    pub(super) fn finish(self) {
+        debug_assert_eq!(self.index, self.layout.len(), "container skipped a field");
+        debug_assert_eq!(self.cursor, self.layout.fixed_part_len());
     }
 
     /// End of the current variable field's body.
     ///
     /// It is the next variable field's offset, or the end of the input when none follows.
     fn end_of_variable_field(&self) -> Result<usize, DecodeError> {
-        let next_variable = self.fields[self.index + 1..]
-            .iter()
-            .position(Option::is_none)
-            .map(|step| self.index + 1 + step);
-
-        let end = match next_variable {
-            Some(field) => Offset::read(self.bytes, self.position_of(field))?,
+        let end = match self.layout.next_variable(self.index + 1) {
+            Some(field) => Offset::read(self.bytes, self.layout.position_of(field))?,
             None => self.bytes.len(),
         };
 
@@ -139,13 +124,5 @@ impl<'a> FieldDecoder<'a> {
             });
         }
         Ok(end)
-    }
-
-    /// Position of a field within the fixed part.
-    fn position_of(&self, field: usize) -> usize {
-        self.fields[..field]
-            .iter()
-            .map(|size| size.unwrap_or(BYTES_PER_LENGTH_OFFSET))
-            .sum()
     }
 }
