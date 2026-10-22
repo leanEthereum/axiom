@@ -55,6 +55,9 @@ pub(crate) mod goodbye {
 /// Threshold: beyond this, the scores closest to forgiven are forgotten first.
 const REMEMBERED_SCORES: usize = 4096;
 
+/// How long a peer's metadata is trusted before it is asked for again.
+const METADATA_REFRESH: Duration = Duration::from_mins(10);
+
 /// The node's targets for its peer set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PeerLimits {
@@ -113,6 +116,8 @@ struct Peer {
     score: PeerScore,
     /// The subnets the peer serves, once its metadata arrived.
     subnets: Option<PeerSubnets>,
+    /// When the metadata was last asked for.
+    metadata_asked: Option<Duration>,
     /// Whether a goodbye is on its way, so the peer is no longer counted on.
     leaving: bool,
 }
@@ -238,6 +243,8 @@ impl PeerManager {
                 quic,
                 score,
                 subnets: None,
+                // The node asks for metadata on connection.
+                metadata_asked: Some(now),
                 leaving: false,
             },
         );
@@ -330,12 +337,17 @@ impl PeerManager {
         let below_target = self.limits.target.saturating_sub(counted.len());
         let outbound_deficit = self.limits.min_outbound().saturating_sub(outbound);
         upkeep.dials = below_target.max(outbound_deficit);
-        upkeep.metadata_due = self
-            .peers
-            .iter()
-            .filter(|(_, peer)| !peer.leaving && peer.subnets.is_none())
-            .map(|(id, _)| id.clone())
-            .collect();
+        // Metadata is asked for on connection, then again whenever it grows stale.
+        // Long-lived attestation subnets rotate every 256 epochs, so a refresh every 10 minutes keeps up.
+        for (id, peer) in &mut self.peers {
+            let due = peer
+                .metadata_asked
+                .is_none_or(|asked| now.saturating_sub(asked) >= METADATA_REFRESH);
+            if !peer.leaving && due {
+                peer.metadata_asked = Some(now);
+                upkeep.metadata_due.push(id.clone());
+            }
+        }
         upkeep
     }
 
@@ -608,8 +620,20 @@ mod tests {
                 dials: 2,
                 // Subnet 0 has no peer, subnet 1 one: the emptiest first.
                 starved: vec![Subnet::Attestation(0), Subnet::Attestation(1)],
-                metadata_due: vec![peer(2)],
+                // Both were asked for metadata on connection.
+                metadata_due: Vec::new(),
             }
+        );
+
+        // Ten minutes on, the metadata is stale and asked for again, once.
+        let mut due = peers.upkeep(&needed, 10 * MINUTE).metadata_due;
+        due.sort();
+        let mut expected = vec![peer(1), peer(2)];
+        expected.sort();
+        assert_eq!(due, expected);
+        assert_eq!(
+            peers.upkeep(&needed, 10 * MINUTE).metadata_due,
+            Vec::<PeerId>::new()
         );
     }
 
