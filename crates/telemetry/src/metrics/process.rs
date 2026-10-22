@@ -106,7 +106,10 @@ impl ProcessStat {
 /// Only Linux samples process values, so other platforms never build one.
 #[cfg_attr(
     not(target_os = "linux"),
-    expect(dead_code, reason = "only Linux samples process values")
+    allow(
+        dead_code,
+        reason = "only Linux samples process values, and tests build both variants"
+    )
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProcessValue {
