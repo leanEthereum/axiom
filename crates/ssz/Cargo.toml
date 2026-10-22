@@ -1,0 +1,20 @@
+[package]
+name = "axiom-ssz"
+description = "Simple Serialize: encoding, decoding, and merkleization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

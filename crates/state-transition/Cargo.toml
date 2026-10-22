@@ -1,0 +1,22 @@
+[package]
+name = "axiom-state-transition"
+description = "The beacon chain state transition function, as a pure library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls.workspace = true
+axiom-ssz.workspace = true
+axiom-types.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

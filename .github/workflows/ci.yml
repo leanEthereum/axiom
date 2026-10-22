@@ -19,18 +19,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # Import grouping and granularity are nightly-only rustfmt options.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: cargo +nightly fmt --all --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features --locked
@@ -40,9 +42,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features --locked
+      # The consensus spec, BLS, and KZG vectors are large and versioned, so they are cached.
+      - uses: actions/cache@v4
+        with:
+          path: testing/vectors
+          key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
+      - run: make -C testing/ef-tests
+      # Release mode: the spec suite runs real BLS and KZG over thousands of cases.
+      # Missing vectors fail the run instead of skipping it.
+      - run: cargo test --workspace --all-features --locked --release
+        env:
+          AXIOM_REQUIRE_VECTORS: "1"
 
   docs:
     name: Docs
@@ -51,20 +65,11 @@ jobs:
       RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --all-features --no-deps --locked
-
-  msrv:
-    name: MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88"
+          toolchain: "1.98"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +1.88 check --workspace --all-features --locked
+      - run: cargo doc --workspace --all-features --no-deps --locked
 
   deny:
     name: Cargo deny

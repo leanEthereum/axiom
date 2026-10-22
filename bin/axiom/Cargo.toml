@@ -1,6 +1,6 @@
 [package]
 name = "axiom"
-description = "A Rust consensus client for Lean Ethereum research"
+description = "An Ethereum consensus client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,3 +14,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-discv5.workspace = true
+axiom-node.workspace = true
+axiom-p2p.workspace = true
+axiom-telemetry.workspace = true
+axiom-types.workspace = true
+axiom-yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
