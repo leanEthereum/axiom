@@ -13,7 +13,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
-use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, Slot};
+use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -79,8 +79,6 @@ struct StartedChain<'a, P: Preset> {
     handle: &'a ChainHandle<P>,
     /// Genesis, in milliseconds since the Unix epoch.
     genesis_time_ms: u64,
-    /// Slot length in milliseconds.
-    slot_ms: u64,
 }
 
 /// A beacon node for one preset.
@@ -155,7 +153,6 @@ impl<P: Preset> Node<P> {
                 let started = StartedChain {
                     handle: &handle,
                     genesis_time_ms,
-                    slot_ms,
                 };
                 let services = (Arc::clone(&execution), Arc::clone(&clock), metrics);
                 Some(Self::start_network(identity, settings, started, services).await?)
@@ -240,18 +237,9 @@ impl<P: Preset> Node<P> {
         chain: StartedChain<'_, P>,
         (execution, clock, metrics): (Arc<ExecutionLayer>, Arc<dyn Clock>, NodeMetrics),
     ) -> Result<(NetworkHandle, JoinHandle<()>), NodeError> {
-        // Topics are named by the fork of the wall clock's epoch, not the anchor's.
-        let elapsed = clock.now_ms().saturating_sub(chain.genesis_time_ms);
-        let epoch = Slot(elapsed / chain.slot_ms).epoch::<P>();
-        let (config, custody, fork_digest) = chain
+        let (config, custody) = chain
             .handle
-            .run(move |chain| {
-                (
-                    chain.config().clone(),
-                    chain.custody().clone(),
-                    chain.fork_digest(epoch),
-                )
-            })
+            .run(|chain| (chain.config().clone(), chain.custody().clone()))
             .await
             .map_err(|_| NodeError::ChainStopped)?;
 
@@ -262,9 +250,8 @@ impl<P: Preset> Node<P> {
             chain.handle.clone(),
             NetworkSetup {
                 config,
-                fork_digest,
-                epoch,
                 custody,
+                genesis_time_ms: chain.genesis_time_ms,
                 execution,
                 clock,
                 metrics,

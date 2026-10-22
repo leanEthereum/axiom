@@ -18,6 +18,7 @@ mod clock;
 mod engine;
 mod error;
 mod network;
+mod race;
 mod service;
 
 pub use api::BeaconApi;

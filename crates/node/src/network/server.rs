@@ -1,6 +1,9 @@
 //! Answers to peers' requests: status, metadata, blocks, and columns.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use axiom_p2p::{
     PeerId,
@@ -25,8 +28,8 @@ const MAX_BLOCKS: u64 = 128;
 pub(crate) struct LocalMetadata {
     /// Bumped whenever the metadata changes, so peers know to fetch it again.
     pub(crate) seq_number: AtomicU64,
-    /// Long-lived attestation subnets, as a bitfield of 64.
-    pub(crate) attnets: [bool; 64],
+    /// Long-lived attestation subnets, one bit per subnet.
+    pub(crate) attnets: AtomicU64,
     /// Custody group count advertised to peers.
     pub(crate) custody_group_count: u64,
 }
@@ -41,7 +44,7 @@ pub(crate) struct RequestServer<P: Preset> {
     /// The network, for responding.
     network: NetworkHandle,
     /// The node's metadata.
-    metadata: LocalMetadata,
+    metadata: Arc<LocalMetadata>,
 }
 
 impl<P: Preset> RequestServer<P> {
@@ -49,7 +52,7 @@ impl<P: Preset> RequestServer<P> {
     pub(crate) const fn new(
         chain: ChainHandle<P>,
         network: NetworkHandle,
-        metadata: LocalMetadata,
+        metadata: Arc<LocalMetadata>,
     ) -> Self {
         Self {
             chain,
@@ -179,9 +182,10 @@ impl<P: Preset> RequestServer<P> {
 
     /// The metadata, as of now.
     fn metadata(&self) -> MetaData {
+        let bits = self.metadata.attnets.load(Ordering::Relaxed);
         let mut attnets = BitVector::default();
-        for (index, subscribed) in self.metadata.attnets.iter().enumerate() {
-            attnets.set(index, *subscribed);
+        for index in 0..64 {
+            attnets.set(index, bits >> index & 1 == 1);
         }
         MetaData {
             seq_number: self.metadata.seq_number.load(Ordering::Relaxed),

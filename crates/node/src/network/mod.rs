@@ -6,35 +6,37 @@ mod requests;
 mod server;
 mod subnets;
 mod sync;
+mod topics;
 
 use std::{
     collections::BTreeSet,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 use axiom_das::NodeId;
 use axiom_p2p::{
     Multiaddr, PeerId,
-    eth::{
-        GossipKind, GossipTopic,
-        reqresp::{Protocol, ResponseCode, Status},
-    },
+    eth::reqresp::{Protocol, ResponseCode, Status},
     swarm::{NetworkEvent, NetworkEvents, NetworkHandle, RequestId},
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Epoch, ForkDigest, Preset, SubnetId};
-use tokio::task;
+use axiom_types::{ChainConfig, ColumnIndex, Preset, Slot};
+use tokio::{task, time};
 use tracing::{debug, info, warn};
 
 pub use self::identity::NodeKey;
 use self::{
     gossip::GossipHandler,
     server::{LocalMetadata, RequestServer},
-    subnets::AttestationSubnets,
     sync::RangeSync,
+    topics::Subscriptions,
 };
-use crate::{ChainHandle, Clock, ExecutionLayer};
+use crate::{ChainHandle, Clock, ExecutionLayer, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
@@ -51,7 +53,7 @@ pub struct NetworkIdentity {
 ///
 /// # Overview
 ///
-/// One loop drains network events in order.
+/// One loop drains network events in order, and wakes once a slot for upkeep.
 /// Gossip runs in spawned tasks, so a slow engine call never stalls the loop.
 ///
 /// ```text
@@ -59,20 +61,35 @@ pub struct NetworkIdentity {
 ///                      ├── request ─────────> server: answer from the chain
 ///                      ├── response ────────> sync: collect the batch
 ///                      └── peer connected ──> status handshake ──> sync
+///
+///     every slot ──> rotate topics on a fork or a subnet change
+///                ──> ask peers for their status: every slot while behind, every epoch otherwise
 /// ```
 #[derive(Debug)]
 pub struct NetworkService<P: Preset> {
     /// The network.
     network: NetworkHandle,
+    /// The chain thread.
+    chain: ChainHandle<P>,
+    /// The wall clock.
+    clock: Arc<dyn Clock>,
+    /// Genesis, in milliseconds since the Unix epoch.
+    genesis_time_ms: u64,
+    /// Slot length in milliseconds.
+    slot_ms: u64,
     /// Gossip validation and import.
     gossip: GossipHandler<P>,
     /// Answers to peers.
     server: RequestServer<P>,
     /// Range sync.
     sync: RangeSync<P>,
+    /// Topics joined, and how they change.
+    subscriptions: Subscriptions,
+    /// What peers are told about this node.
+    metadata: Arc<LocalMetadata>,
     /// Peers with a status request in flight.
     handshakes: Vec<(RequestId, PeerId)>,
-    /// Connected peers, for the peer count.
+    /// Connected peers, for the peer count and status refreshes.
     peers: BTreeSet<PeerId>,
     /// Peer counts and gossip outcomes.
     metrics: NodeMetrics,
@@ -85,8 +102,8 @@ impl<P: Preset> NetworkService<P> {
     ///
     /// - `network`: the started libp2p stack.
     /// - `identity`: the node identifier, custody, and boot nodes.
-    /// - `chain`, `execution`, `clock`, `metrics`: the node's services.
-    #[must_use]
+    /// - `chain`: the chain thread.
+    /// - `setup`: the node's other services and chain facts.
     pub async fn start(
         network: NetworkHandle,
         identity: &NetworkIdentity,
@@ -95,71 +112,112 @@ impl<P: Preset> NetworkService<P> {
     ) -> Self {
         let NetworkSetup {
             config,
-            fork_digest,
-            epoch,
             custody,
+            genesis_time_ms,
             execution,
             clock,
             metrics,
         } = setup;
+        let slot_ms = config.slot_duration_ms;
+        let metadata = Arc::new(LocalMetadata {
+            seq_number: AtomicU64::new(0),
+            attnets: AtomicU64::new(0),
+            custody_group_count: identity.custody_group_count,
+        });
+        let mut service = Self {
+            gossip: GossipHandler::new(
+                chain.clone(),
+                Arc::clone(&execution),
+                Arc::clone(&clock),
+                network.clone(),
+                metrics.clone(),
+            ),
+            server: RequestServer::new(chain.clone(), network.clone(), Arc::clone(&metadata)),
+            sync: RangeSync::new(chain.clone(), execution, network.clone()),
+            subscriptions: Subscriptions::new(identity.node_id, config, &custody),
+            network,
+            chain,
+            clock,
+            genesis_time_ms,
+            slot_ms,
+            metadata,
+            handshakes: Vec::new(),
+            peers: BTreeSet::new(),
+            metrics,
+        };
 
-        // Long-lived attestation subnets, from the node identifier.
-        let subnets = AttestationSubnets::new(identity.node_id).at::<P>(epoch, &config);
-        let mut attnets = [false; 64];
-        for subnet in &subnets {
-            if let Some(bit) = usize::try_from(subnet.0)
-                .ok()
-                .and_then(|index| attnets.get_mut(index))
-            {
-                *bit = true;
-            }
-        }
-        for topic in Self::topics(fork_digest, &config, &custody, &subnets) {
-            if let Err(error) = network.subscribe(topic.topic()).await {
-                warn!(%error, %topic, "could not subscribe");
-            }
-        }
+        // The first upkeep joins the topics of the current epoch.
+        service.maintain().await;
         for address in &identity.boot_nodes {
-            if let Err(error) = network.dial(address.clone()).await {
+            if let Err(error) = service.network.dial(address.clone()).await {
                 warn!(%error, %address, "could not dial boot node");
             }
         }
         info!(
-            peer = %network.local_peer(),
-            address = %network.listen_addr(),
-            subnets = ?subnets,
+            peer = %service.network.local_peer(),
+            address = %service.network.listen_addr(),
             custody_columns = custody.len(),
             "network started"
         );
-
-        let metadata = LocalMetadata {
-            seq_number: AtomicU64::new(1),
-            attnets,
-            custody_group_count: identity.custody_group_count,
-        };
-        Self {
-            gossip: GossipHandler::new(
-                chain.clone(),
-                Arc::clone(&execution),
-                clock,
-                network.clone(),
-                metrics.clone(),
-            ),
-            server: RequestServer::new(chain.clone(), network.clone(), metadata),
-            sync: RangeSync::new(chain, execution, network.clone()),
-            network,
-            handshakes: Vec::new(),
-            peers: BTreeSet::new(),
-            metrics,
-        }
+        service
     }
 
-    /// Handles network events until the network stops.
+    /// Handles network events until the network stops, with upkeep once a slot.
     pub async fn run(mut self, mut events: NetworkEvents) {
-        while let Some(event) = events.next().await {
-            self.handle(event).await;
+        let mut upkeep = time::interval(Duration::from_millis(self.slot_ms.max(1)));
+        loop {
+            match Either::race(events.next(), upkeep.tick()).await {
+                Either::Left(Some(event)) => self.handle(event).await,
+                Either::Left(None) => break,
+                Either::Right(_) => self.maintain().await,
+            }
         }
         info!("network stopped");
+    }
+
+    /// Rotates topics and refreshes peer statuses.
+    async fn maintain(&mut self) {
+        let elapsed = self.clock.now_ms().saturating_sub(self.genesis_time_ms);
+        let slot = Slot(elapsed / self.slot_ms.max(1));
+        let epoch = slot.epoch::<P>();
+        let Ok((head, digest)) = self
+            .chain
+            .run(move |chain| (chain.head().slot, chain.fork_digest(epoch)))
+            .await
+        else {
+            return;
+        };
+
+        // Join and leave topics as forks and subnet rotations require.
+        let change = self.subscriptions.update::<P>(epoch, digest);
+        for topic in &change.join {
+            if let Err(error) = self.network.subscribe(topic.topic()).await {
+                warn!(%error, %topic, "could not subscribe");
+            }
+        }
+        for topic in &change.leave {
+            if let Err(error) = self.network.unsubscribe(topic.topic()).await {
+                warn!(%error, %topic, "could not unsubscribe");
+            }
+        }
+        // New attestation subnets are new metadata: bump the sequence so peers refetch it.
+        if self
+            .metadata
+            .attnets
+            .swap(change.attnets, Ordering::Relaxed)
+            != change.attnets
+        {
+            self.metadata.seq_number.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Peers' heads move every slot; ask again often while behind, rarely once caught up.
+        let behind = slot.0.saturating_sub(head.0) > 1;
+        if behind || slot.index_in_epoch::<P>() == 0 {
+            let peers: Vec<PeerId> = self.peers.iter().cloned().collect();
+            for peer in peers {
+                self.send_status(peer).await;
+            }
+        }
     }
 
     /// Handles one event.
@@ -247,45 +305,6 @@ impl<P: Preset> NetworkService<P> {
             Err(error) => warn!(%error, "could not send status"),
         }
     }
-
-    /// Every topic the node joins.
-    ///
-    /// The global topics, its custody columns' subnets, and its long-lived attestation subnets.
-    fn topics(
-        fork_digest: ForkDigest,
-        config: &ChainConfig,
-        custody: &BTreeSet<ColumnIndex>,
-        subnets: &[SubnetId],
-    ) -> Vec<GossipTopic> {
-        let mut kinds = vec![
-            GossipKind::BeaconBlock,
-            GossipKind::BeaconAggregateAndProof,
-            GossipKind::VoluntaryExit,
-            GossipKind::ProposerSlashing,
-            GossipKind::AttesterSlashing,
-            GossipKind::SyncCommitteeContributionAndProof,
-            GossipKind::BlsToExecutionChange,
-        ];
-        // Columns map onto subnets by index modulo the subnet count.
-        let column_subnets: BTreeSet<u64> = custody
-            .iter()
-            .map(|column| column.0 % config.data_column_sidecar_subnet_count)
-            .collect();
-        kinds.extend(
-            column_subnets
-                .into_iter()
-                .map(GossipKind::DataColumnSidecar),
-        );
-        kinds.extend(
-            subnets
-                .iter()
-                .map(|subnet| GossipKind::BeaconAttestation(subnet.0)),
-        );
-        kinds
-            .into_iter()
-            .map(|kind| GossipTopic { fork_digest, kind })
-            .collect()
-    }
 }
 
 /// The node's services and chain facts the network service starts from.
@@ -293,12 +312,10 @@ impl<P: Preset> NetworkService<P> {
 pub struct NetworkSetup {
     /// The chain configuration.
     pub config: ChainConfig,
-    /// The current fork digest.
-    pub fork_digest: ForkDigest,
-    /// The current epoch.
-    pub epoch: Epoch,
     /// The node's custody columns.
     pub custody: BTreeSet<ColumnIndex>,
+    /// Genesis, in milliseconds since the Unix epoch.
+    pub genesis_time_ms: u64,
     /// The engine.
     pub execution: Arc<ExecutionLayer>,
     /// The wall clock.
