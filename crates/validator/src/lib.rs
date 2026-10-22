@@ -22,3 +22,4 @@ pub mod keymanager;
 pub mod keys;
 pub mod protection;
 pub mod signing;
+pub mod validators;

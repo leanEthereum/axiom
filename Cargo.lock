@@ -330,6 +330,7 @@ dependencies = [
  "axiom-crypto",
  "axiom-http",
  "axiom-json",
+ "axiom-node",
  "axiom-ssz",
  "axiom-store",
  "axiom-types",

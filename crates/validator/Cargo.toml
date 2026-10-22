@@ -18,6 +18,7 @@ axiom-bls.workspace = true
 axiom-crypto.workspace = true
 axiom-http.workspace = true
 axiom-json.workspace = true
+axiom-node.workspace = true
 axiom-ssz.workspace = true
 axiom-store.workspace = true
 axiom-types.workspace = true

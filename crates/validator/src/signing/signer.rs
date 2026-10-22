@@ -55,6 +55,9 @@ pub enum SignError {
     /// The key is held but disabled, such as during doppelganger detection.
     #[error("validator {0} is not allowed to sign yet")]
     Disabled(BlsPubkey),
+    /// Slashing protection could not record a batch, so none of it may be signed.
+    #[error("slashing protection unavailable: {0}")]
+    Unavailable(String),
     /// Slashing protection refused the message or failed.
     #[error("slashing protection: {0}")]
     Protection(#[from] ProtectionError),
