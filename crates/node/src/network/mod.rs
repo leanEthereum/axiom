@@ -47,7 +47,7 @@ use self::{
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
 };
-use crate::{ChainHandle, Clock, ExecutionLayer, race::Either};
+use crate::{ChainHandle, Clock, ExecutionLayer, NodeError, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
@@ -58,6 +58,29 @@ pub(crate) struct NetworkIdentity {
     pub(crate) custody_group_count: u64,
     /// Peers to dial at startup.
     pub(crate) boot_nodes: Vec<Multiaddr>,
+}
+
+impl NetworkIdentity {
+    /// The columns the node samples: those of its custody groups, and more if sampling needs it.
+    ///
+    /// A node samples at least the spec's samples per slot, whatever its custody.
+    /// The draw is a prefix: the first groups drawn are exactly the custody groups.
+    /// See `get_custody_groups` and "Custody sampling" in the Fulu DAS core spec.
+    pub(crate) fn sampling_columns<P: Preset>(
+        &self,
+        config: &ChainConfig,
+    ) -> Result<Vec<ColumnIndex>, NodeError> {
+        let sampling_size = self.custody_group_count.max(config.samples_per_slot);
+        let groups = self
+            .node_id
+            .custody_groups(sampling_size, config)
+            .map_err(NodeError::Custody)?;
+        let mut columns = Vec::new();
+        for group in groups {
+            columns.extend(group.columns::<P>(config).map_err(NodeError::Custody)?);
+        }
+        Ok(columns)
+    }
 }
 
 /// The node's network service.
