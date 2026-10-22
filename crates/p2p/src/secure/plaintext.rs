@@ -127,8 +127,12 @@ impl Handshake for PlaintextHandshake {
         };
         let exchange = Exchange::decode(body)?;
         // The identifier must be derived from the announced key.
-        if !exchange.id.matches(&exchange.pubkey) {
-            return Err(SecureError::IdentifierMismatch);
+        let derived = PeerId::from_public_key(&exchange.pubkey);
+        if exchange.id != derived {
+            return Err(SecureError::IdentifierMismatch {
+                claimed: exchange.id,
+                derived,
+            });
         }
         // The dialer also checks it reached the peer it asked for.
         if let Some(expected) = self.expected.take()
@@ -243,7 +247,10 @@ mod tests {
             PlaintextConfig::new(PublicKey::secp256k1([2; 33])).handshake(Role::Responder, None);
         assert_eq!(
             listener.receive(&wire).unwrap_err(),
-            SecureError::IdentifierMismatch
+            SecureError::IdentifierMismatch {
+                claimed: PeerId::from_public_key(&PublicKey::secp256k1([4; 33])),
+                derived: PeerId::from_public_key(&PublicKey::secp256k1([3; 33])),
+            }
         );
     }
 

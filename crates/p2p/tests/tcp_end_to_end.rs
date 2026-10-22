@@ -190,7 +190,7 @@ async fn gossip(pair: &mut Pair) {
             .expect("swarm running")
         {
             Ok(id) => break id,
-            Err(PublishError::InsufficientPeers) => sleep(Duration::from_millis(50)).await,
+            Err(PublishError::InsufficientPeers { .. }) => sleep(Duration::from_millis(50)).await,
             Err(error) => panic!("publish failed: {error}"),
         }
     };

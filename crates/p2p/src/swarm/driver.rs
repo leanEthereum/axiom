@@ -315,7 +315,9 @@ impl Swarm {
                     self.emit(NetworkEvent::RequestFailed {
                         request,
                         peer,
-                        error: RequestError::Timeout,
+                        error: RequestError::Timeout {
+                            timeout: self.config.request_timeout,
+                        },
                     });
                 }
             }

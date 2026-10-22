@@ -183,7 +183,10 @@ impl Session {
         }
         // The specification's only backpressure on stream creation.
         if self.ack_backlog >= self.config.max_ack_backlog {
-            return Err(YamuxError::AckBacklogFull);
+            return Err(YamuxError::AckBacklogFull {
+                backlog: self.ack_backlog,
+                max: self.config.max_ack_backlog,
+            });
         }
         let id = StreamId(self.next_id);
         // Identifiers grow by two to keep their parity; at the top they are spent.
@@ -213,7 +216,12 @@ impl Session {
         }
         // Threshold: an idle stream takes any write; a backed-up one only up to the cap.
         if !stream.pending.is_empty() && stream.pending.len() + data.len() > max_send_buffer {
-            return Err(YamuxError::SendBufferFull(id));
+            return Err(YamuxError::SendBufferFull {
+                stream: id,
+                len: data.len(),
+                pending: stream.pending.len(),
+                max: max_send_buffer,
+            });
         }
         stream.pending.extend(data);
         self.flush_stream(id);
@@ -415,10 +423,13 @@ impl Session {
         match header.frame_type {
             FrameType::WindowUpdate => {
                 // Credit grows the send window, then held-back data may flow.
-                stream.send_window = stream
-                    .send_window
-                    .checked_add(header.length)
-                    .ok_or(YamuxError::WindowOverflow(id))?;
+                stream.send_window = stream.send_window.checked_add(header.length).ok_or(
+                    YamuxError::WindowOverflow {
+                        stream: id,
+                        window: stream.send_window,
+                        credit: header.length,
+                    },
+                )?;
                 self.flush_stream(id);
             }
             _ => {
@@ -725,7 +736,15 @@ mod tests {
         // 400 more fit exactly; one byte beyond fails.
         client.send(id, &[0; 400]).unwrap();
         assert_eq!(client.writable(id), 0);
-        assert_eq!(client.send(id, &[0]), Err(YamuxError::SendBufferFull(id)));
+        assert_eq!(
+            client.send(id, &[0]),
+            Err(YamuxError::SendBufferFull {
+                stream: id,
+                len: 1,
+                pending: 1000,
+                max: 1000
+            })
+        );
     }
 
     #[test]
@@ -773,6 +792,27 @@ mod tests {
         assert_eq!(
             server.receive(&syn(1)),
             Err(YamuxError::DuplicateStream(StreamId(1)))
+        );
+    }
+
+    #[test]
+    fn credit_past_the_window_limit_is_a_protocol_error() {
+        let mut client = Session::new(Mode::Client, Config::default());
+        let id = client.open_stream().unwrap();
+        // Mutation: the peer grants 2^32 - 1 on top of the initial 256 KiB window.
+        let update = Header {
+            frame_type: FrameType::WindowUpdate,
+            flags: Flags::ACK,
+            stream_id: id,
+            length: u32::MAX,
+        };
+        assert_eq!(
+            client.receive(&update.encode()),
+            Err(YamuxError::WindowOverflow {
+                stream: id,
+                window: INITIAL_WINDOW,
+                credit: u32::MAX
+            })
         );
     }
 
@@ -827,7 +867,10 @@ mod tests {
         // Two unacknowledged streams fill a backlog of 2.
         client.open_stream().unwrap();
         client.open_stream().unwrap();
-        assert_eq!(client.open_stream(), Err(YamuxError::AckBacklogFull));
+        assert_eq!(
+            client.open_stream(),
+            Err(YamuxError::AckBacklogFull { backlog: 2, max: 2 })
+        );
     }
 
     #[test]

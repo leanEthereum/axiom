@@ -212,7 +212,10 @@ fn wrong_identity_signature_is_rejected() {
         .await;
         assert_eq!(
             error,
-            "security handshake failed: identity signature does not verify"
+            format!(
+                "security handshake failed: identity signature of {} over its static key is absent or invalid",
+                bob.peer_id()
+            )
         );
     });
 }

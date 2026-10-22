@@ -13,28 +13,53 @@ pub enum ProtobufError {
     Varint(#[from] VarintError),
 
     /// The input ends inside a field.
-    #[error("message ends inside a field")]
-    Truncated,
+    ///
+    /// For a varint cut short, the bytes needed are a lower bound: one more than remain.
+    #[error("message ends inside a field: {remaining} bytes left, at least {needed} needed")]
+    Truncated {
+        /// Bytes the field needs, or a lower bound on them.
+        needed: u64,
+        /// Bytes left in the input.
+        remaining: usize,
+    },
 
     /// A key uses a group or unassigned wire type.
-    #[error("unsupported wire type {0}")]
-    InvalidWireType(u8),
+    #[error("field {field} uses unsupported wire type {wire_type}")]
+    InvalidWireType {
+        /// Field number.
+        field: u32,
+        /// The wire type found.
+        wire_type: u8,
+    },
 
     /// A key carries field number zero or one above 2^29 - 1.
-    #[error("field number out of range")]
-    InvalidFieldNumber,
+    #[error("field number {number} is outside 1..=536870911")]
+    InvalidFieldNumber {
+        /// The field number found.
+        number: u64,
+    },
 
     /// A known field arrives with a wire type its schema forbids.
-    #[error("field {0} has the wrong wire type")]
-    UnexpectedWireType(u32),
+    #[error("field {field} arrives with forbidden wire type {wire_type}")]
+    UnexpectedWireType {
+        /// Field number.
+        field: u32,
+        /// The wire type found.
+        wire_type: u8,
+    },
 
     /// A required field is absent.
     #[error("required field {0} is missing")]
     MissingField(u32),
 
     /// A string field holds bytes that are not UTF-8.
-    #[error("field {0} is not valid UTF-8")]
-    InvalidUtf8(u32),
+    #[error("field {field} is not UTF-8 after byte {valid_up_to}")]
+    InvalidUtf8 {
+        /// Field number.
+        field: u32,
+        /// Length of the longest valid UTF-8 prefix.
+        valid_up_to: usize,
+    },
 
     /// An enum field holds a value outside the schema.
     #[error("field {field} holds unknown enum value {value}")]

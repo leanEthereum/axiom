@@ -67,28 +67,49 @@ pub enum NegotiationError {
     Framing(#[from] ProtobufError),
 
     /// A message does not end with a newline.
-    #[error("message lacks its trailing newline")]
-    MissingNewline,
+    #[error("message of {len} bytes lacks its trailing newline")]
+    MissingNewline {
+        /// Length of the message, in bytes.
+        len: usize,
+    },
 
     /// A message is not UTF-8.
-    #[error("message is not UTF-8")]
-    InvalidUtf8,
+    #[error("message is not UTF-8 after byte {valid_up_to}")]
+    InvalidUtf8 {
+        /// Length of the longest valid UTF-8 prefix.
+        valid_up_to: usize,
+    },
 
     /// The peer opened with something other than the protocol header.
     #[error("unexpected header {0:?}")]
     InvalidHeader(String),
 
     /// The listener refused every proposal.
-    #[error("no protocol in common")]
-    NoCommonProtocol,
+    #[error("listener refused all {refused} proposals, the last {last:?}")]
+    NoCommonProtocol {
+        /// Number of proposals refused.
+        refused: usize,
+        /// The last protocol proposed.
+        last: String,
+    },
 
     /// The listener answered a proposal with neither an echo nor a refusal.
-    #[error("unexpected response {0:?}")]
-    UnexpectedResponse(String),
+    #[error("unexpected response {response:?} to proposal {proposed:?}")]
+    UnexpectedResponse {
+        /// The protocol proposed.
+        proposed: String,
+        /// The answer received.
+        response: String,
+    },
 
     /// The dialer kept proposing past the listener's patience.
-    #[error("too many proposals")]
-    TooManyProposals,
+    #[error("dialer sent more than {max} unsupported proposals, the last {last:?}")]
+    TooManyProposals {
+        /// Most unsupported proposals the listener answers.
+        max: usize,
+        /// The proposal that crossed the bound.
+        last: String,
+    },
 
     /// The dialer was given no protocol to propose.
     #[error("no protocol to propose")]

@@ -41,7 +41,7 @@ use crate::{
     identify::{self, IdentifyInfo},
     identity::PeerId,
     multiaddr::Multiaddr,
-    multistream::{Dialer, Listener, Negotiated},
+    multistream::{Dialer, Listener, Negotiated, NegotiationError},
     ping::PingResponder,
     protobuf::{LengthPrefixedDecoder, ProtoMessage},
     secure::{Open, Seal},
@@ -518,13 +518,16 @@ impl Connection {
                     let _ = self.session.send(stream, &dialer.take_output());
                     Some(StreamState::Dialing(dialer, purpose))
                 }
-                Err(_) => {
+                Err(error) => {
                     // No common protocol, or a broken negotiation.
-                    if let Purpose::Request(request, ..) = purpose {
-                        self.report(ConnectionEvent::RequestFailed(
-                            request,
-                            RequestError::Unsupported,
-                        ));
+                    if let Purpose::Request(request, protocol, _) = purpose {
+                        let error = match error {
+                            NegotiationError::NoCommonProtocol { .. } => {
+                                RequestError::Unsupported { protocol }
+                            }
+                            error => RequestError::Negotiation { protocol, error },
+                        };
+                        self.report(ConnectionEvent::RequestFailed(request, error));
                     }
                     let _ = self.session.reset(stream);
                     None
@@ -700,7 +703,7 @@ impl Connection {
                 Err(error) => {
                     self.report(ConnectionEvent::RequestFailed(
                         request,
-                        RequestError::InvalidResponse(error.to_string()),
+                        RequestError::InvalidResponse { protocol, error },
                     ));
                     let _ = self.session.reset(stream);
                     return None;
@@ -732,12 +735,12 @@ impl Connection {
                     }
                 }
             }
-            StreamState::RequestOut(request, _, mut decoder) => {
+            StreamState::RequestOut(request, protocol, mut decoder) => {
                 let event = match decoder.finish() {
                     Ok(()) => ConnectionEvent::ResponseEnded(request),
                     Err(error) => ConnectionEvent::RequestFailed(
                         request,
-                        RequestError::InvalidResponse(error.to_string()),
+                        RequestError::InvalidResponse { protocol, error },
                     ),
                 };
                 self.report(event);

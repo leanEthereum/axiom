@@ -36,6 +36,8 @@ pub struct ResponseDecoder {
     chunk: Option<PartialChunk>,
     /// The violation that ended decoding, returned again on every later call.
     failure: Option<ReqRespError>,
+    /// Bytes received in all.
+    received: usize,
 }
 
 impl ResponseDecoder {
@@ -49,6 +51,7 @@ impl ResponseDecoder {
             consumed: 0,
             chunk: None,
             failure: None,
+            received: 0,
         }
     }
 
@@ -57,6 +60,7 @@ impl ResponseDecoder {
         // Drop decoded bytes first, so the buffer holds at most one unit in progress.
         self.buffer.drain(..mem::take(&mut self.consumed));
         self.buffer.extend_from_slice(bytes);
+        self.received += bytes.len();
     }
 
     /// The next complete chunk, or nothing while it is incomplete.
@@ -84,7 +88,9 @@ impl ResponseDecoder {
         self.buffer.clear();
         self.consumed = 0;
         if partial {
-            Err(ReqRespError::UnexpectedEof)
+            Err(ReqRespError::UnexpectedEof {
+                received: self.received,
+            })
         } else {
             Ok(())
         }
@@ -212,12 +218,18 @@ mod tests {
         let mut decoder = ResponseDecoder::new(Protocol::PingV1, 1024);
         decoder.feed(&[0x00, 0x08]);
         assert_eq!(decoder.next_chunk(), Ok(None));
-        assert_eq!(decoder.finish(), Err(ReqRespError::UnexpectedEof));
+        assert_eq!(
+            decoder.finish(),
+            Err(ReqRespError::UnexpectedEof { received: 2 })
+        );
         // A lone code byte is a partial chunk too.
         let mut decoder = ResponseDecoder::new(Protocol::PingV1, 1024);
         decoder.feed(&[0x00]);
         assert_eq!(decoder.next_chunk(), Ok(None));
-        assert_eq!(decoder.finish(), Err(ReqRespError::UnexpectedEof));
+        assert_eq!(
+            decoder.finish(),
+            Err(ReqRespError::UnexpectedEof { received: 1 })
+        );
     }
 
     proptest! {

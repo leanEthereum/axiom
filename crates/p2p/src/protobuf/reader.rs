@@ -18,6 +18,18 @@ pub enum FieldValue<'a> {
     Fixed32(u32),
 }
 
+impl FieldValue<'_> {
+    /// The wire type that carries this value.
+    const fn wire_type(&self) -> u8 {
+        match self {
+            Self::Varint(_) => 0,
+            Self::Fixed64(_) => 1,
+            Self::Bytes(_) => 2,
+            Self::Fixed32(_) => 5,
+        }
+    }
+}
+
 /// One field of a message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Field<'a> {
@@ -32,7 +44,7 @@ impl<'a> Field<'a> {
     pub const fn varint(&self) -> Result<u64, ProtobufError> {
         match self.value {
             FieldValue::Varint(value) => Ok(value),
-            _ => Err(ProtobufError::UnexpectedWireType(self.number)),
+            _ => Err(self.unexpected_wire_type()),
         }
     }
 
@@ -48,14 +60,25 @@ impl<'a> Field<'a> {
     pub const fn bytes(&self) -> Result<&'a [u8], ProtobufError> {
         match self.value {
             FieldValue::Bytes(bytes) => Ok(bytes),
-            _ => Err(ProtobufError::UnexpectedWireType(self.number)),
+            _ => Err(self.unexpected_wire_type()),
         }
     }
 
     /// The value as a UTF-8 string.
     pub fn string(&self) -> Result<&'a str, ProtobufError> {
         let bytes = self.bytes()?;
-        str::from_utf8(bytes).map_err(|_| ProtobufError::InvalidUtf8(self.number))
+        str::from_utf8(bytes).map_err(|error| ProtobufError::InvalidUtf8 {
+            field: self.number,
+            valid_up_to: error.valid_up_to(),
+        })
+    }
+
+    /// The error for a value whose wire type the schema forbids here.
+    const fn unexpected_wire_type(&self) -> ProtobufError {
+        ProtobufError::UnexpectedWireType {
+            field: self.number,
+            wire_type: self.value.wire_type(),
+        }
     }
 }
 
@@ -84,7 +107,7 @@ impl<'a> FieldReader<'a> {
         let number = key >> 3;
         // Field numbers run from 1 to 2^29 - 1.
         if number == 0 || number > (1 << 29) - 1 {
-            return Err(ProtobufError::InvalidFieldNumber);
+            return Err(ProtobufError::InvalidFieldNumber { number });
         }
         // Invariant: number < 2^29, so it fits in a u32.
         let number = number as u32;
@@ -95,17 +118,23 @@ impl<'a> FieldReader<'a> {
             2 => {
                 let len = self.read_varint()?;
                 // A length past the end of input is a truncated message.
-                let len = usize::try_from(len).map_err(|_| ProtobufError::Truncated)?;
-                let (bytes, rest) = self
-                    .rest
-                    .split_at_checked(len)
-                    .ok_or(ProtobufError::Truncated)?;
+                let truncated = ProtobufError::Truncated {
+                    needed: len,
+                    remaining: self.rest.len(),
+                };
+                let len = usize::try_from(len).map_err(|_| truncated)?;
+                let (bytes, rest) = self.rest.split_at_checked(len).ok_or(truncated)?;
                 self.rest = rest;
                 FieldValue::Bytes(bytes)
             }
             5 => FieldValue::Fixed32(u32::from_le_bytes(self.read_array()?)),
             // Groups (3, 4) and the unassigned tags (6, 7).
-            other => return Err(ProtobufError::InvalidWireType(other as u8)),
+            other => {
+                return Err(ProtobufError::InvalidWireType {
+                    field: number,
+                    wire_type: other as u8,
+                });
+            }
         };
         Ok(Some(Field { number, value }))
     }
@@ -113,10 +142,14 @@ impl<'a> FieldReader<'a> {
     /// Consumes one varint.
     fn read_varint(&mut self) -> Result<u64, ProtobufError> {
         // Inside a complete message, a varint cut short is truncation.
+        // Its full length is unknown, but it needs at least one byte more than remain.
         Varint::Protobuf
             .read(&mut self.rest)
             .map_err(|error| match error {
-                VarintError::Truncated => ProtobufError::Truncated,
+                VarintError::Truncated { len } => ProtobufError::Truncated {
+                    needed: len as u64 + 1,
+                    remaining: len,
+                },
                 other => ProtobufError::Varint(other),
             })
     }
@@ -126,7 +159,10 @@ impl<'a> FieldReader<'a> {
         let (head, rest) = self
             .rest
             .split_first_chunk::<N>()
-            .ok_or(ProtobufError::Truncated)?;
+            .ok_or(ProtobufError::Truncated {
+                needed: N as u64,
+                remaining: self.rest.len(),
+            })?;
         self.rest = rest;
         Ok(*head)
     }
@@ -137,6 +173,42 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn typed_accessors_name_the_field() {
+        // Field 7 as a varint, read where bytes are expected.
+        let varint = Field {
+            number: 7,
+            value: FieldValue::Varint(1),
+        };
+        assert_eq!(
+            varint.bytes(),
+            Err(ProtobufError::UnexpectedWireType {
+                field: 7,
+                wire_type: 0
+            })
+        );
+        // Field 2 as bytes, read where a varint is expected.
+        let bytes = Field {
+            number: 2,
+            value: FieldValue::Bytes(b"ab\xff"),
+        };
+        assert_eq!(
+            bytes.varint(),
+            Err(ProtobufError::UnexpectedWireType {
+                field: 2,
+                wire_type: 2
+            })
+        );
+        // "ab" then 0xff: valid UTF-8 stops after 2 bytes.
+        assert_eq!(
+            bytes.string(),
+            Err(ProtobufError::InvalidUtf8 {
+                field: 2,
+                valid_up_to: 2
+            })
+        );
+    }
 
     #[test]
     fn fixed_fields_decode() {
@@ -164,27 +236,39 @@ mod tests {
         // Wire type 3 opens a deprecated group.
         assert_eq!(
             FieldReader::new(&[0x0b]).next_field(),
-            Err(ProtobufError::InvalidWireType(3))
+            Err(ProtobufError::InvalidWireType {
+                field: 1,
+                wire_type: 3
+            })
         );
         // Field number 0 is reserved.
         assert_eq!(
             FieldReader::new(&[0x00, 0x01]).next_field(),
-            Err(ProtobufError::InvalidFieldNumber)
+            Err(ProtobufError::InvalidFieldNumber { number: 0 })
         );
         // A length of 5 with only 2 bytes left.
         assert_eq!(
             FieldReader::new(&[0x0a, 0x05, 1, 2]).next_field(),
-            Err(ProtobufError::Truncated)
+            Err(ProtobufError::Truncated {
+                needed: 5,
+                remaining: 2
+            })
         );
         // A fixed64 with 3 of its 8 bytes.
         assert_eq!(
             FieldReader::new(&[0x09, 1, 2, 3]).next_field(),
-            Err(ProtobufError::Truncated)
+            Err(ProtobufError::Truncated {
+                needed: 8,
+                remaining: 3
+            })
         );
         // A key varint cut short after its continuation bit.
         assert_eq!(
             FieldReader::new(&[0x88]).next_field(),
-            Err(ProtobufError::Truncated)
+            Err(ProtobufError::Truncated {
+                needed: 2,
+                remaining: 1
+            })
         );
     }
 

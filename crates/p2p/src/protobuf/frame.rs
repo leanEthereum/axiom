@@ -52,7 +52,7 @@ impl LengthPrefixedDecoder {
         let len = match Varint::Multiformat.read(&mut rest) {
             Ok(len) => len,
             // A prefix cut short waits for more bytes.
-            Err(VarintError::Truncated) => return Ok(None),
+            Err(VarintError::Truncated { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
         let prefix = self.buffer.len() - rest.len();
@@ -134,7 +134,7 @@ mod tests {
         decoder.feed(&[0x80, 0x00]);
         assert_eq!(
             decoder.next_frame(),
-            Err(ProtobufError::Varint(VarintError::NotMinimal))
+            Err(ProtobufError::Varint(VarintError::NotMinimal { len: 2 }))
         );
         // A prefix cut short waits.
         let mut decoder = LengthPrefixedDecoder::new(16);

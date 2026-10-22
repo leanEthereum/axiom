@@ -376,13 +376,24 @@ fn publish_errors() {
     // No peers at all.
     assert_eq!(
         router.publish(topic(), vec![1], Duration::ZERO),
-        Err(PublishError::InsufficientPeers)
+        Err(PublishError::InsufficientPeers { topic: topic() })
     );
     let mut router = router_with_peers(1);
-    router.publish(topic(), vec![1], Duration::ZERO).unwrap();
+    let id = router.publish(topic(), vec![1], Duration::ZERO).unwrap();
     // The same content again is a duplicate.
     assert_eq!(
         router.publish(topic(), vec![1], Duration::ZERO),
-        Err(PublishError::Duplicate)
+        Err(PublishError::Duplicate { id })
+    );
+    // A 100-byte payload under a 100-byte limit.
+    // Framed: data field 1 + 1 + 100, topic field 1 + 1 + 38, plus 16 of allowance → 158.
+    let config = GossipsubConfig {
+        max_transmit_size: 100,
+        ..GossipsubConfig::default()
+    };
+    let mut router = Router::new(config, None, 1);
+    assert_eq!(
+        router.publish(topic(), vec![0; 100], Duration::ZERO),
+        Err(PublishError::MessageTooLarge { len: 158, max: 100 })
     );
 }

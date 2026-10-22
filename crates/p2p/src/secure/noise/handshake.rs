@@ -148,14 +148,16 @@ impl NoiseHandshake {
             .ok_or(SecureError::InvalidKey)?;
         let payload = NoiseHandshakePayload::decode(payload)?;
         let key = payload.identity_key.ok_or(SecureError::InvalidIdentity)?;
-        let signature = payload.identity_sig.ok_or(SecureError::InvalidSignature)?;
+        let peer = PeerId::from_public_key(&key);
+        let Some(signature) = payload.identity_sig else {
+            return Err(SecureError::InvalidSignature { peer });
+        };
         // The binding: identity key signs "noise-libp2p-static-key:" || static key.
         let mut signed = STATIC_KEY_DOMAIN.to_vec();
         signed.extend_from_slice(&remote_static);
         if !key.verify(&signed, &signature) {
-            return Err(SecureError::InvalidSignature);
+            return Err(SecureError::InvalidSignature { peer });
         }
-        let peer = PeerId::from_public_key(&key);
         // The dialer insists on the identity it dialed.
         if let Some(expected) = self.expected.take()
             && expected != peer
@@ -215,7 +217,9 @@ impl NoiseHandshake {
                 Step::AwaitMessage2 => return self.conclude(&message).map(Some),
                 // Responder: message 3 in, done.
                 Step::AwaitMessage3 => return self.accept(&message).map(Some),
-                Step::Done => return Err(SecureError::UnexpectedData),
+                Step::Done => {
+                    return Err(SecureError::UnexpectedData { len: message.len() });
+                }
             }
         }
         Ok(None)
@@ -229,7 +233,7 @@ impl Handshake for NoiseHandshake {
 
     fn receive(&mut self, bytes: &[u8]) -> Result<Option<SecureSession>, SecureError> {
         if self.step == Step::Done {
-            return Err(SecureError::UnexpectedData);
+            return Err(SecureError::UnexpectedData { len: bytes.len() });
         }
         self.inbound.extend_from_slice(bytes);
         // A failed handshake is over: it never resumes on later bytes.
@@ -335,12 +339,12 @@ mod tests {
         message2[39] ^= 1;
         assert_eq!(
             initiator.receive(&message2).unwrap_err(),
-            SecureError::DecryptionFailed
+            SecureError::DecryptionFailed { nonce: 0 }
         );
-        // The failure is final: the same bytes again are refused outright.
+        // The failure is final: even 3 more bytes are refused outright.
         assert_eq!(
-            initiator.receive(&[]).unwrap_err(),
-            SecureError::UnexpectedData
+            initiator.receive(&[1, 2, 3]).unwrap_err(),
+            SecureError::UnexpectedData { len: 3 }
         );
     }
 
@@ -382,7 +386,9 @@ mod tests {
         responder.receive(&initiator.take_output()).unwrap();
         assert_eq!(
             initiator.receive(&responder.take_output()).unwrap_err(),
-            SecureError::InvalidSignature
+            SecureError::InvalidSignature {
+                peer: bob.peer_id()
+            }
         );
     }
 
@@ -409,7 +415,9 @@ mod tests {
         initiator.receive(&responder.take_output()).unwrap();
         assert_eq!(
             responder.receive(&initiator.take_output()).unwrap_err(),
-            SecureError::InvalidSignature
+            SecureError::InvalidSignature {
+                peer: identity(2).peer_id()
+            }
         );
     }
 
