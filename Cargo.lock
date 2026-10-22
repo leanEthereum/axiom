@@ -221,6 +221,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-hashsig"
+version = "0.1.0"
+dependencies = [
+ "axiom-crypto",
+ "proptest",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "axiom-http"
 version = "0.1.0"
 dependencies = [
