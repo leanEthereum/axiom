@@ -1689,9 +1689,14 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                 GossipError::reject("builder is not a payload builder").with(builder_detail)
             );
         }
-        // The vectors' finalized checkpoint stands in for the state's, see the test format.
+        // Activity reads the finality of the state advanced to the bid's slot, not the store's.
+        // Advancing across an epoch boundary can finalize the builder's deposit epoch.
         // See is_active_builder in the Gloas beacon chain spec.
-        let finalized = self.view.finalized.epoch;
+        let finalized = self
+            .view
+            .state_finality
+            .unwrap_or(state.finalized_checkpoint)
+            .epoch;
         if !(builder.deposit_epoch < finalized && builder.withdrawable_epoch == Epoch::FAR_FUTURE) {
             return Err(GossipError::reject("builder is not active").with(builder_detail));
         }

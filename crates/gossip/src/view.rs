@@ -37,6 +37,11 @@ pub struct ChainView<'a, P: Preset> {
     pub payload_statuses: &'a HashMap<Root, ExecutionStatus>,
     /// Finalized checkpoint the rules respect.
     pub finalized: Checkpoint,
+    /// A finalized checkpoint that replaces every state's own, when one is fixed.
+    ///
+    /// Rules that read a state's finality read this instead, when set.
+    /// The spec's gossip vectors fix finality this way, see the gossip validation test format.
+    pub state_finality: Option<Checkpoint>,
     /// The bid each block carries, by block root, from Gloas on.
     pub bids: HashMap<Root, ExecutionPayloadBid>,
     /// The verified payload envelope of each block whose payload arrived, from Gloas on.
@@ -58,6 +63,7 @@ impl<'a, P: Preset> ChainView<'a, P> {
             unimported,
             payload_statuses,
             finalized,
+            state_finality: None,
             bids: HashMap::new(),
             payloads: HashMap::new(),
         }

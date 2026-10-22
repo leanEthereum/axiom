@@ -166,8 +166,11 @@ impl<'c, P: Preset, F: SpecFork> GossipCase<'c, P, F> {
         let mut view = ChainView::new(&mut chain.store, &chain.unimported, &chain.payload_statuses);
         view.bids = chain.bids;
         view.payloads = chain.payloads;
+        // A fixed finalized checkpoint replaces the store's and every state's.
         if let Some(finalized) = self.meta.get("finalized_checkpoint") {
-            view.finalized = self.finalized(finalized)?;
+            let finalized = self.finalized(finalized)?;
+            view.finalized = finalized;
+            view.state_finality = Some(finalized);
         }
 
         // Phase 2: validate each message in order, updating the seen state on success.
