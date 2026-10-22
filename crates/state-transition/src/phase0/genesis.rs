@@ -5,7 +5,7 @@ use axiom_types::{
     Bytes32, ChainConfig, Epoch, Gwei, Hash32, Preset,
     accessors::CoreState,
     constants::DEPOSIT_CONTRACT_TREE_DEPTH,
-    phase0::{BeaconBlockBody, BeaconState, Deposit, Fork},
+    phase0::{BeaconBlockBody, BeaconState, Deposit, Fork, RandaoMixes},
 };
 
 use crate::{BlockError, BlockProcessor, CachedState, Caches, PubkeyCache, Verification};
@@ -56,9 +56,8 @@ impl Genesis {
         state.eth1_data.deposit_count = deposits.len() as u64;
         state.eth1_data.block_hash = self.eth1_block_hash;
         state.latest_block_header.body_root = BeaconBlockBody::<P>::default().hash_tree_root();
-        for mix in state.randao_mixes.iter_mut() {
-            *mix = Bytes32(self.eth1_block_hash.0);
-        }
+        // Every mix starts as the eth1 block hash, so all packs share one copy.
+        state.randao_mixes = RandaoMixes::<P>::repeat(&Bytes32(self.eth1_block_hash.0));
 
         // Phase 1: each deposit, proven against the root of the deposit list up to it.
         // The deposits apply by the block rule, though no block exists yet.

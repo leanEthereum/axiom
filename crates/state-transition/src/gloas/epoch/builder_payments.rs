@@ -121,8 +121,8 @@ mod tests {
 
         // Only builder 1 is paid.
         assert_eq!(
-            state.builder_pending_withdrawals.as_slice(),
-            &[payment(1, 60).withdrawal]
+            state.builder_pending_withdrawals.to_vec(),
+            [payment(1, 60).withdrawal]
         );
         // The current epoch's payment moves to the previous half, and the current half empties.
         assert_eq!(state.builder_pending_payments[0], payment(3, 100));

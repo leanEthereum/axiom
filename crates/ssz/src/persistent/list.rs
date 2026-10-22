@@ -41,6 +41,28 @@ impl<T: Ssz, N: Length> PersistentList<T, N> {
         Self::from_sequence(Sequence::empty(Self::layout()))
     }
 
+    /// A list holding one value repeated, whose full packs share one pack.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the length exceeds the limit.
+    pub fn repeat(value: &T, length: usize) -> Result<Self, CapacityError>
+    where
+        T: Clone,
+    {
+        if length > N::LEN {
+            return Err(CapacityError::ExceedsLimit {
+                limit: N::LEN,
+                length,
+            });
+        }
+        Ok(Self::from_sequence(Sequence::repeat(
+            Self::layout(),
+            value,
+            length,
+        )))
+    }
+
     /// A list of the same limit holding each element transformed.
     ///
     /// The length is unchanged, so the result always fits.

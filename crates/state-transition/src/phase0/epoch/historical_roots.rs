@@ -50,6 +50,7 @@ impl HistoricalRootsUpdate {
 
 #[cfg(test)]
 mod tests {
+    use axiom_ssz::Vector;
     use axiom_types::{Minimal, altair, phase0::HistoricalBatch};
 
     use super::*;
@@ -73,9 +74,9 @@ mod tests {
             .apply(&mut state)
             .unwrap();
         let batch = HistoricalBatch::<Minimal> {
-            block_roots: state.block_roots.clone(),
-            state_roots: state.state_roots.clone(),
+            block_roots: Vector::try_from(state.block_roots.to_vec()).unwrap(),
+            state_roots: Vector::try_from(state.state_roots.to_vec()).unwrap(),
         };
-        assert_eq!(state.historical_roots.as_slice(), &[batch.hash_tree_root()]);
+        assert_eq!(state.historical_roots.to_vec(), [batch.hash_tree_root()]);
     }
 }

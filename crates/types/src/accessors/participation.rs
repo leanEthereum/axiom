@@ -1,6 +1,6 @@
 //! Participation flags and inactivity scores, from Altair on.
 
-use axiom_ssz::CapacityError;
+use axiom_ssz::{CapacityError, Sequence, SequenceMut};
 
 use crate::{ParticipationFlags, accessors::CoreState};
 
@@ -14,20 +14,24 @@ use crate::{ParticipationFlags, accessors::CoreState};
 /// Each list holds one entry per validator.
 pub trait ParticipationState: CoreState {
     /// Duties each validator fulfilled in the previous epoch.
-    fn previous_epoch_participation(&self) -> &[ParticipationFlags];
+    fn previous_epoch_participation(&self) -> &Sequence<ParticipationFlags>;
 
     /// Duties each validator fulfilled in the current epoch.
-    fn current_epoch_participation(&self) -> &[ParticipationFlags];
+    fn current_epoch_participation(&self) -> &Sequence<ParticipationFlags>;
 
     /// Flags of the previous and the current epoch, in that order, for edits in place.
-    fn epoch_participation_mut(&mut self)
-    -> (&mut [ParticipationFlags], &mut [ParticipationFlags]);
+    fn epoch_participation_mut(
+        &mut self,
+    ) -> (
+        SequenceMut<'_, ParticipationFlags>,
+        SequenceMut<'_, ParticipationFlags>,
+    );
 
     /// Per-validator inactivity scores, which drive the inactivity leak.
-    fn inactivity_scores(&self) -> &[u64];
+    fn inactivity_scores(&self) -> &Sequence<u64>;
 
     /// Per-validator inactivity scores, for edits in place.
-    fn inactivity_scores_mut(&mut self) -> &mut [u64];
+    fn inactivity_scores_mut(&mut self) -> SequenceMut<'_, u64>;
 
     /// Appends empty flags and a zero score for a validator just added to the registry.
     ///

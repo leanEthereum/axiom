@@ -1,6 +1,8 @@
 //! The beacon state of Bellatrix, which tracks the latest execution payload.
 
-use axiom_ssz::{CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
+use axiom_ssz::{
+    CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Sequence, SequenceMut, Ssz,
+};
 
 use crate::{
     ForkName, Gwei, ParticipationFlags, Preset, Root, Slot,
@@ -295,20 +297,20 @@ impl<P: Preset> CoreState for BeaconState<P> {
         &mut self.eth1_deposit_index
     }
 
-    fn validators(&self) -> &[Validator] {
+    fn validators(&self) -> &Sequence<Validator> {
         &self.validators
     }
 
-    fn validators_mut(&mut self) -> &mut [Validator] {
-        &mut self.validators
+    fn validators_mut(&mut self) -> SequenceMut<'_, Validator> {
+        self.validators.elements_mut()
     }
 
-    fn balances(&self) -> &[Gwei] {
+    fn balances(&self) -> &Sequence<Gwei> {
         &self.balances
     }
 
-    fn balances_mut(&mut self) -> &mut [Gwei] {
-        &mut self.balances
+    fn balances_mut(&mut self) -> SequenceMut<'_, Gwei> {
+        self.balances.elements_mut()
     }
 
     fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {
@@ -367,29 +369,32 @@ impl<P: Preset> CoreState for BeaconState<P> {
 }
 
 impl<P: Preset> ParticipationState for BeaconState<P> {
-    fn previous_epoch_participation(&self) -> &[ParticipationFlags] {
+    fn previous_epoch_participation(&self) -> &Sequence<ParticipationFlags> {
         &self.previous_epoch_participation
     }
 
-    fn current_epoch_participation(&self) -> &[ParticipationFlags] {
+    fn current_epoch_participation(&self) -> &Sequence<ParticipationFlags> {
         &self.current_epoch_participation
     }
 
     fn epoch_participation_mut(
         &mut self,
-    ) -> (&mut [ParticipationFlags], &mut [ParticipationFlags]) {
+    ) -> (
+        SequenceMut<'_, ParticipationFlags>,
+        SequenceMut<'_, ParticipationFlags>,
+    ) {
         (
-            &mut self.previous_epoch_participation[..],
-            &mut self.current_epoch_participation[..],
+            self.previous_epoch_participation.elements_mut(),
+            self.current_epoch_participation.elements_mut(),
         )
     }
 
-    fn inactivity_scores(&self) -> &[u64] {
+    fn inactivity_scores(&self) -> &Sequence<u64> {
         &self.inactivity_scores
     }
 
-    fn inactivity_scores_mut(&mut self) -> &mut [u64] {
-        &mut self.inactivity_scores
+    fn inactivity_scores_mut(&mut self) -> SequenceMut<'_, u64> {
+        self.inactivity_scores.elements_mut()
     }
 
     fn push_participant(&mut self) -> Result<(), CapacityError> {

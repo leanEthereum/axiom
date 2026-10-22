@@ -33,6 +33,22 @@ impl<'a, T: Clone> SequenceMut<'a, T> {
         self.sequence.get_mut(index)
     }
 
+    /// Overwrites every element with the matching one of a sequence of the same length.
+    ///
+    /// The two collections then share their storage until either is edited.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lengths differ, as copying between slices would.
+    pub fn copy_from(&mut self, source: &Sequence<T>) {
+        self.sequence.copy_from(source);
+    }
+
+    /// Overwrites every element with one value.
+    pub fn fill(&mut self, value: &T) {
+        self.sequence.fill(value);
+    }
+
     /// Iterator over the elements for edits, in order.
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
         self.sequence.iter_mut()

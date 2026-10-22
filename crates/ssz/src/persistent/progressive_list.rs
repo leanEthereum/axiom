@@ -34,6 +34,17 @@ impl<T: Ssz> PersistentProgressiveList<T> {
         }
     }
 
+    /// A list holding one value repeated, whose full packs share one pack.
+    #[must_use]
+    pub fn repeat(value: &T, length: usize) -> Self
+    where
+        T: Clone,
+    {
+        Self {
+            elements: Sequence::repeat(Layout::progressive::<T>(), value, length),
+        }
+    }
+
     /// A list holding each element transformed.
     #[must_use]
     pub fn map<U: Ssz>(&self, transform: impl FnMut(&T) -> U) -> PersistentProgressiveList<U> {

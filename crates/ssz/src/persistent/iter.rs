@@ -22,8 +22,8 @@ impl<'a, T> Iter<'a, T> {
     pub(super) fn new(packs: &'a [Arc<Pack<T>>], remaining: usize) -> Self {
         Self {
             packs: packs.iter(),
-            front: [].iter(),
-            back: [].iter(),
+            front: slice::Iter::default(),
+            back: slice::Iter::default(),
             remaining,
         }
     }
@@ -52,6 +52,35 @@ impl<'a, T> Iterator for Iter<'a, T> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         (self.remaining, Some(self.remaining))
+    }
+
+    /// Skips whole packs at a time, so a skip costs one step per pack.
+    fn nth(&mut self, mut skip: usize) -> Option<&'a T> {
+        if skip >= self.remaining {
+            self.remaining = 0;
+            self.front = slice::Iter::default();
+            self.packs = slice::Iter::default();
+            self.back = slice::Iter::default();
+            return None;
+        }
+        loop {
+            let in_front = self.front.len();
+            if skip < in_front {
+                self.remaining -= skip + 1;
+                return self.front.nth(skip);
+            }
+            skip -= in_front;
+            self.remaining -= in_front;
+            match self.packs.next() {
+                Some(pack) => self.front = pack.items().iter(),
+                None => {
+                    // Invariant: the skip is below the elements left, so it ends in the back pack.
+                    self.front = slice::Iter::default();
+                    self.remaining -= skip + 1;
+                    return self.back.nth(skip);
+                }
+            }
+        }
     }
 }
 
@@ -99,8 +128,8 @@ impl<'a, T> IterMut<'a, T> {
     pub(super) fn new(packs: &'a mut [Arc<Pack<T>>], remaining: usize) -> Self {
         Self {
             packs: packs.iter_mut(),
-            front: [].iter_mut(),
-            back: [].iter_mut(),
+            front: slice::IterMut::default(),
+            back: slice::IterMut::default(),
             remaining,
         }
     }

@@ -4,7 +4,7 @@
 
 use axiom_ssz::{
     BitVector, CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Merkleization,
-    ProgressiveList, Ssz,
+    PersistentProgressiveList, Sequence, SequenceMut, Ssz,
 };
 
 use crate::{
@@ -25,25 +25,25 @@ use crate::{
 };
 
 /// The validator registry.
-pub type Validators = ProgressiveList<Validator>;
+pub type Validators = PersistentProgressiveList<Validator>;
 
 /// Validator balances.
-pub type Balances = ProgressiveList<Gwei>;
+pub type Balances = PersistentProgressiveList<Gwei>;
 
 /// Participation flags per validator.
-pub type EpochParticipation = ProgressiveList<ParticipationFlags>;
+pub type EpochParticipation = PersistentProgressiveList<ParticipationFlags>;
 
 /// Inactivity scores per validator.
-pub type InactivityScores = ProgressiveList<u64>;
+pub type InactivityScores = PersistentProgressiveList<u64>;
 
 /// The pending deposit queue.
-pub type PendingDeposits = ProgressiveList<PendingDeposit>;
+pub type PendingDeposits = PersistentProgressiveList<PendingDeposit>;
 
 /// The pending partial withdrawal queue.
-pub type PendingPartialWithdrawals = ProgressiveList<PendingPartialWithdrawal>;
+pub type PendingPartialWithdrawals = PersistentProgressiveList<PendingPartialWithdrawal>;
 
 /// The pending consolidation queue.
-pub type PendingConsolidations = ProgressiveList<PendingConsolidation>;
+pub type PendingConsolidations = PersistentProgressiveList<PendingConsolidation>;
 
 /// Whether each recent slot's payload arrived, indexed by slot.
 pub type ExecutionPayloadAvailability<P> = BitVector<<P as Preset>::SlotsPerHistoricalRoot>;
@@ -454,20 +454,20 @@ impl<P: Preset> CoreState for BeaconState<P> {
         &mut self.eth1_deposit_index
     }
 
-    fn validators(&self) -> &[Validator] {
+    fn validators(&self) -> &Sequence<Validator> {
         &self.validators
     }
 
-    fn validators_mut(&mut self) -> &mut [Validator] {
-        &mut self.validators
+    fn validators_mut(&mut self) -> SequenceMut<'_, Validator> {
+        self.validators.elements_mut()
     }
 
-    fn balances(&self) -> &[Gwei] {
+    fn balances(&self) -> &Sequence<Gwei> {
         &self.balances
     }
 
-    fn balances_mut(&mut self) -> &mut [Gwei] {
-        &mut self.balances
+    fn balances_mut(&mut self) -> SequenceMut<'_, Gwei> {
+        self.balances.elements_mut()
     }
 
     fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {
@@ -527,29 +527,32 @@ impl<P: Preset> CoreState for BeaconState<P> {
 }
 
 impl<P: Preset> ParticipationState for BeaconState<P> {
-    fn previous_epoch_participation(&self) -> &[ParticipationFlags] {
+    fn previous_epoch_participation(&self) -> &Sequence<ParticipationFlags> {
         &self.previous_epoch_participation
     }
 
-    fn current_epoch_participation(&self) -> &[ParticipationFlags] {
+    fn current_epoch_participation(&self) -> &Sequence<ParticipationFlags> {
         &self.current_epoch_participation
     }
 
     fn epoch_participation_mut(
         &mut self,
-    ) -> (&mut [ParticipationFlags], &mut [ParticipationFlags]) {
+    ) -> (
+        SequenceMut<'_, ParticipationFlags>,
+        SequenceMut<'_, ParticipationFlags>,
+    ) {
         (
-            &mut self.previous_epoch_participation[..],
-            &mut self.current_epoch_participation[..],
+            self.previous_epoch_participation.elements_mut(),
+            self.current_epoch_participation.elements_mut(),
         )
     }
 
-    fn inactivity_scores(&self) -> &[u64] {
+    fn inactivity_scores(&self) -> &Sequence<u64> {
         &self.inactivity_scores
     }
 
-    fn inactivity_scores_mut(&mut self) -> &mut [u64] {
-        &mut self.inactivity_scores
+    fn inactivity_scores_mut(&mut self) -> SequenceMut<'_, u64> {
+        self.inactivity_scores.elements_mut()
     }
 
     fn push_participant(&mut self) -> Result<(), CapacityError> {
@@ -656,7 +659,7 @@ impl<P: Preset> PendingQueueState for BeaconState<P> {
         &mut self.earliest_consolidation_epoch
     }
 
-    fn pending_deposits(&self) -> &[PendingDeposit] {
+    fn pending_deposits(&self) -> &Sequence<PendingDeposit> {
         &self.pending_deposits
     }
 
@@ -669,7 +672,7 @@ impl<P: Preset> PendingQueueState for BeaconState<P> {
         self.pending_deposits.drain(..count);
     }
 
-    fn pending_partial_withdrawals(&self) -> &[PendingPartialWithdrawal] {
+    fn pending_partial_withdrawals(&self) -> &Sequence<PendingPartialWithdrawal> {
         &self.pending_partial_withdrawals
     }
 
@@ -685,7 +688,7 @@ impl<P: Preset> PendingQueueState for BeaconState<P> {
         self.pending_partial_withdrawals.drain(..count);
     }
 
-    fn pending_consolidations(&self) -> &[PendingConsolidation] {
+    fn pending_consolidations(&self) -> &Sequence<PendingConsolidation> {
         &self.pending_consolidations
     }
 
@@ -803,15 +806,16 @@ mod tests {
         state.push_participant().unwrap();
 
         assert_eq!(state.validators().len(), 1);
-        assert_eq!(state.balances(), [Gwei(32_000_000_000)]);
+        assert_eq!(state.balances().to_vec(), [Gwei(32_000_000_000)]);
         assert_eq!(
-            state.epoch_participation_mut(),
-            (
-                &mut [ParticipationFlags::default()][..],
-                &mut [ParticipationFlags::default()][..]
-            )
+            state.previous_epoch_participation().to_vec(),
+            [ParticipationFlags::default()]
         );
-        assert_eq!(state.inactivity_scores(), [0]);
+        assert_eq!(
+            state.current_epoch_participation().to_vec(),
+            [ParticipationFlags::default()]
+        );
+        assert_eq!(state.inactivity_scores().to_vec(), [0]);
     }
 
     #[test]

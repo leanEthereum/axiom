@@ -1,6 +1,6 @@
 //! The upgrade from Bellatrix to Capella.
 
-use axiom_ssz::List;
+use axiom_ssz::PersistentList;
 use axiom_types::{
     ChainConfig, Preset, Root, ValidatorIndex, WithdrawalIndex,
     accessors::CoreState,
@@ -73,7 +73,7 @@ impl<P: Preset> Upgrade for BeaconState<P> {
             },
             next_withdrawal_index: WithdrawalIndex(0),
             next_withdrawal_validator_index: ValidatorIndex(0),
-            historical_summaries: List::new(),
+            historical_summaries: PersistentList::new(),
         })
     }
 }

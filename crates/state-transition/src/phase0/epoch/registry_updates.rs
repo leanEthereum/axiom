@@ -95,7 +95,7 @@ impl RegistryUpdates {
             .collect();
         queue.sort_unstable();
 
-        let validators = registry.state.beacon.validators_mut();
+        let mut validators = registry.state.beacon.validators_mut();
         for (_, index) in queue.into_iter().take(self.churn_limit as usize) {
             validators[index].activation_epoch = self.activation_epoch;
         }

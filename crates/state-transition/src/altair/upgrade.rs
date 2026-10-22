@@ -1,6 +1,6 @@
 //! The upgrade from phase0 to Altair.
 
-use axiom_ssz::List;
+use axiom_ssz::PersistentList;
 use axiom_types::{
     ChainConfig, ParticipationFlags, Preset,
     accessors::{CoreState, ParticipationState},
@@ -34,12 +34,12 @@ impl<P: Preset> Upgrade for BeaconState<P> {
         let epoch = pre.current_epoch();
         let registry_size = pre.validators.len();
         let empty_flags = || {
-            List::try_from(vec![ParticipationFlags::default(); registry_size]).map_err(|source| {
-                StateError::Capacity {
+            PersistentList::repeat(&ParticipationFlags::default(), registry_size).map_err(
+                |source| StateError::Capacity {
                     list: "epoch participation",
                     source,
-                }
-            })
+                },
+            )
         };
         let previous_epoch_attestations = pre.previous_epoch_attestations;
         let mut post = Self {
@@ -68,7 +68,7 @@ impl<P: Preset> Upgrade for BeaconState<P> {
             previous_justified_checkpoint: pre.previous_justified_checkpoint,
             current_justified_checkpoint: pre.current_justified_checkpoint,
             finalized_checkpoint: pre.finalized_checkpoint,
-            inactivity_scores: List::try_from(vec![0; registry_size]).map_err(|source| {
+            inactivity_scores: PersistentList::repeat(&0, registry_size).map_err(|source| {
                 StateError::Capacity {
                     list: "inactivity scores",
                     source,
@@ -112,7 +112,7 @@ impl<P: Preset> ParticipationTranslation<'_, P> {
         let attesters = state
             .attesters(data.slot, [data.index], attestation.aggregation_bits.iter())
             .map_err(failed)?;
-        let (previous, _) = state.beacon.epoch_participation_mut();
+        let (mut previous, _) = state.beacon.epoch_participation_mut();
         for index in attesters {
             let participation = &mut previous[index.as_usize()];
             for flag in &flags {

@@ -8,7 +8,8 @@ use std::{env, hint::black_box};
 use axiom_ssz::{Length, Ssz};
 use axiom_state_transition::State;
 use axiom_types::{
-    BlsPubkey, Bytes32, ChainConfig, Epoch, ForkName, Gwei, Mainnet, ParticipationFlags, Preset, Root, Slot,
+    BlsPubkey, Bytes32, ChainConfig, Epoch, ForkName, Gwei, Mainnet, ParticipationFlags, Preset,
+    Root, Slot,
     fulu::{
         Balances, BeaconState, BlockRoots, EpochParticipation, InactivityScores, RandaoMixes,
         StateRoots, Validator, Validators,
@@ -35,7 +36,7 @@ struct Spread(u64);
 
 impl Spread {
     /// The next index below a bound.
-    fn next_below(&mut self, bound: usize) -> usize {
+    const fn next_below(&mut self, bound: usize) -> usize {
         // Constants of Knuth's MMIX linear congruential generator.
         self.0 = self
             .0
@@ -187,4 +188,6 @@ fn main() {
         });
         group.finish();
     }
+
+    criterion.final_summary();
 }

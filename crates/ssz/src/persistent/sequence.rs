@@ -31,8 +31,16 @@ use crate::{
 /// The cached root, when set, is the root of the elements as they are now.
 /// Every edit passes through one method, which clears it first.
 pub struct Sequence<T> {
-    /// The packs, shared with clones until one of them edits the table.
-    packs: Arc<Vec<Arc<Pack<T>>>>,
+    /// The table of packs, shared with clones until one of them edits it.
+    table: Arc<Table<T>>,
+}
+
+/// The packs of a sequence, with its length, layout, and cached root.
+///
+/// One pointer to it is the whole sequence, so a sequence is one word wide.
+struct Table<T> {
+    /// The packs, in order.
+    packs: Vec<Arc<Pack<T>>>,
     /// Number of elements.
     len: usize,
     /// Pack boundaries and the tree shape, fixed by the owning collection.
@@ -41,15 +49,22 @@ pub struct Sequence<T> {
     root: OnceLock<Root>,
 }
 
+impl<T> Clone for Table<T> {
+    /// Copies the pack pointers, sharing every pack.
+    fn clone(&self) -> Self {
+        Self {
+            packs: self.packs.clone(),
+            len: self.len,
+            layout: self.layout,
+            root: self.root.clone(),
+        }
+    }
+}
+
 impl<T> Sequence<T> {
     /// An empty sequence.
     pub(crate) fn empty(layout: Layout) -> Self {
-        Self {
-            packs: Arc::new(Vec::new()),
-            len: 0,
-            layout,
-            root: OnceLock::new(),
-        }
+        Self::from_packs(layout, Vec::new(), 0)
     }
 
     /// A sequence holding the given elements, moved into packs.
@@ -64,35 +79,42 @@ impl<T> Sequence<T> {
             }
             packs.push(Arc::new(Pack::new(pack)));
         }
+        Self::from_packs(layout, packs, len)
+    }
+
+    /// A sequence over packs holding that many elements in total.
+    fn from_packs(layout: Layout, packs: Vec<Arc<Pack<T>>>, len: usize) -> Self {
         Self {
-            packs: Arc::new(packs),
-            len,
-            layout,
-            root: OnceLock::new(),
+            table: Arc::new(Table {
+                packs,
+                len,
+                layout,
+                root: OnceLock::new(),
+            }),
         }
     }
 
     /// Number of elements.
     #[must_use]
-    pub const fn len(&self) -> usize {
-        self.len
+    pub fn len(&self) -> usize {
+        self.table.len
     }
 
     /// Whether there are no elements.
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn is_empty(&self) -> bool {
+        self.table.len == 0
     }
 
     /// The element at an index, if there is one.
     #[inline]
     #[must_use]
     pub fn get(&self, index: usize) -> Option<&T> {
-        if index >= self.len {
+        if index >= self.table.len {
             return None;
         }
-        let (pack, position) = self.layout.locate(index);
-        self.packs.get(pack)?.items().get(position)
+        let (pack, position) = self.table.layout.locate(index);
+        self.table.packs.get(pack)?.items().get(position)
     }
 
     /// The first element, if there is one.
@@ -104,12 +126,16 @@ impl<T> Sequence<T> {
     /// The last element, if there is one.
     #[must_use]
     pub fn last(&self) -> Option<&T> {
-        self.len.checked_sub(1).and_then(|index| self.get(index))
+        self.table
+            .len
+            .checked_sub(1)
+            .and_then(|index| self.get(index))
     }
 
     /// Iterator over the elements, in order.
+    #[must_use]
     pub fn iter(&self) -> Iter<'_, T> {
-        Iter::new(&self.packs, self.len)
+        Iter::new(&self.table.packs, self.table.len)
     }
 
     /// Whether some element equals the given one.
@@ -126,8 +152,8 @@ impl<T> Sequence<T> {
     where
         T: Clone,
     {
-        let mut items = Vec::with_capacity(self.len);
-        for pack in self.packs.iter() {
+        let mut items = Vec::with_capacity(self.table.len);
+        for pack in &self.table.packs {
             items.extend_from_slice(pack.items());
         }
         items
@@ -135,7 +161,7 @@ impl<T> Sequence<T> {
 
     /// Whether two sequences share their whole table, so they hold the same elements.
     pub(crate) fn shares_packs_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.packs, &other.packs)
+        Arc::ptr_eq(&self.table, &other.table)
     }
 }
 
@@ -161,58 +187,80 @@ impl<T: Clone> Sequence<T> {
             packs.push(pack);
             start += count;
         }
-        Self {
-            packs: Arc::new(packs),
-            len,
-            layout,
-            root: OnceLock::new(),
-        }
+        Self::from_packs(layout, packs, len)
     }
 
     /// The element at an index, for an edit.
     #[inline]
     pub(crate) fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if index >= self.len {
+        if index >= self.table.len {
             return None;
         }
-        let (pack, position) = self.layout.locate(index);
-        let pack = self.packs_mut().get_mut(pack)?;
+        let (pack, position) = self.table.layout.locate(index);
+        let pack = self.table_mut().packs.get_mut(pack)?;
         Arc::make_mut(pack).items_mut().get_mut(position)
+    }
+
+    /// Overwrites every element with the matching one of another sequence of the same length.
+    ///
+    /// Two sequences of one layout then share every pack, cached roots included.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the lengths differ, as copying between slices would.
+    pub(crate) fn copy_from(&mut self, source: &Self) {
+        assert_eq!(
+            self.table.len, source.table.len,
+            "source length {} differs from destination length {}",
+            source.table.len, self.table.len
+        );
+        if self.table.layout == source.table.layout {
+            *self = source.clone();
+        } else {
+            for (target, item) in self.iter_mut().zip(source) {
+                target.clone_from(item);
+            }
+        }
+    }
+
+    /// Overwrites every element with one value, sharing one pack across all full packs.
+    pub(crate) fn fill(&mut self, value: &T) {
+        *self = Self::repeat(self.table.layout, value, self.table.len);
     }
 
     /// Iterator over the elements for edits, in order.
     pub(crate) fn iter_mut(&mut self) -> IterMut<'_, T> {
-        let len = self.len;
-        IterMut::new(self.packs_mut(), len)
+        let table = self.table_mut();
+        IterMut::new(&mut table.packs, table.len)
     }
 
     /// Appends an element.
     pub(crate) fn push(&mut self, item: T) {
-        let layout = self.layout;
-        let (pack, _) = layout.locate(self.len);
-        let packs = self.packs_mut();
-        if pack == packs.len() {
-            packs.push(Arc::new(Pack::new(Vec::with_capacity(
-                layout.capacity(pack),
-            ))));
+        let table = self.table_mut();
+        let (pack, _) = table.layout.locate(table.len);
+        if pack == table.packs.len() {
+            let capacity = table.layout.capacity(pack);
+            table
+                .packs
+                .push(Arc::new(Pack::new(Vec::with_capacity(capacity))));
         }
         // Invariant: the element after the last one lands in the last pack or a new one.
-        if let Some(last) = packs.last_mut() {
+        if let Some(last) = table.packs.last_mut() {
             Arc::make_mut(last).items_mut().push(item);
         }
-        self.len += 1;
+        table.len += 1;
     }
 
     /// Removes and returns the last element.
     pub(crate) fn pop(&mut self) -> Option<T> {
-        let packs = self.packs_mut();
-        let last = packs.last_mut()?;
+        let table = self.table_mut();
+        let last = table.packs.last_mut()?;
         let items = Arc::make_mut(last).items_mut();
         let item = items.pop();
         if items.is_empty() {
-            packs.pop();
+            table.packs.pop();
         }
-        self.len -= 1;
+        table.len -= 1;
         item
     }
 
@@ -220,25 +268,25 @@ impl<T: Clone> Sequence<T> {
     ///
     /// Packs wholly before the cut keep their cached roots.
     pub(crate) fn truncate(&mut self, length: usize) {
-        if length >= self.len {
+        if length >= self.table.len {
             return;
         }
-        let (pack, position) = self.layout.locate(length);
-        let packs = self.packs_mut();
+        let table = self.table_mut();
+        let (pack, position) = table.layout.locate(length);
         if position == 0 {
-            packs.truncate(pack);
+            table.packs.truncate(pack);
         } else {
-            packs.truncate(pack + 1);
-            if let Some(last) = packs.last_mut() {
+            table.packs.truncate(pack + 1);
+            if let Some(last) = table.packs.last_mut() {
                 Arc::make_mut(last).items_mut().truncate(position);
             }
         }
-        self.len = length;
+        table.len = length;
     }
 
     /// Removes every element.
     pub(crate) fn clear(&mut self) {
-        *self = Self::empty(self.layout);
+        *self = Self::empty(self.table.layout);
     }
 
     /// Keeps only the elements the predicate accepts, preserving order.
@@ -278,28 +326,28 @@ impl<T: Clone> Sequence<T> {
         let end = match range.end_bound() {
             Bound::Included(&end) => end + 1,
             Bound::Excluded(&end) => end,
-            Bound::Unbounded => self.len,
+            Bound::Unbounded => self.table.len,
         };
         assert!(
-            start <= end && end <= self.len,
+            start <= end && end <= self.table.len,
             "drain range {start}..{end} is out of bounds for length {}",
-            self.len
+            self.table.len
         );
-        if end == self.len {
+        if end == self.table.len {
             let tail: Vec<T> = self.iter().skip(start).cloned().collect();
             self.truncate(start);
             return tail.into_iter();
         }
         let mut items = self.take_vec();
         let drained: Vec<T> = items.drain(start..end).collect();
-        *self = Self::from_vec(self.layout, items);
+        *self = Self::from_vec(self.table.layout, items);
         drained.into_iter()
     }
 
     /// The elements, moved out where no clone shares them and copied otherwise.
     pub(crate) fn into_vec(self) -> Vec<T> {
-        let mut items = Vec::with_capacity(self.len);
-        for pack in Arc::unwrap_or_clone(self.packs) {
+        let mut items = Vec::with_capacity(self.table.len);
+        for pack in Arc::unwrap_or_clone(self.table).packs {
             match Arc::try_unwrap(pack) {
                 Ok(pack) => items.extend(pack.into_items()),
                 Err(shared) => items.extend_from_slice(shared.items()),
@@ -310,16 +358,17 @@ impl<T: Clone> Sequence<T> {
 
     /// The elements, leaving the sequence empty.
     fn take_vec(&mut self) -> Vec<T> {
-        mem::replace(self, Self::empty(self.layout)).into_vec()
+        mem::replace(self, Self::empty(self.table.layout)).into_vec()
     }
 
     /// The pack table, for an edit, which drops the cached root.
     ///
     /// Copy on write: a table shared with a clone is copied first, sharing its packs.
-    fn packs_mut(&mut self) -> &mut Vec<Arc<Pack<T>>> {
+    fn table_mut(&mut self) -> &mut Table<T> {
+        let table = Arc::make_mut(&mut self.table);
         // Invariant: the root is cleared before any element can change.
-        self.root.take();
-        Arc::make_mut(&mut self.packs)
+        table.root.take();
+        table
     }
 }
 
@@ -332,16 +381,19 @@ impl<T: Ssz + Sync> Sequence<T> {
     /// After an edit, only the edited packs re-hash, then one fold over the pack roots runs.
     /// Many cold packs, as after a decode, hash on all cores.
     pub(crate) fn root(&self) -> Root {
-        *self.root.get_or_init(|| match self.layout.shape {
-            Shape::Binary { depth } => self.binary_root(depth),
-            Shape::Progressive => self.progressive_root(),
-        })
+        *self
+            .table
+            .root
+            .get_or_init(|| match self.table.layout.shape {
+                Shape::Binary { depth } => self.binary_root(depth),
+                Shape::Progressive => self.progressive_root(),
+            })
     }
 
     /// Length of the elements' encoding, in bytes.
     pub(crate) fn encoded_len(&self) -> usize {
         match T::FIXED_SIZE {
-            Some(size) => size * self.len,
+            Some(size) => size * self.table.len,
             None => self
                 .iter()
                 .map(|item| BYTES_PER_LENGTH_OFFSET + item.encoded_len())
@@ -352,14 +404,14 @@ impl<T: Ssz + Sync> Sequence<T> {
     /// Appends the elements' encoding, the same as a slice's.
     pub(crate) fn encode_to(&self, out: &mut Vec<u8>) {
         if T::FIXED_SIZE.is_some() {
-            for pack in self.packs.iter() {
+            for pack in &self.table.packs {
                 Elements::encode_to(pack.items(), out);
             }
             return;
         }
 
         // Phase 1: the offset table, each offset counting the bodies before it.
-        let mut offset = BYTES_PER_LENGTH_OFFSET * self.len;
+        let mut offset = BYTES_PER_LENGTH_OFFSET * self.table.len;
         for item in self {
             out.extend_from_slice(&Offset::encode(offset));
             offset += item.encoded_len();
@@ -383,11 +435,11 @@ impl<T: Ssz + Sync> Sequence<T> {
 
     /// Root of a binary tree: one fold over the cached pack roots.
     fn binary_root(&self, depth: usize) -> Root {
-        let height = self.layout.pack_height;
-        self.hash_cold_packs(&self.packs);
+        let height = self.table.layout.pack_height;
+        self.hash_cold_packs(&self.table.packs);
         // Invariant: the layout caps the pack height at the depth.
         let mut top = Merkleizer::over_subtrees(depth - height, height);
-        for pack in self.packs.iter() {
+        for pack in &self.table.packs {
             top.push(pack.root(height));
         }
         top.finish()
@@ -403,14 +455,18 @@ impl<T: Ssz + Sync> Sequence<T> {
     ///
     /// See EIP-7916.
     fn progressive_root(&self) -> Root {
-        let leaves = Elements::<T>::leaf_count(self.len);
-        let per_leaf = self.layout.per_leaf;
-        let height = self.layout.pack_height;
+        let leaves = Elements::<T>::leaf_count(self.table.len);
+        let per_leaf = self.table.layout.per_leaf;
+        let height = self.table.layout.pack_height;
         let head = Layout::head_subtrees();
         let mut subtrees = Vec::new();
 
         // Phase 1: the subtrees smaller than a pack, all inside the first pack.
-        let first = self.packs.first().map_or(&[][..], |pack| pack.items());
+        let first = self
+            .table
+            .packs
+            .first()
+            .map_or(&[][..], |pack| pack.items());
         for subtree in 0..head {
             let start = Layout::subtree_offset(subtree);
             if start >= leaves {
@@ -424,7 +480,7 @@ impl<T: Ssz + Sync> Sequence<T> {
         }
 
         // Phase 2: every later subtree spans whole packs, aligned to its start.
-        if let Some(rest) = self.packs.get(1..) {
+        if let Some(rest) = self.table.packs.get(1..) {
             self.hash_cold_packs(rest);
         }
         let mut subtree = head;
@@ -434,7 +490,7 @@ impl<T: Ssz + Sync> Sequence<T> {
             // Invariant: the first subtree past the first pack has at least 2^height leaves.
             let depth = 2 * subtree - height;
             let mut top = Merkleizer::over_subtrees(depth, height);
-            for pack in self.packs.iter().skip(first_pack).take(1 << depth) {
+            for pack in self.table.packs.iter().skip(first_pack).take(1 << depth) {
                 top.push(pack.root(height));
             }
             subtrees.push(top.finish());
@@ -450,7 +506,7 @@ impl<T: Ssz + Sync> Sequence<T> {
 
     /// Hashes every pack whose root is not cached, on all cores when there are many.
     fn hash_cold_packs(&self, packs: &[Arc<Pack<T>>]) {
-        let height = self.layout.pack_height;
+        let height = self.table.layout.pack_height;
         let cold: Vec<&Pack<T>> = packs
             .iter()
             .filter(|pack| !pack.is_hashed())
@@ -466,10 +522,7 @@ impl<T> Clone for Sequence<T> {
     /// Shares the pack table, so a clone costs one reference count.
     fn clone(&self) -> Self {
         Self {
-            packs: Arc::clone(&self.packs),
-            len: self.len,
-            layout: self.layout,
-            root: self.root.clone(),
+            table: Arc::clone(&self.table),
         }
     }
 }
@@ -487,7 +540,7 @@ impl<T> Index<usize> for Sequence<T> {
             Some(item) => item,
             None => panic!(
                 "index out of bounds: the len is {} but the index is {index}",
-                self.len
+                self.table.len
             ),
         }
     }
@@ -520,17 +573,18 @@ impl<T: fmt::Debug> fmt::Debug for Sequence<T> {
 impl<T: PartialEq> PartialEq for Sequence<T> {
     /// Compares elements, skipping packs the two sequences share.
     fn eq(&self, other: &Self) -> bool {
-        if self.len != other.len {
+        if self.table.len != other.table.len {
             return false;
         }
         if self.shares_packs_with(other) {
             return true;
         }
-        if self.layout == other.layout {
+        if self.table.layout == other.table.layout {
             return self
+                .table
                 .packs
                 .iter()
-                .zip(other.packs.iter())
+                .zip(other.table.packs.iter())
                 .all(|(left, right)| Arc::ptr_eq(left, right) || left.items() == right.items());
         }
         self.iter().eq(other.iter())
@@ -541,7 +595,7 @@ impl<T: Eq> Eq for Sequence<T> {}
 
 impl<T: Hash> Hash for Sequence<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.len.hash(state);
+        self.table.len.hash(state);
         for item in self {
             item.hash(state);
         }
@@ -550,14 +604,17 @@ impl<T: Hash> Hash for Sequence<T> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::{Const, List, PersistentList};
 
     /// Number of packs two sequences hold at the same address.
     fn shared_packs<T>(left: &Sequence<T>, right: &Sequence<T>) -> usize {
-        left.packs
+        left.table
+            .packs
             .iter()
-            .zip(right.packs.iter())
+            .zip(right.table.packs.iter())
             .filter(|(left, right)| Arc::ptr_eq(left, right))
             .count()
     }
@@ -601,6 +658,7 @@ mod tests {
         list[5000] = 7;
 
         let cold: Vec<usize> = list
+            .table
             .packs
             .iter()
             .enumerate()
@@ -608,7 +666,7 @@ mod tests {
             .map(|(index, _)| index)
             .collect();
         assert_eq!(cold, [19]);
-        assert!(list.root.get().is_none());
+        assert!(list.table.root.get().is_none());
     }
 
     #[test]
@@ -633,5 +691,29 @@ mod tests {
         left.hash_tree_root();
 
         assert_eq!(left, right);
+    }
+
+    proptest! {
+        #[test]
+        fn iteration_from_both_ends_matches_a_slice(
+            length in 0_usize..2000,
+            steps in proptest::collection::vec((0_u8..3, 0_usize..700), 0..20),
+        ) {
+            // Fixture state: u64 in packs of 256, walked by next, next_back, and long skips.
+            let values: Vec<u64> = (0..length as u64).collect();
+            let list = PersistentList::<u64, Const<4096>>::try_from(values.clone()).unwrap();
+            let mut persistent = list.iter();
+            let mut plain = values.iter();
+
+            for (kind, skip) in steps {
+                match kind {
+                    0 => prop_assert_eq!(persistent.next(), plain.next()),
+                    1 => prop_assert_eq!(persistent.next_back(), plain.next_back()),
+                    _ => prop_assert_eq!(persistent.nth(skip), plain.nth(skip)),
+                }
+                prop_assert_eq!(persistent.len(), plain.len());
+            }
+            prop_assert!(persistent.eq(plain));
+        }
     }
 }
