@@ -42,7 +42,7 @@ pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use client_stats::{ClientStatsSettings, DEFAULT_PUSH_PERIOD};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
-    AnchorSource, BuilderClientSettings, BuilderFallback, DatabaseSettings, EngineConfig,
+    AnchorSource, ApiTls, BuilderClientSettings, BuilderFallback, DatabaseSettings, EngineConfig,
     HistorySettings, NetworkSettings, NodeConfig, ProposerSettings, SlasherSetup,
 };
 pub use engine::ExecutionLayer;

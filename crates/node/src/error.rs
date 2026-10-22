@@ -6,7 +6,7 @@ use axiom_builder_client::BuilderError;
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
-use axiom_http::HttpError;
+use axiom_http::{HttpError, TlsSetupError};
 use axiom_light_client::LightClientError;
 use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
@@ -172,6 +172,9 @@ pub enum NodeError {
         #[source]
         error: io::Error,
     },
+    /// The beacon API's TLS certificate or key cannot load.
+    #[error("beacon API TLS: {0}")]
+    Tls(#[from] TlsSetupError),
     /// A server failed to bind its address.
     #[error("{context} on {address}: {error}")]
     Bind {

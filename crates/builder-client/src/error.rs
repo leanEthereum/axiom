@@ -14,7 +14,7 @@ use crate::{BidError, RevealError};
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BuilderError {
-    /// The relay URL is not a plain http URL, with an optional builder key as user name.
+    /// The relay URL is not an http or https URL, with an optional builder key as user name.
     #[error("relay URL {url:?} is not of the form http://[0x<builder key>@]host[:port][/path]")]
     InvalidUrl {
         /// The URL as configured.

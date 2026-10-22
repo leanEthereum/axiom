@@ -8,7 +8,7 @@ use thiserror::Error;
 /// Why a request to a keymanager API failed.
 #[derive(Debug, Error)]
 pub enum KeymanagerClientError {
-    /// The client could not be reached, or the URL is not a plain http URL.
+    /// The client could not be reached, or the URL is not an http or https URL.
     #[error("keymanager API unreachable: {0}")]
     Http(#[from] HttpError),
     /// The client answered with an error status.

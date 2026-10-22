@@ -34,7 +34,7 @@ impl BeaconClient {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not a plain http URL.
+    /// Fails when the URL is not an http or https URL.
     pub fn new(url: &str, config: ClientConfig) -> Result<Self, HttpError> {
         Ok(Self {
             http: Client::new(Endpoint::parse(url)?, config),

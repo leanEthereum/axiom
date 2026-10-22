@@ -16,7 +16,7 @@
 //! So every check that can fail runs before signing, and the local payload is the fallback.
 //! After signing a blinded block, the proposer is bound to it.
 //!
-//! Relays are reached over plain http, since this codebase has no TLS.
+//! Relays are reached over https, or plain http for a local sidecar.
 //! The usual deployment is a local sidecar that fans out to remote relays.
 //!
 //! # Spec mapping

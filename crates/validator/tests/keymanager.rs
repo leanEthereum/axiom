@@ -605,7 +605,7 @@ fn remote_keys_import_list_and_delete() {
             entry(seven, Some(url)),
             entry(seven, Some(url)),
             entry(eight, None),
-            entry(nine, Some("https://signer")),
+            entry(nine, Some("ftp://signer")),
         ]),
     )]);
     assert_eq!(
@@ -617,7 +617,7 @@ fn remote_keys_import_list_and_delete() {
                 status("duplicate"),
                 error("no remote signer URL given".to_owned()),
                 error(format!(
-                    "remote signer URL \"https://signer\" is not a plain http URL: {}",
+                    "remote signer URL \"ftp://signer\" is not an http or https URL: {}",
                     HttpError::InvalidUrl
                 )),
             ])

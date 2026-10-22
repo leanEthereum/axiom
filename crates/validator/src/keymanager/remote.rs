@@ -158,7 +158,7 @@ impl RemoteKeys {
                 }
                 Err(error) => {
                     return ImportStatus::Error(format!(
-                        "remote signer URL {url:?} is not a plain http URL: {error}"
+                        "remote signer URL {url:?} is not an http or https URL: {error}"
                     ));
                 }
             },

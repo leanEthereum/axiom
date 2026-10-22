@@ -137,6 +137,7 @@ impl NodeFlags {
                 chain: self.behaviour.chain_settings(storage.pruning),
                 database: storage.database,
                 http_allow_origin: services.http_allow_origin,
+                http_tls: services.http_tls,
                 metrics_allow_origin: services.metrics_allow_origin,
                 shutdown_after_sync: self.behaviour.shutdown_after_sync,
                 monitor,

@@ -10,7 +10,7 @@ use std::{
 
 use axiom_builder_client::{CircuitBreaker, RelayClient, RelayTimeouts};
 use axiom_execution::{EngineClient, JwtSecret};
-use axiom_http::{Cors, Server, ServerConfig};
+use axiom_http::{Cors, Server, ServerConfig, ServerIdentity};
 use axiom_p2p::{
     Multiaddr,
     eth::MessageIds,
@@ -326,6 +326,8 @@ pub struct NodeConfig {
     pub database: DatabaseSettings,
     /// The browser origins the beacon API admits; none admits pages from its own address only.
     pub http_allow_origin: Option<Cors>,
+    /// The certificate and key to serve the beacon API over TLS; none serves plain http.
+    pub http_tls: Option<ApiTls>,
     /// The browser origins the metrics endpoint admits; none admits its own address only.
     pub metrics_allow_origin: Option<Cors>,
     /// Whether the node stops once its head reaches the wall clock.
@@ -334,6 +336,15 @@ pub struct NodeConfig {
     pub monitor: MonitorSettings,
     /// Where the node pushes its client stats; none pushes nothing.
     pub client_stats: Option<ClientStatsSettings>,
+}
+
+/// The PEM files of the beacon API's TLS identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiTls {
+    /// The certificate chain, the server's own certificate first.
+    pub certificate: PathBuf,
+    /// The private key, unencrypted, in PKCS#8, SEC 1 or PKCS#1 form.
+    pub key: PathBuf,
 }
 
 /// How the node builds blocks for the validators it serves.
@@ -635,14 +646,18 @@ impl NodeConfig {
                 .unwrap_or_else(|| Cors::local(address))
                 .with_header("eth-consensus-version");
             let router = BeaconApi::router(handle.clone(), api).with_cors(cors);
-            let server = Server::bind(address, router, ServerConfig::default())
+            let mut server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Bind {
                     context: "binding the beacon API",
                     address,
                     error,
                 })?;
-            info!(%address, "beacon API listening");
+            if let Some(tls) = &self.http_tls {
+                let identity = ServerIdentity::from_pem_files(&tls.certificate, &tls.key)?;
+                server = server.with_tls(identity);
+            }
+            info!(%address, tls = self.http_tls.is_some(), "beacon API listening");
             let signal = ShutdownSignal(stopped.clone());
             servers.push(task::spawn(server.serve(signal.wait())));
         }
