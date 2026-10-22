@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use axiom_json::{Json, Object, data};
+use axiom_json::{Data, Json, Object};
 use thiserror::Error;
 
 use super::{
@@ -59,7 +59,7 @@ impl JwtSecret {
         } else {
             format!("0x{text}")
         };
-        data::decode_array::<32>(&prefixed)
+        <[u8; 32]>::from_data(&prefixed)
             .map(Self)
             .map_err(|_| JwtError::InvalidSecret)
     }

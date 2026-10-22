@@ -73,62 +73,45 @@ impl Number {
     ///     exp    = ( "e" / "E" ) [ "-" / "+" ] 1*digit
     /// ```
     pub(crate) fn scan(bytes: &[u8], start: usize) -> Result<usize, usize> {
-        let mut at = start;
+        let mut scanner = Scanner { bytes, at: start };
 
         // Optional minus sign.
         // A plus sign is not part of the grammar.
-        if bytes.get(at) == Some(&b'-') {
-            at += 1;
-        }
+        scanner.eat(b"-");
 
         // Integer part: a lone zero, or a nonzero digit and any digits after it.
-        match bytes.get(at) {
-            // "0" ends the integer part; "01" is rejected by the caller seeing a digit next.
-            Some(b'0') => at += 1,
-            Some(b'1'..=b'9') => at = skip_digits(bytes, at + 1),
+        match scanner.peek() {
+            // "0" ends the integer part; "01" is rejected below by the digit after it.
+            Some(b'0') => scanner.at += 1,
+            Some(b'1'..=b'9') => {
+                scanner.at += 1;
+                scanner.digits();
+            }
             // "-", "-a", or "." with no digit before it.
-            _ => return Err(at),
+            _ => return Err(scanner.at),
         }
 
         // Optional fraction: a dot and at least one digit.
-        if bytes.get(at) == Some(&b'.') {
-            let digits = at + 1;
-            at = skip_digits(bytes, digits);
-            // "1." has no digit after the dot.
-            if at == digits {
-                return Err(at);
-            }
+        // "1." has no digit after the dot.
+        if scanner.eat(b".") && scanner.digits() == 0 {
+            return Err(scanner.at);
         }
 
         // Optional exponent: e or E, an optional sign, and at least one digit.
-        if matches!(bytes.get(at), Some(b'e' | b'E')) {
-            at += 1;
-            if matches!(bytes.get(at), Some(b'+' | b'-')) {
-                at += 1;
-            }
-            let digits = at;
-            at = skip_digits(bytes, digits);
-            // "1e" or "1e+" has no exponent digit.
-            if at == digits {
-                return Err(at);
+        // "1e" or "1e+" has no exponent digit.
+        if scanner.eat(b"eE") {
+            scanner.eat(b"+-");
+            if scanner.digits() == 0 {
+                return Err(scanner.at);
             }
         }
 
         // A digit right after a lone zero means a leading zero, as in "012".
-        if bytes.get(at).is_some_and(u8::is_ascii_digit) {
-            return Err(at);
+        if scanner.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+            return Err(scanner.at);
         }
-        Ok(at)
+        Ok(scanner.at)
     }
-}
-
-/// Advances past a run of ASCII digits.
-fn skip_digits(bytes: &[u8], mut at: usize) -> usize {
-    // Stop at the first non-digit or at the end of the input.
-    while bytes.get(at).is_some_and(u8::is_ascii_digit) {
-        at += 1;
-    }
-    at
 }
 
 impl FromStr for Number {
@@ -176,6 +159,38 @@ impl NumberError {
     #[must_use]
     pub const fn offset(&self) -> usize {
         self.offset
+    }
+}
+
+/// A cursor that walks the bytes of one number.
+struct Scanner<'a> {
+    /// The whole input.
+    bytes: &'a [u8],
+    /// Offset of the next unread byte.
+    at: usize,
+}
+
+impl Scanner<'_> {
+    /// The next byte, if any.
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.at).copied()
+    }
+
+    /// Steps past the next byte when it is one of the given ones.
+    fn eat(&mut self, accepted: &[u8]) -> bool {
+        let found = self.peek().is_some_and(|byte| accepted.contains(&byte));
+        self.at += usize::from(found);
+        found
+    }
+
+    /// Steps past a run of ASCII digits and returns how many there were.
+    fn digits(&mut self) -> usize {
+        let start = self.at;
+        // Stop at the first non-digit or at the end of the input.
+        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
+            self.at += 1;
+        }
+        self.at - start
     }
 }
 

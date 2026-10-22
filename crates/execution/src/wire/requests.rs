@@ -13,7 +13,7 @@
 //! See `get_execution_requests_list` in the Electra beacon chain spec,
 //! and its inverse `get_execution_requests` in the Electra validator spec.
 
-use axiom_json::{Json, data};
+use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
 use axiom_types::{
     ExecutionRequests, Preset,
@@ -117,7 +117,7 @@ impl<P: Preset> JsonCodec for ExecutionRequests<P> {
         Json::Array(
             encode_list(self)
                 .iter()
-                .map(|element| Json::String(data::encode(element)))
+                .map(|element| Json::String(element.to_data()))
                 .collect(),
         )
     }

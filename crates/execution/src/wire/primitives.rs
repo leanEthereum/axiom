@@ -7,7 +7,7 @@
 //!     lists and vectors          array      element by element
 //! ```
 
-use axiom_json::{HexError, Json, data, quantity};
+use axiom_json::{Data, HexError, Json, Quantity};
 use axiom_ssz::{ByteList, ByteVector, Length, List, U256, Vector};
 use axiom_types::{
     Bytes32, ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, ValidatorIndex,
@@ -35,17 +35,17 @@ const fn hex_error(error: HexError) -> WireError {
 
 /// Reads a QUANTITY of up to 64 bits.
 fn read_quantity(value: &Json) -> Result<u64, WireError> {
-    quantity::decode(text(value)?).map_err(hex_error)
+    u64::from_quantity(text(value)?).map_err(hex_error)
 }
 
 /// Reads a DATA of exactly N bytes.
 pub(crate) fn read_fixed<const N: usize>(value: &Json) -> Result<[u8; N], WireError> {
-    data::decode_array::<N>(text(value)?).map_err(hex_error)
+    <[u8; N]>::from_data(text(value)?).map_err(hex_error)
 }
 
 impl JsonCodec for u64 {
     fn to_json(&self) -> Json {
-        Json::String(quantity::encode(*self))
+        Json::String(self.to_quantity())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -55,11 +55,11 @@ impl JsonCodec for u64 {
 
 impl JsonCodec for U256 {
     fn to_json(&self) -> Json {
-        Json::String(quantity::encode_u256(self))
+        Json::String(self.to_quantity())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        quantity::decode_u256(text(value)?).map_err(hex_error)
+        Self::from_quantity(text(value)?).map_err(hex_error)
     }
 }
 
@@ -115,7 +115,7 @@ impl JsonCodec for ValidatorIndex {
 
 impl JsonCodec for Hash32 {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -125,7 +125,7 @@ impl JsonCodec for Hash32 {
 
 impl JsonCodec for Bytes32 {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -135,7 +135,7 @@ impl JsonCodec for Bytes32 {
 
 impl JsonCodec for Root {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -145,7 +145,7 @@ impl JsonCodec for Root {
 
 impl JsonCodec for ExecutionAddress {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -155,7 +155,7 @@ impl JsonCodec for ExecutionAddress {
 
 impl JsonCodec for VersionedHash {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -165,7 +165,7 @@ impl JsonCodec for VersionedHash {
 
 impl JsonCodec for KzgCommitment {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -175,7 +175,7 @@ impl JsonCodec for KzgCommitment {
 
 impl JsonCodec for KzgProof {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -186,17 +186,17 @@ impl JsonCodec for KzgProof {
 impl JsonCodec for Vec<u8> {
     /// A DATA of any length.
     fn to_json(&self) -> Json {
-        Json::String(data::encode(self))
+        Json::String(self.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        data::decode(text(value)?).map_err(hex_error)
+        Self::from_data(text(value)?).map_err(hex_error)
     }
 }
 
 impl<N: Length> JsonCodec for ByteVector<N> {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(self))
+        Json::String(self.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -209,7 +209,7 @@ impl<N: Length> JsonCodec for ByteVector<N> {
                 actual: (text.len() - 2) / 2,
             }));
         }
-        let bytes = data::decode(text).map_err(hex_error)?;
+        let bytes = Vec::<u8>::from_data(text).map_err(hex_error)?;
         Self::try_from(bytes.as_slice()).map_err(|_| {
             WireError::new(WireErrorKind::WrongLength {
                 expected: N::LEN,
@@ -221,11 +221,11 @@ impl<N: Length> JsonCodec for ByteVector<N> {
 
 impl<N: Length> JsonCodec for ByteList<N> {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(self))
+        Json::String(self.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        let bytes = data::decode(text(value)?).map_err(hex_error)?;
+        let bytes = Vec::<u8>::from_data(text(value)?).map_err(hex_error)?;
         let actual = bytes.len();
         Self::try_from(bytes).map_err(|_| {
             WireError::new(WireErrorKind::TooLong {
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn fixed_bytes_check_length() {
         // A 20-byte address given 19 bytes.
-        let short = Json::String(data::encode(&[0x11; 19]));
+        let short = Json::String([0x11; 19].to_data());
         assert_eq!(
             ExecutionAddress::from_json(&short),
             Err(WireError::new(WireErrorKind::WrongLength {
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(error.kind(), &WireErrorKind::Hex(HexError::MissingPrefix));
 
         // A 3-byte list against a 2-byte limit.
-        let bytes = Json::String(data::encode(&[1, 2, 3]));
+        let bytes = Json::String([1, 2, 3].to_data());
         assert_eq!(
             ByteList::<Const<2>>::from_json(&bytes),
             Err(WireError::new(WireErrorKind::TooLong {
@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn byte_vector_length_is_checked_before_decoding() {
         // Four bytes of DATA against a vector of eight.
-        let four = Json::String(data::encode(&[0; 4]));
+        let four = Json::String([0; 4].to_data());
         assert_eq!(
             ByteVector::<Const<8>>::from_json(&four),
             Err(WireError::new(WireErrorKind::WrongLength {

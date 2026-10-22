@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use axiom_json::{Json, data};
+use axiom_json::{Data, Json};
 use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, Withdrawals};
 
 use super::{Fields, JsonCodec, PayloadStatus, nullable, object, primitives::read_fixed};
@@ -111,7 +111,7 @@ pub struct PayloadId(pub [u8; 8]);
 
 impl JsonCodec for PayloadId {
     fn to_json(&self) -> Json {
-        Json::String(data::encode(&self.0))
+        Json::String(self.0.to_data())
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
@@ -121,7 +121,7 @@ impl JsonCodec for PayloadId {
 
 impl fmt::Display for PayloadId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&data::encode(&self.0))
+        f.write_str(&self.0.to_data())
     }
 }
 
