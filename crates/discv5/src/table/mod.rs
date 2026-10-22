@@ -108,6 +108,7 @@ impl RoutingTable {
 
     /// Offers a record to the table.
     pub fn insert(&mut self, enr: Enr, now: Duration) -> InsertOutcome {
+        // The local node files nowhere.
         let node = enr.node_id();
         let Some(index) = self.bucket_index(&node) else {
             return InsertOutcome::LocalNode;
@@ -157,6 +158,7 @@ impl RoutingTable {
     ///
     /// An existing entry being updated is left out of the count.
     fn ip_allowed(&self, index: usize, enr: &Enr, updating: Option<&NodeId>) -> bool {
+        // Without limits or without an IPv4 address, nothing caps the record.
         let (Some(limits), Some(ip)) = (self.config.ip_limits, enr.endpoints().ip4) else {
             return true;
         };
@@ -172,6 +174,7 @@ impl RoutingTable {
     ///
     /// A newcomer waiting on this node gives up: the incumbent stays.
     pub fn record_success(&mut self, node: &NodeId) {
+        // Note whether the node was the one a candidate challenges, before it moves.
         let Some(index) = self.bucket_index(node) else {
             return;
         };
@@ -197,6 +200,7 @@ impl RoutingTable {
     ///
     /// Whether the node was evicted.
     pub fn record_failure(&mut self, node: &NodeId) -> bool {
+        // The entry decides from its own record whether this miss is one too many.
         let Some(index) = self.bucket_index(node) else {
             return false;
         };
@@ -219,6 +223,7 @@ impl RoutingTable {
     ///
     /// Reaching the deadline means the stalest node never failed, so it keeps its slot.
     pub fn expire_pending(&mut self, now: Duration) {
+        // Each bucket has at most one candidate, so one pass suffices.
         for bucket in &mut self.buckets {
             if bucket
                 .pending()
@@ -232,6 +237,7 @@ impl RoutingTable {
     /// The earliest candidate deadline.
     #[must_use]
     pub fn next_pending_deadline(&self) -> Option<Duration> {
+        // The driver needs only the earliest one.
         self.buckets
             .iter()
             .filter_map(|bucket| bucket.pending().map(|pending| pending.deadline))
@@ -240,6 +246,7 @@ impl RoutingTable {
 
     /// Removes a node outright.
     pub fn remove(&mut self, node: &NodeId) -> Option<Entry> {
+        // A node lives only in the bucket of its distance.
         let index = self.bucket_index(node)?;
         self.buckets[index].remove(node)
     }
@@ -247,6 +254,7 @@ impl RoutingTable {
     /// The entry of a node.
     #[must_use]
     pub fn get(&self, node: &NodeId) -> Option<&Entry> {
+        // A node lives only in the bucket of its distance.
         let index = self.bucket_index(node)?;
         self.buckets[index].get(node)
     }
@@ -292,6 +300,7 @@ impl RoutingTable {
     /// Verified records at a distance from the local node, for a FINDNODE answer.
     #[must_use]
     pub fn verified_at(&self, distance: LogDistance) -> Vec<Enr> {
+        // Unverified nodes may be dead or fake, so they are never relayed.
         self.bucket(distance)
             .map(|bucket| {
                 bucket
@@ -306,6 +315,7 @@ impl RoutingTable {
 
     /// The stalest record of a random non-empty bucket, the next liveness check.
     pub fn revalidation_target(&self, rng: &mut Csprng) -> Option<Enr> {
+        // A uniform bucket, then its stalest entry: the one most likely to have gone away.
         let filled: Vec<&KBucket> = self.buckets.iter().filter(|b| !b.is_empty()).collect();
         if filled.is_empty() {
             return None;

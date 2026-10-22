@@ -62,6 +62,7 @@ impl LogDistance {
     /// Bucket i holds distance i + 1, so 256 buckets cover distances 1 to 256.
     #[must_use]
     pub const fn bucket(self) -> Option<usize> {
+        // The local node has no bucket; every other distance shifts down by one.
         match self.0 {
             0 => None,
             value => Some(value as usize - 1),

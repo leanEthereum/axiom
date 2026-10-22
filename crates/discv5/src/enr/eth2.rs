@@ -103,6 +103,7 @@ impl Eth2Fields {
     /// Whether the node subscribes to an attestation subnet.
     #[must_use]
     pub fn on_attestation_subnet(&self, subnet: usize) -> bool {
+        // A missing bitfield or an out-of-range subnet reads as unsubscribed.
         self.attnets
             .as_ref()
             .and_then(|bits| bits.get(subnet))
@@ -112,6 +113,7 @@ impl Eth2Fields {
     /// Whether the node subscribes to a sync committee subnet.
     #[must_use]
     pub fn on_sync_subnet(&self, subnet: usize) -> bool {
+        // A missing bitfield or an out-of-range subnet reads as unsubscribed.
         self.syncnets
             .as_ref()
             .and_then(|bits| bits.get(subnet))
@@ -120,6 +122,7 @@ impl Eth2Fields {
 
     /// An SSZ value held in an RLP string.
     fn ssz<T: Ssz>(raw: &[u8]) -> Option<T> {
+        // Exactly one RLP string, whose payload must be a strict SSZ encoding.
         let mut decoder = Decoder::new(raw);
         let bytes = decoder.bytes().ok()?;
         decoder.finish().ok()?;

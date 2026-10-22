@@ -84,7 +84,7 @@ impl Header {
         }
         // Long form: the prefix encodes how many length bytes follow.
         let width = Self::length_bytes(self.payload_len);
-        // Invariant: a usize has at most 8 bytes, so the width fits the 8 long-form prefixes.
+        // Invariant: a length has at most 8 bytes, so the width fits the 8 long-form prefixes.
         out.push(long_base + (width as u8) - 1);
         let bytes = self.payload_len.to_be_bytes();
         out.extend_from_slice(&bytes[bytes.len() - width..]);

@@ -43,6 +43,7 @@ impl Session {
     /// A session from explicit write and read keys.
     #[must_use]
     pub fn new(write_key: &[u8; 16], read_key: &[u8; 16]) -> Self {
+        // Each direction gets its own cipher; the counter starts at zero.
         Self {
             write: Aes128Gcm::new(write_key),
             read: Aes128Gcm::new(read_key),

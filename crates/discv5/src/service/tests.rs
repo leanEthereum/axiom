@@ -22,6 +22,7 @@ struct Wire {
 impl Wire {
     /// Nodes 1 to n on 10.0.i.1:9000, with a given key seed per node.
     fn new(count: u8) -> Self {
+        // Node i signs with key [i; 32] and seeds its generator with [i; 32].
         let nodes = (1..=count)
             .map(|i| {
                 let enr = record(i, 1);
@@ -40,6 +41,7 @@ impl Wire {
 
     /// Collects one node's outputs.
     fn drain(&mut self, node: usize) {
+        // Datagrams go on the wire unless marked for dropping; events are kept per node.
         while let Some(output) = self.nodes[node].poll_output() {
             match output {
                 Output::Send(datagram) => {
@@ -56,6 +58,7 @@ impl Wire {
 
     /// Delivers datagrams until none are in transit.
     fn settle(&mut self, now: Duration) {
+        // First collect what every node already queued, then deliver in order.
         for node in 0..self.nodes.len() {
             self.drain(node);
         }
@@ -88,6 +91,7 @@ fn key(i: u8) -> SecretKey {
 
 /// The record of node i at a sequence number.
 fn record(i: u8, seq: u64) -> Enr {
+    // Node i lives on 10.0.i.1:9000, its own /24.
     Enr::builder()
         .seq(seq)
         .ip4(Ipv4Addr::new(10, 0, i, 1))
@@ -283,6 +287,7 @@ fn newer_records_are_fetched_after_ping() {
 
 #[test]
 fn talk_requests_reach_the_application() {
+    // Alice sends TALKREQ "ask" under protocol "proto"; bob's application sees it.
     let mut wire = Wire::new(2);
     let bob = wire.enr(1);
     let request_id = wire.nodes[0]
@@ -298,6 +303,7 @@ fn talk_requests_reach_the_application() {
         request: b"ask".to_vec(),
     }));
     let alice_id = wire.enr(0).node_id();
+    // Bob's application answers "ok", which reaches alice's application.
     wire.nodes[1].talk_response(alice_id, alice_addr, request_id, b"ok".to_vec());
     wire.settle(Duration::ZERO);
     assert!(wire.events[0].contains(&Event::TalkResponse {
@@ -309,6 +315,7 @@ fn talk_requests_reach_the_application() {
 
 #[test]
 fn lookups_on_an_empty_table_finish_at_once() {
+    // A lone node has nobody to ask, so the lookup reports no peers straight away.
     let mut wire = Wire::new(1);
     let id = wire.nodes[0].lookup(Duration::ZERO, NodeId([1; 32]), EnrFilter::Any, 16);
     wire.drain(0);

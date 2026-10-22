@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(encode_uint(128), [0x81, 0x80]);
         // 1000 is 0x03e8 behind 0x82.
         assert_eq!(encode_uint(1000), [0x82, 0x03, 0xe8]);
-        // The largest u64 takes eight bytes behind 0x88.
+        // The largest 64-bit value takes eight bytes behind 0x88.
         let mut expected = vec![0x88];
         expected.extend_from_slice(&[0xff; 8]);
         assert_eq!(encode_uint(u64::MAX), expected);

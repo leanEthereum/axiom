@@ -51,6 +51,11 @@ const RANDOM_MESSAGE_LEN: usize = 32;
 /// A second covers a peer that lost its session while the first was in flight.
 const MAX_HANDSHAKES: u8 = 2;
 
+/// Most challenges awaiting handshakes at once.
+///
+/// Each costs a few hundred bytes; past the cap, new strangers wait for old challenges to lapse.
+const MAX_CHALLENGES: usize = 1024;
+
 /// Timeouts of the packet layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HandlerConfig {
@@ -84,6 +89,7 @@ pub(crate) struct Handler {
 impl Handler {
     /// A handler for a local identity.
     pub(crate) const fn new(key: SecretKey, local_enr: Enr, config: HandlerConfig) -> Self {
+        // No sessions, challenges, or requests yet.
         Self {
             key,
             local_enr,
@@ -290,6 +296,12 @@ impl Handler {
                 to: from,
                 bytes: challenge.datagram.clone(),
             });
+            return Vec::new();
+        }
+        // Threshold: packets from made-up ids must not grow the challenge store without bound.
+        self.challenges
+            .retain(|_, challenge| challenge.deadline > now);
+        if self.challenges.len() >= MAX_CHALLENGES {
             return Vec::new();
         }
         let known = known(&src_id);

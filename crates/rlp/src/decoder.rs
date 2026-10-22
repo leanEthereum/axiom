@@ -121,7 +121,7 @@ impl<'a> Decoder<'a> {
                 found: payload.len(),
             });
         }
-        // Accumulate big-endian; eight bytes cannot overflow a u64.
+        // Accumulate big-endian; eight bytes cannot overflow 64 bits.
         Ok(payload
             .iter()
             .fold(0, |value, &byte| (value << 8) | u64::from(byte)))
@@ -192,7 +192,7 @@ mod tests {
             Decoder::new(&[0x82, 0x00, 0x01]).uint(),
             Err(RlpError::LeadingZeroInInteger)
         );
-        // Nine bytes exceed a u64.
+        // Nine bytes exceed 64 bits.
         let mut nine = vec![0x89];
         nine.extend_from_slice(&[1; 9]);
         assert_eq!(

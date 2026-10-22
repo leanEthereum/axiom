@@ -76,6 +76,7 @@ impl Lookup {
         internal: bool,
         seeds: Vec<Enr>,
     ) -> Self {
+        // Seeds enter as fresh peers, keyed by their distance to the target.
         let mut lookup = Self {
             target,
             filter,
@@ -124,6 +125,7 @@ impl Lookup {
 
     /// Sets the state of a known peer.
     fn set_state(&mut self, node: &NodeId, state: PeerState) {
+        // Unknown peers are ignored: a late answer may name one never added.
         if let Some((_, current)) = self.peers.get_mut(&node.distance(&self.target)) {
             *current = state;
         }
@@ -200,6 +202,7 @@ impl Lookup {
 
     /// The results: peers that did not fail and meet the filter, nearest first.
     pub(crate) fn results(&self, chain: &ChainConfig) -> Vec<Enr> {
+        // The map is ordered by distance, so the first matches are the nearest.
         self.peers
             .values()
             .filter(|(enr, state)| *state != PeerState::Failed && self.filter.matches(enr, chain))

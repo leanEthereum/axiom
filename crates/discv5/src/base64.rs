@@ -65,6 +65,7 @@ impl Base64Url {
 
     /// The value of one symbol, absent outside the alphabet.
     const fn sextet(symbol: u8) -> Option<u8> {
+        // Four contiguous ranges, then the two URL-safe symbols.
         match symbol {
             b'A'..=b'Z' => Some(symbol - b'A'),
             b'a'..=b'z' => Some(symbol - b'a' + 26),

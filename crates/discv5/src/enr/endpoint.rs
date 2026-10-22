@@ -61,18 +61,21 @@ impl Endpoints {
     /// The IPv4 discovery socket, when the record has an address and a UDP port.
     #[must_use]
     pub fn udp4_socket(&self) -> Option<SocketAddrV4> {
+        // Both halves must be present.
         Some(SocketAddrV4::new(self.ip4?, self.udp4?))
     }
 
     /// The IPv6 discovery socket, falling back to the shared UDP port per EIP-778.
     #[must_use]
     pub fn udp6_socket(&self) -> Option<SocketAddrV6> {
+        // No flow label and no scope: records carry neither.
         Some(SocketAddrV6::new(self.ip6?, self.udp6.or(self.udp4)?, 0, 0))
     }
 
     /// The discovery socket, preferring IPv4.
     #[must_use]
     pub fn udp_socket(&self) -> Option<SocketAddr> {
+        // IPv4 first, the family every client supports.
         self.udp4_socket()
             .map(SocketAddr::V4)
             .or_else(|| self.udp6_socket().map(SocketAddr::V6))
@@ -89,6 +92,7 @@ impl Endpoints {
 
     /// A string value of exactly N bytes.
     fn array<const N: usize>(raw: &[u8]) -> Option<[u8; N]> {
+        // Exactly one RLP string of the right length.
         let mut decoder = Decoder::new(raw);
         let bytes = decoder.array().ok()?;
         decoder.finish().ok()?;
@@ -97,6 +101,7 @@ impl Endpoints {
 
     /// A port: a canonical integer of at most 16 bits.
     fn port(raw: &[u8]) -> Option<u16> {
+        // Exactly one canonical RLP integer.
         let mut decoder = Decoder::new(raw);
         let port = decoder.u16().ok()?;
         decoder.finish().ok()?;
