@@ -22,6 +22,7 @@ mod proposer;
 mod publish;
 mod race;
 mod service;
+mod slasher;
 mod tasks;
 
 pub use api::BeaconApi;

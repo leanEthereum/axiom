@@ -197,9 +197,9 @@ impl<P: Preset> Node<P> {
         let (hub, event_sender, streams) = EventHub::new();
         let hub = task::spawn(hub.run());
 
-        // The chain, from the database's anchor or from genesis.
+        // The chain, from the database's anchor or from genesis, with its slasher if enabled.
         let mut chain = config
-            .open_chain::<P>(chain_config)?
+            .attach_slasher(config.open_chain::<P>(chain_config)?)?
             .with_metrics(metrics.clone())
             .with_events(event_sender.clone());
 

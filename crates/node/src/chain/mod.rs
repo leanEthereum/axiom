@@ -26,6 +26,7 @@ use axiom_light_client::{
     combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
 };
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
+use axiom_slasher::Slashing;
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
@@ -48,7 +49,7 @@ pub use head::{ChainEvent, ExecutionHead, Head};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::{ApiEvent, ChainError, EventSender, EventTopic};
+use crate::{ApiEvent, ChainError, EventSender, EventTopic, slasher::SlasherFeed};
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
@@ -95,6 +96,8 @@ pub struct Chain<P: Preset> {
     api_events: EventSender,
     /// Operations waiting for the blocks this node's validators propose.
     pool: OperationPool<P>,
+    /// The slasher's feed, when the node runs one.
+    slasher: Option<SlasherFeed<P>>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -194,6 +197,7 @@ impl<P: Preset> Chain<P> {
             light_client: LightClientServer::new(),
             api_events: EventSender::detached(),
             pool: OperationPool::default(),
+            slasher: None,
         })
     }
 
@@ -203,6 +207,13 @@ impl<P: Preset> Chain<P> {
     #[must_use]
     pub fn with_custody(mut self, columns: impl IntoIterator<Item = ColumnIndex>) -> Self {
         self.availability = AvailabilityBuffer::new(columns);
+        self
+    }
+
+    /// Feeds every verified vote and imported block to a slasher.
+    #[must_use]
+    pub(crate) fn with_slasher(mut self, feed: SlasherFeed<P>) -> Self {
+        self.slasher = Some(feed);
         self
     }
 
@@ -490,6 +501,16 @@ impl<P: Preset> Chain<P> {
         if self.store.current_slot() != slot {
             // Votes and signatures too old for any coming block leave the pool.
             self.pool.on_slot(self.store.current_slot());
+            // The slasher checks what it gathered once a slot, and returns what it found.
+            let found = self.slasher.as_ref().map(|slasher| {
+                slasher.pass(self.store.current_epoch());
+                slasher.found()
+            });
+            for slashing in found.into_iter().flatten() {
+                if let Err(error) = self.on_found_slashing(slashing) {
+                    warn!(%error, "slasher evidence refused");
+                }
+            }
         }
         if self.store.current_epoch() != epoch {
             // Messages from two epochs ago can no longer be gossiped, so forget them.
@@ -529,6 +550,10 @@ impl<P: Preset> Chain<P> {
             return Err(error.into());
         }
         drop(timer);
+        // The import verified the proposer's signature and every vote in the body.
+        if let Some(slasher) = &mut self.slasher {
+            slasher.block(&self.store, block);
+        }
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
         info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
@@ -822,6 +847,11 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice refuses the vote.
     pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
         self.pool_vote(vote);
+        // Gossip rules verified the signature, and a vote of the current slot still testifies.
+        // So the slasher sees it even when the fork choice does not count it yet.
+        if let Some(slasher) = &mut self.slasher {
+            slasher.vote(&self.store, vote);
+        }
         self.store
             .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
@@ -881,6 +911,9 @@ impl<P: Preset> Chain<P> {
             payload: claim,
         };
         self.pool_vote(&aggregate);
+        if let Some(slasher) = &self.slasher {
+            slasher.single(attester, data, *vote.signature());
+        }
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
@@ -924,6 +957,34 @@ impl<P: Preset> Chain<P> {
         }
         self.store
             .on_attester_slashing(votes, Verification::Verify)?;
+        Ok(())
+    }
+
+    /// Takes evidence the slasher found, checks its signatures, and pools it.
+    ///
+    /// The slasher trusts the signers it was told of.
+    /// Votes resolved against another branch's committees would carry a signature that fails here.
+    /// So nothing unverifiable reaches a block this node proposes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the evidence does not verify, or slashes nobody at the head.
+    pub fn on_found_slashing(&mut self, slashing: Slashing) -> Result<(), ChainError> {
+        match slashing {
+            Slashing::Attester(votes) => {
+                self.store
+                    .on_attester_slashing(&votes, Verification::Verify)?;
+                let state = Self::head_beacon(&self.store, self.head)?;
+                info!(validators = ?votes.common_signers(), "slasher found an attester slashing");
+                self.pool.slashings_mut().insert_attester(state, votes)?;
+            }
+            Slashing::Proposer(slashing) => {
+                let state = Self::head_beacon(&self.store, self.head)?;
+                let proposer = slashing.signed_header_1.message.proposer_index;
+                info!(%proposer, "slasher found a proposer slashing");
+                self.pool.slashings_mut().insert_proposer(state, slashing)?;
+            }
+        }
         Ok(())
     }
 

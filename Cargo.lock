@@ -45,6 +45,7 @@ dependencies = [
  "axiom-discv5",
  "axiom-node",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-telemetry",
  "axiom-types",
  "axiom-yaml",
@@ -169,6 +170,7 @@ dependencies = [
  "axiom-node",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",
@@ -279,6 +281,7 @@ dependencies = [
  "axiom-light-client",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-store",
@@ -321,6 +324,19 @@ name = "axiom-rlp"
 version = "0.1.0"
 dependencies = [
  "axiom-json",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "axiom-slasher"
+version = "0.1.0"
+dependencies = [
+ "axiom-operation-pool",
+ "axiom-snappy",
+ "axiom-ssz",
+ "axiom-store",
+ "axiom-types",
  "proptest",
  "thiserror",
 ]
