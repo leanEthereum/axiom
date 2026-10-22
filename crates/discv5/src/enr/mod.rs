@@ -151,7 +151,10 @@ mod tests {
             list.bytes(&[1; 64]).uint(1);
             list.bytes(b"z").bytes(b"").bytes(b"id").bytes(b"v4");
         });
-        assert_eq!(Enr::decode(&encoder.finish()), Err(EnrError::UnsortedKeys));
+        assert_eq!(
+            Enr::decode(&encoder.finish()),
+            Err(EnrError::UnsortedKeys { position: 1 })
+        );
         // No scheme at all.
         let mut encoder = Encoder::new();
         encoder.list(|list| {
