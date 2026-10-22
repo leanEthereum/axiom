@@ -263,6 +263,8 @@ Header docs:
 - No doc comment above an `impl` block.
 - Constants document the constraint that produced the value, not the value.
 - Cite the spec, the EIP, the RFC, or the paper for every non-obvious rule or constant.
+- Never mention another client in code or docs.
+  Axiom is a reference, not a copy: explain a technique on its own merits and cite its primary source.
 - Section names: `# Overview`, `# Algorithm`, `# Invariants`, `# Performance`, `# Arguments`, `# Returns`, `# Errors`, `# Panics`, `# Safety`.
   `# Algorithm` is for a real mathematical idea, never a restatement of the body's steps.
 - No code examples in docs: tests show usage, and examples only go stale and bury the explanation.

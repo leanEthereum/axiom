@@ -21,7 +21,7 @@
 //! Counters decay once per decay interval: c = c * decay, and zero below a floor.
 //!
 //! The consensus specs leave the values to clients.
-//! The Ethereum parameterization follows the derivation lighthouse publishes.
+//! These follow the parameterization in common use on the Ethereum network.
 //! See gossipsub v1.1, peer scoring.
 
 use std::{collections::BTreeMap, time::Duration};
