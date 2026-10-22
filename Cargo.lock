@@ -68,6 +68,7 @@ dependencies = [
  "axiom-kzg",
  "axiom-light-client",
  "axiom-node",
+ "axiom-p2p",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",

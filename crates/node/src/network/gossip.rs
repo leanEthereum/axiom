@@ -94,12 +94,12 @@ impl<P: Preset> GossipHandler<P> {
     pub(crate) async fn handle(&self, id: MessageId, topic: &Topic, data: Vec<u8>) {
         let Ok(topic) = topic.as_str().parse::<GossipTopic>() else {
             // The router only delivers subscribed topics, so this cannot be an honest message.
-            self.report(id, "unknown", ValidationOutcome::Reject);
+            self.report(id, "unknown", ValidationOutcome::Reject).await;
             return;
         };
         let name = Self::topic_name(topic.kind);
         let (outcome, accepted) = self.validate(topic.kind, &data).await;
-        self.report(id, name, outcome);
+        self.report(id, name, outcome).await;
         if let Some(accepted) = accepted {
             self.apply(accepted).await;
         }
@@ -331,7 +331,7 @@ impl<P: Preset> GossipHandler<P> {
     }
 
     /// Sends a verdict to the router and counts it.
-    fn report(&self, id: MessageId, topic: &str, outcome: ValidationOutcome) {
+    async fn report(&self, id: MessageId, topic: &str, outcome: ValidationOutcome) {
         let label = match outcome {
             ValidationOutcome::Accept => "accept",
             ValidationOutcome::Ignore => "ignore",
@@ -342,7 +342,7 @@ impl<P: Preset> GossipHandler<P> {
             .with_label_values([topic, label])
             .inc();
         // A stopped network has nobody to tell.
-        let _stopped = self.network.report_validation(id, outcome);
+        let _stopped = self.network.report_validation(id, outcome).await;
     }
 
     /// A short topic name for metrics, without the fork digest or subnet.

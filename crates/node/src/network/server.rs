@@ -84,7 +84,7 @@ impl<P: Preset> RequestServer<P> {
         };
         debug!(%peer, ?protocol, chunks = chunks.len(), "answered request");
         // A peer that hung up needs no answer.
-        let _stopped = self.network.respond(id, chunks);
+        let _stopped = self.network.respond(id, chunks).await;
     }
 
     /// The response chunks for a request, or the one error chunk that ends it.

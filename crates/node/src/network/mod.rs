@@ -87,7 +87,7 @@ impl<P: Preset> NetworkService<P> {
     /// - `identity`: the node identifier, custody, and boot nodes.
     /// - `chain`, `execution`, `clock`, `metrics`: the node's services.
     #[must_use]
-    pub fn start(
+    pub async fn start(
         network: NetworkHandle,
         identity: &NetworkIdentity,
         chain: ChainHandle<P>,
@@ -115,12 +115,12 @@ impl<P: Preset> NetworkService<P> {
             }
         }
         for topic in Self::topics(fork_digest, &config, &custody, &subnets) {
-            if let Err(error) = network.subscribe(topic.topic()) {
+            if let Err(error) = network.subscribe(topic.topic()).await {
                 warn!(%error, %topic, "could not subscribe");
             }
         }
         for address in &identity.boot_nodes {
-            if let Err(error) = network.dial(address.clone()) {
+            if let Err(error) = network.dial(address.clone()).await {
                 warn!(%error, %address, "could not dial boot node");
             }
         }
@@ -241,6 +241,7 @@ impl<P: Preset> NetworkService<P> {
         match self
             .network
             .send_request(peer.clone(), Protocol::StatusV2, status.encode())
+            .await
         {
             Ok(request) => self.handshakes.push((request, peer)),
             Err(error) => warn!(%error, "could not send status"),

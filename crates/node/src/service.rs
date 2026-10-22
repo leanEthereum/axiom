@@ -9,7 +9,6 @@ use axiom_execution::{EngineClient, JwtSecret};
 use axiom_http::{Server, ServerConfig};
 use axiom_p2p::{
     Multiaddr,
-    secure::plaintext::PlaintextConfig,
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
 use axiom_ssz::Ssz;
@@ -178,7 +177,7 @@ impl<P: Preset> Node<P> {
         }
         if let Some((p2p, service)) = network {
             // A swarm that already stopped needs no second notice.
-            let _stopped = p2p.shutdown();
+            let _stopped = p2p.shutdown().await;
             service.abort();
             let _cancelled = service.await;
         }
@@ -270,7 +269,8 @@ impl<P: Preset> Node<P> {
                 clock,
                 metrics,
             },
-        );
+        )
+        .await;
         Ok((network, task::spawn(service.run(events))))
     }
 
@@ -343,8 +343,8 @@ impl<P: Preset> Node<P> {
         key: &NodeKey,
         settings: &NetworkSettings,
     ) -> Result<(NetworkHandle, NetworkEvents), NodeError> {
-        let public = key.public_key();
-        let mut p2p = NetworkConfig::new(public.clone(), Arc::new(PlaintextConfig::new(public)));
+        // Noise secures every connection under the node's secp256k1 identity.
+        let mut p2p = NetworkConfig::new(key.keypair()).map_err(NodeError::Network)?;
         p2p.listen_addr = Multiaddr::from_tcp(settings.listen_address);
         swarm::start(p2p).await.map_err(NodeError::Network)
     }

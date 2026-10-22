@@ -180,13 +180,13 @@ impl<P: Preset> RangeSync<P> {
         }
         let start = Slot(head.0 + 1);
         let count = BATCH_SLOTS.min(status.head_slot.0 - head.0);
-        if let Err(error) = self.request(peer, start, count, custody) {
+        if let Err(error) = self.request(peer, start, count, custody).await {
             warn!(%error, "could not request a batch");
         }
     }
 
     /// Sends the requests of a batch.
-    fn request(
+    async fn request(
         &mut self,
         peer: PeerId,
         start: Slot,
@@ -198,11 +198,14 @@ impl<P: Preset> RangeSync<P> {
             count,
             step: 1,
         };
-        let blocks_request = self.network.send_request(
-            peer.clone(),
-            Protocol::BeaconBlocksByRangeV2,
-            blocks.encode(),
-        )?;
+        let blocks_request = self
+            .network
+            .send_request(
+                peer.clone(),
+                Protocol::BeaconBlocksByRangeV2,
+                blocks.encode(),
+            )
+            .await?;
         let columns_request = if custody.is_empty() {
             None
         } else {
@@ -212,11 +215,15 @@ impl<P: Preset> RangeSync<P> {
                 // Custody never exceeds the column count, so the list always fits.
                 columns: List::try_from(custody).unwrap_or_default(),
             };
-            Some(self.network.send_request(
-                peer.clone(),
-                Protocol::DataColumnSidecarsByRangeV1,
-                columns.encode(),
-            )?)
+            Some(
+                self.network
+                    .send_request(
+                        peer.clone(),
+                        Protocol::DataColumnSidecarsByRangeV1,
+                        columns.encode(),
+                    )
+                    .await?,
+            )
         };
         debug!(%peer, start = %start, count, "requested batch");
         self.batch = Some(Batch {
@@ -250,7 +257,7 @@ impl<P: Preset> RangeSync<P> {
                 && sidecar.verify_inclusion_proof().is_ok()
                 && sidecar.verify_kzg_proofs(Kzg::mainnet()).is_ok();
             if !valid {
-                return self.punish(&peer, "invalid column in batch");
+                return self.punish(&peer, "invalid column in batch").await;
             }
             let column = Arc::new(column);
             if let Ok(Err(error)) = self
@@ -258,7 +265,7 @@ impl<P: Preset> RangeSync<P> {
                 .run(move |chain| chain.submit_column(column))
                 .await
             {
-                return self.punish(&peer, &error.to_string());
+                return self.punish(&peer, &error.to_string()).await;
             }
         }
 
@@ -272,7 +279,7 @@ impl<P: Preset> RangeSync<P> {
                 .await
             {
                 Ok(Ok(_)) | Err(_) => {}
-                Ok(Err(error)) => return self.punish(&peer, &error.to_string()),
+                Ok(Err(error)) => return self.punish(&peer, &error.to_string()).await,
             }
         }
         if count > 0 {
@@ -281,10 +288,10 @@ impl<P: Preset> RangeSync<P> {
     }
 
     /// Drops a peer that served bad data.
-    fn punish(&mut self, peer: &PeerId, reason: &str) {
+    async fn punish(&mut self, peer: &PeerId, reason: &str) {
         warn!(%peer, reason, "disconnecting peer for a bad batch");
         self.peers.remove(peer);
         // A disconnect only fails when the network is gone, which ends sync anyway.
-        let _stopped = self.network.disconnect(peer.clone());
+        let _stopped = self.network.disconnect(peer.clone()).await;
     }
 }

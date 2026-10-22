@@ -8,7 +8,7 @@ use std::{
 
 use axiom_crypto::{keccak::Keccak256, secp256k1::SecretKey};
 use axiom_das::NodeId;
-use axiom_p2p::PublicKey;
+use axiom_p2p::Keypair;
 use axiom_ssz::U256;
 
 /// The secp256k1 key that names this node on the network.
@@ -84,10 +84,11 @@ impl NodeKey {
         &self.secret
     }
 
-    /// The public key as libp2p encodes it.
+    /// The libp2p identity: the same key, as the transport handshake signs with it.
     #[must_use]
-    pub fn public_key(&self) -> PublicKey {
-        PublicKey::secp256k1(self.secret.public_key().to_compressed())
+    pub fn keypair(&self) -> Keypair {
+        // Invariant: the secret already passed the same range check when this key was built.
+        Keypair::from_secret_bytes(&self.secret.to_bytes()).expect("a valid secret stays valid")
     }
 
     /// The discovery node identifier: keccak256 of the uncompressed point without its tag byte.

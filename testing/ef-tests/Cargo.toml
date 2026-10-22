@@ -30,4 +30,5 @@ axiom-yaml.workspace = true
 [dev-dependencies]
 axiom-http.workspace = true
 axiom-json.workspace = true
+axiom-p2p.workspace = true
 tokio.workspace = true
