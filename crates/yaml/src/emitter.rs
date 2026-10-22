@@ -1,147 +1,158 @@
 //! Block-style YAML output that parses back to the same node.
 
-use std::fmt::{self, Display, Formatter, Write};
+use std::fmt::{self, Formatter, Write};
 
 use crate::Yaml;
 
 /// Spaces added per nesting level.
 const STEP: usize = 2;
 
-impl Display for Yaml {
-    /// Writes the node as a block-style document ending in a newline.
-    ///
-    /// ```text
-    /// key: value
-    /// list:
-    ///   - a
-    ///   - k: v
-    ///     j: "two words"
-    /// empty: []
-    /// ```
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write_block(f, self, 0, false)
-    }
-}
-
-/// Writes a node in block style.
-///
-/// # Arguments
-///
-/// - `indent`: column of the node's entries.
-/// - `compact`: whether the first line is already written up to the indent, as after "- ".
-fn write_block(f: &mut Formatter<'_>, node: &Yaml, indent: usize, compact: bool) -> fmt::Result {
-    match node {
-        Yaml::Mapping(mapping) if !mapping.is_empty() => {
-            for (i, (key, value)) in mapping.iter().enumerate() {
-                // The first entry of a compact mapping shares the dash's line.
-                if i > 0 || !compact {
-                    pad(f, indent)?;
-                }
-                write_string(f, key)?;
-                f.write_char(':')?;
-                write_child(f, value, indent, false)?;
-            }
-            Ok(())
-        }
-        Yaml::Sequence(items) if !items.is_empty() => {
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 || !compact {
-                    pad(f, indent)?;
-                }
-                f.write_char('-')?;
-                write_child(f, item, indent, true)?;
-            }
-            Ok(())
-        }
-        // Scalars and empty collections fit on one line.
-        _ => {
-            write_scalar(f, node)?;
-            f.write_char('\n')
-        }
-    }
-}
-
-/// Writes what follows a key's colon or an entry's dash.
+/// Writes nodes in block style to a formatter.
 ///
 /// ```text
-/// key:            dash:
-///   nested: 1     - nested: 1     (compact, shares the dash's line)
+/// key: value
+/// list:
+///   - a
+///   - k: v
+///     j: "two words"
+/// empty: []
 /// ```
-fn write_child(f: &mut Formatter<'_>, node: &Yaml, indent: usize, after_dash: bool) -> fmt::Result {
-    let nested = match node {
-        Yaml::Mapping(mapping) => !mapping.is_empty(),
-        Yaml::Sequence(items) => !items.is_empty(),
-        _ => false,
-    };
-    if nested && !after_dash {
-        // A collection under a key starts on the next line, one step deeper.
-        f.write_char('\n')?;
-        write_block(f, node, indent + STEP, false)
-    } else {
-        // A scalar follows on the same line.
-        // A collection after a dash starts compactly, its entries aligned past "- ".
-        f.write_char(' ')?;
-        write_block(f, node, indent + STEP, true)
-    }
+pub(crate) struct Emitter<'a, 'f> {
+    /// The destination.
+    f: &'a mut Formatter<'f>,
 }
 
-/// Writes a scalar or an empty collection on one line.
-fn write_scalar(f: &mut Formatter<'_>, node: &Yaml) -> fmt::Result {
-    match node {
-        Yaml::Null => f.write_str("null"),
-        Yaml::Bool(true) => f.write_str("true"),
-        Yaml::Bool(false) => f.write_str("false"),
-        Yaml::String(text) => write_string(f, text),
-        Yaml::Sequence(_) => f.write_str("[]"),
-        Yaml::Mapping(_) => f.write_str("{}"),
+impl<'a, 'f> Emitter<'a, 'f> {
+    /// An emitter writing to the given formatter.
+    pub(crate) const fn new(f: &'a mut Formatter<'f>) -> Self {
+        Self { f }
     }
-}
 
-/// Writes text plain when it reads back as the same text, double-quoted otherwise.
-fn write_string(f: &mut Formatter<'_>, text: &str) -> fmt::Result {
-    if is_plain_safe(text) {
-        return f.write_str(text);
+    /// Writes a node as a whole document ending in a newline.
+    pub(crate) fn document(&mut self, node: &Yaml) -> fmt::Result {
+        self.block(node, 0, false)
     }
-    f.write_char('"')?;
-    for c in text.chars() {
-        match c {
-            '"' => f.write_str("\\\"")?,
-            '\\' => f.write_str("\\\\")?,
-            '\n' => f.write_str("\\n")?,
-            '\t' => f.write_str("\\t")?,
-            '\r' => f.write_str("\\r")?,
-            // YAML 1.1 line breaks and the byte order mark get named escapes.
-            '\u{85}' => f.write_str("\\N")?,
-            '\u{2028}' => f.write_str("\\L")?,
-            '\u{2029}' => f.write_str("\\P")?,
-            '\u{feff}' => f.write_str("\\ufeff")?,
-            // Other control characters, C0, DEL, and C1, as two hex digits.
-            c if c.is_control() => write!(f, "\\x{:02x}", u32::from(c))?,
-            c => f.write_char(c)?,
+
+    /// Writes a node in block style.
+    ///
+    /// # Arguments
+    ///
+    /// - `indent`: column of the node's entries.
+    /// - `compact`: whether the first line is already written up to the indent, as after "- ".
+    fn block(&mut self, node: &Yaml, indent: usize, compact: bool) -> fmt::Result {
+        match node {
+            Yaml::Mapping(mapping) if !mapping.is_empty() => {
+                for (i, (key, value)) in mapping.iter().enumerate() {
+                    // The first entry of a compact mapping shares the dash's line.
+                    if i > 0 || !compact {
+                        self.pad(indent)?;
+                    }
+                    self.string(key)?;
+                    self.f.write_char(':')?;
+                    self.child(value, indent, false)?;
+                }
+                Ok(())
+            }
+            Yaml::Sequence(items) if !items.is_empty() => {
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 || !compact {
+                        self.pad(indent)?;
+                    }
+                    self.f.write_char('-')?;
+                    self.child(item, indent, true)?;
+                }
+                Ok(())
+            }
+            // Scalars and empty collections fit on one line.
+            _ => {
+                self.scalar(node)?;
+                self.f.write_char('\n')
+            }
         }
     }
-    f.write_char('"')
-}
 
-/// Whether text can be written without quotes and still read back as the same string.
-///
-/// The test is conservative: a letter or digit first, then a small safe alphabet.
-/// Words the core schema resolves to null or a boolean must be quoted.
-fn is_plain_safe(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let Some(first) = bytes.first() else {
-        return false;
-    };
-    first.is_ascii_alphanumeric()
-        && bytes
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b'+'))
-        && matches!(Yaml::from_plain(text.to_owned()), Yaml::String(_))
-}
+    /// Writes what follows a key's colon or an entry's dash.
+    ///
+    /// ```text
+    /// key:            dash:
+    ///   nested: 1     - nested: 1     (compact, shares the dash's line)
+    /// ```
+    fn child(&mut self, node: &Yaml, indent: usize, after_dash: bool) -> fmt::Result {
+        let nested = match node {
+            Yaml::Mapping(mapping) => !mapping.is_empty(),
+            Yaml::Sequence(items) => !items.is_empty(),
+            _ => false,
+        };
+        if nested && !after_dash {
+            // A collection under a key starts on the next line, one step deeper.
+            self.f.write_char('\n')?;
+            self.block(node, indent + STEP, false)
+        } else {
+            // A scalar follows on the same line.
+            // A collection after a dash starts compactly, its entries aligned past "- ".
+            self.f.write_char(' ')?;
+            self.block(node, indent + STEP, true)
+        }
+    }
 
-/// Writes the indentation of a line.
-fn pad(f: &mut Formatter<'_>, indent: usize) -> fmt::Result {
-    write!(f, "{:indent$}", "")
+    /// Writes a scalar or an empty collection on one line.
+    fn scalar(&mut self, node: &Yaml) -> fmt::Result {
+        match node {
+            Yaml::Null => self.f.write_str("null"),
+            Yaml::Bool(true) => self.f.write_str("true"),
+            Yaml::Bool(false) => self.f.write_str("false"),
+            Yaml::String(text) => self.string(text),
+            Yaml::Sequence(_) => self.f.write_str("[]"),
+            Yaml::Mapping(_) => self.f.write_str("{}"),
+        }
+    }
+
+    /// Writes text plain when it reads back as the same text, double-quoted otherwise.
+    fn string(&mut self, text: &str) -> fmt::Result {
+        if Self::is_plain_safe(text) {
+            return self.f.write_str(text);
+        }
+        self.f.write_char('"')?;
+        for c in text.chars() {
+            match c {
+                '"' => self.f.write_str("\\\"")?,
+                '\\' => self.f.write_str("\\\\")?,
+                '\n' => self.f.write_str("\\n")?,
+                '\t' => self.f.write_str("\\t")?,
+                '\r' => self.f.write_str("\\r")?,
+                // YAML 1.1 line breaks and the byte order mark get named escapes.
+                '\u{85}' => self.f.write_str("\\N")?,
+                '\u{2028}' => self.f.write_str("\\L")?,
+                '\u{2029}' => self.f.write_str("\\P")?,
+                '\u{feff}' => self.f.write_str("\\ufeff")?,
+                // Other control characters, C0, DEL, and C1, as two hex digits.
+                c if c.is_control() => write!(self.f, "\\x{:02x}", u32::from(c))?,
+                c => self.f.write_char(c)?,
+            }
+        }
+        self.f.write_char('"')
+    }
+
+    /// Whether text can be written without quotes and still read back as the same string.
+    ///
+    /// The test is conservative: a letter or digit first, then a small safe alphabet.
+    /// Words the core schema resolves to null or a boolean must be quoted.
+    fn is_plain_safe(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let Some(first) = bytes.first() else {
+            return false;
+        };
+        first.is_ascii_alphanumeric()
+            && bytes.iter().all(|&b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'/' | b'+')
+            })
+            && matches!(Yaml::from_plain(text.to_owned()), Yaml::String(_))
+    }
+
+    /// Writes the indentation of a line.
+    fn pad(&mut self, indent: usize) -> fmt::Result {
+        write!(self.f, "{:indent$}", "")
+    }
 }
 
 #[cfg(test)]
