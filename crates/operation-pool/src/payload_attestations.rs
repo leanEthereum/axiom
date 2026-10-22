@@ -129,3 +129,77 @@ impl PayloadAttestationPool {
         self.votes.retain(|slot, _| *slot >= oldest);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_bls::SecretKey;
+    use axiom_types::{BlsSignature, Minimal};
+
+    use super::*;
+
+    /// A vote on the payload of slot 4's block, by a member holding a secret key.
+    fn message(validator: u64, secret: u8, present: bool) -> PayloadAttestationMessage {
+        let mut bytes = [0; 32];
+        bytes[31] = secret;
+        let key = SecretKey::from_bytes(&bytes).unwrap();
+        PayloadAttestationMessage {
+            validator_index: ValidatorIndex(validator),
+            data: PayloadAttestationData {
+                beacon_block_root: Root([4; 32]),
+                slot: Slot(4),
+                payload_present: present,
+                blob_data_available: true,
+            },
+            signature: BlsSignature(key.sign(b"data").to_bytes()),
+        }
+    }
+
+    #[test]
+    fn votes_aggregate_per_vote_at_every_seat_of_their_member() {
+        // Fixture state: the slot's committee of 4 seats is 3, 5, 3, 8; validator 3 sits twice.
+        let committee = [3, 5, 3, 8].map(ValidatorIndex);
+        let mut pool = PayloadAttestationPool::default();
+        pool.insert(&message(3, 1, true), &committee).unwrap();
+        pool.insert(&message(8, 2, true), &committee).unwrap();
+        // Validator 5 saw no payload: another vote, its own aggregate.
+        pool.insert(&message(5, 3, false), &committee).unwrap();
+
+        let attestations = pool
+            .for_block::<Minimal>(Slot(4), Root([4; 32]), 4)
+            .unwrap();
+
+        // The vote with three seats first, then the one with one.
+        let seats: Vec<(bool, Vec<usize>)> = attestations
+            .iter()
+            .map(|attestation| {
+                let seats = attestation
+                    .aggregation_bits
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, bit)| *bit)
+                    .map(|(seat, _)| seat)
+                    .collect();
+                (attestation.data.payload_present, seats)
+            })
+            .collect();
+        assert_eq!(seats, [(true, vec![0, 2, 3]), (false, vec![1])]);
+
+        // A block on another parent takes none of them.
+        assert_eq!(
+            pool.for_block::<Minimal>(Slot(4), Root([9; 32]), 4),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_vote_from_outside_the_committee_is_refused() {
+        let committee = [3, 5].map(ValidatorIndex);
+        assert_eq!(
+            PayloadAttestationPool::default().insert(&message(7, 1, true), &committee),
+            Err(PoolError::NotInPayloadCommittee {
+                validator: ValidatorIndex(7),
+                slot: Slot(4),
+            })
+        );
+    }
+}

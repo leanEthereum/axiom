@@ -8,7 +8,8 @@ use axiom_state_transition::State;
 use axiom_types::{
     BlsPubkey, ForkName, Preset, Slot, ValidatorIndex,
     accessors::{BuilderState, CoreState, ForkState},
-    combined, gloas,
+    combined,
+    gloas::{self, SignedExecutionPayloadBid},
 };
 
 use crate::{Chain, ExecutionHead, ProposerError};
@@ -32,6 +33,8 @@ pub(crate) struct ProposalContext<P: Preset> {
     pub(crate) parent_gas_limit: u64,
     /// The recent chain, which decides whether builders may be trusted with the slot.
     pub(crate) health: ChainHealth,
+    /// The best bid gossip brought for a Gloas payload on this parent.
+    pub(crate) gloas_bid: Option<SignedExecutionPayloadBid>,
 }
 
 impl<P: Preset> ProposalContext<P> {
@@ -95,6 +98,13 @@ impl<P: Preset> ProposalContext<P> {
         } else {
             None
         };
+        let gloas_bid = execution.as_ref().and_then(|(execution_head, _)| {
+            chain
+                .pool()
+                .bids()
+                .best(slot, head.root, execution_head.head)
+                .cloned()
+        });
         let parent_gas_limit = Self::latest_gas_limit(state.beacon());
         let health = Self::health(chain, slot);
         Ok(Self {
@@ -106,6 +116,7 @@ impl<P: Preset> ProposalContext<P> {
             execution,
             parent_gas_limit,
             health,
+            gloas_bid,
         })
     }
 

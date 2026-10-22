@@ -11,8 +11,8 @@ use axiom_types::{
 };
 
 use crate::{
-    AttestationPacker, AttestationPool, PayloadAttestationPool, PoolError, PoolFork, SlashingPool,
-    SyncPool, ValidatorRequests,
+    AttestationPacker, AttestationPool, BidPool, PayloadAttestationPool, PoolError, PoolFork,
+    SlashingPool, SyncPool, ValidatorRequests,
 };
 
 /// The operations of one block, in the containers of the block's fork.
@@ -55,6 +55,8 @@ pub struct OperationPool<P: Preset> {
     sync: SyncPool<P>,
     /// Payload timeliness votes.
     payload_attestations: PayloadAttestationPool,
+    /// Builders' bids for coming payloads.
+    bids: BidPool,
 }
 
 impl<P: Preset> OperationPool<P> {
@@ -113,8 +115,20 @@ impl<P: Preset> OperationPool<P> {
         &mut self.payload_attestations
     }
 
+    /// The builders' bids.
+    #[must_use]
+    pub const fn bids(&self) -> &BidPool {
+        &self.bids
+    }
+
+    /// The builders' bids, to add what gossip forwards.
+    pub const fn bids_mut(&mut self) -> &mut BidPool {
+        &mut self.bids
+    }
+
     /// Drops what no block from a slot on can include.
     pub fn on_slot(&mut self, slot: Slot) {
+        self.bids.prune(slot);
         self.attestations.prune::<P>(slot.epoch::<P>());
         self.sync.prune(slot);
         self.payload_attestations.prune(slot);

@@ -431,7 +431,12 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, bid: &SignedExecutionPayloadBid| {
                         validator.execution_payload_bid(bid, now)
                     },
-                    |_| None,
+                    |bid| {
+                        Some(Self::job(move |chain| {
+                            chain.pool_mut().bids_mut().insert(bid);
+                            Ok(())
+                        }))
+                    },
                 )
                 .await
             }

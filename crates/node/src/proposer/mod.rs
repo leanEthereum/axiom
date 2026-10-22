@@ -12,12 +12,13 @@ use std::{
 
 use axiom_block_production::{
     BlockProducer, BuilderBoost, ExecutionChoice, GloasBid, LocalBuild, PayloadRequest,
-    ProducedBlock, Proposal, ProposalRequest, RandaoCheck,
+    ProducedBlock, Proposal, ProposalRequest, RandaoCheck, Wei,
 };
 use axiom_builder_client::{
     BidRequest, CircuitBreaker, GasLimitTarget, RelaySet, UnblindedBlock, VerifiedBid,
 };
 use axiom_execution::PayloadId;
+use axiom_operation_pool::BidPool;
 use axiom_ssz::Ssz;
 use axiom_types::{
     BlsSignature, Bytes32, ExecutionAddress, Preset, Root, Slot, ValidatorIndex,
@@ -190,8 +191,8 @@ impl<P: Preset> ProposerService<P> {
             .chain
             .run(move |chain| ProposalContext::gather(chain, slot))
             .await??;
-        let execution = match context.execution.clone() {
-            None => ExecutionChoice::PreMerge,
+        let (execution, fallback) = match context.execution.clone() {
+            None => (ExecutionChoice::PreMerge, None),
             Some((head, request)) => {
                 let bid = self.builder_bid(&context, head, &request).await;
                 let build = self.local_build(&context, head, request).await;
@@ -211,7 +212,21 @@ impl<P: Preset> ProposerService<P> {
         let proposal = self
             .chain
             .run(move |chain| {
-                BlockProducer::new(chain.config(), chain.pool()).produce(&state, request)
+                let producer = BlockProducer::new(chain.config(), chain.pool());
+                match (producer.produce(&state, request.clone()), fallback) {
+                    // A builder's bid the state refuses, say for want of balance, falls back.
+                    (Err(error), Some(execution)) => {
+                        warn!(%error, "builder bid refused; building the payload locally");
+                        producer.produce(
+                            &state,
+                            ProposalRequest {
+                                execution,
+                                ..request
+                            },
+                        )
+                    }
+                    (outcome, _) => outcome,
+                }
             })
             .await??;
         if let ProducedBlock::GloasContents(contents) = &proposal.block {
@@ -226,19 +241,40 @@ impl<P: Preset> ProposerService<P> {
     /// The payload a block commits to: the engine's, or a builder's when it pays enough more.
     ///
     /// A failed local build still leaves a builder's bid, and a missing bid the local build.
+    ///
+    /// # Returns
+    ///
+    /// The choice, and the self-built payload to fall back on when a Gloas bid fails its checks.
     fn choose(
         context: &ProposalContext<P>,
         boost: BuilderBoost,
         build: Result<LocalBuild<P>, ProposerError>,
         bid: Option<VerifiedBid<P>>,
-    ) -> Result<ExecutionChoice<P>, ProposerError> {
+    ) -> Result<(ExecutionChoice<P>, Option<ExecutionChoice<P>>), ProposerError> {
         if context.fork.separates_payloads() {
-            return Ok(ExecutionChoice::Gloas {
-                parent: context.parent.clone(),
-                bid: GloasBid::SelfBuild(Box::new(build?)),
+            // A gossiped bid wins when, boosted, it pays more than the engine's payload.
+            // See the bid comparison of the block production route in beacon-APIs.
+            let local = build?;
+            let parent = context.parent.clone();
+            let self_build = |local| ExecutionChoice::Gloas {
+                parent: parent.clone(),
+                bid: GloasBid::SelfBuild(Box::new(local)),
+            };
+            return Ok(match &context.gloas_bid {
+                Some(bid)
+                    if boost
+                        .prefers_builder(local.value, Wei::from_gwei(BidPool::total(bid).0)) =>
+                {
+                    let chosen = ExecutionChoice::Gloas {
+                        parent: context.parent.clone(),
+                        bid: GloasBid::Builder(Box::new(bid.clone())),
+                    };
+                    (chosen, Some(self_build(local)))
+                }
+                _ => (self_build(local), None),
             });
         }
-        Ok(match (build, bid) {
+        let chosen = match (build, bid) {
             (Ok(local), Some(bid)) if boost.prefers_builder(local.value, bid.value()) => {
                 ExecutionChoice::Builder(bid.into_bid())
             }
@@ -248,7 +284,8 @@ impl<P: Preset> ProposerService<P> {
                 ExecutionChoice::Builder(bid.into_bid())
             }
             (Err(error), None) => return Err(error),
-        })
+        };
+        Ok((chosen, None))
     }
 
     /// The best verified bid of the configured builders, when the fork and the chain allow one.

@@ -9,7 +9,7 @@
 //! - Proposer and attester slashings.
 //! - Voluntary exits and withdrawal credential changes.
 //! - Sync committee messages and contributions.
-//! - Payload timeliness votes, from Gloas on.
+//! - Payload timeliness votes and builders' bids, from Gloas on.
 //!
 //! Each pool checks an operation on entry against the head state.
 //! Packing checks it again under the rules of the block's fork, at the block's slot.
@@ -25,6 +25,7 @@
 
 mod aggregate;
 mod attestations;
+mod bids;
 mod bits;
 mod error;
 mod exits;
@@ -37,6 +38,7 @@ mod sync;
 
 pub use aggregate::Aggregate;
 pub use attestations::{AttestationPool, CommitteeAggregate, CommitteeVotes, Insertion, VoteGroup};
+pub use bids::BidPool;
 pub use bits::Bits;
 pub use error::PoolError;
 pub use exits::ValidatorRequests;
