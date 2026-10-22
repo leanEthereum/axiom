@@ -157,7 +157,7 @@ impl ParticipationCredit<'_> {
             .map(|index| state.validators()[index.as_usize()].effective_balance)
             .collect();
         let (previous, current) = state.epoch_participation_mut();
-        let participation = if self.is_current { current } else { previous };
+        let mut participation = if self.is_current { current } else { previous };
         let mut proposer_reward_numerator = 0_u64;
         for (index, effective_balance) in attesters.iter().zip(effective_balances) {
             let increments = effective_balance / S::Preset::EFFECTIVE_BALANCE_INCREMENT;

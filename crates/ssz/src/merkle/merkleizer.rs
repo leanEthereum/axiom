@@ -37,6 +37,8 @@ pub struct Merkleizer {
     count: u64,
     /// Depth of the full tree, so it has 2^depth leaf slots.
     depth: usize,
+    /// Height of each leaf above the chunks, zero unless the leaves are subtree roots.
+    height: usize,
     /// Bytes of a partially filled chunk, for packed basic values.
     partial: [u8; BYTES_PER_CHUNK],
     /// Number of bytes used in the partial chunk.
@@ -60,11 +62,28 @@ impl Merkleizer {
     /// Panics when the depth exceeds 64.
     #[must_use]
     pub fn with_depth(depth: usize) -> Self {
-        assert!(depth <= MAX_DEPTH, "tree depth {depth} exceeds {MAX_DEPTH}");
+        Self::over_subtrees(depth, 0)
+    }
+
+    /// Merkleizer whose leaves are roots of subtrees of a given height.
+    ///
+    /// The tree is the top of a larger one, so its padding is zero subtrees of that height.
+    /// A collection that caches the roots of its aligned subtrees finishes its root this way.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the depth and the height together exceed 64.
+    #[must_use]
+    pub fn over_subtrees(depth: usize, height: usize) -> Self {
+        assert!(
+            depth + height <= MAX_DEPTH,
+            "tree depth {depth} above height {height} exceeds {MAX_DEPTH}"
+        );
         Self {
             pending: [Root::ZERO; MAX_DEPTH + 1],
             count: 0,
             depth,
+            height,
             partial: [0; BYTES_PER_CHUNK],
             partial_len: 0,
         }
@@ -167,15 +186,17 @@ impl Merkleizer {
                 (true, Some(right)) => Some(Root::hash_pair(&self.pending[level], &right)),
                 (true, None) => Some(Root::hash_pair(
                     &self.pending[level],
-                    &ZeroHashes::at(level),
+                    &ZeroHashes::at(self.height + level),
                 )),
-                (false, Some(left)) => Some(Root::hash_pair(&left, &ZeroHashes::at(level))),
+                (false, Some(left)) => {
+                    Some(Root::hash_pair(&left, &ZeroHashes::at(self.height + level)))
+                }
                 (false, None) => None,
             };
         }
 
         // No leaf at all leaves the whole tree empty.
-        node.unwrap_or_else(|| ZeroHashes::at(self.depth))
+        node.unwrap_or_else(|| ZeroHashes::at(self.height + self.depth))
     }
 
     /// Emits the partial chunk as a leaf.
@@ -276,7 +297,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn empty_subtree_tree_is_the_zero_subtree_of_the_whole_height() {
+        // Depth 3 over subtrees of height 4 spans 2^7 chunks of zeros.
+        assert_eq!(Merkleizer::over_subtrees(3, 4).finish(), ZeroHashes::at(7));
+    }
+
     proptest! {
+        #[test]
+        fn subtree_roots_finish_the_whole_tree(count in 0_usize..=40, height in 0_usize..=3) {
+            // Fixture state: leaves of a depth-6 tree, grouped into subtrees of 2^height leaves.
+            let leaves: Vec<Root> = (0..count).map(|i| leaf(u8::try_from(i).unwrap())).collect();
+            let subtrees: Vec<Root> = leaves
+                .chunks(1 << height)
+                .map(|group| {
+                    let mut subtree = Merkleizer::with_depth(height);
+                    for leaf in group {
+                        subtree.push(*leaf);
+                    }
+                    subtree.finish()
+                })
+                .collect();
+
+            let mut top = Merkleizer::over_subtrees(6 - height, height);
+            for subtree in subtrees {
+                top.push(subtree);
+            }
+
+            prop_assert_eq!(top.finish(), reference_root(&leaves, 6));
+        }
+
         #[test]
         fn streaming_root_equals_reference(count in 0_usize..=64, depth in 6_usize..=8) {
             let leaves: Vec<Root> = (0..count).map(|i| leaf(u8::try_from(i).unwrap())).collect();

@@ -2,7 +2,7 @@
 
 use std::mem;
 
-use axiom_ssz::List;
+use axiom_ssz::PersistentList;
 use axiom_types::{Epoch, Gwei, Preset, accessors::CoreState, phase0::BeaconState};
 
 /// The passage from the ending epoch to the next one.
@@ -36,7 +36,7 @@ impl Rollover {
             .0
             .is_multiple_of(S::Preset::EPOCHS_PER_ETH1_VOTING_PERIOD)
         {
-            *state.eth1_data_votes_mut() = List::new();
+            *state.eth1_data_votes_mut() = PersistentList::new();
         }
     }
 

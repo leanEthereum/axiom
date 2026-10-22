@@ -1,8 +1,8 @@
 //! The beacon state of phase0.
 
 use axiom_ssz::{
-    BitVector, CapacityError, Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
-    Vector,
+    BitVector, CapacityError, Const, Container, DecodeError, FieldDecoder, FieldVisitor,
+    PersistentList, PersistentVector, Sequence, SequenceMut, Ssz,
 };
 
 use crate::{
@@ -14,32 +14,32 @@ use crate::{
 };
 
 /// Recent block roots.
-pub type BlockRoots<P> = Vector<Root, <P as Preset>::SlotsPerHistoricalRoot>;
+pub type BlockRoots<P> = PersistentVector<Root, <P as Preset>::SlotsPerHistoricalRoot>;
 
 /// Recent state roots.
-pub type StateRoots<P> = Vector<Root, <P as Preset>::SlotsPerHistoricalRoot>;
+pub type StateRoots<P> = PersistentVector<Root, <P as Preset>::SlotsPerHistoricalRoot>;
 
 /// Pre-Capella history accumulator.
-pub type HistoricalRoots<P> = List<Root, <P as Preset>::HistoricalRootsLimit>;
+pub type HistoricalRoots<P> = PersistentList<Root, <P as Preset>::HistoricalRootsLimit>;
 
 /// Eth1 data votes of a voting period.
-pub type Eth1DataVotes<P> = List<Eth1Data, <P as Preset>::Eth1DataVotesLimit>;
+pub type Eth1DataVotes<P> = PersistentList<Eth1Data, <P as Preset>::Eth1DataVotesLimit>;
 
 /// The validator registry.
-pub type Validators<P> = List<Validator, <P as Preset>::ValidatorRegistryLimit>;
+pub type Validators<P> = PersistentList<Validator, <P as Preset>::ValidatorRegistryLimit>;
 
 /// Validator balances.
-pub type Balances<P> = List<Gwei, <P as Preset>::ValidatorRegistryLimit>;
+pub type Balances<P> = PersistentList<Gwei, <P as Preset>::ValidatorRegistryLimit>;
 
 /// Randao mixes by epoch.
-pub type RandaoMixes<P> = Vector<Bytes32, <P as Preset>::EpochsPerHistoricalVector>;
+pub type RandaoMixes<P> = PersistentVector<Bytes32, <P as Preset>::EpochsPerHistoricalVector>;
 
 /// Slashed balances by epoch.
-pub type Slashings<P> = Vector<Gwei, <P as Preset>::EpochsPerSlashingsVector>;
+pub type Slashings<P> = PersistentVector<Gwei, <P as Preset>::EpochsPerSlashingsVector>;
 
 /// Attestations of one epoch awaiting scoring.
 pub type PendingAttestations<P> =
-    List<PendingAttestation<P>, <P as Preset>::MaxPendingAttestations>;
+    PersistentList<PendingAttestation<P>, <P as Preset>::MaxPendingAttestations>;
 
 /// Justification history of the last four epochs.
 pub type JustificationBits = BitVector<Const<JUSTIFICATION_BITS_LENGTH>>;
@@ -299,20 +299,20 @@ impl<P: Preset> CoreState for BeaconState<P> {
         &mut self.eth1_deposit_index
     }
 
-    fn validators(&self) -> &[Validator] {
+    fn validators(&self) -> &Sequence<Validator> {
         &self.validators
     }
 
-    fn validators_mut(&mut self) -> &mut [Validator] {
-        &mut self.validators
+    fn validators_mut(&mut self) -> SequenceMut<'_, Validator> {
+        self.validators.elements_mut()
     }
 
-    fn balances(&self) -> &[Gwei] {
+    fn balances(&self) -> &Sequence<Gwei> {
         &self.balances
     }
 
-    fn balances_mut(&mut self) -> &mut [Gwei] {
-        &mut self.balances
+    fn balances_mut(&mut self) -> SequenceMut<'_, Gwei> {
+        self.balances.elements_mut()
     }
 
     fn push_validator(&mut self, validator: Validator, balance: Gwei) -> Result<(), CapacityError> {

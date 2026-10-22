@@ -1,6 +1,8 @@
 //! Sync committees, the rotating set that signs heads for light clients.
 
-use axiom_ssz::{BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, Ssz, Vector};
+use axiom_ssz::{
+    BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, PersistentVector, Ssz, Vector,
+};
 
 use crate::{BlsPubkey, BlsSignature, Preset, Root, Slot, ValidatorIndex};
 
@@ -14,7 +16,7 @@ pub type SyncSubcommitteeBits<P> = BitVector<<P as Preset>::SyncSubcommitteeSize
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncCommittee<P: Preset> {
     /// Member keys, possibly repeating a validator.
-    pub pubkeys: Vector<BlsPubkey, P::SyncCommitteeSize>,
+    pub pubkeys: PersistentVector<BlsPubkey, P::SyncCommitteeSize>,
 
     /// Sum of the member keys.
     pub aggregate_pubkey: BlsPubkey,

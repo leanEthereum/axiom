@@ -1,6 +1,6 @@
 //! The upgrade from Fulu to Gloas.
 
-use axiom_ssz::{BitVector, ProgressiveList, Ssz, Vector};
+use axiom_ssz::{BitVector, PersistentProgressiveList, ProgressiveList, Ssz, Vector};
 use axiom_types::{
     BuilderIndex, ChainConfig, ExecutionAddress, Gwei, Preset,
     accessors::CoreState,
@@ -100,11 +100,11 @@ impl<P: Preset> Upgrade for BeaconState<P> {
             pending_partial_withdrawals: pre.pending_partial_withdrawals.into_vec().into(),
             pending_consolidations: pre.pending_consolidations.into_vec().into(),
             proposer_lookahead: pre.proposer_lookahead,
-            builders: ProgressiveList::default(),
+            builders: PersistentProgressiveList::default(),
             next_withdrawal_builder_index: BuilderIndex(0),
             execution_payload_availability,
             builder_pending_payments: Vector::default(),
-            builder_pending_withdrawals: ProgressiveList::default(),
+            builder_pending_withdrawals: PersistentProgressiveList::default(),
             latest_execution_payload_bid,
             payload_expected_withdrawals: ProgressiveList::default(),
             ptc_window: Vector::default(),

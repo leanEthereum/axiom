@@ -6,6 +6,7 @@ use std::{
 };
 
 use axiom_bls::PublicKey;
+use axiom_ssz::Sequence;
 use axiom_types::{BlsPubkey, ValidatorIndex, phase0::Validator};
 
 /// Decompressed public keys and a key-to-index map, grown with the registry.
@@ -44,14 +45,14 @@ impl PubkeyCache {
     }
 
     /// Extends the cache to mirror every validator of a registry.
-    pub fn sync(&mut self, validators: &[Validator]) {
+    pub fn sync(&mut self, validators: &Sequence<Validator>) {
         if validators.len() <= self.keys.len() {
             return;
         }
         let start = self.keys.len();
         let keys = Arc::make_mut(&mut self.keys);
         let indices = Arc::make_mut(&mut self.indices);
-        for (offset, validator) in validators[start..].iter().enumerate() {
+        for (offset, validator) in validators.iter().skip(start).enumerate() {
             keys.push(OnceLock::new());
             // The first validator with a key wins, as the spec's list lookup does.
             indices

@@ -1,6 +1,6 @@
 //! Electra's pending queues and balance churn, from Electra on.
 
-use axiom_ssz::CapacityError;
+use axiom_ssz::{CapacityError, Sequence};
 
 use crate::{
     Epoch, Gwei, ValidatorIndex,
@@ -49,7 +49,7 @@ pub trait PendingQueueState: CoreState {
     fn earliest_consolidation_epoch_mut(&mut self) -> &mut Epoch;
 
     /// Deposits waiting for churn, oldest first.
-    fn pending_deposits(&self) -> &[PendingDeposit];
+    fn pending_deposits(&self) -> &Sequence<PendingDeposit>;
 
     /// Queues a deposit at the back.
     ///
@@ -62,7 +62,7 @@ pub trait PendingQueueState: CoreState {
     fn remove_pending_deposits(&mut self, count: usize);
 
     /// Partial withdrawals waiting for their epoch, oldest first.
-    fn pending_partial_withdrawals(&self) -> &[PendingPartialWithdrawal];
+    fn pending_partial_withdrawals(&self) -> &Sequence<PendingPartialWithdrawal>;
 
     /// Queues a partial withdrawal at the back.
     ///
@@ -78,7 +78,7 @@ pub trait PendingQueueState: CoreState {
     fn remove_pending_partial_withdrawals(&mut self, count: usize);
 
     /// Consolidations waiting for their source to be withdrawable, oldest first.
-    fn pending_consolidations(&self) -> &[PendingConsolidation];
+    fn pending_consolidations(&self) -> &Sequence<PendingConsolidation>;
 
     /// Queues a consolidation at the back.
     ///

@@ -1,6 +1,8 @@
 //! A beacon state of any fork.
 
-use axiom_ssz::{CapacityError, DecodeError, GeneralizedIndex, MerkleProof, Root, Ssz};
+use axiom_ssz::{
+    CapacityError, DecodeError, GeneralizedIndex, MerkleProof, Root, Sequence, SequenceMut, Ssz,
+};
 
 use crate::{
     ChainConfig, ForkName, Gwei, Hash32, Preset, Slot,
@@ -296,19 +298,19 @@ impl<P: Preset> CoreState for BeaconState<P> {
         self.as_core_mut().eth1_deposit_index_mut()
     }
 
-    fn validators(&self) -> &[Validator] {
+    fn validators(&self) -> &Sequence<Validator> {
         self.as_core().validators()
     }
 
-    fn validators_mut(&mut self) -> &mut [Validator] {
+    fn validators_mut(&mut self) -> SequenceMut<'_, Validator> {
         self.as_core_mut().validators_mut()
     }
 
-    fn balances(&self) -> &[Gwei] {
+    fn balances(&self) -> &Sequence<Gwei> {
         self.as_core().balances()
     }
 
-    fn balances_mut(&mut self) -> &mut [Gwei] {
+    fn balances_mut(&mut self) -> SequenceMut<'_, Gwei> {
         self.as_core_mut().balances_mut()
     }
 

@@ -185,7 +185,7 @@ impl<'a, S: CoreState + ?Sized> CachedState<'a, S> {
         let balances = self.beacon.balances_mut();
         let registry_size = balances.len();
         balances
-            .get_mut(index.as_usize())
+            .into_mut(index.as_usize())
             .ok_or(StateError::UnknownValidator {
                 index,
                 registry_size,

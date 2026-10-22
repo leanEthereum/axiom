@@ -1,6 +1,6 @@
 //! The phase0 core every beacon state carries.
 
-use axiom_ssz::CapacityError;
+use axiom_ssz::{CapacityError, Sequence, SequenceMut};
 
 use crate::{
     Bytes32, Domain, DomainType, Epoch, ForkName, Gwei, Preset, Root, Slot, ValidatorIndex,
@@ -88,16 +88,16 @@ pub trait CoreState {
     fn eth1_deposit_index_mut(&mut self) -> &mut u64;
 
     /// The validator registry.
-    fn validators(&self) -> &[Validator];
+    fn validators(&self) -> &Sequence<Validator>;
 
     /// The validator registry, for edits in place.
-    fn validators_mut(&mut self) -> &mut [Validator];
+    fn validators_mut(&mut self) -> SequenceMut<'_, Validator>;
 
     /// Actual balance of each validator.
-    fn balances(&self) -> &[Gwei];
+    fn balances(&self) -> &Sequence<Gwei>;
 
     /// Actual balance of each validator, for edits in place.
-    fn balances_mut(&mut self) -> &mut [Gwei];
+    fn balances_mut(&mut self) -> SequenceMut<'_, Gwei>;
 
     /// Appends a validator and its balance to the registry.
     ///

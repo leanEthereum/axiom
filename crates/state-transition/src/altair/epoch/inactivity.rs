@@ -59,7 +59,7 @@ impl InactivityUpdates {
 
     /// Writes the new scores into the state.
     pub fn apply<S: ParticipationState + ?Sized>(self, state: &mut S) {
-        let scores = state.inactivity_scores_mut();
+        let mut scores = state.inactivity_scores_mut();
         for (index, participated) in self.votes {
             let score = &mut scores[index];
             *score = if participated {

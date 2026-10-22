@@ -1,6 +1,6 @@
 //! The upgrade from Deneb to Electra.
 
-use axiom_ssz::List;
+use axiom_ssz::PersistentList;
 use axiom_types::{
     ChainConfig, Epoch, Gwei, Preset, Slot, ValidatorIndex,
     accessors::{CoreState, PendingQueueState},
@@ -84,9 +84,9 @@ impl<P: Preset> Upgrade for BeaconState<P> {
             earliest_exit_epoch,
             consolidation_balance_to_consume: Gwei::ZERO,
             earliest_consolidation_epoch: activation_exit_epoch,
-            pending_deposits: List::new(),
-            pending_partial_withdrawals: List::new(),
-            pending_consolidations: List::new(),
+            pending_deposits: PersistentList::new(),
+            pending_partial_withdrawals: PersistentList::new(),
+            pending_consolidations: PersistentList::new(),
         };
 
         let limits = Self::churn_limits(ActiveBalance::of(&post), config);

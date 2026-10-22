@@ -2,7 +2,9 @@
 //!
 //! See EIP-7732 and the Gloas beacon chain spec.
 
-use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, ProgressiveList, Ssz, Vector};
+use axiom_ssz::{
+    Container, DecodeError, FieldDecoder, FieldVisitor, PersistentProgressiveList, Ssz, Vector,
+};
 
 use crate::{
     BlsPubkey, BlsSignature, BuilderIndex, Bytes32, Epoch, ExecutionAddress, Gwei, Preset,
@@ -10,14 +12,14 @@ use crate::{
 };
 
 /// The builder registry.
-pub type Builders = ProgressiveList<Builder>;
+pub type Builders = PersistentProgressiveList<Builder>;
 
 /// Payments owed to builders, one per slot of the previous and current epochs.
 pub type BuilderPendingPayments<P> =
     Vector<BuilderPendingPayment, <P as Preset>::BuilderPendingPaymentsSlots>;
 
 /// Builder payments waiting to be withdrawn.
-pub type BuilderPendingWithdrawals = ProgressiveList<BuilderPendingWithdrawal>;
+pub type BuilderPendingWithdrawals = PersistentProgressiveList<BuilderPendingWithdrawal>;
 
 /// A builder's identity, balance, and lifecycle epochs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
