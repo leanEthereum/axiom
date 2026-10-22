@@ -12,6 +12,7 @@ use crate::metrics::process::{ProcessStat, ProcessValue};
 ///
 /// The kernel exports user-visible ticks at a fixed 100 Hz on every mainstream architecture.
 /// Source: the definition of user ticks in the Linux kernel parameter headers.
+#[cfg(any(target_os = "linux", test))]
 const TICKS_PER_SECOND: u64 = 100;
 
 /// What the running process uses.
@@ -123,6 +124,7 @@ impl SystemUsage {
     ///     cpu0 ...                                                   one line per thread
     ///     btime 1700000000
     /// ```
+    #[cfg(any(target_os = "linux", test))]
     fn read_stat(&mut self, stat: &str) {
         for line in stat.lines() {
             let mut fields = line.split_whitespace();
@@ -147,6 +149,7 @@ impl SystemUsage {
     }
 
     /// Physical cores: the cores of each distinct physical package.
+    #[cfg(any(target_os = "linux", test))]
     fn cores(cpuinfo: &str) -> u64 {
         let mut packages = Vec::new();
         let mut cores_per_package = 0;
@@ -165,6 +168,7 @@ impl SystemUsage {
     }
 
     /// Reads memory sizes, given in kibibytes.
+    #[cfg(any(target_os = "linux", test))]
     fn read_meminfo(&mut self, meminfo: &str) {
         for line in meminfo.lines() {
             let mut fields = line.split_whitespace();
@@ -187,6 +191,7 @@ impl SystemUsage {
     /// ```text
     ///     major minor name reads ... writes ...    reads is field 4, writes field 8
     /// ```
+    #[cfg(any(target_os = "linux", test))]
     fn read_diskstats(&mut self, diskstats: &str) {
         for line in diskstats.lines() {
             let fields: Vec<&str> = line.split_whitespace().collect();
@@ -210,6 +215,7 @@ impl SystemUsage {
     /// ```text
     ///     eth0: rx_bytes rx_packets ... (8 receive fields) tx_bytes ...
     /// ```
+    #[cfg(any(target_os = "linux", test))]
     fn read_netdev(&mut self, netdev: &str) {
         for line in netdev.lines() {
             let Some((name, counters)) = line.split_once(':') else {
