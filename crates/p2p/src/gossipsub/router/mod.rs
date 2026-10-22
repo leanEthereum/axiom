@@ -22,11 +22,11 @@ mod inbound;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    error::Error,
-    fmt,
     net::IpAddr,
     time::Duration,
 };
+
+use thiserror::Error;
 
 use super::{
     ControlMessage, GossipsubConfig, MessageId, ProtocolVersion, RawMessage, Rpc, SubOpts, Topic,
@@ -76,28 +76,19 @@ pub enum GossipsubEvent {
 }
 
 /// Why a publish failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PublishError {
     /// The same content was already published or received recently.
+    #[error("message already published")]
     Duplicate,
     /// No peer is eligible to receive the message.
+    #[error("no peer to publish to")]
     InsufficientPeers,
     /// The encoded message exceeds the transmit limit.
+    #[error("message exceeds the transmit limit")]
     MessageTooLarge,
 }
-
-impl fmt::Display for PublishError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Duplicate => f.write_str("message already published"),
-            Self::InsufficientPeers => f.write_str("no peer to publish to"),
-            Self::MessageTooLarge => f.write_str("message exceeds the transmit limit"),
-        }
-    }
-}
-
-impl Error for PublishError {}
 
 /// What the router knows about a connected peer.
 #[derive(Clone, Debug)]

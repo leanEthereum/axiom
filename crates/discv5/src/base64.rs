@@ -2,7 +2,7 @@
 //!
 //! See RFC 4648, section 5, and EIP-778, "Text Encoding".
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// The URL-safe alphabet: `-` and `_` replace `+` and `/`.
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -78,29 +78,20 @@ impl Base64Url {
 }
 
 /// Text that is not unpadded URL-safe base64.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum Base64Error {
     /// A byte outside the URL-safe alphabet, padding included.
+    #[error("byte 0x{0:02x} is not base64url")]
     InvalidSymbol(u8),
 
     /// A length that leaves one symbol dangling.
+    #[error("base64url length leaves a dangling symbol")]
     InvalidLength,
 
     /// Nonzero bits past the last encoded byte.
+    #[error("base64url has nonzero trailing bits")]
     NonCanonical,
 }
-
-impl fmt::Display for Base64Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSymbol(symbol) => write!(f, "byte 0x{symbol:02x} is not base64url"),
-            Self::InvalidLength => f.write_str("base64url length leaves a dangling symbol"),
-            Self::NonCanonical => f.write_str("base64url has nonzero trailing bits"),
-        }
-    }
-}
-
-impl Error for Base64Error {}
 
 #[cfg(test)]
 mod tests {

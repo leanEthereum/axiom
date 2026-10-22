@@ -47,8 +47,7 @@ mod events;
 mod upgrade;
 
 use std::{
-    error::Error,
-    fmt, io,
+    io,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -57,6 +56,7 @@ use std::{
 };
 
 pub use events::{EventLimits, NetworkEvents};
+use thiserror::Error;
 use tokio::{
     net::TcpListener,
     sync::{mpsc, oneshot},
@@ -156,34 +156,25 @@ pub struct RequestId(pub u64);
 pub struct InboundRequestId(pub u64);
 
 /// Why an outbound request ended without a complete response.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum RequestError {
     /// The peer is not connected.
+    #[error("peer not connected")]
     NotConnected,
     /// The peer does not support the protocol.
+    #[error("protocol not supported by the peer")]
     Unsupported,
     /// The response was malformed.
+    #[error("invalid response: {0}")]
     InvalidResponse(String),
     /// The stream was reset or the connection dropped.
+    #[error("stream closed before the response completed")]
     StreamClosed,
     /// The response did not complete in time.
+    #[error("response timed out")]
     Timeout,
 }
-
-impl fmt::Display for RequestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotConnected => f.write_str("peer not connected"),
-            Self::Unsupported => f.write_str("protocol not supported by the peer"),
-            Self::InvalidResponse(reason) => write!(f, "invalid response: {reason}"),
-            Self::StreamClosed => f.write_str("stream closed before the response completed"),
-            Self::Timeout => f.write_str("response timed out"),
-        }
-    }
-}
-
-impl Error for RequestError {}
 
 /// Something that happened on the network.
 #[derive(Clone, Debug, PartialEq)]
@@ -269,22 +260,29 @@ pub enum NetworkEvent {
 }
 
 /// A failure of the swarm or of one connection.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum NetworkError {
     /// A socket operation failed.
+    #[error("i/o error: {0}")]
     Io(io::Error),
     /// The address is not a TCP address.
+    #[error("unsupported address {0}")]
     UnsupportedAddress(Multiaddr),
     /// The address is malformed.
+    #[error("invalid address: {0}")]
     InvalidAddress(MultiaddrError),
     /// A protocol negotiation failed.
+    #[error("negotiation failed: {0}")]
     Negotiation(NegotiationError),
     /// The security handshake failed.
+    #[error("security handshake failed: {0}")]
     Security(SecureError),
     /// The peer closed the connection.
+    #[error("connection closed")]
     ConnectionClosed,
     /// The swarm task has stopped.
+    #[error("network has shut down")]
     Shutdown,
 }
 
@@ -311,22 +309,6 @@ impl From<MultiaddrError> for NetworkError {
         Self::InvalidAddress(error)
     }
 }
-
-impl fmt::Display for NetworkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "i/o error: {error}"),
-            Self::UnsupportedAddress(addr) => write!(f, "unsupported address {addr}"),
-            Self::InvalidAddress(error) => write!(f, "invalid address: {error}"),
-            Self::Negotiation(error) => write!(f, "negotiation failed: {error}"),
-            Self::Security(error) => write!(f, "security handshake failed: {error}"),
-            Self::ConnectionClosed => f.write_str("connection closed"),
-            Self::Shutdown => f.write_str("network has shut down"),
-        }
-    }
-}
-
-impl Error for NetworkError {}
 
 /// A command from the handle to the swarm task.
 #[derive(Debug)]

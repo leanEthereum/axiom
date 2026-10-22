@@ -2,9 +2,10 @@
 
 mod field;
 
-use std::{error::Error, fmt};
+use std::fmt;
 
 use field::FieldElement;
+use thiserror::Error;
 
 use crate::ct::{Mask, wipe};
 
@@ -199,22 +200,13 @@ impl fmt::Debug for SharedSecret {
 }
 
 /// A Diffie-Hellman exchange that must be refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum X25519Error {
     /// The peer key has small order, so the shared secret is all zeros.
+    #[error("peer public key has low order")]
     LowOrderPoint,
 }
-
-impl fmt::Display for X25519Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LowOrderPoint => f.write_str("peer public key has low order"),
-        }
-    }
-}
-
-impl Error for X25519Error {}
 
 #[cfg(test)]
 mod tests {

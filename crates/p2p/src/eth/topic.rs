@@ -1,8 +1,9 @@
 //! Ethereum gossip topic names.
 
-use std::{error::Error, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use axiom_types::ForkDigest;
+use thiserror::Error;
 
 use crate::gossipsub::Topic;
 
@@ -180,25 +181,16 @@ impl FromStr for GossipTopic {
 }
 
 /// Text that is not a known consensus topic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum TopicError {
     /// The topic does not have the five-part shape or a valid digest.
+    #[error("malformed consensus topic")]
     Malformed,
     /// The name is not one the specs define.
+    #[error("unknown consensus topic name")]
     UnknownName,
 }
-
-impl fmt::Display for TopicError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Malformed => f.write_str("malformed consensus topic"),
-            Self::UnknownName => f.write_str("unknown consensus topic name"),
-        }
-    }
-}
-
-impl Error for TopicError {}
 
 #[cfg(test)]
 mod tests {

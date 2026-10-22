@@ -1,6 +1,6 @@
 //! Distances in the keyspace: the XOR metric and its logarithm.
 
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// The XOR of two node identifiers, compared as a 256-bit big-endian number.
 ///
@@ -71,16 +71,9 @@ impl LogDistance {
 }
 
 /// A logarithmic distance above 256.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("log distance {0} exceeds 256")]
 pub struct DistanceError(pub u16);
-
-impl fmt::Display for DistanceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "log distance {} exceeds 256", self.0)
-    }
-}
-
-impl Error for DistanceError {}
 
 #[cfg(test)]
 mod tests {

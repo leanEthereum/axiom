@@ -1,6 +1,8 @@
 //! HKDF-SHA256, the extract-then-expand key derivation of RFC 5869.
 
-use std::{error::Error, fmt};
+use std::fmt;
+
+use thiserror::Error;
 
 use crate::{ct::wipe, hmac::HmacSha256};
 
@@ -110,10 +112,11 @@ impl fmt::Debug for Hkdf {
 }
 
 /// A key derivation request HKDF cannot serve.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum HkdfError {
     /// The requested output exceeds 255 hash blocks.
+    #[error("output of {len} bytes exceeds the HKDF limit of {max}")]
     OutputTooLong {
         /// Bytes requested.
         len: usize,
@@ -121,18 +124,6 @@ pub enum HkdfError {
         max: usize,
     },
 }
-
-impl fmt::Display for HkdfError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OutputTooLong { len, max } => {
-                write!(f, "output of {len} bytes exceeds the HKDF limit of {max}")
-            }
-        }
-    }
-}
-
-impl Error for HkdfError {}
 
 #[cfg(test)]
 mod tests {
