@@ -105,7 +105,7 @@ fn a_node_imports_published_blocks_and_reports_its_head() {
         }
 
         // The head is the second block, at slot 2, and the node is in sync.
-        let header = json(&client, "/eth/v1/beacon/headers/head").await;
+        let header = json(&client, "/eth/v1/beacon/headers/head").await.unwrap();
         let data = header.get("data").unwrap();
         assert_eq!(data.get("root").and_then(Json::as_str), Some(HEAD));
         assert_eq!(data.get("canonical").and_then(Json::as_bool), Some(true));
@@ -115,13 +115,13 @@ fn a_node_imports_published_blocks_and_reports_its_head() {
             .and_then(|message| message.get("slot"));
         assert_eq!(slot.and_then(Json::as_str), Some("2"));
 
-        let syncing = json(&client, "/eth/v1/node/syncing").await;
+        let syncing = json(&client, "/eth/v1/node/syncing").await.unwrap();
         let data = syncing.get("data").unwrap();
         assert_eq!(data.get("head_slot").and_then(Json::as_str), Some("2"));
         assert_eq!(data.get("is_syncing").and_then(Json::as_bool), Some(false));
 
         // A block by slot is the canonical one; slot 3 is still empty.
-        let by_slot = json(&client, "/eth/v1/beacon/blocks/2/root").await;
+        let by_slot = json(&client, "/eth/v1/beacon/blocks/2/root").await.unwrap();
         assert_eq!(
             by_slot
                 .get("data")
@@ -142,16 +142,20 @@ fn a_node_imports_published_blocks_and_reports_its_head() {
     fs::remove_dir_all(&directory).unwrap();
 }
 
-/// A JSON route's parsed body, which must be a success.
-async fn json(client: &Client, path: &str) -> Json {
-    let response = client.send(&Request::new(Method::Get, path)).await.unwrap();
-    assert_eq!(
-        response.status,
-        StatusCode::OK,
-        "{path}: {}",
-        body_text(&response)
-    );
-    Json::parse(&response.body).unwrap()
+/// A JSON route's parsed body, or why the route did not answer with one.
+async fn json(client: &Client, path: &str) -> Result<Json, String> {
+    let response = client
+        .send(&Request::new(Method::Get, path))
+        .await
+        .map_err(|error| format!("{path}: {error}"))?;
+    if response.status != StatusCode::OK {
+        return Err(format!(
+            "{path}: {}: {}",
+            response.status,
+            body_text(&response)
+        ));
+    }
+    Json::parse(&response.body).map_err(|error| format!("{path}: {error}"))
 }
 
 /// A response body as text, for failure messages.
