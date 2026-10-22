@@ -69,6 +69,8 @@ impl PreparationRoutes {
         request: Request,
     ) -> ApiResult {
         let preparations: Vec<ProposerPreparation> = Body(&request).json_items()?;
+        // Fee recipients serve the chain's coming proposals, so the chain must be running.
+        context.query(|_| Ok(())).await?;
         context.proposer.prepare(
             preparations
                 .into_iter()

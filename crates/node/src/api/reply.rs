@@ -228,7 +228,7 @@ impl Reply {
     }
 
     /// An empty reply: the request was fine, but there is nothing to answer.
-    pub(crate) fn no_content() -> Response {
+    pub(crate) const fn no_content() -> Response {
         Response::new(StatusCode::NO_CONTENT)
     }
 
