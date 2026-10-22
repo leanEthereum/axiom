@@ -317,6 +317,34 @@ impl<P: Preset> BeaconBlock<P> {
         }
     }
 
+    /// The voluntary exits the block carries, a container no fork changed.
+    #[must_use]
+    pub fn voluntary_exits(&self) -> &[phase0::SignedVoluntaryExit] {
+        match self {
+            Self::Phase0(block) => &block.body.voluntary_exits,
+            Self::Altair(block) => &block.body.voluntary_exits,
+            Self::Bellatrix(block) => &block.body.voluntary_exits,
+            Self::Capella(block) => &block.body.voluntary_exits,
+            Self::Deneb(block) => &block.body.voluntary_exits,
+            Self::Electra(block) | Self::Fulu(block) => &block.body.voluntary_exits,
+            Self::Gloas(block) => &block.body.voluntary_exits,
+        }
+    }
+
+    /// The proposer slashings the block carries, a container no fork changed.
+    #[must_use]
+    pub fn proposer_slashings(&self) -> &[phase0::ProposerSlashing] {
+        match self {
+            Self::Phase0(block) => &block.body.proposer_slashings,
+            Self::Altair(block) => &block.body.proposer_slashings,
+            Self::Bellatrix(block) => &block.body.proposer_slashings,
+            Self::Capella(block) => &block.body.proposer_slashings,
+            Self::Deneb(block) => &block.body.proposer_slashings,
+            Self::Electra(block) | Self::Fulu(block) => &block.body.proposer_slashings,
+            Self::Gloas(block) => &block.body.proposer_slashings,
+        }
+    }
+
     /// The block a genesis state implies, in the state's fork.
     ///
     /// It has the state's latest header, an empty body, and the state's root.

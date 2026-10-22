@@ -16,6 +16,7 @@ use crate::{
     ChainHandle, Clock, EventHub, EventSender, ExecutionLayer, NetworkSettings, NodeConfig,
     NodeError, NodeKey, ProposerService, ProposerSettings, Publisher,
     api::ApiServices,
+    monitor::{MonitorMetrics, ValidatorMonitor},
     network::{
         AttestationSubnets, Discovery, ForkDigests, NatMetrics, NetworkIdentity, NetworkService,
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
@@ -250,6 +251,9 @@ impl<P: Preset> Node<P> {
             event_sender.clone(),
         ))
         .await?;
+        // The validator monitor watches the validators the operator named, with its own metrics.
+        let monitor_metrics = MonitorMetrics::register(&registry).map_err(NodeError::Metrics)?;
+        let chain = chain.with_monitor(ValidatorMonitor::new(&config.monitor, monitor_metrics));
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.

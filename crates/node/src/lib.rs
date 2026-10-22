@@ -19,6 +19,7 @@ mod engine;
 mod error;
 mod events;
 mod genesis;
+mod monitor;
 pub(crate) mod network;
 mod proposer;
 mod publish;
@@ -49,6 +50,7 @@ pub use events::{
     UnknownTopic,
 };
 pub use genesis::{EmbeddedGenesis, GenesisDownload, GenesisState};
+pub use monitor::MonitorSettings;
 pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
 pub use proposer::{BlockOrder, ProposerError, ProposerReorgs, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};

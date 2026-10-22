@@ -41,6 +41,7 @@ use super::{
 };
 use crate::{
     ApiEvent, Chain, ChainError, ChainHandle, Clock, EventSender, EventTopic, ExecutionLayer,
+    monitor::{Observed, Source},
 };
 
 /// Work on the chain that an accepted message leaves, run after it was forwarded.
@@ -49,7 +50,12 @@ type ChainJob<P> = Box<dyn FnOnce(&mut Chain<P>) -> Result<(), ChainError> + Sen
 /// What remains to do with a message once its verdict is reported.
 enum Accepted<P: Preset> {
     /// A block, to be judged by the engine and imported.
-    Block(Arc<combined::SignedBeaconBlock<P>>),
+    Block {
+        /// The block.
+        block: Arc<combined::SignedBeaconBlock<P>>,
+        /// When the node saw it, in milliseconds since the Unix epoch.
+        seen_ms: u64,
+    },
     /// A payload envelope, to be judged by the engine and imported.
     Envelope(Arc<SignedExecutionPayloadEnvelope<P>>),
     /// Anything else the chain consumes: votes, slashings, sidecars.
@@ -238,12 +244,72 @@ impl<P: Preset> GossipHandler<P> {
                     |block| {
                         let block = F::into_any_block(block);
                         self.announce_block(&block);
-                        Some(Accepted::Block(Arc::new(block)))
+                        Some(Accepted::Block {
+                            block: Arc::new(block),
+                            seen_ms: now,
+                        })
                     },
                     |block, _| MissingBlock::Parent(Arc::new(F::into_any_block(block))),
                 )
                 .await
             }
+            GossipKind::BeaconAggregateAndProof | GossipKind::BeaconAttestation(_) => {
+                self.validate_vote_in::<F>(kind, data, now).await
+            }
+            GossipKind::AttesterSlashing => {
+                self.check(
+                    data,
+                    Announce::Plain(EventTopic::AttesterSlashing),
+                    |validator, slashing: &F::AttesterSlashing| {
+                        validator.attester_slashing(slashing)
+                    },
+                    |slashing| {
+                        let votes = slashing.conflicting_votes();
+                        Some(Self::job(move |chain| {
+                            chain.observe(Observed::AttesterSlashing(&votes), Source::Gossip, now);
+                            chain.on_attester_slashing(&votes)
+                        }))
+                    },
+                )
+                .await
+            }
+            GossipKind::VoluntaryExit => {
+                self.check(
+                    data,
+                    Announce::Plain(EventTopic::VoluntaryExit),
+                    move |validator, exit: &SignedVoluntaryExit| {
+                        validator.voluntary_exit::<F>(exit, now)
+                    },
+                    |exit| {
+                        Some(Self::job(move |chain| {
+                            chain.observe(Observed::Exit(&exit.message), Source::Gossip, now);
+                            chain.on_voluntary_exit(exit)
+                        }))
+                    },
+                )
+                .await
+            }
+            GossipKind::LightClientFinalityUpdate | GossipKind::LightClientOptimisticUpdate => (
+                self.forward_light_client(F::FORK, kind, data, now).await,
+                None,
+            ),
+            GossipKind::BlobSidecar(subnet) => self.validate_blob(F::FORK, subnet, data, now).await,
+            GossipKind::DataColumnSidecar(subnet) => {
+                self.validate_column(F::FORK.blob_data(), subnet, data, now)
+                    .await
+            }
+            _ => self.validate_operation(F::FORK, kind, data, now).await,
+        }
+    }
+
+    /// Validates a vote on a topic of one fork: an aggregate, or a single vote on its subnet.
+    async fn validate_vote_in<F>(&self, kind: GossipKind, data: Vec<u8>, now: u64) -> Checked<P>
+    where
+        F: GossipFork<Preset = P>,
+        F::SignedAggregateAndProof: ApiJson + Send + 'static,
+        F::SubnetAttestation: ApiJson + Send + 'static,
+    {
+        match kind {
             GossipKind::BeaconAggregateAndProof => {
                 self.check_or_look_up(
                     data,
@@ -253,7 +319,15 @@ impl<P: Preset> GossipHandler<P> {
                     },
                     |aggregate| {
                         let vote = aggregate.aggregate().committee_vote();
-                        Some(Self::job(move |chain| chain.on_vote(&vote)))
+                        let aggregator = aggregate.aggregator_index();
+                        Some(Self::job(move |chain| {
+                            let observed = Observed::Aggregate {
+                                aggregator,
+                                vote: &vote,
+                            };
+                            chain.observe(observed, Source::Gossip, now);
+                            chain.on_vote(&vote)
+                        }))
                     },
                     |_, root| MissingBlock::Root(root),
                 )
@@ -272,47 +346,19 @@ impl<P: Preset> GossipHandler<P> {
                     },
                     |vote| {
                         let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
-                        Some(Self::job(move |chain| chain.on_subnet_vote(&vote, claim)))
+                        Some(Self::job(move |chain| {
+                            let attester = chain.on_subnet_vote(&vote, claim)?;
+                            let data = vote.data();
+                            chain.observe(Observed::Single { attester, data }, Source::Gossip, now);
+                            Ok(())
+                        }))
                     },
                     |_, root| MissingBlock::Root(root),
                 )
                 .await
             }
-            GossipKind::AttesterSlashing => {
-                self.check(
-                    data,
-                    Announce::Plain(EventTopic::AttesterSlashing),
-                    |validator, slashing: &F::AttesterSlashing| {
-                        validator.attester_slashing(slashing)
-                    },
-                    |slashing| {
-                        let votes = slashing.conflicting_votes();
-                        Some(Self::job(move |chain| chain.on_attester_slashing(&votes)))
-                    },
-                )
-                .await
-            }
-            GossipKind::VoluntaryExit => {
-                self.check(
-                    data,
-                    Announce::Plain(EventTopic::VoluntaryExit),
-                    move |validator, exit: &SignedVoluntaryExit| {
-                        validator.voluntary_exit::<F>(exit, now)
-                    },
-                    |exit| Some(Self::job(move |chain| chain.on_voluntary_exit(exit))),
-                )
-                .await
-            }
-            GossipKind::LightClientFinalityUpdate | GossipKind::LightClientOptimisticUpdate => (
-                self.forward_light_client(F::FORK, kind, data, now).await,
-                None,
-            ),
-            GossipKind::BlobSidecar(subnet) => self.validate_blob(F::FORK, subnet, data, now).await,
-            GossipKind::DataColumnSidecar(subnet) => {
-                self.validate_column(F::FORK.blob_data(), subnet, data, now)
-                    .await
-            }
-            _ => self.validate_operation(F::FORK, kind, data, now).await,
+            // Every other topic has its own validation.
+            _ => (ValidationOutcome::Ignore, None),
         }
     }
 
@@ -455,7 +501,13 @@ impl<P: Preset> GossipHandler<P> {
                     data,
                     Announce::Plain(EventTopic::ProposerSlashing),
                     |validator, slashing: &ProposerSlashing| validator.proposer_slashing(slashing),
-                    |slashing| Some(Self::job(move |chain| chain.on_proposer_slashing(slashing))),
+                    |slashing| {
+                        Some(Self::job(move |chain| {
+                            let observed = Observed::ProposerSlashing(&slashing);
+                            chain.observe(observed, Source::Gossip, now);
+                            chain.on_proposer_slashing(slashing)
+                        }))
+                    },
                 )
                 .await
             }
@@ -467,8 +519,16 @@ impl<P: Preset> GossipHandler<P> {
                         validator.sync_contribution(contribution, now)
                     },
                     |signed| {
+                        let aggregator = signed.message.aggregator_index;
                         let contribution = signed.message.contribution;
-                        Some(Self::job(move |chain| chain.on_contribution(&contribution)))
+                        Some(Self::job(move |chain| {
+                            let observed = Observed::Contribution {
+                                aggregator,
+                                contribution: &contribution,
+                            };
+                            chain.observe(observed, Source::Gossip, now);
+                            chain.on_contribution(&contribution)
+                        }))
                     },
                 )
                 .await
@@ -480,7 +540,12 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, message: &SyncCommitteeMessage| {
                         validator.sync_committee_message(message, now, SubnetId(subnet))
                     },
-                    |message| Some(Self::job(move |chain| chain.on_sync_message(&message))),
+                    |message| {
+                        Some(Self::job(move |chain| {
+                            chain.observe(Observed::SyncMessage(&message), Source::Gossip, now);
+                            chain.on_sync_message(&message)
+                        }))
+                    },
                 )
                 .await
             }
@@ -654,7 +719,7 @@ impl<P: Preset> GossipHandler<P> {
     /// Acts on a message after its verdict, forwarded or kept for a lookup.
     async fn apply(&self, accepted: Accepted<P>, source: PeerId) {
         let outcome = match accepted {
-            Accepted::Block(block) => {
+            Accepted::Block { block, seen_ms } => {
                 let payload = self.execution.verdict(&self.chain, &block).await;
                 // Gossip admits a block up to the clock disparity early; it waits for its slot.
                 let slot = block.slot();
@@ -667,6 +732,7 @@ impl<P: Preset> GossipHandler<P> {
                     .run(move |chain| {
                         // The store's clock may lag the ticker, so bring it to now first.
                         chain.on_tick(now)?;
+                        chain.observe(Observed::Block(&block), Source::Gossip, seen_ms);
                         chain.submit_block(block, payload).map(|_| ())
                     })
                     .await

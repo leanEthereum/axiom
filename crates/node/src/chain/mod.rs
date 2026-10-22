@@ -63,7 +63,11 @@ pub use settings::{ChainSettings, SidecarPruning};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::{ApiEvent, ChainError, EventSender, EventTopic, slasher::SlasherFeed};
+use crate::{
+    ApiEvent, ChainError, EventSender, EventTopic,
+    monitor::{Observed, Source, ValidatorMonitor},
+    slasher::SlasherFeed,
+};
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
@@ -115,6 +119,8 @@ pub struct Chain<P: Preset> {
     pool: OperationPool<P>,
     /// The slasher's feed, when the node runs one.
     slasher: Option<SlasherFeed<P>>,
+    /// What the node sees of the validators its operator watches.
+    monitor: ValidatorMonitor,
     /// Past states, backfill, and the trusted checkpoint.
     history: History<P>,
     /// The operator's choices.
@@ -230,6 +236,7 @@ impl<P: Preset> Chain<P> {
             api_events: EventSender::detached(),
             pool: OperationPool::default(),
             slasher: None,
+            monitor: ValidatorMonitor::detached(),
             history,
             settings: ChainSettings::default(),
             fast_confirmation: None,
@@ -257,6 +264,38 @@ impl<P: Preset> Chain<P> {
     pub fn with_custody(mut self, columns: impl IntoIterator<Item = ColumnIndex>) -> Self {
         self.availability = AvailabilityBuffer::new(columns);
         self
+    }
+
+    /// Watches validators through a monitor.
+    #[must_use]
+    pub(crate) fn with_monitor(mut self, monitor: ValidatorMonitor) -> Self {
+        self.monitor = monitor;
+        self
+    }
+
+    /// Accounts for a message about validators, for the validator monitor.
+    ///
+    /// # Arguments
+    ///
+    /// - `seen_ms`: when the node saw the message, for its delay.
+    pub(crate) fn observe(&mut self, observed: Observed<'_, P>, source: Source, seen_ms: u64) {
+        self.monitor
+            .observe(&self.store, self.head.root, observed, source, seen_ms);
+    }
+
+    /// Watches a validator a local validator client subscribed for, when the monitor takes those.
+    pub(crate) fn auto_register(&mut self, index: ValidatorIndex) {
+        if !self.monitor.registers_automatically() {
+            return;
+        }
+        let pubkey = self
+            .head_state()
+            .ok()
+            .and_then(|state| state.beacon().validators().get(index.as_usize()))
+            .map(|validator| validator.pubkey);
+        if let Some(pubkey) = pubkey {
+            self.monitor.auto_register(index, pubkey);
+        }
     }
 
     /// Feeds every verified vote and imported block to a slasher.
@@ -578,6 +617,7 @@ impl<P: Preset> Chain<P> {
             {
                 debug!(%error, "fast confirmation skipped this slot");
             }
+            self.monitor.on_slot::<P>(self.store.current_slot());
             self.count_queued_votes();
             // The slasher checks what it gathered once a slot, and returns what it found.
             let epoch = self.store.current_epoch();
@@ -633,6 +673,7 @@ impl<P: Preset> Chain<P> {
         if let Some(slasher) = &mut self.slasher {
             slasher.block(&self.store, block);
         }
+        self.monitor.on_block(&self.store, root, block);
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
         self.history.note_block(block.message().state_root(), root);
@@ -1187,6 +1228,10 @@ impl<P: Preset> Chain<P> {
     ///
     /// - `claim`: what the vote says about its head's payload, as its fork reads the data index.
     ///
+    /// # Returns
+    ///
+    /// The attester.
+    ///
     /// # Errors
     ///
     /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
@@ -1194,7 +1239,7 @@ impl<P: Preset> Chain<P> {
         &mut self,
         vote: &V,
         claim: PayloadClaim,
-    ) -> Result<(), ChainError> {
+    ) -> Result<ValidatorIndex, ChainError> {
         let data = vote.data();
         self.check_skips(data.slot, data.beacon_block_root)?;
         let committee_index = vote.committee_index();
@@ -1229,7 +1274,8 @@ impl<P: Preset> Chain<P> {
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
-        self.count_vote(aggregate)
+        self.count_vote(aggregate)?;
+        Ok(attester)
     }
 
     /// Committees of an epoch as the head state shuffles them.

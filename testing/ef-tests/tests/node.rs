@@ -29,8 +29,8 @@ use axiom_light_client::{
     },
 };
 use axiom_node::{
-    AnchorSource, DiscoverySettings, EngineConfig, ManualClock, NetworkSettings, Node, NodeConfig,
-    NodeError, PortMappingSettings,
+    AnchorSource, DiscoverySettings, EngineConfig, ManualClock, MonitorSettings, NetworkSettings,
+    Node, NodeConfig, NodeError, PortMappingSettings,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
@@ -39,7 +39,7 @@ use axiom_state_transition::{
     rewards::{AttesterRewards, BlockRewards, SyncCommitteeReward},
 };
 use axiom_types::{
-    ChainConfig, Epoch, ForkName, Hash32, KzgCommitment, KzgProof, Minimal, Slot,
+    ChainConfig, Epoch, ForkName, Hash32, KzgCommitment, KzgProof, Minimal, Slot, ValidatorIndex,
     accessors::CoreState,
     bellatrix::PowBlock,
     combined,
@@ -1699,6 +1699,12 @@ fn a_node_streams_its_events_and_serves_its_routes_in_json_and_ssz() {
     });
 }
 
+/// The pyspec phase0 genesis, whose validators hold the pyspec test keys.
+fn pyspec_phase0_genesis(vectors: &Vectors) -> phase0::BeaconState<Minimal> {
+    let case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
+    case.ssz("state").expect("the genesis vector decodes")
+}
+
 /// A builder at the pyspec phase0 genesis, and the blocks it proposed for the first slots.
 fn phase0_blocks(
     vectors: &Vectors,
@@ -1708,10 +1714,7 @@ fn phase0_blocks(
     ChainBuilder<Minimal>,
     Vec<combined::SignedBeaconBlock<Minimal>>,
 ) {
-    let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
-    let genesis: phase0::BeaconState<Minimal> = genesis_case
-        .ssz("state")
-        .expect("the genesis vector decodes");
+    let genesis = pyspec_phase0_genesis(vectors);
     let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
     let blocks = (0..count)
         .map(|_| builder.propose().expect("a block").block().clone())
@@ -1851,6 +1854,122 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
 
         b.stop().await;
         a.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn the_validator_monitor_reports_watched_votes_blocks_and_misses() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis, every validator voting in every block.
+    // Blocks fill slots 1 to 17, but for slot 10, whose proposer misses it.
+    //
+    //     epoch 0: slots 0 to 7     every vote included, so recorded right
+    //     epoch 1: slots 8 to 15    slot 10 empty
+    //     epoch 2: slot 16, 17      the block at 16 settles the records of epoch 0
+    let config = ChainConfig::minimal();
+    let genesis = pyspec_phase0_genesis(&vectors);
+    let mut builder = ChainBuilder::new(config.clone(), genesis)
+        .expect("pyspec genesis")
+        .with_participation(Participation::Full);
+    let mut advanced = builder.state().clone();
+    advanced.process_slots(&config, Slot(10)).expect("slot 10");
+    let absent = advanced
+        .beacon_proposer_index()
+        .expect("slot 10 has a proposer");
+    let mut blocks = Vec::new();
+    for slot in (1..=17).filter(|slot| *slot != 10) {
+        blocks.push(
+            builder
+                .propose_at(Slot(slot))
+                .expect("a block")
+                .block()
+                .clone(),
+        );
+    }
+
+    // The watched validators: the absent proposer and three others.
+    let watched: Vec<ValidatorIndex> = [absent.0, 20, 30, 40]
+        .into_iter()
+        .map(ValidatorIndex)
+        .collect();
+    let registry = builder.genesis().validators();
+    let pubkeys = watched
+        .iter()
+        .map(|index| registry[index.as_usize()].pubkey)
+        .collect();
+    let proposed = blocks
+        .iter()
+        .filter(|block| watched.contains(&block.message().proposer_index()))
+        .count();
+    let (directory, genesis_path) = write_genesis("monitor", &builder);
+    let now_ms = slot_start_ms(&builder, 17);
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let api = free_address();
+        let metrics = free_address();
+        let node_config = NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            http_address: Some(api),
+            metrics_address: Some(metrics),
+            monitor: MonitorSettings {
+                pubkeys,
+                ..MonitorSettings::default()
+            },
+            ..NodeConfig::default()
+        };
+        let node = TestNode::start_with(now_ms, config.clone(), node_config, api).await;
+        for block in &blocks {
+            let response = node.publish_any(block).await;
+            assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        }
+        let total = |name: &str| format!("validator_monitor_{name}{{validator=\"total\"}}");
+
+        // Four validators are watched; each vote of epoch 0 was recorded right in every part.
+        assert_eq!(
+            metric(metrics, "validator_monitor_validators_total")
+                .await
+                .as_deref(),
+            Some("4")
+        );
+        for counter in [
+            "prev_epoch_on_chain_attester_hit",
+            "prev_epoch_on_chain_head_attester_hit",
+            "prev_epoch_on_chain_target_attester_hit",
+        ] {
+            assert_eq!(
+                metric(metrics, &total(counter)).await.as_deref(),
+                Some("4"),
+                "{counter}"
+            );
+        }
+        assert_eq!(
+            metric(metrics, &total("prev_epoch_on_chain_attester_miss")).await,
+            None
+        );
+
+        // Their blocks arrived through the API; the proposer of slot 10 missed its block.
+        let blocks_total = "validator_monitor_beacon_block_total{src=\"api\",validator=\"total\"}";
+        assert_eq!(
+            metric(metrics, blocks_total).await,
+            Some(proposed.to_string())
+        );
+        assert_eq!(
+            metric(metrics, &total("missed_blocks_total"))
+                .await
+                .as_deref(),
+            Some("1")
+        );
+        let missed = format!(
+            "validator_monitor_missed_blocks_total{{validator=\"{}\"}}",
+            absent.0
+        );
+        assert_eq!(metric(metrics, &missed).await.as_deref(), Some("1"));
+
+        node.stop().await;
     });
     let _ignored = fs::remove_dir_all(&directory);
 }

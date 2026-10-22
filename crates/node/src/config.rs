@@ -32,9 +32,10 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, ChainSettings, CheckpointServer,
-    Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState, NodeError, NodeKey,
-    PortMappingSettings, ProposerReorgs, StorageMode, WeakSubjectivity, WeakSubjectivityError,
-    api::ApiServices, genesis::GenesisSync, network::NetworkIdentity, slasher::SlasherFeed,
+    Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState, MonitorSettings,
+    NodeError, NodeKey, PortMappingSettings, ProposerReorgs, StorageMode, WeakSubjectivity,
+    WeakSubjectivityError, api::ApiServices, genesis::GenesisSync, network::NetworkIdentity,
+    slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -323,6 +324,8 @@ pub struct NodeConfig {
     pub metrics_allow_origin: Option<Cors>,
     /// Whether the node stops once its head reaches the wall clock.
     pub shutdown_after_sync: bool,
+    /// The validators the node watches, and how closely.
+    pub monitor: MonitorSettings,
 }
 
 /// How the node builds blocks for the validators it serves.
