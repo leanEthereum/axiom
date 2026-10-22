@@ -1699,6 +1699,26 @@ fn a_node_streams_its_events_and_serves_its_routes_in_json_and_ssz() {
     });
 }
 
+/// A builder at the pyspec phase0 genesis, and the blocks it proposed for the first slots.
+fn phase0_blocks(
+    vectors: &Vectors,
+    config: &ChainConfig,
+    count: usize,
+) -> (
+    ChainBuilder<Minimal>,
+    Vec<combined::SignedBeaconBlock<Minimal>>,
+) {
+    let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
+    let genesis: phase0::BeaconState<Minimal> = genesis_case
+        .ssz("state")
+        .expect("the genesis vector decodes");
+    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
+    let blocks = (0..count)
+        .map(|_| builder.propose().expect("a block").block().clone())
+        .collect();
+    (builder, blocks)
+}
+
 /// A metric's value in a node's Prometheus text, when it is exported.
 async fn metric(address: SocketAddr, name: &str) -> Option<String> {
     let client = Client::new(
@@ -1727,14 +1747,7 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
         slot_duration_ms: 60_000,
         ..ChainConfig::minimal()
     };
-    let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
-    let genesis: phase0::BeaconState<Minimal> = genesis_case
-        .ssz("state")
-        .expect("the genesis vector decodes");
-    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
-    let blocks: Vec<combined::SignedBeaconBlock<Minimal>> = (0..3)
-        .map(|_| builder.propose().expect("a block").block().clone())
-        .collect();
+    let (builder, blocks) = phase0_blocks(&vectors, &config, 3);
     let tip = format!("{}", blocks[2].block_root());
     let genesis_root = format!(
         "{}",
@@ -1752,6 +1765,9 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
         //     B's clock moves to slot 3
         //     block 3 published        parent 2 unknown: B looks up 2, then 1
         let settings = |listen_address, boot_nodes| NetworkSettings {
+            quic_port: None,
+            target_peers: 64,
+            port_mapping: PortMappingSettings::default(),
             listen_address,
             boot_nodes,
             custody_group_count: 4,
