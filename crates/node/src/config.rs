@@ -15,7 +15,7 @@ use axiom_p2p::{
 };
 use axiom_slasher::SlasherConfig;
 use axiom_ssz::DecodeError;
-use axiom_telemetry::{MetricsServer, Registry};
+use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
 use axiom_types::{
     ChainConfig, ExecutionAddress, Preset, SlotClock,
     accessors::CoreState,
@@ -29,8 +29,9 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, CheckpointServer, Clock,
-    DiscoverySettings, ExecutionLayer, NodeError, NodeKey, StorageMode, WeakSubjectivity,
-    WeakSubjectivityError, api::ApiServices, network::NetworkIdentity, slasher::SlasherFeed,
+    DiscoverySettings, EventSender, ExecutionLayer, NodeError, NodeKey, StorageMode,
+    WeakSubjectivity, WeakSubjectivityError, api::ApiServices, network::NetworkIdentity,
+    slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -319,6 +320,34 @@ impl NodeConfig {
         };
         let directory = self.data_dir.as_ref().map(|data| data.join("slasher"));
         Ok(chain.with_slasher(SlasherFeed::start(settings, directory.as_deref())?))
+    }
+
+    /// The chain the node runs: opened, with its slasher, telemetry, event feed, and custody.
+    ///
+    /// The network identity fixes which columns the node custodies, so it opens here too.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chain, the slasher, or the network identity cannot open.
+    pub(crate) async fn start_chain<P: Preset>(
+        &self,
+        chain_config: ChainConfig,
+        clock: &dyn Clock,
+        metrics: NodeMetrics,
+        events: EventSender,
+    ) -> Result<(Chain<P>, Option<(NodeKey, NetworkIdentity)>), NodeError> {
+        // A checkpoint download holds a whole state; boxing keeps this future small.
+        let chain = Box::pin(self.open_chain::<P>(chain_config, clock)).await?;
+        let chain = self
+            .attach_slasher(chain)?
+            .with_metrics(metrics)
+            .with_events(events);
+        let Some(settings) = &self.network else {
+            return Ok((chain, None));
+        };
+        let identity = self.open_identity(settings)?;
+        let columns = identity.1.sampling_columns::<P>(chain.config())?;
+        Ok((chain.with_custody(columns), Some(identity)))
     }
 
     /// Loads or creates the node key, and derives the network identity from it.
