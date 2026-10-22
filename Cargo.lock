@@ -329,6 +329,7 @@ dependencies = [
 name = "axiom-slasher"
 version = "0.1.0"
 dependencies = [
+ "axiom-operation-pool",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-store",

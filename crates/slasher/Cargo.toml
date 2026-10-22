@@ -21,4 +21,5 @@ axiom-types.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+axiom-operation-pool.workspace = true
 proptest.workspace = true
