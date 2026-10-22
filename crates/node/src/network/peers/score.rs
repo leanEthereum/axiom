@@ -14,6 +14,9 @@
 //! - at or below the disconnect threshold the peer is dropped, and may reconnect later
 //! - at or below the ban threshold the peer is dropped and refused
 //!
+//! The gossipsub router's own score adds in, scaled so that the worst gossip score alone stays
+//! just short of a disconnect.
+//!
 //! Crossing the ban threshold freezes the decay for 12 hours.
 //! The ban lifts once the frozen score has then decayed back above the threshold.
 //!
@@ -37,6 +40,15 @@ const HALF_LIFE: Duration = Duration::from_mins(10);
 
 /// How long a fresh ban holds the score before it decays.
 const BAN_FREEZE: Duration = Duration::from_hours(12);
+
+/// Below this local score, the gossip score no longer counts: the peer is banned on local faults.
+const LOCAL_BAN_FLOOR: f64 = -60.0;
+
+/// The gossipsub graylist threshold of the Ethereum scoring parameters.
+const GOSSIP_GRAYLIST_THRESHOLD: f64 = -16000.0;
+
+/// The weight of the gossip score: a graylisted peer lands one point above the disconnect threshold.
+const GOSSIP_WEIGHT: f64 = (DISCONNECT_THRESHOLD + 1.0) / GOSSIP_GRAYLIST_THRESHOLD;
 
 /// How severe a fault is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,13 +96,17 @@ pub(crate) enum Standing {
     Ban,
 }
 
-/// A decaying score.
+/// A decaying score of local faults, combined with the router's gossip score.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PeerScore {
-    /// The value at the reference time.
+    /// The local score at the reference time.
     value: f64,
     /// The time decay counts from; a ban moves it into the future.
     updated: Duration,
+    /// The gossipsub router's latest score.
+    gossip: f64,
+    /// Whether a negative gossip score is ignored, so the peer can recover in the mesh.
+    ignore_negative_gossip: bool,
 }
 
 impl PeerScore {
@@ -99,25 +115,56 @@ impl PeerScore {
         Self {
             value: 0.0,
             updated: now,
+            gossip: 0.0,
+            ignore_negative_gossip: false,
         }
     }
 
-    /// The score at a time, decayed since the reference time.
-    pub(crate) fn at(&self, now: Duration) -> f64 {
+    /// The local score at a time, decayed since the reference time.
+    fn local_at(&self, now: Duration) -> f64 {
         let elapsed = now.saturating_sub(self.updated).as_secs_f64();
         self.value * (-elapsed / HALF_LIFE.as_secs_f64()).exp2()
+    }
+
+    /// The combined score at a time.
+    pub(crate) fn at(&self, now: Duration) -> f64 {
+        let local = self.local_at(now);
+        if local <= LOCAL_BAN_FLOOR || (self.gossip < 0.0 && self.ignore_negative_gossip) {
+            return local;
+        }
+        self.gossip.mul_add(GOSSIP_WEIGHT, local)
     }
 
     /// Applies a fault and returns the standing it leaves.
     pub(crate) fn apply(&mut self, action: PeerAction, now: Duration) -> Standing {
         let before = self.at(now);
-        self.value = (before - action.penalty()).max(MIN_SCORE);
+        self.value = (self.local_at(now) - action.penalty()).max(MIN_SCORE);
         // A frozen score keeps its freeze; otherwise decay restarts from now.
         self.updated = self.updated.max(now);
-        if before > BAN_THRESHOLD && self.value <= BAN_THRESHOLD {
+        self.freeze_on_ban(before, now);
+        self.standing(now)
+    }
+
+    /// Takes the router's gossip score and returns the standing it leaves.
+    pub(crate) fn set_gossip(
+        &mut self,
+        gossip: f64,
+        ignore_negative: bool,
+        now: Duration,
+    ) -> Standing {
+        let before = self.at(now);
+        self.gossip = gossip;
+        self.ignore_negative_gossip = ignore_negative;
+        self.freeze_on_ban(before, now);
+        self.standing(now)
+    }
+
+    /// Freezes the local score for twelve hours when the combined score just crossed into a ban.
+    fn freeze_on_ban(&mut self, before: f64, now: Duration) {
+        if before > BAN_THRESHOLD && self.at(now) <= BAN_THRESHOLD {
+            self.value = self.local_at(now);
             self.updated = now + BAN_FREEZE;
         }
-        self.standing(now)
     }
 
     /// The standing at a time.
@@ -187,6 +234,34 @@ mod tests {
         );
         assert_eq!(score.standing(BAN_FREEZE + 30 * MINUTE), Standing::Good);
         assert!(score.is_forgiven(BAN_FREEZE + 70 * MINUTE));
+    }
+
+    #[test]
+    fn the_gossip_score_counts_but_never_disconnects_alone() {
+        let mut score = PeerScore::new(Duration::ZERO);
+        // A graylisted gossip score of -16000 alone gives -19: still good.
+        assert_eq!(
+            score.set_gossip(-16_000.0, false, Duration::ZERO),
+            Standing::Good
+        );
+        assert_eq!(score.at(Duration::ZERO), -19.0);
+        // One more local fault tips it into a disconnect.
+        assert_eq!(
+            score.apply(PeerAction::HighTolerance, Duration::ZERO),
+            Standing::Disconnect
+        );
+        // Ignored, the negative gossip score no longer counts.
+        assert_eq!(
+            score.set_gossip(-16_000.0, true, Duration::ZERO),
+            Standing::Good
+        );
+        assert_eq!(score.at(Duration::ZERO), -1.0);
+        // A positive gossip score offsets local faults.
+        assert_eq!(
+            score.set_gossip(1600.0, false, Duration::ZERO),
+            Standing::Good
+        );
+        assert!((score.at(Duration::ZERO) - 0.9).abs() < 1e-9);
     }
 
     #[test]

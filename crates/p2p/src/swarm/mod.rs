@@ -372,6 +372,8 @@ enum Command {
         /// The chunks, in order.
         chunks: Vec<ResponseChunk>,
     },
+    /// Read the gossipsub router's score of every connected peer.
+    GossipScores(oneshot::Sender<Vec<(PeerId, f64)>>),
     /// Close the connection to a peer.
     Disconnect(PeerId),
     /// Stop everything.
@@ -476,6 +478,13 @@ impl NetworkHandle {
         chunks: Vec<ResponseChunk>,
     ) -> Result<(), NetworkError> {
         self.send(Command::Respond { id, chunks }).await
+    }
+
+    /// The gossipsub router's score of every connected peer.
+    pub async fn gossip_scores(&self) -> Result<Vec<(PeerId, f64)>, NetworkError> {
+        let (reply, scores) = oneshot::channel();
+        self.send(Command::GossipScores(reply)).await?;
+        scores.await.map_err(|_| NetworkError::Shutdown)
     }
 
     /// Closes the connection to a peer.

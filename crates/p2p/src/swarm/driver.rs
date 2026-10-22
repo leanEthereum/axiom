@@ -402,6 +402,14 @@ impl Swarm {
                     self.send_to_connection(connection, ConnectionInput::Respond(stream, chunks));
                 }
             }
+            Command::GossipScores(reply) => {
+                let scores = self
+                    .peers
+                    .keys()
+                    .map(|peer| (peer.clone(), self.router.peer_score(peer, now)))
+                    .collect();
+                let _ = reply.send(scores);
+            }
             Command::Disconnect(peer) => self.send_to_peer(&peer, ConnectionInput::Close),
             Command::Shutdown => {}
         }

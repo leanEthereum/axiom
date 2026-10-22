@@ -708,6 +708,12 @@ impl<P: Preset> NetworkService<P> {
     async fn manage_peers(&mut self, digest: ForkDigest) {
         let now = self.now();
         let needed = self.subscriptions.needed_subnets();
+        // The router's gossip scores count towards each peer's standing.
+        if let Ok(scores) = self.network.gossip_scores().await {
+            for (peer, reason) in self.peers.update_gossip_scores(scores, now) {
+                self.say_goodbye(peer, reason).await;
+            }
+        }
         let upkeep = self.peers.upkeep(&needed, now);
         for (peer, reason) in upkeep.disconnect {
             self.say_goodbye(peer, reason).await;

@@ -61,6 +61,11 @@ const REMEMBERED_PEERS: usize = 1500;
 /// A few honest nodes may share a NAT, but more than five banned identities do not happen by chance.
 const BANNED_PEERS_PER_IP: usize = 5;
 
+/// The share of the target whose negative gossip scores are ignored, the best of them first.
+///
+/// They may recover in the mesh instead of being dropped for a transient gossip penalty.
+const IGNORED_NEGATIVE_GOSSIP_PERCENT: usize = 10;
+
 /// How often an outbound peer is pinged.
 const PING_OUTBOUND: Duration = Duration::from_secs(15);
 
@@ -336,6 +341,43 @@ impl PeerManager {
         if let Some(known) = self.peers.get_mut(peer) {
             known.subnets = Some(subnets);
         }
+    }
+
+    /// Takes the gossipsub router's scores of connected peers.
+    ///
+    /// # Returns
+    ///
+    /// The goodbyes for peers the combined score pushed out.
+    pub(crate) fn update_gossip_scores(
+        &mut self,
+        mut scores: Vec<(PeerId, f64)>,
+        now: Duration,
+    ) -> Vec<(PeerId, GoodbyeReason)> {
+        // The best scores first, so the leniency goes to the peers closest to recovering.
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut lenient = (self.limits.target * IGNORED_NEGATIVE_GOSSIP_PERCENT).div_ceil(100);
+        let mut goodbyes = Vec::new();
+        for (id, gossip) in scores {
+            let Some(peer) = self.peers.get_mut(&id) else {
+                continue;
+            };
+            let ignore = gossip < 0.0 && lenient > 0;
+            if ignore {
+                lenient -= 1;
+            }
+            let standing = peer.score.set_gossip(gossip, ignore, now);
+            if peer.leaving {
+                continue;
+            }
+            let reason = match standing {
+                Standing::Good => continue,
+                Standing::Disconnect => goodbye::BAD_SCORE,
+                Standing::Ban => goodbye::BANNED,
+            };
+            peer.leaving = true;
+            goodbyes.push((id, reason));
+        }
+        goodbyes
     }
 
     /// Takes a ping answer, returning whether the peer's metadata changed and must be fetched.
@@ -737,6 +779,28 @@ mod tests {
             peers.on_connected(&peer(21), &host, true, now),
             Err(goodbye::BANNED)
         );
+    }
+
+    #[test]
+    fn gossip_scores_are_lenient_with_the_best_negative_peers() {
+        // A target of 10 forgives one negative gossip score.
+        let mut peers = PeerManager::new(PeerLimits {
+            target: 10,
+            ..LIMITS
+        });
+        let now = Duration::ZERO;
+        for seed in 1..=2 {
+            peers
+                .on_connected(&peer(seed), &address(seed), true, now)
+                .unwrap();
+            // A mid-tolerance fault each: -5 locally.
+            peers.report(&peer(seed), PeerAction::MidTolerance, now);
+        }
+        // Both graylisted: -19 each from gossip. The better one is forgiven, the worse drops.
+        let goodbyes =
+            peers.update_gossip_scores(vec![(peer(1), -16_000.0), (peer(2), -16_001.0)], now);
+        assert_eq!(goodbyes, vec![(peer(2), goodbye::BAD_SCORE)]);
+        assert!(peers.contains(&peer(1)));
     }
 
     #[test]
