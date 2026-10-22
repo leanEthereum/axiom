@@ -1,6 +1,9 @@
 //! The visitors that turn a field walk into each SSZ operation.
 
-use crate::{BYTES_PER_LENGTH_OFFSET, FieldVisitor, Merkleizer, Root, Ssz, offset::Offset};
+use crate::{
+    BYTES_PER_LENGTH_OFFSET, FieldVisitor, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz,
+    offset::Offset,
+};
 
 /// Keeps the visitor trait closed to this crate.
 pub trait Sealed {}
@@ -188,5 +191,45 @@ impl Sealed for FieldRoots {}
 impl FieldVisitor for FieldRoots {
     fn field<T: Ssz>(&mut self, value: &T) {
         self.roots.push(value.hash_tree_root());
+    }
+}
+
+/// Proves a node inside one chosen field.
+pub(super) struct FieldProver {
+    /// Position of the chosen field.
+    target: usize,
+    /// Index of the node within the field's own tree.
+    inner: GeneralizedIndex,
+    /// Fields seen so far.
+    index: usize,
+    /// The node and its proof within the field, once found.
+    result: Option<(Root, MerkleProof)>,
+}
+
+impl FieldProver {
+    /// A prover for a node of one field.
+    pub(super) const fn new(target: usize, inner: GeneralizedIndex) -> Self {
+        Self {
+            target,
+            inner,
+            index: 0,
+            result: None,
+        }
+    }
+
+    /// The node and its proof within the field, when the field could prove it.
+    pub(super) fn into_result(self) -> Option<(Root, MerkleProof)> {
+        self.result
+    }
+}
+
+impl Sealed for FieldProver {}
+
+impl FieldVisitor for FieldProver {
+    fn field<T: Ssz>(&mut self, value: &T) {
+        if self.index == self.target {
+            self.result = value.prove(self.inner);
+        }
+        self.index += 1;
     }
 }

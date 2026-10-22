@@ -48,7 +48,9 @@ mod decoder;
 mod visitors;
 
 pub use decoder::FieldDecoder;
-use visitors::{FieldRoots, FixedPartWriter, LengthCounter, RootMerkleizer, VariablePartWriter};
+use visitors::{
+    FieldProver, FieldRoots, FixedPartWriter, LengthCounter, RootMerkleizer, VariablePartWriter,
+};
 
 use crate::{
     BYTES_PER_LENGTH_OFFSET, DecodeError, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz,
@@ -181,6 +183,36 @@ impl<C: Container> Ssz for C {
         let mut merkleizer = RootMerkleizer::new(C::FIELDS);
         self.visit_fields(&mut merkleizer);
         merkleizer.finish()
+    }
+
+    /// Proves a node of the container's tree, descending into a field when the index is deeper.
+    ///
+    /// ```text
+    /// index 169 in a 64-leaf container = 0b1_010100_1
+    ///                                       field 20, then node 1 inside it
+    ///
+    /// branch = [siblings inside the field] ++ [siblings of field 20 in the container]
+    /// ```
+    fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
+        if index == GeneralizedIndex::ROOT {
+            return Some((self.hash_tree_root(), MerkleProof::default()));
+        }
+        let depth = Self::depth();
+        if (index.depth() as usize) < depth {
+            return None;
+        }
+
+        // Split the path: the top bits pick the field, the rest address a node inside it.
+        let inner_depth = index.depth() as usize - depth;
+        let field = (index.get() >> inner_depth) - (1 << depth);
+        let inner =
+            GeneralizedIndex::new((1 << inner_depth) | (index.get() & ((1 << inner_depth) - 1)));
+
+        let mut prover = FieldProver::new(field as usize, inner);
+        self.visit_fields(&mut prover);
+        let (leaf, mut proof) = prover.into_result()?;
+        proof.branch.extend(self.field_proof(field as usize).branch);
+        Some((leaf, proof))
     }
 }
 

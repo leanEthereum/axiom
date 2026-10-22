@@ -121,6 +121,28 @@ fn field_proof_verifies_against_the_root() {
 }
 
 #[test]
+fn nested_field_proof_descends_into_the_inner_container() {
+    // Fixture state: field 2 of a 4-field container is node 6.
+    // Its field 1 in a 2-field container adds one more step.
+    //
+    //     node 6 = 0b110, then field 1 -> 0b1101 = 13
+    let value = mixed();
+    let index = GeneralizedIndex::new(13);
+
+    let (leaf, proof) = value.prove(index).unwrap();
+
+    assert_eq!(leaf, value.nested.b.hash_tree_root());
+    assert_eq!(proof.branch.len(), 3);
+    assert!(proof.verify(leaf, index, value.hash_tree_root()));
+}
+
+#[test]
+fn index_above_the_field_level_is_not_proven() {
+    // Node 2 is an inner node of the field tree, not a field, so this container declines it.
+    assert_eq!(mixed().prove(GeneralizedIndex::new(2)), None);
+}
+
+#[test]
 fn first_offset_must_end_the_fixed_part() {
     // Mutation: the first offset claims 51 while the fixed part is 50 bytes.
     let mut bytes = mixed().encode();

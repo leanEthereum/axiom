@@ -1,0 +1,19 @@
+[package]
+name = "axiom-light-client"
+description = "The light client sync protocol: following the chain through sync committee signatures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls.workspace = true
+axiom-ssz.workspace = true
+axiom-types.workspace = true

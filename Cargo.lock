@@ -31,6 +31,7 @@ dependencies = [
  "axiom-bls",
  "axiom-das",
  "axiom-fork-choice",
+ "axiom-light-client",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",
@@ -46,6 +47,15 @@ dependencies = [
  "axiom-state-transition",
  "axiom-types",
  "proptest",
+]
+
+[[package]]
+name = "axiom-light-client"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-ssz",
+ "axiom-types",
 ]
 
 [[package]]

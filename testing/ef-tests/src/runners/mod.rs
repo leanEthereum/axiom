@@ -4,6 +4,8 @@ mod blocks;
 mod epoch_processing;
 mod fork;
 mod fork_choice;
+mod light_client;
+mod merkle_proof;
 mod networking;
 mod operations;
 mod rewards;
@@ -11,11 +13,13 @@ mod shuffling;
 mod ssz_static;
 mod transition;
 
-use axiom_types::{ChainConfig, Preset};
+use axiom_types::{ChainConfig, Epoch, Preset};
 pub use blocks::Blocks;
 pub use epoch_processing::EpochProcessing;
 pub use fork::Fork;
 pub use fork_choice::ForkChoice;
+pub use light_client::LightClient;
+pub use merkle_proof::MerkleProofs;
 pub use networking::Networking;
 pub use operations::Operations;
 pub use rewards::Rewards;
@@ -66,11 +70,21 @@ pub const BEACON_STATE_FIELDS: [&str; 38] = [
 ];
 
 /// The configuration the vectors of a preset were generated with.
+///
+/// The generator activates every fork up to the one under test at genesis.
+/// Fork epochs then read as zero, whatever the preset's configuration file says.
 #[must_use]
 pub fn config_of<P: Preset>() -> ChainConfig {
-    if P::NAME == "mainnet" {
+    let mut config = if P::NAME == "mainnet" {
         ChainConfig::mainnet()
     } else {
         ChainConfig::minimal()
-    }
+    };
+    config.altair_fork_epoch = Epoch::GENESIS;
+    config.bellatrix_fork_epoch = Epoch::GENESIS;
+    config.capella_fork_epoch = Epoch::GENESIS;
+    config.deneb_fork_epoch = Epoch::GENESIS;
+    config.electra_fork_epoch = Epoch::GENESIS;
+    config.fulu_fork_epoch = Epoch::GENESIS;
+    config
 }
