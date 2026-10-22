@@ -102,10 +102,11 @@ impl<'a, P: Preset> Ghost<'a, P> {
     /// Phase 2 walks the tree children first, adding each subtree's weight into its parent.
     /// The result equals the spec's per-block sum, in one pass over votes and one over blocks.
     ///
+    /// Take block a with children b and d, and c as the child of b:
+    ///
     /// ```text
-    /// votes:   a=0  b=10  c=20  d=5          a -> b -> c
-    /// weights: a=35 b=30  c=20  d=5            \
-    ///                                           d
+    /// votes:   a=0  b=10  c=20  d=5
+    /// weights: a=35 b=30  c=20  d=5
     /// ```
     ///
     /// See `get_weight` in the phase0 fork choice spec.

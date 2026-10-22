@@ -7,10 +7,11 @@
 //! Each leading zero byte becomes one leading `1`, so leading zeros survive.
 //!
 //! ```text
-//! bytes [0x00, 0x00, 0x01]  →  "11" + base58(1) = "112"
+//! bytes [0x00, 0x00, 0x01]  ->  "11" + base58(1) = "112"
 //! ```
 //!
 //! Base32 is the unpadded lowercase alphabet of RFC 4648, five bits per character.
+//! Encoding writes lowercase, and decoding accepts either case.
 //!
 //! The quadratic schoolbook base58 conversion is fine for 40-byte identifiers.
 //! The multibase prefix character is left to the caller.
@@ -151,13 +152,16 @@ impl Multibase {
 
     /// Base32 decoding: five bits per character, flushing whole bytes.
     ///
-    /// Leftover bits that do not fill a byte are dropped.
+    /// Leftover bits that do not fill a byte must be zero, and fewer than one character.
+    /// Otherwise one byte string would have several accepted texts, as RFC 4648 section 3.5 warns.
+    ///
+    /// Letters match in either case, as the multibase table defines base32 as case-insensitive.
     fn decode_base32(text: &str) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(text.len() * 5 / 8);
         // Accumulate five bits per character, flushing whole bytes.
         let mut buffer = 0u32;
         let mut bits = 0u32;
-        for c in text.bytes() {
+        for c in text.bytes().map(|c| c.to_ascii_lowercase()) {
             let value = BASE32_ALPHABET.iter().position(|&a| a == c)? as u32;
             buffer = (buffer << 5) | value;
             bits += 5;
@@ -168,7 +172,9 @@ impl Multibase {
             // Keep only the bits not yet flushed, so the buffer never overflows.
             buffer &= (1 << bits) - 1;
         }
-        Some(out)
+        // Invariant: a canonical text ends with under five padding bits, all zero.
+        // Lengths of 1, 3, or 6 characters modulo 8 leave five or more, so no encoder writes them.
+        (bits < 5 && buffer == 0).then_some(out)
     }
 }
 
@@ -203,7 +209,7 @@ mod tests {
 
     #[test]
     fn base32_known_vectors() {
-        // RFC 4648 section 10, lowercased and unpadded: "foobar" → "mzxw6ytboi".
+        // RFC 4648 section 10, lowercased and unpadded: "foobar" encodes to "mzxw6ytboi".
         let base32 = Multibase::Base32Lower;
         assert_eq!(base32.encode(b"f"), "my");
         assert_eq!(base32.encode(b"foobar"), "mzxw6ytboi");
@@ -216,9 +222,20 @@ mod tests {
         // '0' is excluded from base58 as a look-alike of 'O'.
         assert_eq!(Multibase::Base58Btc.decode("10"), None);
         assert_eq!(Multibase::Base58Btc.decode("abc!"), None);
-        // '1' is not a base32 digit, and neither are capitals.
+        // '1' is not a base32 digit.
         assert_eq!(Multibase::Base32Lower.decode("m1"), None);
-        assert_eq!(Multibase::Base32Lower.decode("MY"), None);
+        assert_eq!(Multibase::Base32Lower.decode("my="), None);
+    }
+
+    #[test]
+    fn base32_rejects_non_canonical_texts() {
+        // "my" is the byte 0x66 followed by two zero padding bits.
+        // "mz" sets the last padding bit, so it would be a second text for the same byte.
+        assert_eq!(Multibase::Base32Lower.decode("mz"), None);
+        // One, three, or six characters leave five or more bits, never written by an encoder.
+        assert_eq!(Multibase::Base32Lower.decode("m"), None);
+        assert_eq!(Multibase::Base32Lower.decode("mya"), None);
+        assert_eq!(Multibase::Base32Lower.decode("mzxw6y"), None);
     }
 
     proptest! {

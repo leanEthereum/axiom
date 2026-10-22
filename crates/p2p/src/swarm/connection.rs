@@ -5,21 +5,23 @@
 //! Every yamux stream first negotiates its protocol, then runs one handler.
 //!
 //! ```text
-//! stream opened ─▶ multistream-select ─┬─▶ /meshsub/*      length-prefixed RPCs, long-lived
-//!                                      ├─▶ /eth2/.../req/  one request, then response chunks
-//!                                      ├─▶ /ipfs/id/1.0.0  one identify message
-//!                                      └─▶ /ipfs/ping/1.0.0 echo 32-byte probes
+//! /meshsub/*         length-prefixed RPCs, long-lived
+//! /eth2/.../req/     one request, then response chunks
+//! /ipfs/id/1.0.0     one identify message
+//! /ipfs/ping/1.0.0   echo 32-byte probes
 //! ```
 //!
 //! This node opens one gossip stream and one identify stream per connection, and one stream per request.
 //!
 //! # Backpressure
 //!
-//! Each turn of the task runs in a fixed order.
+//! Each turn of the task runs in a fixed order:
 //!
-//! ```text
-//! input ─▶ handlers ─▶ events to the swarm (waits) ─▶ yamux credit ─▶ responses topped up ─▶ socket write
-//! ```
+//! 1. Feed the input to the handlers.
+//! 2. Send events to the swarm, waiting if its queue is full.
+//! 3. Grant yamux credit.
+//! 4. Top up the responses.
+//! 5. Write to the socket.
 //!
 //! Credit follows delivery, so a peer can never get further ahead than its receive windows.
 //! Responses enter yamux only as fast as its send buffer drains.

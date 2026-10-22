@@ -5,12 +5,12 @@
 //! The handler turns messages into datagrams and back.
 //! It opens sessions on demand and keeps every request until it is answered or times out.
 //!
-//! ```text
-//! A -> B   message packet, random content      (no session yet)
-//! A <- B   WHOAREYOU, nonce of A's packet      (B stores the challenge)
-//! A -> B   handshake packet carrying the request
-//! A <- B   response under the new session
-//! ```
+//! A handshake between nodes A and B takes four packets:
+//!
+//! 1. A sends B a message packet with random content, since no session exists yet.
+//! 2. B answers WHOAREYOU with the nonce of that packet, and stores the challenge.
+//! 3. A sends a handshake packet that carries the real request.
+//! 4. B answers the request under the new session.
 //!
 //! See discv5-theory.md, "Sessions".
 

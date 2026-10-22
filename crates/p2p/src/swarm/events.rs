@@ -12,12 +12,11 @@
 //!
 //! Traffic is bounded twice.
 //!
-//! ```text
-//! push traffic from peer P
-//!   ├─ P already holds the per-peer limit  → Flooding: refused, P is disconnected
-//!   ├─ the queue holds the total limit     → Dropped: refused, the node is overloaded
-//!   └─ otherwise                           → Queued
-//! ```
+//! Push traffic from peer P meets three cases, checked in order:
+//!
+//! 1. P already holds the per-peer limit: Flooding, refused, and P is disconnected.
+//! 2. The queue holds the total limit: Dropped, refused, as the node is overloaded.
+//! 3. Otherwise: Queued.
 //!
 //! A refused gossip message is ignored without penalty, and a refused request gets an error.
 //! The swarm never waits on the node, so a slow node cannot stall the network.

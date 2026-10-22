@@ -5,15 +5,14 @@
 //! Each message is a varint length, then UTF-8 text ending in a newline.
 //! Both sides open with the protocol header, then the dialer proposes and the listener answers.
 //!
-//! ```text
-//! dialer                                        listener
-//!   ── "/multistream/1.0.0\n" ──────────────────▶
-//!   ◀───────────────────── "/multistream/1.0.0\n" ──
-//!   ── "/mplex/6.7.0\n" ────────────────────────▶   unsupported
-//!   ◀───────────────────────────────────── "na\n" ──
-//!   ── "/yamux/1.0.0\n" ────────────────────────▶   supported
-//!   ◀─────────────────────────── "/yamux/1.0.0\n" ──  echo: agreed
+//! 1. The dialer sends "/multistream/1.0.0\n".
+//! 2. The listener answers "/multistream/1.0.0\n".
+//! 3. The dialer proposes "/mplex/6.7.0\n", which the listener does not support.
+//! 4. The listener answers "na\n".
+//! 5. The dialer proposes "/yamux/1.0.0\n", which the listener supports.
+//! 6. The listener echoes "/yamux/1.0.0\n", and both sides agree.
 //!
+//! ```text
 //! wire form of "na\n":  [0x03, b'n', b'a', b'\n']
 //! ```
 //!

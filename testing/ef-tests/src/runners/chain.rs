@@ -31,11 +31,9 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 /// The chain adds persistence, pruning, and head tracking on top of the store.
 /// Each case runs against a fresh on-disk database, then the database is reopened.
 ///
-/// ```text
-///     steps ──> chain ──> head and checkpoints compared at every check
-///                 │
-///                 └── database ──> reopened: the anchor must be the final finalized block
-/// ```
+/// 1. The steps run through the chain.
+/// 2. Every check compares the head and the checkpoints.
+/// 3. The database is reopened, and its anchor must be the final finalized block.
 ///
 /// Only head and checkpoint checks apply: the chain does not expose the store's internals.
 #[derive(Debug)]

@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn challenge_matches_vectors() {
         // Each case lists deduplicated commitments, then one row per cell.
-        for case in cases("compute_verify_cell_kzg_proof_batch_challenge") {
+        for case in cases("compute_verify_cell_kzg_proof_batch_challenge", 10) {
             let input = case.get("input").unwrap();
             let sequence = |key: &str| input.get(key).and_then(Yaml::as_sequence).unwrap();
             let commitments = points(sequence("commitments"));

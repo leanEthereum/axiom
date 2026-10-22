@@ -7,19 +7,34 @@ use std::{
 
 use axiom_snappy::raw;
 
-/// Directory of the downloaded vectors, if present.
+/// SSZ-snappy files in the consensus spec tests at the release pinned in testing/ef-tests/Makefile.
+///
+/// A shrinking download or a listing bug changes this count and fails the suite.
+const SSZ_SNAPPY_FILES: usize = 246_238;
+
+/// Directory of the downloaded consensus spec tests, if present.
 ///
 /// The `AXIOM_VECTORS` variable wins.
 /// Otherwise the nearest ancestor holding `testing/vectors` is used.
 /// Vectors are gitignored, so a git worktree finds them in the main checkout above it.
+///
+/// # Panics
+///
+/// Panics when the vectors are missing and `AXIOM_REQUIRE_VECTORS` is set, as in CI.
 fn vectors_dir() -> Option<PathBuf> {
-    if let Some(dir) = env::var_os("AXIOM_VECTORS") {
-        return Some(PathBuf::from(dir));
-    }
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .map(|dir| dir.join("testing/vectors"))
-        .find(|dir| dir.is_dir())
+    let root = env::var_os("AXIOM_VECTORS").map(PathBuf::from).or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .map(|dir| dir.join("testing/vectors"))
+            .find(|dir| dir.join("consensus-spec-tests").is_dir())
+    });
+    let dir = root.map(|root| root.join("consensus-spec-tests/tests"));
+    let found = dir.as_ref().is_some_and(|dir| dir.is_dir());
+    assert!(
+        found || env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+        "consensus spec tests required but missing; run `make -C testing/ef-tests`"
+    );
+    dir.filter(|_| found)
 }
 
 /// Every file with the given extension below a directory, sorted for stable reports.
@@ -46,7 +61,8 @@ fn decodes_and_round_trips_every_ssz_snappy_vector() {
         println!("skipped: no testing/vectors found; set AXIOM_VECTORS to run the corpus");
         return;
     };
-    let files = files_with_extension(&root.join("consensus-spec-tests/tests"), "ssz_snappy");
+    let files = files_with_extension(&root, "ssz_snappy");
+    assert_eq!(files.len(), SSZ_SNAPPY_FILES, "ssz_snappy file count");
 
     let mut identical = 0_usize;
     let mut reference_bytes = 0_usize;

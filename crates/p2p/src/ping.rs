@@ -5,9 +5,12 @@
 //! The dialer writes 32 random bytes and the listener echoes them back.
 //! The dialer may repeat on the same stream; the listener echoes every 32-byte block.
 //!
+//! 1. The dialer sends 32 bytes to the listener.
+//! 2. The listener sends the same 32 bytes back.
+//! 3. The dialer measures the round trip:
+//!
 //! ```text
-//! dialer ── 32 bytes ──▶ listener
-//! dialer ◀── same 32 ── listener      rtt = receive time - send time
+//! rtt = receive time - send time
 //! ```
 //!
 //! See `libp2p/specs/ping/ping.md`.
@@ -101,7 +104,7 @@ mod tests {
         let echo = responder.receive(&ping.payload()[20..]);
         assert_eq!(echo, ping.payload());
 
-        // The echo lands at t = 1.042 s → rtt 42 ms.
+        // The echo lands at t = 1.042 s, so the rtt is 42 ms.
         let echo: [u8; PING_SIZE] = echo.try_into().unwrap();
         assert_eq!(
             ping.verify(&echo, Duration::from_millis(1042)),

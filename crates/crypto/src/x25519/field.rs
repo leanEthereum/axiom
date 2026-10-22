@@ -179,8 +179,11 @@ impl FieldElement {
     /// The exponent p - 2 = 2^255 - 21 has a fixed addition chain, as in curve25519 ref10.
     /// The chain is public, so the timing does not depend on the input.
     ///
+    /// The chain builds z^(2^k - 1) for k = 5, 10, 20, 40, 50, 100, 200, 250.
+    /// Each step joins two earlier terms with one rule:
+    ///
     /// ```text
-    /// z^(2^5 - 1) -> z^(2^10 - 1) -> ... -> z^(2^250 - 1)
+    /// z^(2^(a + b) - 1) = (z^(2^a - 1))^(2^b) * z^(2^b - 1)
     /// z^(2^255 - 21) = (z^(2^250 - 1))^(2^5) * z^11
     /// ```
     pub(super) fn invert(self) -> Self {

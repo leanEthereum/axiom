@@ -8,11 +8,12 @@
 //!
 //! ```text
 //!     before:  | seg 3: a1 b1 c1 | seg 4: a2 x1 | seg 5 (active): b2 |
-//!                       ^dead ^dead       ^live                ^live
-//!              seg 3 is 2/3 dead: rewrite it, c1 is its only live entry
-//!
 //!     after:   | seg 4: a2 x1 | seg 5 (active): b2 c1' |
 //! ```
+//!
+//! Entries a2 and b2 supersede a1 and b1, so those two are dead.
+//! Segment 3 is then two thirds dead, and compaction rewrites it.
+//! Its only live entry, c1, moves to the active segment as c1'.
 //!
 //! Live puts are easy: the index points at exactly one entry per key.
 //!
@@ -20,11 +21,12 @@
 //! A tombstone is dead weight unless an older segment still holds a put of its key.
 //! Dropping it would let that put win again at the next replay, resurrecting the key.
 //!
-//! ```text
-//!     seg 1: put k=v   (not compacted, mostly live)
-//!     seg 2: del k     (compacted)
-//!     drop the tombstone -> replay sees seg 1 only -> k=v is back
-//! ```
+//! Take segment 1 holding put k=v, mostly live and not compacted.
+//! Segment 2 holds del k, and compaction rewrites it.
+//!
+//! 1. Compaction drops the tombstone.
+//! 2. The next replay sees only segment 1.
+//! 3. The key k maps to v again.
 //!
 //! Finding the exact older segments holding the key would need their hints.
 //! The plan keeps a tombstone when any segment older than its own survives, and its key is still absent.

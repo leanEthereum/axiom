@@ -337,18 +337,91 @@ mod tests {
         let forged = format!("{}.{forged_claims}.{}", parts[0], parts[2]);
         assert_eq!(secret().verify(&forged, 1000), Err(JwtError::BadSignature));
 
-        // An unsigned token with alg "none" is refused before any MAC is computed.
-        let none_header = Base64Url(br#"{"alg":"none"}"#);
-        let unsigned = format!("{none_header}.{}.", parts[1]);
-        assert_eq!(
-            secret().verify(&unsigned, 1000),
-            Err(JwtError::UnsupportedAlgorithm("none".to_owned()))
-        );
-
         // Two segments only.
         assert_eq!(
             secret().verify("a.b", 1000),
             Err(JwtError::SegmentCount { found: 2 })
+        );
+    }
+
+    /// The HS256 example token of RFC 7515 appendix A.1, also shown in RFC 7519 section 3.1.
+    const RFC7515_TOKEN: &str = concat!(
+        "eyJ0eXAiOiJKV1QiLA0KICJhbGciOiJIUzI1NiJ9",
+        ".",
+        "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFt",
+        "cGxlLmNvbS9pc19yb290Ijp0cnVlfQ",
+        ".",
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    );
+
+    #[test]
+    fn rfc7515_appendix_a1_hs256() {
+        // The appendix gives its 64-byte key as the "k" member of a JSON Web Key.
+        let key = Base64Url::decode(
+            "AyM1SysPpbyDfgZld3umj1qzKObwVMkoqQ-EstJQLr_T-1qS0gZH75aKtMN3Yj0iPS4hcgUuTwjAzZr1Z9CAow",
+        )
+        .unwrap();
+        assert_eq!(key.len(), 64);
+        assert_eq!(key[..4], [3, 35, 53, 75]);
+
+        // The header spans two lines joined by CRLF, with typ before alg.
+        let token = Token::split(RFC7515_TOKEN).unwrap();
+        assert_eq!(
+            token.header.bytes().unwrap(),
+            b"{\"typ\":\"JWT\",\r\n \"alg\":\"HS256\"}"
+        );
+        let header = token.header.json().unwrap();
+        assert_eq!(header.get("alg").and_then(Json::as_str), Some("HS256"));
+        assert_eq!(header.get("typ").and_then(Json::as_str), Some("JWT"));
+
+        // HMAC-SHA256 under the 64-byte key reproduces the appendix's signature exactly.
+        let signature = token.signature.bytes().unwrap();
+        let mac = HmacSha256::new(&key);
+        assert_eq!(
+            mac.mac(token.signing_input.as_bytes()).as_slice(),
+            signature
+        );
+        assert!(mac.verify(token.signing_input.as_bytes(), &signature));
+
+        // The claim set is not an engine one: an issuer, an expiry, a private claim, no issued-at.
+        let claims = token.claims.json().unwrap();
+        assert_eq!(claims.get("iss").and_then(Json::as_str), Some("joe"));
+        assert_eq!(
+            claims.get("exp").and_then(Json::as_u64),
+            Some(1_300_819_380)
+        );
+        assert_eq!(
+            claims
+                .get("http://example.com/is_root")
+                .and_then(Json::as_bool),
+            Some(true)
+        );
+        assert_eq!(claims.get("iat"), None);
+
+        // Engine secrets are 32 bytes, so the first half of the key is a different key.
+        // The token parses, then fails on its signature before the missing issued-at matters.
+        let half: [u8; 32] = key[..32].try_into().unwrap();
+        assert_eq!(
+            JwtSecret::new(half).verify(RFC7515_TOKEN, 1_300_819_380),
+            Err(JwtError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn rfc7519_section_6_1_unsecured_token_is_refused() {
+        // The unsecured example: header {"alg":"none"}, the same claims, an empty signature.
+        let unsecured = concat!(
+            "eyJhbGciOiJub25lIn0",
+            ".",
+            "eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFt",
+            "cGxlLmNvbS9pc19yb290Ijp0cnVlfQ",
+            ".",
+        );
+
+        // The engine authentication spec forbids "none", so it fails before any MAC.
+        assert_eq!(
+            secret().verify(unsecured, 1_300_819_380),
+            Err(JwtError::UnsupportedAlgorithm("none".to_owned()))
         );
     }
 

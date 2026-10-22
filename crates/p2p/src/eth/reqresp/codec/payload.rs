@@ -168,7 +168,8 @@ impl PayloadDecoder {
             };
             // Phase 2: decode the chunk as a stream of its own, bounded by the bytes still owed.
             //
-            //     [ identifier ][ this chunk ]  → frame decoder, limit = expected - produced
+            //     input = [ identifier ][ this chunk ]
+            //     limit = expected - produced
             self.scratch.truncate(STREAM_IDENTIFIER_LEN);
             if framed > 0 {
                 self.scratch.extend_from_slice(chunk);

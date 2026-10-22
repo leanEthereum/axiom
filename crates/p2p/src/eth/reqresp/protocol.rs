@@ -230,7 +230,8 @@ impl Protocol {
             | Self::BeaconBlocksByHeadV1 => (100, u64::MAX),
             // A blob sidecar: 131072 blob + 8 + 48 + 48 + 208 header + depth * 32 proof.
             //
-            //     minimal depth 10 → 131704,  mainnet depth 17 → 131928
+            //     minimal, depth 10: 131704
+            //     mainnet, depth 17: 131928
             Self::BlobSidecarsByRangeV1 | Self::BlobSidecarsByRootV1 => (131_704, 131_928),
             // A data column sidecar: index 8 + three offsets 12 + header 208 + proof 4 * 32.
             Self::DataColumnSidecarsByRangeV1 | Self::DataColumnSidecarsByRootV1 => (356, u64::MAX),

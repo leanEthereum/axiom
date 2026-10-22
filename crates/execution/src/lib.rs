@@ -7,13 +7,14 @@
 //! It also tells that client which block is head, and asks it to build blocks.
 //!
 //! ```text
-//!     beacon node                                   execution client
-//!         | engine_newPayloadV4(payload, ...)  ------->  execute, verdict
-//!         | engine_forkchoiceUpdatedV3(state, attrs) ->  set head, start a build
-//!         | engine_getPayloadV5(id)            ------->  built payload, blobs, requests
-//!         | engine_getBlobsV2(hashes)          ------->  blobs from the mempool
-//!         <---------------------------------------- JSON-RPC over HTTP, JWT-authenticated
+//!     beacon node calls                          execution client does
+//!     engine_newPayloadV4(payload, ...)          execute, return a verdict
+//!     engine_forkchoiceUpdatedV3(state, attrs)   set head, start a build
+//!     engine_getPayloadV5(id)                    return the built payload, blobs, requests
+//!     engine_getBlobsV2(hashes)                  return blobs from the mempool
 //! ```
+//!
+//! Every call is JSON-RPC over HTTP, authenticated with a JWT.
 //!
 //! # Spec mapping
 //!

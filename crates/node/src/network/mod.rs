@@ -91,15 +91,17 @@ impl NetworkIdentity {
 /// One loop drains network events in order, and wakes once a slot for upkeep.
 /// Gossip runs in spawned tasks, so a slow engine call never stalls the loop.
 ///
-/// ```text
-///     network events ──┬── gossip message ──> spawned: validate, report, import
-///                      ├── request ─────────> server: answer from the chain
-///                      ├── response ────────> sync: collect the batch
-///                      └── peer connected ──> status handshake ──> sync
+/// Each network event goes to one place:
 ///
-///     every slot ──> rotate topics on a fork or a subnet change
-///                ──> ask peers for their status: every slot while behind, every epoch otherwise
-/// ```
+/// - A gossip message goes to a spawned task that validates, reports, and imports it.
+/// - A request goes to the server, which answers from the chain.
+/// - A response goes to sync, which collects the batch.
+/// - A new peer gets a status handshake, then goes to sync.
+///
+/// Every slot, the loop does two chores:
+///
+/// - It rotates topics on a fork or a subnet change.
+/// - It asks peers for their status, every slot while behind and every epoch otherwise.
 #[derive(Debug)]
 pub(crate) struct NetworkService<P: Preset> {
     /// The network.

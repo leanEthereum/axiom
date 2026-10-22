@@ -43,13 +43,11 @@ pub(crate) struct ReadyBlock<P: Preset> {
 /// A block with blobs is available once every custody column of the node verified.
 /// Blocks and columns arrive in any order, so whichever comes last releases the block.
 ///
-/// ```text
-///     custody: {3, 40, 77, 101}
+/// Take custody columns {3, 40, 77, 101}, with columns 3 and 40 already verified:
 ///
-///     block B   ──> waiting: has {3, 40}
-///     column 77 ──> waiting: has {3, 40, 77}
-///     column 101──> complete ──> released for import
-/// ```
+/// 1. Block B arrives, and waits with {3, 40}.
+/// 2. Column 77 arrives, and B waits with {3, 40, 77}.
+/// 3. Column 101 arrives, the set is complete, and B is released for import.
 ///
 /// A block without blobs needs no column and passes straight through.
 /// Only verified columns may be offered: the buffer trusts what it receives.

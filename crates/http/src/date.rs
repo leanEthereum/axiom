@@ -113,7 +113,8 @@ mod tests {
 
     #[test]
     fn known_dates() {
-        // The epoch, the RFC's own example, and a leap day.
+        // The epoch, the IMF-fixdate example of RFC 9110 section 5.6.7, a leap day, and a year end.
+        // A sender must generate this form only, so the two obsolete forms never apply.
         let cases = [
             (0, "Thu, 01 Jan 1970 00:00:00 GMT"),
             (784_111_777, "Sun, 06 Nov 1994 08:49:37 GMT"),

@@ -118,12 +118,10 @@ struct SharedServices {
 ///
 /// # Overview
 ///
-/// ```text
-///     ticker ─────┐                        ┌──> engine: fork choice updates
-///     beacon api ─┼──> chain thread ──events┤
-///                 │                        └──> logs and metrics
-///     metrics <───┘ (scraped by Prometheus)
-/// ```
+/// - The ticker and the beacon API feed the chain thread.
+/// - The chain thread emits events.
+/// - Events drive fork choice updates to the engine, and logs and metrics.
+/// - A metrics server exposes the metrics for Prometheus to scrape.
 ///
 /// Shutdown stops the servers, then the tasks, then drains the chain thread.
 #[derive(Debug)]

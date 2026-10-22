@@ -21,10 +21,11 @@ use crate::{Claims, JwtSecret, RpcError};
 /// Tests set a canned reply per method, then point a client at the engine's URL.
 /// The engine records each authenticated call, so tests can check the exact parameters sent.
 ///
-/// ```text
-///     client --POST + JWT--> mock: verify JWT -> record call -> canned reply
-///                                  bad JWT    -> 401, nothing recorded
-/// ```
+/// Each call runs in three steps:
+///
+/// 1. The client sends a POST carrying a JWT.
+/// 2. The mock verifies the JWT, and answers 401 without recording when it is bad.
+/// 3. The mock records the call and returns the canned reply.
 #[derive(Debug)]
 pub struct MockEngine {
     /// The base URL clients connect to.

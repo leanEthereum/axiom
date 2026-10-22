@@ -11,8 +11,9 @@ use crate::{BYTES_PER_LENGTH_OFFSET, DecodeError, Ssz, offset::Offset};
 ///
 /// ```text
 /// [fixed a][offset b][fixed c][offset d] [body b][body d]
-///                                         ^ first offset = length of fixed part
 /// ```
+///
+/// The first offset equals the length of the fixed part, where the first body starts.
 ///
 /// A variable body runs from its offset to the next variable field's offset.
 /// The last body runs to the end of the input.

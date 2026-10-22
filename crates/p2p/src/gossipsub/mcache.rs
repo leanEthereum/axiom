@@ -2,10 +2,10 @@
 //!
 //! ```text
 //! windows:   [ newest ][ w1 ][ w2 ][ w3 ][ w4 ][ oldest ]   history_length = 6
-//!            └──── gossiped in IHAVE ────┘                 history_gossip = 3
-//!
-//! every heartbeat: drop the oldest window, open a new empty one
 //! ```
+//!
+//! IHAVE gossip covers the three newest windows, newest, w1, and w2, as history_gossip = 3.
+//! Every heartbeat drops the oldest window and opens a new empty one.
 //!
 //! See the message cache section of gossipsub v1.0.
 

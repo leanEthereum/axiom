@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn size_bounds() {
-        // 10 MiB payload → 32 + 10485760 + 1747626 = 12233418 compressed.
+        // A 10 MiB payload compresses to at most 32 + 10485760 + 1747626 = 12233418 bytes.
         assert_eq!(
             raw::max_compressed_len(MAX_PAYLOAD_SIZE as usize),
             12_233_418

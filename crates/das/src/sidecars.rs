@@ -22,10 +22,9 @@ const BLOB_KZG_COMMITMENTS_FIELD: usize = 11;
 ///
 /// ```text
 ///                cell 0    cell 1    ...   cell 127
-///     blob 0  [  c_00      c_01      ...   c_0,127  ]
-///     blob 1  [  c_10      c_11      ...   c_1,127  ]
-///                  │         │                │
-///               column 0  column 1   ...  column 127
+///     blob 0     c_00      c_01      ...   c_0,127
+///     blob 1     c_10      c_11      ...   c_1,127
+///     column     0         1         ...   127
 /// ```
 ///
 /// Each column travels as one sidecar, with the block header and a proof that the commitments are in it.

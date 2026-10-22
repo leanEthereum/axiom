@@ -92,7 +92,7 @@ pub(crate) mod tests {
     #[test]
     fn challenge_matches_vectors() {
         // Each case hashes a blob and a commitment into the evaluation point.
-        for case in cases("compute_challenge") {
+        for case in cases("compute_challenge", 9) {
             let input = case.get("input").unwrap();
             let blob_bytes = input.get("blob").and_then(Yaml::as_hex_bytes).unwrap();
             let blob = Blob::from_bytes(&blob_bytes).unwrap();

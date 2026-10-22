@@ -130,10 +130,10 @@ impl<C: Container> Ssz for C {
     ///
     /// ```text
     /// index 169 in a 64-leaf container = 0b1_010100_1
-    ///                                       field 20, then node 1 inside it
-    ///
     /// branch = [siblings inside the field] ++ [siblings of field 20 in the container]
     /// ```
+    ///
+    /// The six bits 010100 pick field 20, then the last bit picks node 1 inside it.
     fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
         if index == GeneralizedIndex::ROOT {
             return Some((self.hash_tree_root(), MerkleProof::default()));

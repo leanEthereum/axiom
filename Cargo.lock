@@ -58,6 +58,7 @@ name = "axiom-bls"
 version = "0.1.0"
 dependencies = [
  "axiom-bls12-381",
+ "axiom-json",
  "criterion",
  "proptest",
  "sha2",
@@ -78,6 +79,7 @@ dependencies = [
 name = "axiom-crypto"
 version = "0.1.0"
 dependencies = [
+ "axiom-json",
  "criterion",
  "proptest",
  "sha2",

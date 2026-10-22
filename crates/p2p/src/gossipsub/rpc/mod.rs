@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn control_layout() {
-        // A GRAFT for "t": RPC field 3 → control field 3 → topic field 1.
+        // A GRAFT for "t" nests topic field 1 in control field 3, in RPC field 3.
         let rpc = Rpc {
             control: Some(ControlMessage {
                 graft: vec![Graft {

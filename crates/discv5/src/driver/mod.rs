@@ -2,13 +2,11 @@
 //!
 //! # Overview
 //!
-//! ```text
-//!   socket ── recv task ──▶ ┐
-//!                           ├─▶ input queue ─▶ driver loop ─▶ service
-//!   handle ── commands ───▶ ┘                     │
-//!                                                 ├─▶ socket send
-//!                                                 └─▶ event queue ─▶ application
-//! ```
+//! 1. A receive task reads the socket and pushes datagrams into the input queue.
+//! 2. The handle pushes application commands into the same queue.
+//! 3. The driver loop pops each input and feeds it to the service.
+//! 4. The loop sends the service's datagrams on the socket.
+//! 5. The loop pushes the service's events into the event queue for the application.
 //!
 //! The loop waits for the next input or the service's next deadline, whichever comes first.
 //! Everything else is the service's.

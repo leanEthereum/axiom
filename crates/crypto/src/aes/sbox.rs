@@ -16,9 +16,8 @@ impl BitPlanes {
     ///
     /// Each half is an 8 x 8 bit matrix, and transposing turns its rows into planes.
     ///
-    /// ```text
-    /// bytes  b0 .. b15  -> 8 x 8 bit transposes ->  planes p0 .. p7 (16 lanes each)
-    /// ```
+    /// The 16 input bytes b0 to b15 pass through two 8 x 8 bit transposes.
+    /// The result is eight planes p0 to p7, with 16 lanes each.
     pub(super) fn from_bytes(bytes: &[u8; 16]) -> Self {
         let (halves, _) = bytes.as_chunks::<8>();
         let low = Self::transpose_8x8(u64::from_le_bytes(halves[0]));

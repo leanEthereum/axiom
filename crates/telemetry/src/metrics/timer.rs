@@ -6,11 +6,9 @@ use crate::metrics::Histogram;
 
 /// Measures wall time from its creation and records it, in seconds, when dropped.
 ///
-/// ```text
-///     guard created      -> the clock starts
-///     timed work runs
-///     guard leaves scope -> the elapsed seconds are observed
-/// ```
+/// 1. Creating the guard starts the clock.
+/// 2. The timed work runs.
+/// 3. The guard leaves scope, and the histogram observes the elapsed seconds.
 #[derive(Debug)]
 #[must_use = "a timer dropped at once records a duration near zero"]
 pub struct Timer {

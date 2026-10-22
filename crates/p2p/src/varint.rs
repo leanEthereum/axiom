@@ -124,7 +124,8 @@ impl Varint {
             // Byte 9 starts at bit 63: only its lowest bit fits in a u64.
             //
             //     bits 0..63 from bytes 0..8, bit 63 from byte 9
-            //     → any group above 1 in byte 9 would be lost
+            //
+            // So any group above 1 in byte 9 would be lost.
             if index == 9 && group > 1 {
                 return Err(VarintError::Overflow { byte });
             }
@@ -175,16 +176,45 @@ mod tests {
             Varint::Multiformat.write(value, &mut out);
             assert_eq!(out, bytes);
             assert_eq!(Varint::Multiformat.encoded_len(value), bytes.len());
-            // Decoding consumes exactly those bytes.
-            let mut input = bytes;
-            assert_eq!(Varint::Protobuf.read(&mut input), Ok(value));
-            assert_eq!(input, [0u8; 0]);
+            // Both dialects decode them, consuming exactly those bytes.
+            for dialect in [Varint::Protobuf, Varint::Multiformat] {
+                let mut input = bytes;
+                assert_eq!(dialect.read(&mut input), Ok(value));
+                assert_eq!(input, [0u8; 0]);
+            }
         }
     }
 
     #[test]
+    fn multiformat_limits() {
+        // The unsigned-varint README caps encodings at 9 bytes, so 2^63 - 1 is the largest value.
+        let largest = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f];
+        let mut out = Vec::new();
+        Varint::Multiformat.write((1 << 63) - 1, &mut out);
+        assert_eq!(out, largest);
+        assert_eq!(
+            Varint::Multiformat.read(&mut &largest[..]),
+            Ok((1 << 63) - 1)
+        );
+        // 2^63 needs a tenth byte, which the multiformats dialect refuses.
+        let mut out = Vec::new();
+        Varint::Multiformat.write(1 << 63, &mut out);
+        assert_eq!(out.len(), 10);
+        assert_eq!(
+            Varint::Multiformat.read(&mut &out[..]),
+            Err(VarintError::TooLong { max: 9 })
+        );
+        // The README's non-minimal example: [0x81, 0x00] is 1 in Go, but only [0x01] is valid.
+        assert_eq!(Varint::Protobuf.read(&mut &[0x81, 0x00][..]), Ok(1));
+        assert_eq!(
+            Varint::Multiformat.read(&mut &[0x81, 0x00][..]),
+            Err(VarintError::NotMinimal { len: 2 })
+        );
+    }
+
+    #[test]
     fn max_value_takes_ten_bytes() {
-        // 2^64 - 1 needs 64 bits → ceil(64 / 7) = 10 groups.
+        // 2^64 - 1 needs 64 bits, so ceil(64 / 7) = 10 groups.
         let mut out = Vec::new();
         Varint::Protobuf.write(u64::MAX, &mut out);
         assert_eq!(

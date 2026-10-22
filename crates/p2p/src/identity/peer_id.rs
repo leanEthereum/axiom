@@ -33,7 +33,7 @@ const LIBP2P_KEY_CODEC: u64 = 0x72;
 /// encoded key <= 42 bytes:   [ 0x00 ][ varint len ][ encoded key ]     identity multihash
 /// encoded key  > 42 bytes:   [ 0x12 ][ 0x20 ][ sha256(encoded key) ]   sha256 multihash
 ///
-/// secp256k1: 37-byte envelope → [0x00, 0x25, 08 02 12 21 <33 bytes>]
+/// secp256k1: 37-byte envelope -> [0x00, 0x25, 08 02 12 21 <33 bytes>]
 ///            base58 text starts with "16Uiu2"
 /// ```
 ///
@@ -225,7 +225,7 @@ mod tests {
         let key = PublicKey::decode(&envelope).unwrap();
         let id = PeerId::from_public_key(&key);
 
-        // 37 <= 42 → identity multihash: [0x00, 0x25] then the envelope verbatim.
+        // 37 <= 42 picks the identity multihash: [0x00, 0x25] then the envelope verbatim.
         assert_eq!(&id.as_bytes()[..2], &[0x00, 0x25]);
         assert_eq!(&id.as_bytes()[2..], &envelope[..]);
         assert_eq!(id.public_key(), Some(key.clone()));
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn long_key_is_hashed() {
-        // A 64-byte RSA stand-in encodes to 67 bytes > 42 → SHA-256 multihash.
+        // A 64-byte RSA stand-in encodes to 67 bytes > 42, so it takes the SHA-256 multihash.
         let key = PublicKey {
             key_type: KeyType::Rsa,
             data: vec![7; 64],

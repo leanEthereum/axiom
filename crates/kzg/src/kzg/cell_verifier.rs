@@ -49,9 +49,10 @@ impl CellVerifier {
     /// Weighting cell k by r^k and summing gives the universal verification equation:
     ///
     /// ```text
-    ///     e( sum_k r^k pi_k , [s^64]_2 )
-    ///         = e( sum_i w_i C_i  -  [sum_k r^k I_k(s)]  +  sum_k r^k h_k^64 pi_k , [1]_2 )
-    ///             \_____ RLC ___/    \______ RLI ______/    \_______ RLP _______/
+    ///     e( sum_k r^k pi_k , [s^64]_2 ) = e( RLC - RLI + RLP , [1]_2 )
+    ///     RLC = sum_i w_i C_i
+    ///     RLI = [sum_k r^k I_k(s)]
+    ///     RLP = sum_k r^k h_k^64 pi_k
     /// ```
     ///
     /// The weight w_i of a distinct commitment sums r^k over its cells.

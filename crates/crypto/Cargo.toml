@@ -18,6 +18,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+axiom-json.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 

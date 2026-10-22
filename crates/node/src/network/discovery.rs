@@ -59,11 +59,10 @@ pub(crate) struct LocalRecord {
 ///
 /// # Overview
 ///
-/// ```text
-///     record: ip, tcp, udp, eth2 fork id, attnets, custody group count, next fork digest
-///     few peers ──> lookup for a random target, only records on this fork
-///     found ──────> dial each record's TCP endpoint once
-/// ```
+/// The node's record carries its IP, TCP and UDP ports, eth2 fork id, attnets, custody group count, and next fork digest.
+///
+/// 1. With few peers, the service looks up a random target, keeping only records on this fork.
+/// 2. It dials each found record's TCP endpoint once.
 ///
 /// The record is built once at startup.
 /// It does not yet follow subnet rotations or forks, so it can go stale on a long run.

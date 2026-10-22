@@ -6,7 +6,7 @@
 //! A request costs tokens, typically the number of items it asks for.
 //!
 //! ```text
-//! quota: 128 tokens per 10 s  →  one token every 78.125 ms, burst of 128
+//! quota: 128 tokens per 10 s, so one token every 78.125 ms, burst of 128
 //!
 //! tat = theoretical arrival time of the next conforming token
 //! a request of n tokens at time t:
@@ -180,7 +180,7 @@ mod tests {
     fn burst_then_steady_rate() {
         let peer = PeerId::from_public_key(&PublicKey::secp256k1([2; 33]));
         let mut limiter = RateLimiter::new();
-        // Fixture state: 4 tokens per 4 s → one token per second.
+        // Fixture state: 4 tokens per 4 s, so one token per second.
         limiter.set_quota(
             Protocol::PingV1,
             Quota {

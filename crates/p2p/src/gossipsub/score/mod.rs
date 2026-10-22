@@ -164,7 +164,7 @@ impl PeerScore {
             s += topic_stats.first_message_deliveries * tp.first_message_deliveries_weight;
             // P3: squared deficit once active.
             //
-            //     threshold 4, delivered 1 → deficit 3 → P3 = 9
+            //     threshold 4, delivered 1: deficit = 3, P3 = 3^2 = 9
             if topic_stats.mesh_message_deliveries_active
                 && topic_stats.mesh_message_deliveries < tp.mesh_message_deliveries_threshold
             {
@@ -573,7 +573,7 @@ mod tests {
         let mut score = PeerScore::new(params());
         let (a, t) = (peer(1), Topic::new("t"));
         score.add_peer(a.clone());
-        // Two invalid messages → P4 = 2^2 = 4 → 4 * -10 = -40.
+        // Two invalid messages give P4 = 2^2 = 4, so 4 * -10 = -40.
         for byte in 0..2 {
             let id = MessageId([byte; 20]);
             score.validate_message(id, Duration::ZERO);
@@ -598,7 +598,7 @@ mod tests {
         score.validate_message(id, Duration::ZERO);
         score.duplicated_message(&b, id, &t, Duration::ZERO);
         score.reject_message(&a, Some(id), &t, RejectReason::Invalid);
-        // Both get P4 = 1 → -10.
+        // Both get P4 = 1, so -10.
         assert!((score.score(&a, Duration::ZERO) + 10.0).abs() < 1e-9);
         assert!((score.score(&b, Duration::ZERO) + 10.0).abs() < 1e-9);
     }
@@ -612,9 +612,9 @@ mod tests {
         // Before activation (5 s), no deficit applies: score = P1 only.
         score.refresh(Duration::from_secs(4));
         assert!((score.score(&a, Duration::from_secs(4)) - 4.0).abs() < 1e-9);
-        // At 6 s the deficit is active: threshold 4, delivered 0 → 16 * -1.
+        // At 6 s the deficit is active: threshold 4, delivered 0, so 16 * -1.
         //
-        //     P1 = 6, P3 = -16 → -10
+        //     P1 + P3 = 6 - 16 = -10
         score.refresh(Duration::from_secs(6));
         assert!((score.score(&a, Duration::from_secs(6)) + 10.0).abs() < 1e-9);
         // A prune turns the deficit into a sticky P3b of 16.
@@ -626,13 +626,13 @@ mod tests {
     fn ip_colocation_and_behaviour_penalty() {
         let mut score = PeerScore::new(params());
         let ip: IpAddr = [10, 0, 0, 1].into();
-        // Three peers on one IP, threshold 1 → surplus 2 → 4 * -5 = -20 each.
+        // Three peers on one IP, threshold 1: surplus 2, so 4 * -5 = -20 each.
         for seed in 1..=3 {
             score.add_peer(peer(seed));
             score.set_ip(&peer(seed), ip);
         }
         assert!((score.score(&peer(1), Duration::ZERO) + 20.0).abs() < 1e-9);
-        // Five penalties, threshold 2 → excess 3 → 9 * -1 = -9 more.
+        // Five penalties, threshold 2: excess 3, so 9 * -1 = -9 more.
         score.add_penalty(&peer(1), 5);
         assert!((score.score(&peer(1), Duration::ZERO) + 29.0).abs() < 1e-9);
     }
@@ -642,13 +642,13 @@ mod tests {
         let mut score = PeerScore::new(params());
         let (a, t) = (peer(1), Topic::new("t"));
         score.add_peer(a.clone());
-        // Four first deliveries → P2 = 4 * 2 = 8.
+        // Four first deliveries give P2 = 4 * 2 = 8.
         for byte in 0..4 {
             let id = MessageId([byte; 20]);
             score.validate_message(id, Duration::ZERO);
             score.deliver_message(&a, id, &t, Duration::ZERO);
         }
-        // One decay at factor 0.5 halves it: 2 deliveries → 4.
+        // One decay at factor 0.5 halves it: 2 deliveries, so 4.
         score.refresh(Duration::from_secs(1));
         assert!((score.score(&a, Duration::from_secs(1)) - 4.0).abs() < 1e-9);
         // A positive peer is forgotten at once on disconnect.
@@ -662,7 +662,7 @@ mod tests {
         let a = peer(1);
         score.add_peer(a.clone());
         score.add_penalty(&a, 4);
-        // Excess 2 → -4, retained across a reconnect within 60 s.
+        // Excess 2 gives -4, retained across a reconnect within 60 s.
         score.remove_peer(&a, Duration::ZERO);
         score.add_peer(a.clone());
         assert!((score.score(&a, Duration::ZERO) + 4.0).abs() < 1e-9);

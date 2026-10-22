@@ -48,9 +48,7 @@ impl Root {
     /// Without it, a list and its zero-padded extension would share a root.
     ///
     /// ```text
-    ///          root
-    ///         /    \
-    ///   contents   length as uint256
+    /// root = hash(contents root, length as uint256)
     /// ```
     #[must_use]
     pub fn mix_in_length(&self, length: usize) -> Self {

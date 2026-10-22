@@ -14,21 +14,26 @@
 //!     server   router, keep-alive, graceful shutdown                 async
 //! ```
 //!
-//! An HTTP/1.1 exchange on one connection:
+//! In an HTTP/1.1 exchange on one connection, the client first sends its request:
 //!
 //! ```text
-//!     client                                      server
-//!     POST / HTTP/1.1\r\n               ------>
+//!     POST / HTTP/1.1\r\n
 //!     host: localhost:8551\r\n
 //!     content-length: 2\r\n
 //!     \r\n
 //!     {}
-//!                                       <------   HTTP/1.1 200 OK\r\n
-//!                                                 content-length: 2\r\n
-//!                                                 \r\n
-//!                                                 {}
-//!     the connection stays open for the next request
 //! ```
+//!
+//! The server then answers:
+//!
+//! ```text
+//!     HTTP/1.1 200 OK\r\n
+//!     content-length: 2\r\n
+//!     \r\n
+//!     {}
+//! ```
+//!
+//! The connection stays open for the next request.
 //!
 //! Every read is bounded: head size, field count, body size, and time.
 //! Ambiguous framing, such as both a length and a transfer coding, is refused outright.

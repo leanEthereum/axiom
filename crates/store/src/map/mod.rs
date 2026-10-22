@@ -9,17 +9,15 @@
 //! It copies the nodes on the path from the root to the change, "path copying".
 //! A node nobody else holds is mutated in place instead, so writes without snapshots allocate nothing.
 //!
-//! ```text
-//!     insert "e" while a snapshot holds the old root
+//! Write n(L, R) for node n with left subtree L and right subtree R.
+//! Insert "e" while a snapshot holds the old root:
 //!
-//!        snapshot             live
-//!           |                   |
-//!          (d)                 (d')       d' and f' are fresh copies
-//!         /   \               /    \
-//!       (b)   (f)          (b)     (f')   b is one node, shared by both trees
-//!                                  /
-//!                                (e)
+//! ```text
+//!     snapshot   d(b, f)
+//!     live       d'(b, f'(e, -))
 //! ```
+//!
+//! Nodes d' and f' are fresh copies, while b is one node shared by both trees.
 //!
 //! The copied path has O(log n) nodes, so a write after a snapshot costs O(log n) allocations.
 //!
@@ -133,13 +131,11 @@ impl<V: Clone> Node<V> {
                 let replacement = match (inner.left.take(), inner.right.take()) {
                     // Zero or one child: the child itself moves up.
                     (None, child) | (child, None) => child,
-                    // Two children: the in-order successor moves up.
+                    // Two children: the in-order successor s, the smallest key above k, moves up.
+                    // Write n(L, R) for node n with left subtree L and right subtree R.
                     //
-                    //         (k)               (s)
-                    //        /   \     ->      /   \
-                    //      (a)   (r)         (a)   (r without s)
-                    //            /
-                    //          (s)  smallest key above k
+                    //     before   k(a, r), with s the leftmost node of r
+                    //     after    s(a, r without s)
                     (Some(left), right) => {
                         let mut right = right;
                         let mut successor = Self::take_min(&mut right)?;
@@ -186,12 +182,11 @@ impl<V: Clone> Node<V> {
 
         if balance > 1 {
             // Left-heavy. A right-leaning left child needs a first rotation.
+            // In the left-right case, with n(L, R) for node n and its subtrees and - for none:
             //
-            //     left-right case:   (c)          (c)          (b)
-            //                        /            /            / \
-            //                      (a)    ->    (b)    ->    (a) (c)
-            //                        \          /
-            //                        (b)      (a)
+            //     start            c(a(-, b), -)
+            //     rotate a left    c(b(a, -), -)
+            //     rotate c right   b(a, c)
             if let Some(left) = inner.left.as_mut()
                 && left.balance() < 0
             {
@@ -211,12 +206,11 @@ impl<V: Clone> Node<V> {
 
     /// Lifts the left child above this node.
     ///
+    /// Write n(L, R) for node n with left subtree L and right subtree R.
+    ///
     /// ```text
-    ///         (y)              (x)
-    ///         / \              / \
-    ///       (x)  C    ->      A  (y)
-    ///       / \                  / \
-    ///      A   B                B   C
+    ///     before   y(x(A, B), C)
+    ///     after    x(A, y(B, C))
     /// ```
     fn rotate_right(node: &mut Arc<Self>) {
         let inner = Arc::make_mut(node);

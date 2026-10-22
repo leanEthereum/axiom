@@ -5,9 +5,10 @@
 //! Simplified SWU needs a curve y^2 = x^3 + A x + B with A B != 0, which the twist (A = 0) is not.
 //! RFC 9380 section 6.6.3 therefore maps to a 3-isogenous curve E2' with A' B' != 0, then carries the point back.
 //!
-//! ```text
-//!     u in F_{p^2} --SSWU--> (x', y') on E2' --iso_3--> (x, y) on E'
-//! ```
+//! The map runs in two steps:
+//!
+//! 1. Simplified SWU sends u in F_{p^2} to a point (x', y') on E2'.
+//! 2. The 3-isogeny sends (x', y') to a point (x, y) on E'.
 //!
 //! The output is a point of E', not yet of G2.
 //! Cofactor clearing finishes the job.

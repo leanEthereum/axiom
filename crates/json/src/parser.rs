@@ -67,14 +67,16 @@ impl<'a> Parser<'a> {
     ///
     /// The loop alternates between two phases.
     ///
-    /// ```text
-    ///     read a value ----> scalar or empty container -> attach to the open container
-    ///          ^         \-> "[" or "{" with content   -> push a frame, read again
-    ///          |
-    ///     attach: "," -> read the next value
-    ///             "]" or "}" -> pop the frame, attach it to its parent in turn
-    ///             no open container -> the document is done
-    /// ```
+    /// Phase 1 reads a value:
+    ///
+    /// - A scalar or an empty container goes to phase 2, to be attached.
+    /// - A "[" or "{" with content pushes a frame, and phase 1 runs again.
+    ///
+    /// Phase 2 attaches the value to the open container, then reads the next byte:
+    ///
+    /// - A "," sends the loop back to phase 1 for the next value.
+    /// - A "]" or "}" pops the frame, and phase 2 attaches it to its parent in turn.
+    /// - With no open container left, the document is done.
     pub(crate) fn document(mut self) -> Result<Json, ParseError> {
         // Size bound first, so no work is spent on an oversized text.
         if self.bytes.len() > self.limits.max_bytes {
@@ -261,11 +263,13 @@ impl<'a> Parser<'a> {
 
     /// Reads a string, decoding escapes.
     ///
+    /// A string alternates plain runs and escapes:
+    ///
     /// ```text
     ///     " plain run \ escape plain run \ escape ... "
-    ///       ^ copied    ^ decoded
     /// ```
     ///
+    /// Plain runs are copied, and escapes are decoded.
     /// Plain runs are copied whole after one UTF-8 check each.
     /// A run never splits a character, because every byte that ends a run is ASCII.
     fn string(&mut self) -> Result<String, ParseError> {

@@ -3,6 +3,8 @@
 //! The vectors live outside the repository.
 //! Point AXIOM_VECTORS at their root.
 //! It defaults to the workspace's testing/vectors directory, and every suite skips when it is absent.
+//! Setting AXIOM_REQUIRE_VECTORS, as CI does, turns a missing suite into a failure.
+//! Each suite asserts its case count, so a shrinking download cannot pass silently.
 //!
 //! ```text
 //!     $AXIOM_VECTORS/bls12-381-tests/{sign,verify,aggregate,...}/*.yaml
@@ -260,7 +262,7 @@ fn vectors_root() -> PathBuf {
     )
 }
 
-/// Runs a check on every YAML file of a directory, returning how many ran.
+/// Runs a check on every YAML file of a directory, which must hold exactly the given count.
 ///
 /// The check returns the expected and the actual outcome.
 /// Any mismatch fails the test.
@@ -269,13 +271,19 @@ fn vectors_root() -> PathBuf {
     clippy::print_stderr,
     reason = "the suite reports its case count, or why it skipped, to the test output"
 )]
-fn run_suite(directory: &Path, check: impl Fn(&Yaml) -> (Yaml, Yaml)) -> usize {
+fn run_suite(directory: &Path, count: usize, check: impl Fn(&Yaml) -> (Yaml, Yaml)) {
     if !directory.is_dir() {
+        // CI sets the variable, so a missing download fails there instead of skipping.
+        assert!(
+            env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+            "vectors required but missing under {}; run make -C testing/ef-tests",
+            directory.display()
+        );
         eprintln!(
             "skipping {}: vectors not found (set AXIOM_VECTORS)",
             directory.display()
         );
-        return 0;
+        return;
     }
     let mut files: Vec<PathBuf> = fs::read_dir(directory)
         .expect("readable directory")
@@ -307,8 +315,8 @@ fn run_suite(directory: &Path, check: impl Fn(&Yaml) -> (Yaml, Yaml)) -> usize {
         failures.len(),
         failures.join("\n")
     );
+    assert_eq!(files.len(), count, "{}: case count", directory.display());
     println!("{}: {} cases passed", directory.display(), files.len());
-    files.len()
 }
 
 /// Root of the bls12-381-tests suites.
@@ -375,7 +383,7 @@ fn yaml_reader_handles_the_vector_shapes() {
 
 #[test]
 fn sign() {
-    run_suite(&bls_suite("sign"), |case| {
+    run_suite(&bls_suite("sign"), 10, |case| {
         let input = case.get("input");
         // A key that fails to decode expects no signature at all.
         let actual = input
@@ -393,7 +401,7 @@ fn sign() {
 
 #[test]
 fn verify() {
-    run_suite(&bls_suite("verify"), |case| {
+    run_suite(&bls_suite("verify"), 29, |case| {
         // Fixture state: one key, one message, one signature.
         let input = case.get("input");
         // A key or signature that fails to decode means the vector expects false.
@@ -410,7 +418,7 @@ fn verify() {
 
 #[test]
 fn aggregate() {
-    run_suite(&bls_suite("aggregate"), |case| {
+    run_suite(&bls_suite("aggregate"), 6, |case| {
         // One undecodable signature voids the whole aggregate.
         let signatures: Option<Vec<Signature>> =
             case.get("input").list().iter().map(signature).collect();
@@ -424,7 +432,7 @@ fn aggregate() {
 
 #[test]
 fn aggregate_verify() {
-    run_suite(&bls_suite("aggregate_verify"), |case| {
+    run_suite(&bls_suite("aggregate_verify"), 5, |case| {
         // Fixture state: n keys, n messages, one aggregate signature.
         let input = case.get("input");
         let messages: Vec<Vec<u8>> = input
@@ -451,7 +459,7 @@ fn aggregate_verify() {
 
 #[test]
 fn fast_aggregate_verify() {
-    run_suite(&bls_suite("fast_aggregate_verify"), |case| {
+    run_suite(&bls_suite("fast_aggregate_verify"), 12, |case| {
         // Fixture state: n keys over one message, one aggregate signature.
         let input = case.get("input");
         // Any undecodable key or signature means the vector expects false.
@@ -471,7 +479,7 @@ fn fast_aggregate_verify() {
 
 #[test]
 fn batch_verify() {
-    run_suite(&bls_suite("batch_verify"), |case| {
+    run_suite(&bls_suite("batch_verify"), 4, |case| {
         let input = case.get("input");
         let keys = input.get("pubkeys").list();
         let messages = input.get("messages").list();
@@ -497,7 +505,7 @@ fn batch_verify() {
 
 #[test]
 fn deserialization_g1() {
-    run_suite(&bls_suite("deserialization_G1"), |case| {
+    run_suite(&bls_suite("deserialization_G1"), 13, |case| {
         // Point decoding with the subgroup check.
         // Infinity is a valid point here.
         let bytes = case.get("input").get("pubkey").bytes();
@@ -509,7 +517,7 @@ fn deserialization_g1() {
 
 #[test]
 fn deserialization_g2() {
-    run_suite(&bls_suite("deserialization_G2"), |case| {
+    run_suite(&bls_suite("deserialization_G2"), 15, |case| {
         // Signature decoding is the subgroup-checked G2 decoding.
         // Infinity is valid.
         let bytes = case.get("input").get("signature").bytes();
@@ -523,7 +531,7 @@ fn deserialization_g2() {
 fn hash_to_g2() {
     // These are the RFC 9380 appendix J.10.1 vectors, under the RFC's test tag.
     let dst = b"QUUX-V01-CS02-with-BLS12381G2_XMD:SHA-256_SSWU_RO_";
-    run_suite(&bls_suite("hash_to_G2"), |case| {
+    run_suite(&bls_suite("hash_to_G2"), 4, |case| {
         let message = case.get("input").get("msg").str().as_bytes().to_vec();
         let point = G2Affine::from(G2Projective::hash_to_curve(&message, dst));
         let (x, y) = point.coordinates().expect("hash output is finite");
@@ -553,7 +561,7 @@ fn hash_to_g2() {
 
 #[test]
 fn eth_aggregate_pubkeys() {
-    run_suite(&altair_suite("eth_aggregate_pubkeys"), |case| {
+    run_suite(&altair_suite("eth_aggregate_pubkeys"), 8, |case| {
         // Empty lists, invalid keys, and infinite sums all expect null.
         let actual = public_keys(case.get("input"))
             .and_then(|keys| PublicKey::aggregate(&keys).ok())
@@ -564,7 +572,7 @@ fn eth_aggregate_pubkeys() {
 
 #[test]
 fn eth_fast_aggregate_verify() {
-    run_suite(&altair_suite("eth_fast_aggregate_verify"), |case| {
+    run_suite(&altair_suite("eth_fast_aggregate_verify"), 12, |case| {
         // Fixture state: possibly no keys, one message, one signature.
         let input = case.get("input");
         // The Altair rule accepts no keys with the infinity signature.

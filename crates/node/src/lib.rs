@@ -5,12 +5,10 @@
 //! The chain runs on one thread and owns all consensus state.
 //! Async services around it talk to it through a queue.
 //!
-//! ```text
-//!     clock ──ticks──┐
-//!     beacon api ────┼──> chain thread ──events──> engine updates, logs, metrics
-//!     network ───────┘         │
-//!                              └──> database
-//! ```
+//! - The clock, the beacon API, and the network feed the chain thread.
+//! - The clock sends ticks; the API and the network send requests and messages.
+//! - The chain thread emits events, which drive engine updates, logs, and metrics.
+//! - The chain thread alone writes the database.
 
 mod api;
 mod chain;

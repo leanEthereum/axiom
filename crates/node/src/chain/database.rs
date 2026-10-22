@@ -291,8 +291,7 @@ mod tests {
         // Fixture state: finalized blocks at slots 1 and 3, and an orphan at slot 2.
         //
         //     1 -> 3      finalized chain
-        //      \
-        //       2         orphan, excluded by finality
+        //     1 -> 2      orphan, excluded by finality
         let database = Database::in_memory().unwrap();
         let (one, two, three) = (block_at(1), block_at(2), block_at(3));
         let roots = [

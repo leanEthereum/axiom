@@ -10,13 +10,14 @@
 //!
 //! The XX pattern takes three messages and authenticates both static keys.
 //!
-//! ```text
-//! initiator                                         responder
-//!   ── e ─────────────────────────────────────────────▶          message 1
-//!   ◀──────────────────────── e, ee, s, es, payload ───          message 2
-//!   ── s, se, payload ────────────────────────────────▶          message 3
+//! 1. The initiator sends e.
+//! 2. The responder sends e, ee, s, es, and its payload.
+//! 3. The initiator sends s, se, and its payload.
 //!
-//! every message travels as [ length: u16 BE ][ bytes ]
+//! Every message travels with a length prefix:
+//!
+//! ```text
+//! [ length: u16 BE ][ bytes ]
 //! ```
 //!
 //! The Noise static key is not the libp2p identity key.

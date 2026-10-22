@@ -58,7 +58,7 @@ impl Gossip {
             .collect();
         // Target max(D_lazy, gossip_factor * eligible) peers.
         //
-        //     40 eligible, factor 0.25 → 10 > D_lazy 6 → gossip to 10
+        //     40 eligible, factor 0.25: 40 * 0.25 = 10 > D_lazy = 6, gossip to 10
         // Invariant: the factor lies in [0, 1], so the product is a non-negative count.
         let eligible = f64::from(u32::try_from(candidates.len()).unwrap_or(u32::MAX));
         #[expect(

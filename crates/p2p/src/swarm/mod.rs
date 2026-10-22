@@ -7,16 +7,14 @@
 //! - A handle sends commands: dial, publish, subscribe, request, respond, disconnect.
 //! - An event stream reports peers, gossip messages, requests, and responses.
 //!
-//! ```text
-//!                      ┌──────────── swarm task ────────────┐
-//! handle ── command ──▶│ gossipsub router, request tables   │── event ──▶ node
-//!                      └──▲──────────────┬──────────────────┘
-//!                         │ events       │ commands
-//!                ┌────────┴──────────────▼────────┐
-//!                │ connection task, one per peer  │◀── reader task: socket → plaintext
-//!                │ yamux session, stream handlers │──▶ socket: sealed frames
-//!                └────────────────────────────────┘
-//! ```
+//! Three kinds of task run below the node:
+//!
+//! - The swarm task owns the gossipsub router and the request tables.
+//!   It takes commands from the handle and emits events to the node.
+//! - A connection task runs per peer, with its yamux session and stream handlers.
+//!   It sends events up to the swarm task, and takes commands from it.
+//!   It writes sealed frames to the socket.
+//! - A reader task per connection reads the socket and hands plaintext to the connection task.
 //!
 //! Every task waits on a single channel, so no task ever selects over several futures.
 //! The swarm task owns the router; its clock is the time since the swarm started.
@@ -25,12 +23,12 @@
 //!
 //! Every queue is bounded, and each bound has one policy.
 //!
-//! ```text
-//! socket ──▶ reader task ══▶ connection task ══▶ swarm task ──▶ event queue ──▶ node
-//!                        waits              waits          never waits
+//! Data flows from the socket to the node in four hops:
 //!
-//! ══▶  bounded channel; a full one makes the sender wait
-//! ```
+//! 1. The reader task reads the socket and sends to the connection task, waiting when full.
+//! 2. The connection task sends to the swarm task, waiting when full.
+//! 3. The swarm task pushes into the event queue, and never waits.
+//! 4. The node drains the event queue.
 //!
 //! - The reader waits for its connection, so a slow connection stops reading the socket.
 //! - A connection grants yamux credit only once the swarm took the data.

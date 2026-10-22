@@ -197,7 +197,7 @@ mod tests {
         //
         //     id field   = 0x0a 0x27 <39-byte multihash>      = 41 bytes
         //     key field  = 0x12 0x25 <37-byte PublicKey>      = 39 bytes
-        //     prefix     = 80 → 0x50
+        //     prefix     = 80 = 0x50
         let to_bob = dialer.take_output();
         assert_eq!(to_bob.len(), 1 + 80);
         assert_eq!(to_bob[0], 80);

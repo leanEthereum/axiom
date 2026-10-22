@@ -120,9 +120,9 @@ impl Mesh {
             self.prune(topic, peer, false, cx, now);
         }
 
-        // Step 2: too few peers → graft random eligible ones up to D.
+        // Step 2: with too few peers, graft random eligible ones up to D.
         //
-        //     D_low = 6, mesh = 4 → graft 8 - 4 = 4
+        //     D_low = 6, mesh = 4, D = 8: graft 8 - 4 = 4
         let size = self.peers(topic).count();
         if size < config.mesh_n_low {
             let mut candidates = self.graft_candidates(topic, &[], cx, now);
@@ -132,7 +132,7 @@ impl Mesh {
             }
         }
 
-        // Step 3: too many peers → keep the best D_score, a random rest up to D, and D_out outbound.
+        // Step 3: with too many peers, keep the best D_score, a random rest up to D, and D_out outbound.
         let size = self.peers(topic).count();
         if size > config.mesh_n_high {
             let keep = self.select_survivors(topic, cx, now);
@@ -200,7 +200,8 @@ impl Mesh {
                 // Grafting right after being pruned is flooding: a second penalty.
                 //
                 //     pruned at t, backoff 60 s, flood threshold 10 s
-                //     → a graft before t + 10 s costs 2
+                //
+                // A graft before t + 10 s then costs 2.
                 if now + cx.config.prune_backoff < expiry + cx.config.graft_flood_threshold {
                     penalty += 1;
                 }
@@ -362,7 +363,8 @@ impl Mesh {
         //
         //     kept:  [score, score, score, score | in, in, out, in]   outbound 1 < D_out 2
         //     tail:  [in, out, in, in]
-        //     → the last random inbound pick makes room for the tail's outbound peer
+        //
+        // The last random inbound pick makes room for the tail's outbound peer.
         let mut outbound = members
             .iter()
             .filter(|peer| cx.peers.is_outbound(peer))

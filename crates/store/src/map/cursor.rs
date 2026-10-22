@@ -13,17 +13,18 @@ use super::{Node, range::KeyRange};
 ///
 /// Each end keeps a stack holding the path of nodes not yet visited.
 ///
+/// Take a tree with root d, children b and f, and c as the right child of b.
+/// Seeking the lower bound "c" fills the front stack in three steps:
+///
+/// 1. At d, d >= c, so push d and go left.
+/// 2. At b, b < c, so skip b and go right.
+/// 3. At c, c >= c, so push c and go left.
+///
 /// ```text
-///     front stack after seeking lower bound "c":
-///
-///              (d)   <- pushed: d >= c, go left
-///             /   \
-///           (b)   (f)
-///             \
-///             (c)  <- pushed: c >= c, go left; b < c was skipped
-///
-///     stack = [d, c]; pop c, then push the leftmost path of c's right subtree
+///     stack = [d, c]
 /// ```
+///
+/// Advancing then pops c, and pushes the leftmost path of the right subtree of c.
 ///
 /// The two ends stop when they meet: the front never yields a key at or past the back's last key.
 ///
