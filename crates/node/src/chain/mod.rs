@@ -14,7 +14,9 @@ use std::{
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
-use axiom_fork_choice::{DataAvailability, ExecutionStatus, ForkChoiceError, PayloadStatus, Store};
+use axiom_fork_choice::{
+    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, PayloadStatus, Store,
+};
 use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
 use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
@@ -249,6 +251,25 @@ impl<P: Preset> Chain<P> {
         self.store
             .block_state(&root)
             .ok_or(ChainError::MissingState(root))
+    }
+
+    /// The head as the fork choice names it, with the payload variant a Gloas head has.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork choice cannot pick a head.
+    pub fn head_node(&mut self) -> Result<ForkChoiceNode, ChainError> {
+        Ok(self.store.head()?)
+    }
+
+    /// Whether a proposal at a slot builds on the head's payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head is not in the store.
+    pub fn builds_on_full(&mut self, slot: Slot) -> Result<bool, ChainError> {
+        let head = self.store.head()?;
+        Ok(self.store.should_build_on_full(head, slot)?)
     }
 
     /// The light client data the chain serves.
@@ -844,7 +865,7 @@ impl<P: Preset> Chain<P> {
         let committees = state
             .beacon()
             .sync_committees()
-            .ok_or(ChainError::NoSyncCommittee(state.fork_name()))?;
+            .ok_or_else(|| ChainError::NoSyncCommittee(state.fork_name()))?;
         let seats = SyncPool::<P>::seats(committees, message.validator_index)?;
         self.pool.sync_mut().insert_message(message, &seats)?;
         Ok(())

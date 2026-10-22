@@ -9,7 +9,7 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::{ChainEvent, ChainHandle, Clock, ExecutionLayer};
+use crate::{ChainEvent, ChainHandle, Clock, ExecutionLayer, ProposerService};
 
 /// How many times per slot the fork choice clock advances.
 ///
@@ -59,6 +59,60 @@ impl<P: Preset> Ticker<P> {
 }
 
 /// Tells the engine about every new head and feeds its verdicts back.
+/// When, as a fraction of a slot, the engine starts building the next slot's payload.
+///
+/// Two thirds in, the slot's block and votes have arrived, so the head is settled.
+/// Proposers that build ahead give the engine the last third to fill the payload.
+const PREPARE_AT_NUMERATOR: u64 = 2;
+
+/// The denominator of the fraction above.
+const PREPARE_AT_DENOMINATOR: u64 = 3;
+
+/// Starts the engine building each prepared proposer's payload before its slot.
+#[derive(Debug)]
+pub(crate) struct PayloadPreparer<P: Preset> {
+    /// The proposal desk.
+    proposer: Arc<ProposerService<P>>,
+    /// The wall clock.
+    clock: Arc<dyn Clock>,
+    /// Genesis and the slot length.
+    slots: SlotClock,
+}
+
+impl<P: Preset> PayloadPreparer<P> {
+    pub(crate) fn new(
+        proposer: Arc<ProposerService<P>>,
+        clock: Arc<dyn Clock>,
+        slots: SlotClock,
+    ) -> Self {
+        Self {
+            proposer,
+            clock,
+            slots,
+        }
+    }
+
+    /// Each slot, two thirds in, prepares the next slot's payload.
+    pub(crate) async fn run(self) {
+        loop {
+            let now = self.clock.now_ms();
+            let slot = self.slots.slot_at(now);
+            let start = self.slots.slot_start_ms(slot);
+            let at = start
+                + self.slots.slot_duration_ms() * PREPARE_AT_NUMERATOR / PREPARE_AT_DENOMINATOR;
+            // Past this slot's moment, aim at the next slot's.
+            let at = if now < at {
+                at
+            } else {
+                at + self.slots.slot_duration_ms()
+            };
+            time::sleep(Duration::from_millis(at.saturating_sub(now))).await;
+            let next = self.slots.slot_at(self.clock.now_ms()) + 1;
+            self.proposer.prepare_next(next).await;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct EngineFollower<P: Preset> {
     /// The chain thread.

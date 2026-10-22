@@ -257,6 +257,18 @@ impl ForkName {
         }
     }
 
+    /// Whether an attestation's data names its committee, as before Electra.
+    ///
+    /// Electra moves the committee out of the data, so one vote spans committees, see EIP-7549.
+    /// Gloas reuses the freed index to signal the payload.
+    #[must_use]
+    pub const fn names_committee_in_vote(self) -> bool {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => true,
+            Self::Electra | Self::Fulu | Self::Gloas => false,
+        }
+    }
+
     /// Whether the off-protocol builder API sells the fork's payloads as blinded headers.
     ///
     /// The API starts with the merge and ends where Gloas brings builders into the protocol.
@@ -401,6 +413,11 @@ mod tests {
     fn the_builder_api_spans_the_merge_to_fulu() {
         // Bellatrix to Fulu sell payloads off-protocol; Gloas bids in the protocol.
         let builder_api: Vec<bool> = ForkName::ALL.map(ForkName::has_builder_api).to_vec();
+        // Votes name their committee in the data until Electra.
+        let named: Vec<bool> = ForkName::ALL
+            .map(ForkName::names_committee_in_vote)
+            .to_vec();
+        assert_eq!(named, [true, true, true, true, true, false, false, false]);
         assert_eq!(
             builder_api,
             [false, false, true, true, true, true, true, false]

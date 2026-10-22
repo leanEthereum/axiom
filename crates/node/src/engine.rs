@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axiom_execution::{
-    EngineClient, ForkchoiceState, NewPayload, PayloadAttributes,
+    EngineClient, ForkchoiceState, GetPayloadResponse, NewPayload, PayloadAttributes, PayloadId,
     PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
 };
 use axiom_fork_choice::PayloadStatus;
@@ -16,7 +16,7 @@ use axiom_types::{
 };
 use tracing::{debug, warn};
 
-use crate::{ChainHandle, ExecutionHead};
+use crate::{ChainHandle, ExecutionHead, ProposerError};
 
 /// The execution layer as the consensus node sees it.
 ///
@@ -259,6 +259,60 @@ impl ExecutionLayer {
     }
 
     /// Reduces the engine's answer to what the fork choice consumes.
+    /// Asks the engine to start building a payload on an execution head.
+    ///
+    /// # Returns
+    ///
+    /// The build's identifier, or nothing when the engine started no build.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no engine is configured, or the call fails.
+    pub async fn start_build<P: Preset>(
+        &self,
+        fork: ForkName,
+        head: ExecutionHead,
+        attributes: &PayloadAttributes<P>,
+    ) -> Result<Option<PayloadId>, ProposerError> {
+        let engine = self.engine.as_ref().ok_or(ProposerError::NoEngine)?;
+        let state = ForkchoiceState {
+            head_block_hash: head.head,
+            safe_block_hash: head.safe,
+            finalized_block_hash: head.finalized,
+        };
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["forkchoice_updated"])
+            .start_timer();
+        let updated = engine
+            .forkchoice_updated::<P>(fork, &state, Some(attributes))
+            .await;
+        drop(timer);
+        Ok(updated.map_err(ProposerError::Engine)?.payload_id)
+    }
+
+    /// Fetches the payload a build produced.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no engine is configured, or the call fails.
+    pub async fn fetch_payload<P: Preset>(
+        &self,
+        fork: ForkName,
+        id: PayloadId,
+    ) -> Result<GetPayloadResponse<P>, ProposerError> {
+        let engine = self.engine.as_ref().ok_or(ProposerError::NoEngine)?;
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["get_payload"])
+            .start_timer();
+        let payload = engine.get_payload::<P>(fork, id).await;
+        drop(timer);
+        payload.map_err(ProposerError::Engine)
+    }
+
     const fn to_verdict(status: &EnginePayloadStatus) -> PayloadStatus {
         match status.status {
             PayloadStatusKind::Valid => PayloadStatus::Valid,

@@ -11,7 +11,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::{DecodeError, Ssz};
 use axiom_types::{
-    BlobData, ChainConfig, ForkName, Preset, Root, Slot, combined,
+    BlobData, ChainConfig, Epoch, ForkName, Preset, Root, Slot, combined,
     deneb::{self, BlobSidecar},
     electra,
     fulu::{self, DataColumnSidecar},
@@ -370,6 +370,28 @@ impl<P: Preset> Publisher<P> {
     }
 
     /// Gossips the block, then each sidecar on its subnet.
+    /// The wall clock's time, in milliseconds since the Unix epoch.
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
+    /// Broadcasts a message that passed the gossip rules on its topic, in the epoch's fork.
+    ///
+    /// Without a network the message stays local, which is no failure.
+    pub async fn gossip(&self, kind: GossipKind, epoch: Epoch, message: Vec<u8>) {
+        let Some(network) = &self.network else {
+            return;
+        };
+        let Ok(fork_digest) = self.chain.run(move |chain| chain.fork_digest(epoch)).await else {
+            return;
+        };
+        let topic = GossipTopic { fork_digest, kind };
+        if let Err(error) = network.publish(topic.topic(), message).await {
+            warn!(%error, %kind, "could not broadcast a message");
+        }
+    }
+
     async fn broadcast(
         &self,
         block: &combined::SignedBeaconBlock<P>,

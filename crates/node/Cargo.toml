@@ -14,6 +14,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-beacon-json.workspace = true
+axiom-block-production.workspace = true
+axiom-bls.workspace = true
 axiom-crypto.workspace = true
 axiom-das.workspace = true
 axiom-discv5.workspace = true
