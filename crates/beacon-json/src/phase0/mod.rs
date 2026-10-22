@@ -5,4 +5,4 @@
 mod attestation;
 mod block;
 mod operations;
-mod validator;
+mod state;

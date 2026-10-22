@@ -1,7 +1,7 @@
 //! JSON forms of scalars and fixed-size byte strings.
 //!
 //! ```text
-//!     u64, U256, Slot, Gwei, indices        decimal string   "0", "1024"
+//!     u64, U256, Slot, Gwei, flags, indices decimal string   "0", "1024"
 //!     bool                                  JSON boolean     true
 //!     roots, hashes, keys, signatures       hex              fixed length, checked
 //! ```
@@ -10,11 +10,24 @@ use axiom_json::{Data, Json};
 use axiom_ssz::U256;
 use axiom_types::{
     BlobIndex, BlsPubkey, BlsSignature, BuilderIndex, Bytes32, ColumnIndex, CommitteeIndex, Epoch,
-    ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, Slot, ValidatorIndex, Version,
-    WithdrawalIndex,
+    ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, ParticipationFlags, Root, Slot,
+    ValidatorIndex, Version, WithdrawalIndex,
 };
 
 use crate::{ApiJson, ApiJsonError, decimal::Decimal, reader::Reader};
+
+/// Participation flags are a uint8, as every integer a decimal string.
+///
+/// Plain bytes have no impl: a list of them is a byte string, written as hex.
+impl ApiJson for ParticipationFlags {
+    fn to_json(&self) -> Json {
+        Json::String(self.0.to_string())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        Reader::new(value).u8().map(Self)
+    }
+}
 
 impl ApiJson for u64 {
     fn to_json(&self) -> Json {

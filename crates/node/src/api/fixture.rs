@@ -12,10 +12,10 @@ use axiom_types::{
 };
 use tokio::runtime::{Builder, Runtime};
 
-use super::BeaconApi;
+use super::{ApiServices, BeaconApi};
 use crate::{
-    Chain, ChainDatabase, ChainHandle, Clock, ExecutionLayer, ManualClock, ProposerService,
-    Publisher,
+    Chain, ChainDatabase, ChainHandle, Clock, EventHub, ExecutionLayer, ManualClock,
+    ProposerService, Publisher,
 };
 
 /// Genesis time of every fixture chain, in seconds.
@@ -57,8 +57,15 @@ impl TestApi {
         );
         let proposer =
             ProposerService::new(chain.clone(), execution, ExecutionAddress::default(), None);
-        let router =
-            BeaconApi::router(chain.clone(), Arc::new(publisher), Arc::new(proposer), None);
+        // No hub runs, so an event stream request finds it stopped.
+        let (_hub, _sender, events) = EventHub::new();
+        let services = ApiServices {
+            publisher: Arc::new(publisher),
+            proposer: Arc::new(proposer),
+            identity: None,
+            events,
+        };
+        let router = BeaconApi::router(chain.clone(), services);
         Self {
             router,
             chain,

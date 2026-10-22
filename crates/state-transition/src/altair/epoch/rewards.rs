@@ -37,29 +37,14 @@ impl Deltas {
         let state = participation.state();
         let validators = state.validators();
         let mut deltas = Self::zero(validators.len());
-        let weight = PARTICIPATION_FLAG_WEIGHTS[flag];
-        let increment = S::Preset::EFFECTIVE_BALANCE_INCREMENT;
-        let total_active_balance = participation.total_active_balance();
-        let participating_increments = participation
-            .unslashed_participating_balance(flag, participation.previous_epoch())
-            / increment;
-        let active_increments = total_active_balance.0 / increment;
-        let per_increment = total_active_balance.base_reward_per_increment::<S::Preset>();
-        let in_leak = state.is_in_inactivity_leak();
+        let rates = FlagReward::new(participation, flag);
         for index in state.eligible_validator_indices() {
             let index = index.as_usize();
-            let base_reward = per_increment * (validators[index].effective_balance / increment);
+            let base_reward = rates.base_reward(validators[index].effective_balance);
             if participation.is_previous_participant(index, flag) {
-                if !in_leak {
-                    let numerator = u128::from(base_reward.0)
-                        * u128::from(weight)
-                        * u128::from(participating_increments);
-                    let denominator =
-                        u128::from(active_increments) * u128::from(WEIGHT_DENOMINATOR);
-                    deltas.rewards[index] += Gwei((numerator / denominator) as u64);
-                }
-            } else if flag != TIMELY_HEAD_FLAG_INDEX {
-                deltas.penalties[index] += base_reward * weight / WEIGHT_DENOMINATOR;
+                deltas.rewards[index] += rates.reward(base_reward);
+            } else {
+                deltas.penalties[index] += rates.penalty(base_reward);
             }
         }
         deltas
@@ -100,6 +85,82 @@ impl Deltas {
             rewards: vec![Gwei::ZERO; count],
             penalties: vec![Gwei::ZERO; count],
         }
+    }
+}
+
+/// What one participation flag pays a participant and charges an absentee in an epoch.
+///
+/// The rates depend only on the epoch's totals, so one value serves every validator.
+/// See `get_flag_index_deltas` in the Altair beacon chain spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlagReward {
+    /// The flag.
+    flag: usize,
+    /// The flag's share of the base reward, over the weight denominator.
+    weight: u64,
+    /// Increments of unslashed stake that earned the flag in the previous epoch.
+    participating_increments: u64,
+    /// Increments of active stake.
+    active_increments: u64,
+    /// Base reward per increment of effective balance.
+    per_increment: Gwei,
+    /// Increment of effective balance.
+    increment: Gwei,
+    /// Whether finality stalls, which withholds every flag reward.
+    in_leak: bool,
+}
+
+impl FlagReward {
+    /// The rates of a flag in the epoch a participation view ends.
+    #[must_use]
+    pub fn new<S: ParticipationState + ?Sized>(
+        participation: &Participation<'_, S>,
+        flag: usize,
+    ) -> Self {
+        let increment = S::Preset::EFFECTIVE_BALANCE_INCREMENT;
+        let total_active_balance = participation.total_active_balance();
+        Self {
+            flag,
+            weight: PARTICIPATION_FLAG_WEIGHTS[flag],
+            participating_increments: participation
+                .unslashed_participating_balance(flag, participation.previous_epoch())
+                / increment,
+            active_increments: total_active_balance.0 / increment,
+            per_increment: total_active_balance.base_reward_per_increment::<S::Preset>(),
+            increment,
+            in_leak: participation.state().is_in_inactivity_leak(),
+        }
+    }
+
+    /// The base reward of a validator with an effective balance.
+    ///
+    /// See `get_base_reward` in the Altair beacon chain spec.
+    #[must_use]
+    pub fn base_reward(&self, effective_balance: Gwei) -> Gwei {
+        self.per_increment * (effective_balance / self.increment)
+    }
+
+    /// What a participant with a base reward earns.
+    #[must_use]
+    pub fn reward(&self, base_reward: Gwei) -> Gwei {
+        if self.in_leak {
+            return Gwei::ZERO;
+        }
+        // Bound: base reward, weight, and increments each fit 64 bits, so the product fits 128.
+        let numerator = u128::from(base_reward.0)
+            * u128::from(self.weight)
+            * u128::from(self.participating_increments);
+        let denominator = u128::from(self.active_increments) * u128::from(WEIGHT_DENOMINATOR);
+        Gwei((numerator / denominator) as u64)
+    }
+
+    /// What an absentee with a base reward pays.
+    #[must_use]
+    pub fn penalty(&self, base_reward: Gwei) -> Gwei {
+        if self.flag == TIMELY_HEAD_FLAG_INDEX {
+            return Gwei::ZERO;
+        }
+        base_reward * self.weight / WEIGHT_DENOMINATOR
     }
 }
 

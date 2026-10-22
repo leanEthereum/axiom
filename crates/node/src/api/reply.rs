@@ -2,30 +2,15 @@
 
 use std::{fmt, future::Future};
 
+use axiom_beacon_json::{ApiJson, ApiJsonError};
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
-use axiom_types::{
-    ForkName,
-    phase0::{BeaconBlockHeader, Checkpoint},
-};
+use axiom_ssz::Ssz;
+use axiom_types::ForkName;
 use tracing::debug;
 
+use super::encoding::{Encoding, JSON, SSZ};
 use crate::{ChainError, ChainStopped};
-
-/// Media type of JSON bodies.
-const JSON: &str = "application/json";
-
-/// Media type of SSZ bodies.
-const SSZ: &str = "application/octet-stream";
-
-/// 414: the request names more items than the route takes in its query.
-///
-/// RFC 9110 section 15.5.15 defines the code; the state validators route uses it.
-const URI_TOO_LONG: StatusCode = match StatusCode::new(414) {
-    Some(status) => status,
-    // 414 lies in the valid range, so this arm never runs.
-    None => StatusCode::BAD_REQUEST,
-};
 
 /// One refused item of a list submission: its position and the reason.
 pub(crate) type Failure = (usize, String);
@@ -63,19 +48,26 @@ impl ApiError {
     }
 
     /// The client accepts no media type this route can produce.
-    pub(crate) fn not_acceptable() -> Self {
-        Self::new(
-            StatusCode::NOT_ACCEPTABLE,
-            "only SSZ is served for this route",
-        )
+    pub(crate) fn not_acceptable(ssz_allowed: bool) -> Self {
+        let message = if ssz_allowed {
+            "this route serves JSON or SSZ only"
+        } else {
+            "this route serves JSON only"
+        };
+        Self::new(StatusCode::NOT_ACCEPTABLE, message)
     }
 
     /// The request body is in a media type this route does not take.
-    pub(crate) fn unsupported_media_type() -> Self {
+    pub(crate) fn unsupported_media_type(kind: &str) -> Self {
         Self::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "only SSZ bodies are accepted",
+            format!("unsupported body type: {kind}"),
         )
+    }
+
+    /// The node cannot answer now, such as while it has no network.
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
     /// Some items of a list submission were refused; the others were accepted.
@@ -89,11 +81,6 @@ impl ApiError {
         }
     }
 
-    /// The query names more items than the route takes.
-    pub(crate) fn too_many(message: impl Into<String>) -> Self {
-        Self::new(URI_TOO_LONG, message)
-    }
-
     /// The node does not implement this optional route.
     pub(crate) fn not_implemented(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, message)
@@ -102,11 +89,6 @@ impl ApiError {
     /// The node failed in a way the client cannot fix.
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-
-    /// The node cannot serve the request now, such as without an engine to build with.
-    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
     /// An error with a status and a message.
@@ -151,13 +133,19 @@ impl fmt::Display for ApiError {
 
 impl From<ChainStopped> for ApiError {
     fn from(error: ChainStopped) -> Self {
-        Self::new(StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+        Self::unavailable(error.to_string())
     }
 }
 
 impl From<ChainError> for ApiError {
     fn from(error: ChainError) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        Self::internal(error.to_string())
+    }
+}
+
+impl From<ApiJsonError> for ApiError {
+    fn from(error: ApiJsonError) -> Self {
+        Self::bad_request(format!("malformed body: {error}"))
     }
 }
 
@@ -181,26 +169,93 @@ impl Reply {
     ///     {"execution_optimistic":false,"finalized":true,"data":{...}}
     /// ```
     pub(crate) fn data(data: Json, freshness: Option<Freshness>) -> Response {
-        let mut body = Object::new();
-        if let Some(freshness) = freshness {
-            body.insert(
-                "execution_optimistic",
-                Json::from(freshness.execution_optimistic),
-            );
-            body.insert("finalized", Json::from(freshness.finalized));
-        }
-        body.insert("data", data);
-        Self::json(StatusCode::OK, &Json::from(body))
+        Self::json(
+            StatusCode::OK,
+            &Json::from(Self::envelope(None, freshness, data)),
+        )
     }
 
-    /// A JSON reply tagged with the fork its data follows, in its body and its header.
+    /// A consensus object in the negotiated encoding, tagged with the fork it follows.
     ///
-    /// ```text
-    ///     {"version":"gloas","execution_optimistic":false,"finalized":true,"data":{...}}
-    /// ```
-    pub(crate) fn versioned(fork: ForkName, data: Json, freshness: Option<Freshness>) -> Response {
+    /// JSON wraps the object with its fork's name and freshness; SSZ sends the bytes alone.
+    /// Both carry the fork in the consensus version field.
+    /// Only the encoding asked for is computed.
+    pub(crate) fn object(
+        encoding: Encoding,
+        fork: ForkName,
+        freshness: Option<Freshness>,
+        json: impl FnOnce() -> Json,
+        ssz: impl FnOnce() -> Vec<u8>,
+    ) -> Response {
+        match encoding {
+            Encoding::Ssz => Self::ssz(ssz(), fork),
+            Encoding::Json => {
+                let body = Self::envelope(Some(fork), freshness, json());
+                Self::json(StatusCode::OK, &Json::from(body))
+                    .with_header("eth-consensus-version", fork.to_string())
+            }
+        }
+    }
+
+    /// SSZ bytes, tagged with the fork they follow.
+    pub(crate) fn ssz(bytes: Vec<u8>, fork: ForkName) -> Response {
+        Response::new(StatusCode::OK)
+            .with_body(SSZ, bytes)
+            .with_header("eth-consensus-version", fork.to_string())
+    }
+
+    /// A value of a statically known type, in the negotiated encoding.
+    pub(crate) fn typed<T: ApiJson + Ssz>(
+        encoding: Encoding,
+        fork: ForkName,
+        freshness: Option<Freshness>,
+        value: &T,
+    ) -> Response {
+        Self::object(
+            encoding,
+            fork,
+            freshness,
+            || value.to_json(),
+            || value.encode(),
+        )
+    }
+
+    /// A sequence of fixed-size values in the negotiated encoding, tagged with a fork.
+    ///
+    /// Lists and vectors of fixed-size values encode as the values back to back.
+    /// So one reply serves any bound, and the progressive lists of later forks too.
+    pub(crate) fn sequence<'a, T: ApiJson + Ssz + 'a>(
+        encoding: Encoding,
+        fork: ForkName,
+        freshness: Option<Freshness>,
+        items: impl IntoIterator<Item = &'a T>,
+    ) -> Response {
+        debug_assert!(
+            T::FIXED_SIZE.is_some(),
+            "only fixed-size values sit back to back"
+        );
+        let items: Vec<&T> = items.into_iter().collect();
+        Self::object(
+            encoding,
+            fork,
+            freshness,
+            || Json::Array(items.iter().map(|item| item.to_json()).collect()),
+            || {
+                let mut bytes = Vec::new();
+                for item in &items {
+                    item.encode_to(&mut bytes);
+                }
+                bytes
+            },
+        )
+    }
+
+    /// The top-level object of a reply: version, freshness, then data.
+    fn envelope(version: Option<ForkName>, freshness: Option<Freshness>, data: Json) -> Object {
         let mut body = Object::new();
-        body.insert("version", Json::from(fork.to_string()));
+        if let Some(version) = version {
+            body.insert("version", Json::from(version.to_string()));
+        }
         if let Some(freshness) = freshness {
             body.insert(
                 "execution_optimistic",
@@ -209,8 +264,7 @@ impl Reply {
             body.insert("finalized", Json::from(freshness.finalized));
         }
         body.insert("data", data);
-        Self::json(StatusCode::OK, &Json::from(body))
-            .with_header("eth-consensus-version", fork.to_string())
+        body
     }
 
     /// The reply to a list submission: 200, or 400 naming each refused item.
@@ -237,13 +291,6 @@ impl Reply {
         Response::new(status).with_body(JSON, body.to_string().into_bytes())
     }
 
-    /// An SSZ reply, tagged with the fork its bytes follow.
-    pub(crate) fn ssz(bytes: Vec<u8>, fork: ForkName) -> Response {
-        Response::new(StatusCode::OK)
-            .with_header("eth-consensus-version", fork.to_string())
-            .with_body(SSZ, bytes)
-    }
-
     /// A number as the beacon API writes it: a decimal string.
     pub(crate) fn number(value: u64) -> Json {
         Json::from(value.to_string())
@@ -252,41 +299,6 @@ impl Reply {
     /// Any value through its display form, such as a 0x-prefixed root.
     pub(crate) fn text(value: &impl ToString) -> Json {
         Json::from(value.to_string())
-    }
-
-    /// A header in the beacon API's JSON form.
-    pub(crate) fn header(header: &BeaconBlockHeader) -> Json {
-        Json::from([
-            ("slot", Self::number(header.slot.0)),
-            ("proposer_index", Self::number(header.proposer_index.0)),
-            ("parent_root", Self::text(&header.parent_root)),
-            ("state_root", Self::text(&header.state_root)),
-            ("body_root", Self::text(&header.body_root)),
-        ])
-    }
-
-    /// A checkpoint in the beacon API's JSON form.
-    pub(crate) fn checkpoint(checkpoint: Checkpoint) -> Json {
-        Json::from([
-            ("epoch", Self::number(checkpoint.epoch.0)),
-            ("root", Self::text(&checkpoint.root)),
-        ])
-    }
-
-    /// Whether a request accepts SSZ.
-    pub(crate) fn accepts_ssz(request: &Request) -> bool {
-        request
-            .headers
-            .get("accept")
-            .is_some_and(|accept| accept.contains(SSZ))
-    }
-
-    /// Whether a request's body is SSZ.
-    pub(crate) fn sends_ssz(request: &Request) -> bool {
-        request
-            .headers
-            .get("content-type")
-            .is_some_and(|kind| kind.starts_with(SSZ))
     }
 }
 
@@ -299,12 +311,18 @@ pub(crate) struct Routes<S> {
     router: Router,
     /// The state each handler receives a clone of.
     state: S,
+    /// Method and pattern of every route added, in order.
+    served: Vec<(Method, String)>,
 }
 
 impl<S: Clone + Send + Sync + 'static> Routes<S> {
     /// Starts a table over existing routes.
     pub(crate) const fn new(router: Router, state: S) -> Self {
-        Self { router, state }
+        Self {
+            router,
+            state,
+            served: Vec::new(),
+        }
     }
 
     /// Adds a GET route.
@@ -327,9 +345,24 @@ impl<S: Clone + Send + Sync + 'static> Routes<S> {
         self.add(Method::Post, pattern, handler)
     }
 
-    /// The finished router.
-    pub(crate) fn finish(self) -> Router {
-        self.router
+    /// Adds a route whose handler builds the whole response itself, such as a stream.
+    #[must_use]
+    pub(crate) fn raw<F, Fut>(mut self, method: Method, pattern: &str, handler: F) -> Self
+    where
+        F: Fn(S, Request) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+    {
+        let shared = self.state.clone();
+        self.router = self.router.route(method, pattern, move |request| {
+            handler(shared.clone(), request)
+        });
+        self.served.push((method, pattern.to_owned()));
+        self
+    }
+
+    /// The finished router, and the method and pattern of every route it serves.
+    pub(crate) fn finish(self) -> (Router, Vec<(Method, String)>) {
+        (self.router, self.served)
     }
 
     /// Adds a route for a method.
@@ -338,13 +371,9 @@ impl<S: Clone + Send + Sync + 'static> Routes<S> {
         F: Fn(S, Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ApiResult> + Send + 'static,
     {
-        let Self { router, state } = self;
-        let shared = state.clone();
-        let router = router.route(method, pattern, move |request| {
-            // Each request gets its own clone of the state.
-            let reply = handler(shared.clone(), request);
+        self.raw(method, pattern, move |state, request| {
+            let reply = handler(state, request);
             async move { reply.await.unwrap_or_else(ApiError::into_response) }
-        });
-        Self { router, state }
+        })
     }
 }

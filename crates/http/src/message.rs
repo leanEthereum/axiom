@@ -1,6 +1,6 @@
 //! Complete requests and responses, as handlers and callers see them.
 
-use crate::{Headers, HttpError, Method, ProtocolError, StatusCode, wire::Encoder};
+use crate::{BodyStream, Headers, HttpError, Method, ProtocolError, StatusCode, wire::Encoder};
 
 /// The protocol version on a start line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -149,8 +149,8 @@ impl Request {
     }
 }
 
-/// A response with its whole body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A response with its whole body, or with a body still being produced.
+#[derive(Debug)]
 pub struct Response {
     /// The status.
     pub status: StatusCode,
@@ -160,6 +160,11 @@ pub struct Response {
 
     /// The decoded body.
     pub body: Vec<u8>,
+
+    /// The body's pieces, when it is streamed rather than held whole.
+    ///
+    /// A streamed body goes out chunked, and the connection closes after it.
+    pub stream: Option<BodyStream>,
 }
 
 impl Response {
@@ -170,7 +175,16 @@ impl Response {
             status,
             headers: Headers::new(),
             body: Vec::new(),
+            stream: None,
         }
+    }
+
+    /// A response whose body is streamed, piece by piece, in a media type.
+    #[must_use]
+    pub fn streaming(status: StatusCode, content_type: &str, stream: BodyStream) -> Self {
+        let mut response = Self::new(status).with_header("content-type", content_type);
+        response.stream = Some(stream);
+        response
     }
 
     /// Adds a header field.
@@ -209,6 +223,11 @@ impl Response {
         let code = self.status.as_u16();
         let bodiless =
             self.status.is_informational() || self.status == StatusCode::NO_CONTENT || code == 304;
+        // A streamed body's length is unknown, so its chunks frame it instead.
+        if self.stream.is_some() && !bodiless {
+            encoder.chunked();
+            return Ok(encoder.finish(&[]));
+        }
         if !bodiless {
             encoder.content_length(self.body.len());
         }

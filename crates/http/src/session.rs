@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use crate::{
-    BodyLength, HttpError, Method, Request, Response, Router, ServerConfig, StatusCode,
+    BodyLength, BodyStream, HttpError, Method, Request, Response, Router, ServerConfig, StatusCode,
     connection::Connection, date::HttpDate, race::Either,
 };
 
@@ -117,6 +117,12 @@ impl Session {
             request.headers = head.headers;
             request.body = body;
             let mut response = self.router.handle(request).await;
+            // A streamed body runs until its producer stops, so the connection ends with it.
+            if response.stream.is_some() {
+                response.headers.insert("connection", "close");
+                self.stream(response, head_only).await;
+                return;
+            }
 
             // Persist only when the client, the handler, and the shutdown flag all allow it.
             let keep_alive = client_keeps_alive
@@ -125,16 +131,48 @@ impl Session {
             if !keep_alive {
                 response.headers.insert("connection", "close");
             }
-            if !self.send(response, head_only).await || !keep_alive {
+            if !self.send(&mut response, head_only).await || !keep_alive {
                 return;
             }
         }
     }
 
+    /// Writes a streamed response: the head, each piece as it comes, then the last chunk.
+    ///
+    /// The stream ends when its producer stops, when shutdown begins, or when a write stalls.
+    /// A reader too slow to take a piece within the I/O timeout is cut off.
+    async fn stream(&mut self, mut response: Response, head_only: bool) {
+        // The head announces the chunked coding while the stream is still in the response.
+        if !self.send(&mut response, head_only).await || head_only {
+            return;
+        }
+        let Some(mut body) = response.stream.take() else {
+            return;
+        };
+        loop {
+            let stopped = &mut self.stopped;
+            let next = Either::race(body.next(), async {
+                let _ = stopped.wait_for(|stop| *stop).await;
+            })
+            .await;
+            let Either::Left(Some(piece)) = next else {
+                break;
+            };
+            let chunk = BodyStream::chunk(&piece);
+            let deadline = Instant::now() + self.config.io_timeout;
+            let written = time::timeout_at(deadline, self.connection.write(&chunk)).await;
+            if !matches!(written, Ok(Ok(()))) {
+                return;
+            }
+        }
+        let deadline = Instant::now() + self.config.io_timeout;
+        let _ = time::timeout_at(deadline, self.connection.write(BodyStream::LAST_CHUNK)).await;
+    }
+
     /// Answers a request the server will not process, then lets the connection close.
     async fn reject(&mut self, status: StatusCode) {
-        let response = Response::new(status).with_header("connection", "close");
-        self.send(response, false).await;
+        let mut response = Response::new(status).with_header("connection", "close");
+        self.send(&mut response, false).await;
     }
 
     /// Writes a response with a date field under the I/O timeout.
@@ -142,7 +180,7 @@ impl Session {
     /// # Returns
     ///
     /// Whether the whole response was written.
-    async fn send(&mut self, mut response: Response, head_only: bool) -> bool {
+    async fn send(&mut self, response: &mut Response, head_only: bool) -> bool {
         // RFC 9110 section 6.6.1: a server with a clock dates its responses.
         response
             .headers

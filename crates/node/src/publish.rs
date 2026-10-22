@@ -2,8 +2,10 @@
 
 use std::sync::Arc;
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, ForkedJson};
 use axiom_das::{BlockColumns, ColumnError};
 use axiom_gossip::{BlobError, BlobSubnets, BlockBlobs, GossipError};
+use axiom_json::Json;
 use axiom_kzg::Kzg;
 use axiom_p2p::{
     eth::{GossipKind, GossipTopic},
@@ -94,6 +96,28 @@ impl<P: Preset> Proposal<P> {
             ForkName::Deneb => Self::DenebBlobs(Ssz::decode(bytes)?),
             ForkName::Electra => Self::ElectraBlobs(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Columns(Ssz::decode(bytes)?),
+        })
+    }
+
+    /// Reads the JSON body of the publish-block route in the format of a fork.
+    ///
+    /// The same bundles as the SSZ body: blocks with blobs from Deneb to Fulu, blocks alone otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the JSON is not that fork's body.
+    pub fn from_json(value: &Json, fork: ForkName) -> Result<Self, ApiJsonError> {
+        Ok(match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Gloas => {
+                Self::Block(combined::SignedBeaconBlock::from_json_in(fork, value)?)
+            }
+            ForkName::Deneb => Self::DenebBlobs(ApiJson::from_json(value)?),
+            ForkName::Electra => Self::ElectraBlobs(ApiJson::from_json(value)?),
+            ForkName::Fulu => Self::Columns(ApiJson::from_json(value)?),
         })
     }
 

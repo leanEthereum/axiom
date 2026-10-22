@@ -1,21 +1,30 @@
-//! The beacon namespace: genesis, blocks, headers, and state summaries.
+//! The beacon namespace: genesis, blocks, headers, blob data, and publishing.
 
-use axiom_beacon_json::{ApiJson, api::Genesis};
+use std::collections::BTreeSet;
+
+use axiom_beacon_json::{ApiJson, ForkedJson};
 use axiom_http::{Request, Response, StatusCode};
-use axiom_json::Json;
-use axiom_ssz::Ssz;
-use axiom_types::{ForkName, Preset, accessors::CoreState, gloas::SignedExecutionPayloadEnvelope};
+use axiom_json::{Data, Json};
+use axiom_ssz::{Length, Ssz};
+use axiom_types::{
+    BlobData, BlobIndex, ColumnIndex, ForkName, KzgCommitment, Preset, Root, Slot, VersionedHash,
+    accessors::CoreState,
+    combined::{SignedBeaconBlock, SignedBlindedBeaconBlock},
+    deneb::{Blob, BlobSidecar},
+    gloas::SignedExecutionPayloadEnvelope,
+};
 use tracing::warn;
 
 use super::{
     ApiContext,
-    ids::{BlockId, StateId},
-    query::{Body, Query},
-    reply::{ApiError, ApiResult, Reply, Routes},
+    encoding::Encoding,
+    ids::BlockId,
+    query::Query,
+    reply::{ApiError, ApiResult, Freshness, Reply, Routes},
 };
-use crate::{ChainStopped, Proposal, PublishError, Published};
+use crate::{Chain, ChainStopped, Proposal, PublishError, Published};
 
-/// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`.
+/// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`, states and light clients aside.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct BeaconRoutes;
 
@@ -24,34 +33,40 @@ impl BeaconRoutes {
     pub(crate) fn register<P: Preset>(routes: Routes<ApiContext<P>>) -> Routes<ApiContext<P>> {
         routes
             .get("/eth/v1/beacon/genesis", Self::genesis::<P>)
+            .get("/eth/v1/beacon/headers", Self::headers::<P>)
             .get("/eth/v1/beacon/headers/{block_id}", Self::header::<P>)
             .get(
                 "/eth/v1/beacon/blocks/{block_id}/root",
                 Self::block_root::<P>,
             )
             .get("/eth/v2/beacon/blocks/{block_id}", Self::block::<P>)
+            .get(
+                "/eth/v1/beacon/blinded_blocks/{block_id}",
+                Self::blinded_block::<P>,
+            )
+            .get(
+                "/eth/v2/beacon/blocks/{block_id}/attestations",
+                Self::attestations::<P>,
+            )
+            .get(
+                "/eth/v1/beacon/blob_sidecars/{block_id}",
+                Self::blob_sidecars::<P>,
+            )
+            .get("/eth/v1/beacon/blobs/{block_id}", Self::blobs::<P>)
+            .get(
+                "/eth/v1/beacon/execution_payload_envelopes/{block_id}",
+                Self::envelope::<P>,
+            )
             .post("/eth/v2/beacon/blocks", Self::publish::<P>)
             .post(
                 "/eth/v1/beacon/execution_payload_envelopes",
                 Self::publish_envelope::<P>,
             )
-            .get(
-                "/eth/v1/beacon/execution_payload_envelopes/{block_id}",
-                Self::envelope::<P>,
-            )
-            .get(
-                "/eth/v1/beacon/states/{state_id}/root",
-                Self::state_root::<P>,
-            )
-            .get("/eth/v1/beacon/states/{state_id}/fork", Self::fork::<P>)
-            .get(
-                "/eth/v1/beacon/states/{state_id}/finality_checkpoints",
-                Self::finality_checkpoints::<P>,
-            )
     }
 
     /// Genesis time, validators root, and fork version: what a signer needs to compute domains.
-    async fn genesis<P: Preset>(context: ApiContext<P>, _request: Request) -> ApiResult {
+    async fn genesis<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Encoding::accepted(&request, false)?;
         context
             .query(|chain| {
                 // Every state carries the genesis fields unchanged, so the head's will do.
@@ -60,45 +75,121 @@ impl BeaconRoutes {
                     .state(&head)
                     .ok_or_else(|| ApiError::not_found("no head state"))?;
                 let beacon = state.beacon();
-                let genesis = Genesis {
-                    genesis_time: beacon.genesis_time(),
-                    genesis_validators_root: beacon.genesis_validators_root(),
-                    genesis_fork_version: chain.config().genesis_fork_version,
+                Ok(Reply::data(
+                    Json::from([
+                        ("genesis_time", Reply::number(beacon.genesis_time())),
+                        (
+                            "genesis_validators_root",
+                            Reply::text(&beacon.genesis_validators_root()),
+                        ),
+                        (
+                            "genesis_fork_version",
+                            Reply::text(&chain.config().genesis_fork_version),
+                        ),
+                    ]),
+                    None,
+                ))
+            })
+            .await
+    }
+
+    /// Headers of the blocks at a slot, or of the children of a parent; the head's by default.
+    ///
+    /// A slot lists its canonical block and every competing block the fork choice holds.
+    async fn headers<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Encoding::accepted(&request, false)?;
+        let query = Query::of(&request);
+        let slot = query.one::<u64>("slot")?.map(Slot);
+        let parent: Option<BlockId> = query
+            .one::<String>("parent_root")?
+            .map(|text| text.parse())
+            .transpose()?;
+        let parent = match parent {
+            None => None,
+            Some(BlockId::Root(root)) => Some(root),
+            Some(_) => return Err(ApiError::bad_request("parent_root must be a block root")),
+        };
+        context
+            .query(move |chain| {
+                let blocks = chain.store().blocks();
+                let mut roots: BTreeSet<Root> = BTreeSet::new();
+                match (slot, parent) {
+                    (None, None) => {
+                        roots.insert(chain.head().root);
+                    }
+                    (slot, parent) => {
+                        if let Some(slot) = slot
+                            && let Some(root) = chain.canonical_root(slot)?
+                        {
+                            roots.insert(root);
+                        }
+                        roots.extend(blocks.iter().filter_map(|(root, node)| {
+                            let at_slot = slot.is_none_or(|slot| node.slot == slot);
+                            let of_parent = parent.is_none_or(|parent| node.parent_root == parent);
+                            (at_slot && of_parent).then_some(*root)
+                        }));
+                    }
+                }
+                let mut data = Vec::new();
+                let mut freshness = Freshness {
+                    execution_optimistic: false,
+                    finalized: true,
                 };
-                Ok(Reply::data(genesis.to_json(), None))
+                for root in roots {
+                    let Some(block) = chain.block(root)? else {
+                        continue;
+                    };
+                    // The flags of a list hold for every item: optimistic if any is, finalized if all are.
+                    let item = ApiContext::freshness(chain, root, block.slot());
+                    freshness.execution_optimistic |= item.execution_optimistic;
+                    freshness.finalized &= item.finalized;
+                    data.push(Self::header_json(chain, root, &block)?);
+                }
+                Ok(Reply::data(Json::Array(data), Some(freshness)))
             })
             .await
     }
 
     /// A block's header and whether it is canonical.
     async fn header<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Encoding::accepted(&request, false)?;
         let id = BlockId::from_request(&request)?;
         context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
-                let header = block.message().header();
-                let canonical = chain.canonical_root(header.slot)? == Some(root);
-                let data = Json::from([
-                    ("root", Reply::text(&root)),
-                    ("canonical", canonical.into()),
-                    (
-                        "header",
-                        Json::from([
-                            ("message", Reply::header(&header)),
-                            ("signature", Reply::text(block.signature())),
-                        ]),
-                    ),
-                ]);
+                let data = Self::header_json(chain, root, &block)?;
                 Ok(Reply::data(
                     data,
-                    Some(ApiContext::freshness(chain, root, header.slot)),
+                    Some(ApiContext::freshness(chain, root, block.slot())),
                 ))
             })
             .await
     }
 
+    /// The header object the header routes list.
+    fn header_json<P: Preset>(
+        chain: &Chain<P>,
+        root: Root,
+        block: &SignedBeaconBlock<P>,
+    ) -> Result<Json, ApiError> {
+        let header = block.message().header();
+        let canonical = chain.canonical_root(header.slot)? == Some(root);
+        Ok(Json::from([
+            ("root", Reply::text(&root)),
+            ("canonical", canonical.into()),
+            (
+                "header",
+                Json::from([
+                    ("message", header.to_json()),
+                    ("signature", Reply::text(block.signature())),
+                ]),
+            ),
+        ]))
+    }
+
     /// The root of a block.
     async fn block_root<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Encoding::accepted(&request, false)?;
         let id = BlockId::from_request(&request)?;
         context
             .query(move |chain| {
@@ -112,35 +203,253 @@ impl BeaconRoutes {
             .await
     }
 
-    /// A whole signed block, as SSZ.
+    /// A whole signed block, as JSON or SSZ.
     async fn block<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::accepts_ssz(&request) {
-            return Err(ApiError::not_acceptable());
-        }
+        let encoding = Encoding::accepted(&request, true)?;
         let id = BlockId::from_request(&request)?;
+        let (block, freshness) = Self::find(&context, id).await?;
+        Ok(Reply::object(
+            encoding,
+            block.fork_name(),
+            Some(freshness),
+            || block.to_json(),
+            || block.encode(),
+        ))
+    }
+
+    /// A whole signed block with its payload replaced by the payload's header, as JSON or SSZ.
+    ///
+    /// The header commits to the payload field by field, so the block root and signature carry over.
+    /// Blocks without a payload, before Bellatrix and from Gloas on, read the same blinded or not.
+    async fn blinded_block<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let encoding = Encoding::accepted(&request, true)?;
+        let id = BlockId::from_request(&request)?;
+        let (block, freshness) = Self::find(&context, id).await?;
+        let fork = block.fork_name();
+        let reply = match SignedBlindedBeaconBlock::blinding(&block) {
+            Some(blinded) => Reply::object(
+                encoding,
+                fork,
+                Some(freshness),
+                || blinded.to_json(),
+                || blinded.encode(),
+            ),
+            None => Reply::object(
+                encoding,
+                fork,
+                Some(freshness),
+                || block.to_json(),
+                || block.encode(),
+            ),
+        };
+        Ok(reply)
+    }
+
+    /// The attestations a block carries, in its fork's attestation format, as JSON.
+    ///
+    /// The list sits at the same place in every fork's body, so it is read from the block's JSON.
+    async fn attestations<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Encoding::accepted(&request, false)?;
+        let id = BlockId::from_request(&request)?;
+        let (block, freshness) = Self::find(&context, id).await?;
+        let fork = block.fork_name();
+        let attestations = block
+            .to_json()
+            .get("message")
+            .and_then(|message| message.get("body"))
+            .and_then(|body| body.get("attestations"))
+            .cloned()
+            .unwrap_or_else(|| Json::Array(Vec::new()));
+        Ok(Reply::object(
+            Encoding::Json,
+            fork,
+            Some(freshness),
+            || attestations,
+            Vec::new,
+        ))
+    }
+
+    /// A block and its freshness, or a 404.
+    async fn find<P: Preset>(
+        context: &ApiContext<P>,
+        id: BlockId,
+    ) -> Result<(SignedBeaconBlock<P>, Freshness), ApiError> {
         context
             .query(move |chain| {
-                let (_, block) = id.find(chain)?;
-                Ok(Reply::ssz(block.encode(), block.fork_name()))
+                let (root, block) = id.find(chain)?;
+                let freshness = ApiContext::freshness(chain, root, block.slot());
+                Ok((block, freshness))
             })
             .await
     }
 
-    /// Publishes a block a validator proposed, with its blobs.
+    /// The blob sidecars of a Deneb or Electra block, optionally by index.
+    async fn blob_sidecars<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let encoding = Encoding::accepted(&request, true)?;
+        let id = BlockId::from_request(&request)?;
+        let indices: Vec<u64> = Query::of(&request)
+            .list("indices")
+            .into_iter()
+            .map(|text| {
+                text.parse()
+                    .map_err(|_| ApiError::bad_request(format!("invalid blob index: {text}")))
+            })
+            .collect::<Result<_, _>>()?;
+        let (sidecars, fork, freshness) = context
+            .query(move |chain| {
+                let (root, block) = id.find(chain)?;
+                let count = block.message().blob_kzg_commitments().len() as u64;
+                let wanted: Vec<u64> = if indices.is_empty() {
+                    (0..count).collect()
+                } else {
+                    indices.into_iter().filter(|index| *index < count).collect()
+                };
+                let mut sidecars = Vec::with_capacity(wanted.len());
+                for index in wanted {
+                    let sidecar = chain
+                        .database()
+                        .blob(root, BlobIndex(index))?
+                        .ok_or_else(|| ApiError::not_found(format!("blob {index} is not held")))?;
+                    sidecars.push(sidecar);
+                }
+                let freshness = ApiContext::freshness(chain, root, block.slot());
+                Ok((sidecars, block.fork_name(), freshness))
+            })
+            .await?;
+        Ok(Reply::sequence::<BlobSidecar<P>>(
+            encoding,
+            fork,
+            Some(freshness),
+            &sidecars,
+        ))
+    }
+
+    /// The blobs of a block, from its sidecars or, from Fulu on, its first half of columns.
+    ///
+    /// The first half of an extended blob's cells is the blob itself.
+    /// So a node holding those columns rebuilds every blob without any proof work.
+    /// See the Fulu data availability sampling spec.
+    async fn blobs<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let encoding = Encoding::accepted(&request, true)?;
+        let id = BlockId::from_request(&request)?;
+        let wanted: Vec<VersionedHash> = Query::of(&request)
+            .list("versioned_hashes")
+            .into_iter()
+            .map(|text| {
+                <[u8; 32]>::from_data(text)
+                    .map(VersionedHash)
+                    .map_err(|_| ApiError::bad_request(format!("invalid versioned hash: {text}")))
+            })
+            .collect::<Result<_, _>>()?;
+        let (blobs, fork, freshness) = context
+            .query(move |chain| {
+                let (root, block) = id.find(chain)?;
+                let fork = block.fork_name();
+                let mut commitments: Vec<KzgCommitment> =
+                    block.message().blob_kzg_commitments().to_vec();
+                // A Gloas block commits to its blobs through its bid.
+                if let Some(bid) = chain.payload_bid(&root) {
+                    commitments.extend(bid.blob_kzg_commitments.iter().copied());
+                }
+                let mut blobs = Self::held_blobs(chain, root, fork, commitments.len())?;
+                if !wanted.is_empty() {
+                    blobs = blobs
+                        .into_iter()
+                        .zip(&commitments)
+                        .filter(|(_, commitment)| wanted.contains(&commitment.versioned_hash()))
+                        .map(|(blob, _)| blob)
+                        .collect();
+                }
+                let freshness = ApiContext::freshness(chain, root, block.slot());
+                Ok((blobs, fork, freshness))
+            })
+            .await?;
+        // The blobs route carries no version; only the freshness flags sit beside the data.
+        Ok(match encoding {
+            Encoding::Ssz => Reply::sequence::<Blob<P>>(encoding, fork, Some(freshness), &blobs),
+            Encoding::Json => {
+                let data = Json::Array(blobs.iter().map(ApiJson::to_json).collect());
+                Reply::data(data, Some(freshness))
+            }
+        })
+    }
+
+    /// Every blob of a block the node can rebuild from what it stores.
+    fn held_blobs<P: Preset>(
+        chain: &Chain<P>,
+        root: Root,
+        fork: ForkName,
+        count: usize,
+    ) -> Result<Vec<Blob<P>>, ApiError> {
+        let database = chain.database();
+        if matches!(
+            fork.blob_data(),
+            BlobData::BlockColumns | BlobData::PayloadColumns
+        ) {
+            // Columns 0 to 63 hold the blobs; any missing column means no blob can be rebuilt.
+            let half = P::NUMBER_OF_COLUMNS / 2;
+            let mut blobs = vec![Vec::with_capacity(P::BytesPerBlob::LEN); count];
+            for index in 0..half {
+                let column = database
+                    .column(root, ColumnIndex(index), fork)?
+                    .ok_or_else(|| {
+                        ApiError::not_found(format!(
+                            "column {index} is not custodied, so blobs cannot be rebuilt"
+                        ))
+                    })?;
+                for (blob, cell) in blobs.iter_mut().zip(column.cells()) {
+                    blob.extend_from_slice(cell);
+                }
+            }
+            return blobs
+                .into_iter()
+                .map(|bytes| {
+                    Blob::<P>::decode(&bytes).map_err(|error| {
+                        ApiError::internal(format!("malformed column cells: {error}"))
+                    })
+                })
+                .collect();
+        }
+        (0..count as u64)
+            .map(|index| {
+                database
+                    .blob(root, BlobIndex(index))?
+                    .map(|sidecar| sidecar.blob)
+                    .ok_or_else(|| ApiError::not_found(format!("blob {index} is not held")))
+            })
+            .collect()
+    }
+
+    /// The payload envelope a Gloas block's builder revealed.
+    async fn envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let encoding = Encoding::accepted(&request, true)?;
+        let id = BlockId::from_request(&request)?;
+        let (envelope, fork, freshness) = context
+            .query(move |chain| {
+                let (root, block) = id.find(chain)?;
+                let envelope = chain.database().envelope(root)?.ok_or_else(|| {
+                    ApiError::not_found(format!("no payload envelope for {root}"))
+                })?;
+                let freshness = ApiContext::freshness(chain, root, block.slot());
+                Ok((envelope, block.fork_name(), freshness))
+            })
+            .await?;
+        Ok(Reply::typed(encoding, fork, Some(freshness), &envelope))
+    }
+
+    /// Publishes a block a validator proposed, with its blobs, as JSON or SSZ.
     ///
     /// # Overview
     ///
-    /// | outcome                               | status |
-    /// |---------------------------------------|--------|
-    /// | broadcast and imported                | 200    |
-    /// | broadcast, but this node's import failed | 202 |
-    /// | body not SSZ                          | 415    |
-    /// | malformed, wrong blob data, or invalid | 400   |
+    /// | outcome                                  | status |
+    /// |------------------------------------------|--------|
+    /// | broadcast and imported                   | 200    |
+    /// | broadcast, but this node's import failed | 202    |
+    /// | body neither JSON nor SSZ                | 415    |
+    /// | malformed, wrong blob data, or invalid   | 400    |
     async fn publish<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::sends_ssz(&request) {
-            return Err(ApiError::unsupported_media_type());
-        }
-        let proposal = Self::proposal(&context, &request).await?;
+        let encoding = Encoding::of_body(&request, true)?;
+        let proposal = Self::proposal(&context, &request, encoding).await?;
         match context.publisher.publish(proposal).await {
             Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
             Ok(Published::BroadcastOnly(error)) => {
@@ -152,7 +461,7 @@ impl BeaconRoutes {
         }
     }
 
-    /// Publishes a signed Gloas payload envelope, as SSZ or JSON.
+    /// Publishes a Gloas payload envelope its block's builder revealed, as JSON or SSZ.
     ///
     /// # Overview
     ///
@@ -166,7 +475,32 @@ impl BeaconRoutes {
     /// Statuses follow the block route: 200 imported, 202 broadcast only, 400 invalid.
     /// See `publishExecutionPayloadEnvelope` in the beacon API.
     async fn publish_envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let fork = Self::consensus_version(&request)?;
+        Self::check_envelope_request(&request)?;
+        let encoding = Encoding::of_body(&request, true)?;
+        let envelope = match encoding {
+            Encoding::Ssz => SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
+                .map_err(|error| ApiError::bad_request(format!("malformed envelope: {error}")))?,
+            Encoding::Json => ApiJson::from_json(&Self::json_body(&request)?)?,
+        };
+        match context.publisher.publish_envelope(envelope).await {
+            Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
+            Ok(Published::BroadcastOnly(error)) => {
+                warn!(%error, "published envelope was broadcast but not imported");
+                Ok(Response::new(StatusCode::ACCEPTED))
+            }
+            Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
+            Err(error) => Err(ApiError::bad_request(error.to_string())),
+        }
+    }
+
+    /// Checks the headers and query of an envelope publication against the beacon API.
+    fn check_envelope_request(request: &Request) -> Result<(), ApiError> {
+        let named = request
+            .headers
+            .get("eth-consensus-version")
+            .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
+        let fork = ForkName::from_name(named)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))?;
         if !fork.separates_payloads() {
             return Err(ApiError::bad_request(format!(
                 "{fork} blocks carry their payload"
@@ -186,70 +520,17 @@ impl BeaconRoutes {
             }
             None => return Err(ApiError::bad_request("missing blob data included header")),
         }
-        match Query::of(&request).text("broadcast_validation") {
-            None | Some("gossip") => {}
+        match Query::of(request).text("broadcast_validation") {
+            None | Some("gossip") => Ok(()),
             Some(level @ ("consensus" | "consensus_and_equivocation")) => {
-                return Err(ApiError::bad_request(format!(
+                Err(ApiError::bad_request(format!(
                     "broadcast validation {level} is not supported; gossip is"
-                )));
+                )))
             }
-            Some(other) => {
-                return Err(ApiError::bad_request(format!(
-                    "unknown broadcast validation: {other}"
-                )));
-            }
+            Some(other) => Err(ApiError::bad_request(format!(
+                "unknown broadcast validation: {other}"
+            ))),
         }
-        let envelope = if Reply::sends_ssz(&request) {
-            SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
-                .map_err(|error| ApiError::bad_request(format!("malformed envelope: {error}")))?
-        } else {
-            Body(&request).json_item()?
-        };
-        match context.publisher.publish_envelope(envelope).await {
-            Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
-            Ok(Published::BroadcastOnly(error)) => {
-                warn!(%error, "published envelope was broadcast but not imported");
-                Ok(Response::new(StatusCode::ACCEPTED))
-            }
-            Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
-            Err(error) => Err(ApiError::bad_request(error.to_string())),
-        }
-    }
-
-    /// The signed payload envelope of a Gloas block, as JSON or SSZ.
-    ///
-    /// See `getSignedExecutionPayloadEnvelope` in the beacon API.
-    async fn envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = BlockId::from_request(&request)?;
-        let ssz = Reply::accepts_ssz(&request);
-        context
-            .query(move |chain| {
-                let (root, block) = id.find(chain)?;
-                let envelope = chain
-                    .database()
-                    .envelope(root)?
-                    .ok_or_else(|| ApiError::not_found("execution payload envelope not found"))?;
-                if ssz {
-                    return Ok(Reply::ssz(envelope.encode(), ForkName::Gloas));
-                }
-                let freshness = ApiContext::freshness(chain, root, block.slot());
-                Ok(Reply::versioned(
-                    ForkName::Gloas,
-                    envelope.to_json(),
-                    Some(freshness),
-                ))
-            })
-            .await
-    }
-
-    /// The fork a request's required consensus version header names.
-    fn consensus_version(request: &Request) -> Result<ForkName, ApiError> {
-        let named = request
-            .headers
-            .get("eth-consensus-version")
-            .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
-        ForkName::from_name(named)
-            .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))
     }
 
     /// The proposal in a publish request's body, decoded in the fork it names.
@@ -259,6 +540,7 @@ impl BeaconRoutes {
     async fn proposal<P: Preset>(
         context: &ApiContext<P>,
         request: &Request,
+        encoding: Encoding,
     ) -> Result<Proposal<P>, ApiError> {
         let named = request.headers.get("eth-consensus-version");
         let fork = match named {
@@ -271,8 +553,12 @@ impl BeaconRoutes {
                     .await?
             }
         };
-        let proposal = Proposal::<P>::decode(&request.body, fork)
-            .map_err(|error| ApiError::bad_request(format!("malformed {fork} block: {error}")))?;
+        let proposal = match encoding {
+            Encoding::Ssz => Proposal::<P>::decode(&request.body, fork).map_err(|error| {
+                ApiError::bad_request(format!("malformed {fork} block: {error}"))
+            })?,
+            Encoding::Json => Proposal::<P>::from_json(&Self::json_body(request)?, fork)?,
+        };
         // A block must belong to the fork its slot falls in, whatever the header says.
         let slot = proposal.slot();
         let expected = context
@@ -286,68 +572,10 @@ impl BeaconRoutes {
         Ok(proposal)
     }
 
-    /// The root of a state.
-    async fn state_root<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = StateId::from_request(&request)?;
-        context
-            .query(move |chain| {
-                let (root, block) = id.find_block(chain)?;
-                let data = Json::from([("root", Reply::text(&block.message().state_root()))]);
-                Ok(Reply::data(
-                    data,
-                    Some(ApiContext::freshness(chain, root, block.slot())),
-                ))
-            })
-            .await
-    }
-
-    /// The fork a state is in.
-    async fn fork<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let id = StateId::from_request(&request)?;
-        context
-            .query(move |chain| {
-                let (root, block) = id.find_block(chain)?;
-                let fork = ApiContext::held_state(chain, root)?.fork();
-                let data = Json::from([
-                    ("previous_version", Reply::text(&fork.previous_version)),
-                    ("current_version", Reply::text(&fork.current_version)),
-                    ("epoch", Reply::number(fork.epoch.0)),
-                ]);
-                Ok(Reply::data(
-                    data,
-                    Some(ApiContext::freshness(chain, root, block.slot())),
-                ))
-            })
-            .await
-    }
-
-    /// The justified and finalized checkpoints a state records.
-    async fn finality_checkpoints<P: Preset>(
-        context: ApiContext<P>,
-        request: Request,
-    ) -> ApiResult {
-        let id = StateId::from_request(&request)?;
-        context
-            .query(move |chain| {
-                let (root, block) = id.find_block(chain)?;
-                let state = ApiContext::held_state(chain, root)?;
-                let data = Json::from([
-                    (
-                        "previous_justified",
-                        Reply::checkpoint(state.previous_justified_checkpoint()),
-                    ),
-                    (
-                        "current_justified",
-                        Reply::checkpoint(state.current_justified_checkpoint()),
-                    ),
-                    ("finalized", Reply::checkpoint(state.finalized_checkpoint())),
-                ]);
-                Ok(Reply::data(
-                    data,
-                    Some(ApiContext::freshness(chain, root, block.slot())),
-                ))
-            })
-            .await
+    /// A request's body parsed as JSON.
+    fn json_body(request: &Request) -> Result<Json, ApiError> {
+        Json::parse(&request.body)
+            .map_err(|error| ApiError::bad_request(format!("malformed JSON body: {error}")))
     }
 }
 
@@ -376,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn envelopes_publish_at_the_plural_route_with_both_headers() {
+    fn an_envelope_publication_needs_both_headers() {
         let api = TestApi::gloas(8);
         let route = "/eth/v1/beacon/execution_payload_envelopes";
         let both = [
@@ -452,39 +680,5 @@ mod tests {
                 "{target}"
             );
         }
-
-        // The singular route is gone.
-        let response = api.send(publish(
-            "/eth/v1/beacon/execution_payload_envelope",
-            &both,
-            vec![1, 2, 3],
-        ));
-        assert_eq!(response.status, StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn an_envelope_is_found_by_its_block_or_named_missing() {
-        let api = TestApi::gloas(8);
-        let route = "/eth/v1/beacon/execution_payload_envelopes";
-        // The genesis block has no envelope.
-        assert_eq!(
-            api.get(&format!("{route}/head")),
-            (
-                StatusCode::NOT_FOUND,
-                error(404, "execution payload envelope not found")
-            )
-        );
-        // A root the node never saw names no block.
-        assert_eq!(
-            api.get(&format!("{route}/0x{}", "11".repeat(32))),
-            (StatusCode::NOT_FOUND, error(404, "block not found"))
-        );
-        assert_eq!(
-            api.get(&format!("{route}/current")),
-            (
-                StatusCode::BAD_REQUEST,
-                error(400, "invalid block id: current")
-            )
-        );
     }
 }

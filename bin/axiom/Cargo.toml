@@ -20,6 +20,7 @@ axiom-http.workspace = true
 axiom-json.workspace = true
 axiom-node.workspace = true
 axiom-p2p.workspace = true
+axiom-slasher.workspace = true
 axiom-telemetry.workspace = true
 axiom-types.workspace = true
 axiom-validator.workspace = true

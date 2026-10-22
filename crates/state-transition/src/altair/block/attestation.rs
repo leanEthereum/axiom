@@ -174,9 +174,11 @@ impl ParticipationCredit<'_> {
         let denominator =
             (WEIGHT_DENOMINATOR - PROPOSER_WEIGHT) * WEIGHT_DENOMINATOR / PROPOSER_WEIGHT;
         let proposer = processor.proposer()?;
+        let proposer_reward = Gwei(proposer_reward_numerator / denominator);
         processor
             .state
-            .increase_balance(proposer, Gwei(proposer_reward_numerator / denominator))?;
+            .increase_balance(proposer, proposer_reward)?;
+        processor.state.caches.proposer_ledger.attestations += proposer_reward;
         Ok(())
     }
 }

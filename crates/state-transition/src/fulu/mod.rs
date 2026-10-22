@@ -14,8 +14,9 @@ use axiom_types::{
 };
 
 use crate::{
-    ActiveBalance, BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine,
-    Registry, StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
+    PayloadEngine, Registry, StateError,
+    altair::AltairEpoch,
     electra::{
         ElectraEpoch,
         block::{Exit, PayloadWithdrawals},
@@ -26,6 +27,7 @@ use crate::{
         epoch::{DepositQueue, ProposerLookahead},
     },
     phase0::{Slashing, SlotRoots, block::RandaoReveal},
+    rewards::AttesterRewards,
 };
 
 impl<P: Preset> Fork for BeaconState<P> {
@@ -94,6 +96,13 @@ impl<P: Preset> Fork for BeaconState<P> {
             }
             _ => ElectraEpoch::run(processor, step),
         }
+    }
+
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        Ok(AltairEpoch::attester_rewards(state.beacon(), config))
     }
 
     /// Runs Fulu's block processing.

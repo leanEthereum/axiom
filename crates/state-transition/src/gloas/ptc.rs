@@ -83,7 +83,7 @@ impl PtcWindow {
     /// # Errors
     ///
     /// Fails when the slot is before the Gloas fork or outside the window.
-    pub fn of_slot<S: BuilderState>(
+    pub fn of_slot<S: BuilderState + ?Sized>(
         state: &S,
         slot: Slot,
         fork_epoch: Epoch,

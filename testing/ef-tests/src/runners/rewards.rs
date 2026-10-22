@@ -5,11 +5,15 @@ use std::marker::PhantomData;
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List};
 use axiom_state_transition::{
     ActiveBalance, State,
-    altair::epoch::{Deltas, Participation},
+    altair::{
+        AltairEpoch,
+        epoch::{Deltas, Participation},
+    },
     phase0::epoch::{AttestationRewards, PendingParticipation, VotePart},
+    rewards::{AttesterReward, AttesterRewards, SignedGwei},
 };
 use axiom_types::{
-    ChainConfig, Gwei, Preset,
+    ChainConfig, Gwei, Preset, ValidatorIndex,
     accessors::ParticipationState,
     constants::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX},
     phase0,
@@ -43,6 +47,68 @@ impl<P: Preset> Container for DeltasVector<P> {
 }
 
 impl<P: Preset> DeltasVector<P> {
+    /// The net amount of one validator in a vector file.
+    fn net(&self, index: usize) -> SignedGwei {
+        SignedGwei::net(self.rewards[index], self.penalties[index])
+    }
+
+    /// Checks the per-validator attestation rewards against the component vectors.
+    ///
+    /// Each listed validator's components equal its net deltas.
+    /// Every validator left out has zero deltas, so the list misses no payment.
+    /// Phase0's inclusion vector also holds proposer shares, which are added back first.
+    fn check_attesters(
+        case: &Case,
+        computed: &AttesterRewards,
+        inclusion_proposers: Option<&[Gwei]>,
+    ) -> Result<(), Failure> {
+        let [source, target, head, inactivity] = [
+            "source_deltas",
+            "target_deltas",
+            "head_deltas",
+            "inactivity_penalty_deltas",
+        ]
+        .map(|stem| case.ssz::<Self>(stem));
+        let (source, target, head, inactivity) = (source?, target?, head?, inactivity?);
+        let inclusion = match inclusion_proposers {
+            Some(_) => Some(case.ssz::<Self>("inclusion_delay_deltas")?),
+            None => None,
+        };
+        let mut expected = Vec::new();
+        for index in 0..source.rewards.len() {
+            let listed = computed
+                .validators
+                .iter()
+                .any(|reward| reward.validator_index.as_usize() == index);
+            let inclusion_delay = match (&inclusion, inclusion_proposers) {
+                (Some(vector), Some(proposers)) => Some(vector.rewards[index] - proposers[index]),
+                _ => None,
+            };
+            if listed {
+                expected.push(AttesterReward {
+                    validator_index: ValidatorIndex::from(index),
+                    head: head.net(index),
+                    target: target.net(index),
+                    source: source.net(index),
+                    inclusion_delay,
+                    inactivity: inactivity.net(index),
+                });
+            } else if [&source, &target, &head, &inactivity]
+                .iter()
+                .any(|vector| vector.net(index) != SignedGwei::default())
+                || inclusion_delay.is_some_and(|reward| reward != Gwei::ZERO)
+            {
+                return Err(Failure(format!(
+                    "validator {index} has deltas but no attestation reward"
+                )));
+            }
+        }
+        if computed.validators != expected {
+            return Err(Failure::new("attestation rewards differ from the deltas"));
+        }
+        Ok(())
+    }
+
     /// Compares computed deltas with a vector file.
     fn check(case: &Case, stem: &str, rewards: &[Gwei], penalties: &[Gwei]) -> Result<(), Failure> {
         let expected = case.ssz::<Self>(stem)?;
@@ -100,7 +166,11 @@ where
             case,
             "inactivity_penalty_deltas",
             &Deltas::inactivity_penalties(&participation, &config),
-        )
+        )?;
+
+        // The beacon API's per-validator split must carry exactly these deltas.
+        let computed = AltairEpoch::attester_rewards(&state, &config);
+        DeltasVector::<P>::check_attesters(case, &computed, None)
     }
 }
 
@@ -148,6 +218,15 @@ impl<P: Preset> Runner for PendingAttestationRewards<P> {
             "inactivity_penalty_deltas",
             &inactivity.rewards,
             &inactivity.penalties,
-        )
+        )?;
+
+        // The beacon API's per-validator split must carry exactly these deltas.
+        let proposers = rewards
+            .inclusion_shares()
+            .map_err(|error| Failure(format!("inclusion shares: {error}")))?
+            .proposers;
+        let computed = AttesterRewards::of_pending(&rewards, typed.beacon())
+            .map_err(|error| Failure(format!("attestation rewards: {error}")))?;
+        DeltasVector::<P>::check_attesters(case, &computed, Some(&proposers.rewards))
     }
 }

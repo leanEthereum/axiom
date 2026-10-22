@@ -66,6 +66,11 @@ impl ConflictingVotes<'_> {
                 common: self.common.len(),
             });
         }
+        processor
+            .state
+            .caches
+            .proposer_ledger
+            .settle_attester_slashing();
         Ok(())
     }
 }

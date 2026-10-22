@@ -6,7 +6,7 @@ use axiom_ssz::{
 
 use crate::{
     ChainConfig, ForkName, Gwei, Hash32, Preset, Slot,
-    accessors::{CoreState, SyncCommitteeState},
+    accessors::{BuilderState, CoreState, LookaheadState, PendingQueueState, SyncCommitteeState},
     altair, bellatrix, capella, deneb, electra, fulu, gloas, phase0,
     phase0::{
         BeaconBlockHeader, BlockRoots, Checkpoint, Eth1Data, Eth1DataVotes, Fork, HistoricalRoots,
@@ -163,6 +163,51 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => Some(state),
             Self::Fulu(state) => Some(state),
             Self::Gloas(state) => Some(state),
+        }
+    }
+
+    /// The deposit, withdrawal, and consolidation queues, from Electra on.
+    #[must_use]
+    pub fn pending_queues(&self) -> Option<&dyn PendingQueueState<Preset = P>> {
+        match self {
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_) => None,
+            Self::Electra(state) => Some(state),
+            Self::Fulu(state) => Some(state),
+            Self::Gloas(state) => Some(state),
+        }
+    }
+
+    /// The proposer lookahead, from Fulu on.
+    #[must_use]
+    pub fn lookahead(&self) -> Option<&dyn LookaheadState<Preset = P>> {
+        match self {
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_)
+            | Self::Electra(_) => None,
+            Self::Fulu(state) => Some(state),
+            Self::Gloas(state) => Some(state),
+        }
+    }
+
+    /// The builder registry and payments, from Gloas on.
+    #[must_use]
+    pub fn builders(&self) -> Option<&dyn BuilderState<Preset = P>> {
+        match self {
+            Self::Gloas(state) => Some(state),
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_)
+            | Self::Electra(_)
+            | Self::Fulu(_) => None,
         }
     }
 

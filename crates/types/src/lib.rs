@@ -35,6 +35,8 @@ pub use axiom_ssz::Root;
 
 // Invariant: indices and slots convert to vector positions without loss.
 const _: () = assert!(usize::BITS == 64, "axiom targets 64-bit platforms only");
-pub use config::{BlobData, BlobParameters, BlobSchedule, ChainConfig, ConfigError, ForkName};
+pub use config::{
+    BlobData, BlobParameters, BlobSchedule, ChainConfig, ConfigError, ConfigValue, ForkName,
+};
 pub use preset::{Mainnet, Minimal, Preset};
 pub use primitives::*;

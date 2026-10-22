@@ -8,8 +8,12 @@ use std::{
 };
 
 use axiom_discv5::Enr;
-use axiom_node::{AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
+use axiom_node::{
+    AnchorSource, DiscoverySettings, EngineConfig, HistorySettings, NetworkSettings, NodeConfig,
+    SnapshotInterval, StorageMode, WeakSubjectivity,
+};
 use axiom_p2p::Multiaddr;
+use axiom_slasher::{LayoutError, SlasherConfig};
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
 use axiom_yaml::{ParseError, Yaml};
@@ -34,8 +38,14 @@ OPTIONS:
     --network <NAME>             mainnet or minimal [default: mainnet]
     --config <FILE>              chain config YAML; its PRESET_BASE picks the preset
     --genesis-state <FILE>       SSZ genesis state, used when the database is empty
+                                 with a checkpoint, it lets an archive rebuild older states
     --checkpoint-state <FILE>    SSZ post-state of a trusted block, instead of genesis
     --checkpoint-block <FILE>    SSZ signed trusted block, with --checkpoint-state
+    --checkpoint-sync-url <URL>  trusted beacon API to download the finalized checkpoint from
+    --weak-subjectivity-checkpoint <ROOT:EPOCH>
+                                 block root and epoch the chain must pass through
+    --archive                    keep state snapshots and backfill to genesis
+    --snapshot-interval <SLOTS>  slots between archive snapshots [default: 2048]
     --datadir <DIR>              database directory [default: in memory]
     --http-address <ADDR>        beacon API address [default: 127.0.0.1:5052]
     --no-http                    disable the beacon API
@@ -50,6 +60,11 @@ OPTIONS:
     --no-network                 run without peers
     --execution-endpoint <URL>   engine API endpoint, such as http://127.0.0.1:8551
     --jwt-secret <FILE>          hex JWT secret shared with the engine
+    --slasher                    detect slashable votes and proposals, and pool the evidence
+    --slasher-history <EPOCHS>   epochs of votes the slasher keeps [default: 4096]
+    --slasher-chunk-epochs <N>   epochs per span chunk on disk [default: 16]
+    --slasher-chunk-validators <N>
+                                 validators per span chunk on disk [default: 1024]
     --log <FILTER>               log filter, such as info,axiom_node=debug [default: info]
     --log-format <FORMAT>        compact, pretty, or json [default: compact]
     -h, --help                   print this help
@@ -94,11 +109,19 @@ pub(crate) enum CliError {
         /// The value given.
         value: String,
     },
+    /// A slasher setting was given without the slasher.
+    #[error("{0} needs --slasher")]
+    SlasherDisabled(&'static str),
+    /// The slasher settings cannot lay out its history.
+    #[error("slasher: {0}")]
+    Slasher(#[from] LayoutError),
     /// Only one of the engine endpoint and its secret was given.
     #[error("--execution-endpoint and --jwt-secret go together")]
     IncompleteEngine,
-    /// Genesis and checkpoint files were mixed, or a checkpoint file is missing.
-    #[error("give either --genesis-state, or both --checkpoint-state and --checkpoint-block")]
+    /// Two checkpoint sources were given, or a checkpoint file is missing.
+    #[error(
+        "give --genesis-state, both --checkpoint-state and --checkpoint-block, or --checkpoint-sync-url"
+    )]
     ConflictingAnchors,
     /// The config file cannot be read.
     #[error("cannot read the config file {}: {source}", .path.display())]
@@ -142,6 +165,12 @@ pub(crate) struct Cli {
     checkpoint_state: Option<PathBuf>,
     /// The checkpoint block file.
     checkpoint_block: Option<PathBuf>,
+    /// The beacon API to download a checkpoint from.
+    checkpoint_sync_url: Option<String>,
+    /// The checkpoint the chain must pass through.
+    weak_subjectivity: Option<WeakSubjectivity>,
+    /// Slots between archive snapshots, given only in archive mode.
+    snapshot_interval: Option<SnapshotInterval>,
     /// The database directory.
     datadir: Option<PathBuf>,
     /// The beacon API address.
@@ -174,6 +203,50 @@ pub(crate) struct Cli {
     log: Option<String>,
     /// The log format.
     log_format: Option<LogFormat>,
+    /// The slasher flags.
+    slasher: SlasherFlags,
+}
+
+/// The slasher flags as given.
+#[derive(Debug, Default)]
+struct SlasherFlags {
+    /// Whether the slasher runs.
+    enabled: bool,
+    /// Epochs of history.
+    history: Option<u64>,
+    /// Epochs per span chunk.
+    chunk_epochs: Option<u64>,
+    /// Validators per span chunk.
+    chunk_validators: Option<u64>,
+}
+
+impl SlasherFlags {
+    /// The settings with defaults filled in, or none when the slasher is off.
+    fn resolve(&self) -> Result<Option<SlasherConfig>, CliError> {
+        if !self.enabled {
+            let settings = [
+                ("--slasher-history", self.history),
+                ("--slasher-chunk-epochs", self.chunk_epochs),
+                ("--slasher-chunk-validators", self.chunk_validators),
+            ];
+            return match settings.iter().find(|(_, value)| value.is_some()) {
+                Some((flag, _)) => Err(CliError::SlasherDisabled(flag)),
+                None => Ok(None),
+            };
+        }
+        let defaults = SlasherConfig::default();
+        let config = SlasherConfig {
+            history_length: self.history.unwrap_or(defaults.history_length),
+            chunk_size: self.chunk_epochs.unwrap_or(defaults.chunk_size),
+            validator_chunk_size: self
+                .chunk_validators
+                .unwrap_or(defaults.validator_chunk_size),
+            ..defaults
+        };
+        // The layout is checked now, so a bad flag fails before the node starts.
+        config.geometry()?;
+        Ok(Some(config))
+    }
 }
 
 impl Cli {
@@ -183,7 +256,6 @@ impl Cli {
     ///
     /// Fails on an unknown flag, a missing value, or a value that does not parse.
     pub(crate) fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
-        let mut cli = Self::default();
         let mut arguments = arguments.into_iter().peekable();
         // A leading command word picks a subcommand; flags alone run the beacon node.
         if arguments.next_if(|word| word == "account").is_some() {
@@ -192,6 +264,12 @@ impl Cli {
         if arguments.next_if(|word| word == "validator").is_some() {
             return ValidatorCommand::parse(arguments).map(Command::Validator);
         }
+        Self::parse_node(arguments)
+    }
+
+    /// Parses the beacon node's flags.
+    fn parse_node(mut arguments: impl Iterator<Item = String>) -> Result<Command, CliError> {
+        let mut cli = Self::default();
         while let Some(flag) = arguments.next() {
             // Each flag either stands alone or takes the next argument as its value.
             let mut value =
@@ -207,6 +285,22 @@ impl Cli {
                 }
                 "--checkpoint-block" => {
                     cli.checkpoint_block = Some(value("--checkpoint-block")?.into());
+                }
+                "--checkpoint-sync-url" => {
+                    cli.checkpoint_sync_url = Some(value("--checkpoint-sync-url")?);
+                }
+                "--weak-subjectivity-checkpoint" => {
+                    let text = value("--weak-subjectivity-checkpoint")?;
+                    cli.weak_subjectivity =
+                        Some(Self::parsed("--weak-subjectivity-checkpoint", text)?);
+                }
+                "--archive" => {
+                    cli.snapshot_interval
+                        .get_or_insert(SnapshotInterval::DEFAULT);
+                }
+                "--snapshot-interval" => {
+                    let text = value("--snapshot-interval")?;
+                    cli.snapshot_interval = Some(Self::parsed("--snapshot-interval", text)?);
                 }
                 "--datadir" => cli.datadir = Some(value("--datadir")?.into()),
                 "--http-address" => {
@@ -252,6 +346,20 @@ impl Cli {
                     cli.execution_endpoint = Some(value("--execution-endpoint")?);
                 }
                 "--jwt-secret" => cli.jwt_secret = Some(value("--jwt-secret")?.into()),
+                "--slasher" => cli.slasher.enabled = true,
+                "--slasher-history" => {
+                    let text = value("--slasher-history")?;
+                    cli.slasher.history = Some(Self::parsed("--slasher-history", text)?);
+                }
+                "--slasher-chunk-epochs" => {
+                    let text = value("--slasher-chunk-epochs")?;
+                    cli.slasher.chunk_epochs = Some(Self::parsed("--slasher-chunk-epochs", text)?);
+                }
+                "--slasher-chunk-validators" => {
+                    let text = value("--slasher-chunk-validators")?;
+                    cli.slasher.chunk_validators =
+                        Some(Self::parsed("--slasher-chunk-validators", text)?);
+                }
                 "--log" => cli.log = Some(value("--log")?),
                 "--log-format" => {
                     cli.log_format = Some(Self::log_format(value("--log-format")?)?);
@@ -264,6 +372,7 @@ impl Cli {
 
     /// Turns the flags into a run, reading the config file if one is named.
     fn resolve(self) -> Result<Run, CliError> {
+        let slasher = self.slasher.resolve()?;
         let (preset, chain) = self.chain()?;
         let engine = match (self.execution_endpoint, self.jwt_secret) {
             (Some(url), Some(jwt_secret)) => Some(EngineConfig { url, jwt_secret }),
@@ -293,17 +402,26 @@ impl Cli {
                     .max(chain.custody_requirement),
             })
         };
-        // A checkpoint needs both its files, and replaces genesis.
-        let anchor = match (
+        // A checkpoint comes from both its files or from a server, and replaces genesis.
+        // A genesis state given with a checkpoint seeds an archive's rebuild instead.
+        let (anchor, genesis) = match (
             self.genesis_state,
             self.checkpoint_state,
             self.checkpoint_block,
+            self.checkpoint_sync_url,
         ) {
-            (None, None, None) => None,
-            (Some(genesis), None, None) => Some(AnchorSource::Genesis(genesis)),
-            (None, Some(state), Some(block)) => Some(AnchorSource::Checkpoint { state, block }),
+            (None, None, None, None) => (None, None),
+            (Some(genesis), None, None, None) => (Some(AnchorSource::Genesis(genesis)), None),
+            (genesis, Some(state), Some(block), None) => {
+                (Some(AnchorSource::Checkpoint { state, block }), genesis)
+            }
+            (genesis, None, None, Some(url)) => (Some(AnchorSource::Url(url)), genesis),
             _ => return Err(CliError::ConflictingAnchors),
         };
+        // An interval implies the archive mode it paces.
+        let mode = self
+            .snapshot_interval
+            .map_or(StorageMode::Pruned, StorageMode::Archive);
         let http_address = if self.no_http {
             None
         } else {
@@ -322,6 +440,12 @@ impl Cli {
                 metrics_address: self.metrics_address,
                 engine,
                 network,
+                slasher,
+                history: HistorySettings {
+                    mode,
+                    weak_subjectivity: self.weak_subjectivity,
+                    genesis,
+                },
                 ..NodeConfig::default()
             },
             log: LogConfig {
@@ -512,6 +636,103 @@ mod tests {
     }
 
     #[test]
+    fn the_slasher_flags_set_its_layout() {
+        // History of 1024 epochs in chunks of 8 by 512 validators.
+        let tuned = run(&[
+            "--slasher",
+            "--slasher-history",
+            "1024",
+            "--slasher-chunk-epochs",
+            "8",
+            "--slasher-chunk-validators",
+            "512",
+        ]);
+        assert_eq!(
+            tuned.node.slasher,
+            Some(SlasherConfig {
+                history_length: 1024,
+                chunk_size: 8,
+                validator_chunk_size: 512,
+                ..SlasherConfig::default()
+            })
+        );
+        // The bare flag takes every default.
+        assert_eq!(
+            run(&["--slasher"]).node.slasher,
+            Some(SlasherConfig::default())
+        );
+    }
+
+    #[test]
+    fn slasher_settings_need_the_slasher_and_a_valid_layout() {
+        assert!(matches!(
+            parse(&["--slasher-history", "64"]),
+            Err(CliError::SlasherDisabled("--slasher-history"))
+        ));
+        // 100 epochs do not split into chunks of 16.
+        assert!(matches!(
+            parse(&["--slasher", "--slasher-history", "100"]),
+            Err(CliError::Slasher(LayoutError::Indivisible {
+                history: 100,
+                chunk: 16
+            }))
+        ));
+    }
+
+    #[test]
+    fn history_flags_reach_the_configuration() {
+        // A checkpoint from a server, archived every 64 slots, with genesis for the rebuild.
+        let root = "0x8584188b86a9296932785cc2827b925f9deebacce6d72ad8d53171fa046b43d9";
+        let checkpoint = format!("{root}:9544");
+        let served = run(&[
+            "--checkpoint-sync-url",
+            "http://10.0.0.2:5052",
+            "--genesis-state",
+            "genesis.ssz",
+            "--snapshot-interval",
+            "64",
+            "--weak-subjectivity-checkpoint",
+            &checkpoint,
+        ]);
+
+        assert_eq!(
+            served.node.anchor,
+            Some(AnchorSource::Url("http://10.0.0.2:5052".to_owned()))
+        );
+        assert_eq!(
+            served.node.history,
+            HistorySettings {
+                mode: StorageMode::Archive(SnapshotInterval::new(64).unwrap()),
+                weak_subjectivity: Some(checkpoint.parse().unwrap()),
+                genesis: Some("genesis.ssz".into()),
+            }
+        );
+
+        // The archive flag alone takes the default interval; checkpoint files keep genesis too.
+        let files = run(&[
+            "--archive",
+            "--genesis-state",
+            "g.ssz",
+            "--checkpoint-state",
+            "s.ssz",
+            "--checkpoint-block",
+            "b.ssz",
+        ]);
+        assert_eq!(
+            files.node.history.mode,
+            StorageMode::Archive(SnapshotInterval::DEFAULT)
+        );
+        assert_eq!(files.node.history.genesis, Some("g.ssz".into()));
+        assert_eq!(
+            files.node.anchor,
+            Some(AnchorSource::Checkpoint {
+                state: "s.ssz".into(),
+                block: "b.ssz".into(),
+            })
+        );
+    }
+
+    #[test]
     fn help_and_version_stop_parsing() {
         // A help flag wins even when a bad flag follows it.
         assert!(matches!(parse(&["--help", "--bogus"]), Ok(Command::Help)));
@@ -562,14 +783,28 @@ mod tests {
         ));
         assert!(matches!(
             parse(&[
-                "--genesis-state",
-                "g.ssz",
+                "--checkpoint-sync-url",
+                "http://127.0.0.1:5052",
                 "--checkpoint-state",
                 "s.ssz",
                 "--checkpoint-block",
                 "b.ssz"
             ]),
             Err(CliError::ConflictingAnchors)
+        ));
+        assert!(matches!(
+            parse(&["--weak-subjectivity-checkpoint", "0x12:3"]),
+            Err(CliError::InvalidValue {
+                flag: "--weak-subjectivity-checkpoint",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["--snapshot-interval", "0"]),
+            Err(CliError::InvalidValue {
+                flag: "--snapshot-interval",
+                ..
+            })
         ));
         // An engine needs both its endpoint and its secret.
         assert!(matches!(

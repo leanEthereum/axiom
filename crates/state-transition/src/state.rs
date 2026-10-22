@@ -14,6 +14,7 @@ use crate::{
     ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError, TransitionError, Upgrade,
     Verification,
     gloas::{EnvelopeError, PayloadEnvelope},
+    rewards::AttesterRewards,
 };
 
 /// A beacon state of whichever fork it belongs to, with its derived caches.
@@ -311,6 +312,35 @@ impl<P: Preset> State<P> {
         step: EpochStep,
     ) -> Result<(), StateError> {
         self.dispatch_mut(RunEpochStep { config, step })
+    }
+
+    /// Runs, in order, every epoch step of the state's fork that precedes a step.
+    ///
+    /// The state is then as that step finds it within a full epoch transition.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state breaks an invariant.
+    pub fn process_epoch_steps_before(
+        &mut self,
+        config: &ChainConfig,
+        step: EpochStep,
+    ) -> Result<(), StateError> {
+        self.dispatch_mut(RunEpochStepsBefore { config, step })
+    }
+
+    /// The attestation rewards of the state's previous epoch, by the rules of the state's fork.
+    ///
+    /// The state is at the last slot of an epoch, after the steps before the rewards.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state breaks an invariant.
+    pub fn attester_rewards(
+        &mut self,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        self.dispatch_mut(RewardAttesters { config })
     }
 
     /// Proposer of the state's slot, by the rules of the state's fork.
@@ -726,6 +756,42 @@ impl<P: Preset> ForkTaskMut<P> for RunEpochStep<'_> {
 
     fn run<S: Fork<Preset = P>>(self, state: CachedState<'_, S>) -> Self::Output {
         EpochProcessor::new(state, self.config).run(self.step)
+    }
+}
+
+/// The epoch steps of a fork that precede one step.
+#[derive(Clone, Copy, Debug)]
+struct RunEpochStepsBefore<'a> {
+    /// The chain configuration.
+    config: &'a ChainConfig,
+    /// The step to stop before.
+    step: EpochStep,
+}
+
+impl<P: Preset> ForkTaskMut<P> for RunEpochStepsBefore<'_> {
+    type Output = Result<(), StateError>;
+
+    fn run<S: Fork<Preset = P>>(self, state: CachedState<'_, S>) -> Self::Output {
+        let mut processor = EpochProcessor::new(state, self.config);
+        S::EPOCH_STEPS
+            .iter()
+            .take_while(|step| **step != self.step)
+            .try_for_each(|step| processor.run(*step))
+    }
+}
+
+/// The attestation rewards of the state's previous epoch.
+#[derive(Clone, Copy, Debug)]
+struct RewardAttesters<'a> {
+    /// The chain configuration.
+    config: &'a ChainConfig,
+}
+
+impl<P: Preset> ForkTaskMut<P> for RewardAttesters<'_> {
+    type Output = Result<AttesterRewards, StateError>;
+
+    fn run<S: Fork<Preset = P>>(self, state: CachedState<'_, S>) -> Self::Output {
+        S::attester_rewards(state, self.config)
     }
 }
 

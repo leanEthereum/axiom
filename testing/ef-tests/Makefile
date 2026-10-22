@@ -21,6 +21,8 @@ AES_KAT_SHA256 ?= a203b16c9246b2ebae31dee5de21a606be80cf78ceabaca37150236fa098eb
 GCM_KAT_SHA256 ?= f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023
 KECCAK_KAT_SHA256 ?= af92d22d23527a0d168a6bbe70b28c840a43bba5bcea828a6d9a5e7ad79378ce
 UNICODE_NORMALIZATION_SHA256 ?= d811971453e7075e1ad56fb1b301eece5aa80757b81f6156e74a1bfb3ae5ceb1
+# The beacon node API's OpenAPI definition, which the API conformance test walks.
+BEACON_APIS_COMMIT ?= 79b9b05e354da4f80d8f18879871af6f0068108d
 
 VECTORS := ../vectors
 SPEC_DIR := $(VECTORS)/consensus-spec-tests
@@ -35,6 +37,8 @@ KECCAK_KAT_DIR := $(VECTORS)/keccak-kat
 SLASHING_INTERCHANGE_DIR := $(VECTORS)/slashing-protection-interchange
 BIP39_DIR := $(VECTORS)/bip39
 UNICODE_DIR := $(VECTORS)/unicode
+SPEC_CONFIG_DIR := $(VECTORS)/consensus-specs
+BEACON_APIS_DIR := $(VECTORS)/beacon-apis
 
 SPEC_URL := https://github.com/ethereum/consensus-specs/releases/download/$(CONSENSUS_SPECS_VERSION)
 BLS_URL := https://github.com/ethereum/bls12-381-tests/releases/download/$(BLS_TESTS_VERSION)
@@ -50,11 +54,14 @@ KECCAK_KAT_URL := https://keccak.team/obsolete/KeccakKAT-3.zip
 SLASHING_INTERCHANGE_URL := https://github.com/eth-clients/slashing-protection-interchange-tests/archive/refs/tags/$(SLASHING_INTERCHANGE_VERSION).tar.gz
 BIP39_VECTORS_URL := https://raw.githubusercontent.com/trezor/python-mnemonic/$(BIP39_VECTORS_COMMIT)/vectors.json
 UNICODE_NORMALIZATION_URL := https://www.unicode.org/Public/$(UNICODE_VERSION)/ucd/NormalizationTest.txt
+SPEC_SOURCE_URL := https://github.com/ethereum/consensus-specs/archive/refs/tags/$(CONSENSUS_SPECS_VERSION).tar.gz
+BEACON_APIS_URL := https://github.com/ethereum/beacon-APIs/archive/$(BEACON_APIS_COMMIT).tar.gz
 
 .PHONY: all
 
 all: $(SPEC_DIR) $(BLS_DIR) $(KZG_DIR) $(GENERAL_DIR) $(WYCHEPROOF_DIR) $(JSON_SUITE_DIR) $(MULTIBASE_DIR) \
-	$(CAVP_DIR) $(KECCAK_KAT_DIR) $(SLASHING_INTERCHANGE_DIR) $(BIP39_DIR) $(UNICODE_DIR)
+	$(CAVP_DIR) $(KECCAK_KAT_DIR) $(SLASHING_INTERCHANGE_DIR) $(BIP39_DIR) $(UNICODE_DIR) \
+	$(SPEC_CONFIG_DIR) $(BEACON_APIS_DIR)
 
 $(SPEC_DIR):
 	mkdir -p $@
@@ -131,3 +138,14 @@ $(UNICODE_DIR):
 	curl --location --fail --silent --show-error $(UNICODE_NORMALIZATION_URL) -o $@.tmp/NormalizationTest.txt
 	echo "$(UNICODE_NORMALIZATION_SHA256)  $@.tmp/NormalizationTest.txt" | sha256sum --check --quiet
 	mv $@.tmp $@
+# The configuration and preset files of the pinned release, which the config route must echo.
+$(SPEC_CONFIG_DIR):
+	mkdir -p $@
+	curl --location --fail --silent --show-error $(SPEC_SOURCE_URL) \
+		| tar -xz -C $@ --strip-components=1 --wildcards '*/configs' '*/presets'
+
+# The beacon node API definition: the index file, the routes, and the types they name.
+$(BEACON_APIS_DIR):
+	mkdir -p $@
+	curl --location --fail --silent --show-error $(BEACON_APIS_URL) \
+		| tar -xz -C $@ --strip-components=1 --wildcards '*/beacon-node-oapi.yaml' '*/apis' '*/types' '*/params'

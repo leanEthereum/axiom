@@ -483,6 +483,236 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
     ///
     /// Equals 2 * SLOTS_PER_EPOCH.
     type BuilderPendingPaymentsSlots: Length;
+
+    /// Every preset value under its spec name.
+    ///
+    /// The spec's preset files list these, one file per fork.
+    #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a data table with one row per preset key"
+    )]
+    fn entries() -> Vec<(&'static str, u64)> {
+        vec![
+            ("MAX_COMMITTEES_PER_SLOT", Self::MAX_COMMITTEES_PER_SLOT),
+            ("TARGET_COMMITTEE_SIZE", Self::TARGET_COMMITTEE_SIZE),
+            (
+                "MAX_VALIDATORS_PER_COMMITTEE",
+                Self::MAX_VALIDATORS_PER_COMMITTEE,
+            ),
+            ("SHUFFLE_ROUND_COUNT", Self::SHUFFLE_ROUND_COUNT),
+            ("HYSTERESIS_QUOTIENT", Self::HYSTERESIS_QUOTIENT),
+            (
+                "HYSTERESIS_DOWNWARD_MULTIPLIER",
+                Self::HYSTERESIS_DOWNWARD_MULTIPLIER,
+            ),
+            (
+                "HYSTERESIS_UPWARD_MULTIPLIER",
+                Self::HYSTERESIS_UPWARD_MULTIPLIER,
+            ),
+            ("MIN_DEPOSIT_AMOUNT", Self::MIN_DEPOSIT_AMOUNT.0),
+            ("MAX_EFFECTIVE_BALANCE", Self::MAX_EFFECTIVE_BALANCE.0),
+            (
+                "EFFECTIVE_BALANCE_INCREMENT",
+                Self::EFFECTIVE_BALANCE_INCREMENT.0,
+            ),
+            (
+                "MIN_ATTESTATION_INCLUSION_DELAY",
+                Self::MIN_ATTESTATION_INCLUSION_DELAY,
+            ),
+            ("SLOTS_PER_EPOCH", Self::SLOTS_PER_EPOCH),
+            ("MIN_SEED_LOOKAHEAD", Self::MIN_SEED_LOOKAHEAD),
+            ("MAX_SEED_LOOKAHEAD", Self::MAX_SEED_LOOKAHEAD),
+            (
+                "EPOCHS_PER_ETH1_VOTING_PERIOD",
+                Self::EPOCHS_PER_ETH1_VOTING_PERIOD,
+            ),
+            (
+                "MIN_EPOCHS_TO_INACTIVITY_PENALTY",
+                Self::MIN_EPOCHS_TO_INACTIVITY_PENALTY,
+            ),
+            ("SLOTS_PER_HISTORICAL_ROOT", Self::SLOTS_PER_HISTORICAL_ROOT),
+            (
+                "EPOCHS_PER_HISTORICAL_VECTOR",
+                Self::EPOCHS_PER_HISTORICAL_VECTOR,
+            ),
+            (
+                "EPOCHS_PER_SLASHINGS_VECTOR",
+                Self::EPOCHS_PER_SLASHINGS_VECTOR,
+            ),
+            ("HISTORICAL_ROOTS_LIMIT", Self::HISTORICAL_ROOTS_LIMIT),
+            ("VALIDATOR_REGISTRY_LIMIT", Self::VALIDATOR_REGISTRY_LIMIT),
+            ("BASE_REWARD_FACTOR", Self::BASE_REWARD_FACTOR),
+            (
+                "WHISTLEBLOWER_REWARD_QUOTIENT",
+                Self::WHISTLEBLOWER_REWARD_QUOTIENT,
+            ),
+            ("PROPOSER_REWARD_QUOTIENT", Self::PROPOSER_REWARD_QUOTIENT),
+            (
+                "INACTIVITY_PENALTY_QUOTIENT",
+                Self::INACTIVITY_PENALTY_QUOTIENT,
+            ),
+            (
+                "MIN_SLASHING_PENALTY_QUOTIENT",
+                Self::MIN_SLASHING_PENALTY_QUOTIENT,
+            ),
+            (
+                "PROPORTIONAL_SLASHING_MULTIPLIER",
+                Self::PROPORTIONAL_SLASHING_MULTIPLIER,
+            ),
+            ("MAX_PROPOSER_SLASHINGS", Self::MAX_PROPOSER_SLASHINGS),
+            ("MAX_ATTESTER_SLASHINGS", Self::MAX_ATTESTER_SLASHINGS),
+            ("MAX_ATTESTATIONS", Self::MAX_ATTESTATIONS),
+            ("MAX_DEPOSITS", Self::MAX_DEPOSITS),
+            ("MAX_VOLUNTARY_EXITS", Self::MAX_VOLUNTARY_EXITS),
+            (
+                "INACTIVITY_PENALTY_QUOTIENT_ALTAIR",
+                Self::INACTIVITY_PENALTY_QUOTIENT_ALTAIR,
+            ),
+            (
+                "MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR",
+                Self::MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR,
+            ),
+            (
+                "PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR",
+                Self::PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR,
+            ),
+            ("SYNC_COMMITTEE_SIZE", Self::SYNC_COMMITTEE_SIZE),
+            (
+                "EPOCHS_PER_SYNC_COMMITTEE_PERIOD",
+                Self::EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+            ),
+            (
+                "MIN_SYNC_COMMITTEE_PARTICIPANTS",
+                Self::MIN_SYNC_COMMITTEE_PARTICIPANTS,
+            ),
+            ("UPDATE_TIMEOUT", Self::UPDATE_TIMEOUT),
+            (
+                "INACTIVITY_PENALTY_QUOTIENT_BELLATRIX",
+                Self::INACTIVITY_PENALTY_QUOTIENT_BELLATRIX,
+            ),
+            (
+                "MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX",
+                Self::MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX,
+            ),
+            (
+                "PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX",
+                Self::PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX,
+            ),
+            ("MAX_BYTES_PER_TRANSACTION", Self::MAX_BYTES_PER_TRANSACTION),
+            (
+                "MAX_TRANSACTIONS_PER_PAYLOAD",
+                Self::MAX_TRANSACTIONS_PER_PAYLOAD,
+            ),
+            ("BYTES_PER_LOGS_BLOOM", Self::BYTES_PER_LOGS_BLOOM),
+            ("MAX_EXTRA_DATA_BYTES", Self::MAX_EXTRA_DATA_BYTES),
+            (
+                "MAX_BLS_TO_EXECUTION_CHANGES",
+                Self::MAX_BLS_TO_EXECUTION_CHANGES,
+            ),
+            (
+                "MAX_WITHDRAWALS_PER_PAYLOAD",
+                Self::MAX_WITHDRAWALS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP",
+                Self::MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP,
+            ),
+            (
+                "MAX_BLOB_COMMITMENTS_PER_BLOCK",
+                Self::MAX_BLOB_COMMITMENTS_PER_BLOCK,
+            ),
+            (
+                "KZG_COMMITMENT_INCLUSION_PROOF_DEPTH",
+                Self::KZG_COMMITMENT_INCLUSION_PROOF_DEPTH,
+            ),
+            ("FIELD_ELEMENTS_PER_BLOB", Self::FIELD_ELEMENTS_PER_BLOB),
+            ("MIN_ACTIVATION_BALANCE", Self::MIN_ACTIVATION_BALANCE.0),
+            (
+                "MAX_EFFECTIVE_BALANCE_ELECTRA",
+                Self::MAX_EFFECTIVE_BALANCE_ELECTRA.0,
+            ),
+            (
+                "MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA",
+                Self::MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
+            ),
+            (
+                "WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA",
+                Self::WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA,
+            ),
+            ("PENDING_DEPOSITS_LIMIT", Self::PENDING_DEPOSITS_LIMIT),
+            (
+                "PENDING_PARTIAL_WITHDRAWALS_LIMIT",
+                Self::PENDING_PARTIAL_WITHDRAWALS_LIMIT,
+            ),
+            (
+                "PENDING_CONSOLIDATIONS_LIMIT",
+                Self::PENDING_CONSOLIDATIONS_LIMIT,
+            ),
+            (
+                "MAX_ATTESTER_SLASHINGS_ELECTRA",
+                Self::MAX_ATTESTER_SLASHINGS_ELECTRA,
+            ),
+            ("MAX_ATTESTATIONS_ELECTRA", Self::MAX_ATTESTATIONS_ELECTRA),
+            (
+                "MAX_DEPOSIT_REQUESTS_PER_PAYLOAD",
+                Self::MAX_DEPOSIT_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD",
+                Self::MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD",
+                Self::MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP",
+                Self::MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP,
+            ),
+            (
+                "MAX_PENDING_DEPOSITS_PER_EPOCH",
+                Self::MAX_PENDING_DEPOSITS_PER_EPOCH,
+            ),
+            (
+                "KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH",
+                Self::KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH,
+            ),
+            ("FIELD_ELEMENTS_PER_CELL", Self::FIELD_ELEMENTS_PER_CELL),
+            (
+                "FIELD_ELEMENTS_PER_EXT_BLOB",
+                Self::FIELD_ELEMENTS_PER_EXT_BLOB,
+            ),
+            ("CELLS_PER_EXT_BLOB", Self::CELLS_PER_EXT_BLOB),
+            ("NUMBER_OF_COLUMNS", Self::NUMBER_OF_COLUMNS),
+            ("PTC_SIZE", Self::PTC_SIZE),
+            ("MAX_PAYLOAD_ATTESTATIONS", Self::MAX_PAYLOAD_ATTESTATIONS),
+            (
+                "MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD",
+                Self::MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD",
+                Self::MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "MAX_BUILDERS_PER_WITHDRAWALS_SWEEP",
+                Self::MAX_BUILDERS_PER_WITHDRAWALS_SWEEP,
+            ),
+            (
+                "MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE",
+                Self::MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE,
+            ),
+            (
+                "MAX_ATTESTER_SLASHING_SIZE",
+                Self::MAX_ATTESTER_SLASHING_SIZE,
+            ),
+            (
+                "MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE",
+                Self::MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE,
+            ),
+        ]
+    }
 }
 
 #[cfg(test)]

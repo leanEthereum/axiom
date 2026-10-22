@@ -21,6 +21,7 @@ use axiom_types::{
 
 use super::{
     ApiContext,
+    encoding::Encoding,
     query::{Body, Query},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
@@ -90,7 +91,7 @@ impl ValidatorRoutes {
             ),
             ("eth-consensus-block-value", Self::gwei_in_wei(&proposal)),
         ];
-        if Reply::accepts_ssz(&request) {
+        if Encoding::accepted(&request, true)? == Encoding::Ssz {
             let mut response = Reply::ssz(proposal.block.encode(), fork);
             for (name, value) in headers {
                 response = response.with_header(name, value);
@@ -125,7 +126,7 @@ impl ValidatorRoutes {
         let order = Self::block_order(&request)?;
         let include_payload = Query::of(&request).flag("include_payload")?;
         // The builder configuration must decode; its entries ask for bids this node does not fetch.
-        if !Reply::sends_ssz(&request) {
+        if Encoding::of_body(&request, true)? == Encoding::Json {
             let config = Body(&request).json()?;
             if config.get("builders").and_then(Json::as_array).is_none() {
                 return Err(ApiError::bad_request(
@@ -167,7 +168,7 @@ impl ValidatorRoutes {
             ),
             ("eth-execution-payload-included", included.to_string()),
         ];
-        let mut response = if Reply::accepts_ssz(&request) {
+        let mut response = if Encoding::accepted(&request, true)? == Encoding::Ssz {
             Reply::ssz(ssz, fork)
         } else {
             let body = Json::from([
@@ -206,7 +207,7 @@ impl ValidatorRoutes {
             .proposer
             .envelope(slot, root)
             .ok_or_else(|| ApiError::not_found("no envelope cached for the slot and block"))?;
-        if Reply::accepts_ssz(&request) {
+        if Encoding::accepted(&request, true)? == Encoding::Ssz {
             return Ok(Reply::ssz(envelope.encode(), ForkName::Gloas));
         }
         let body = Json::from([
@@ -229,7 +230,7 @@ impl ValidatorRoutes {
         let committee_index = query
             .optional_number("committee_index")?
             .map(CommitteeIndex);
-        let ssz = Reply::accepts_ssz(&request);
+        let ssz = Encoding::accepted(&request, true)? == Encoding::Ssz;
         context
             .query(move |chain| {
                 if chain.head().optimistic {
@@ -273,7 +274,7 @@ impl ValidatorRoutes {
                     gain: 0,
                 };
                 let (json, ssz) = Self::attestation_of::<P>(fork, packed)?;
-                if Reply::accepts_ssz(&request) {
+                if Encoding::accepted(&request, true)? == Encoding::Ssz {
                     return Ok(Reply::ssz(ssz, fork));
                 }
                 let body = Json::from([("version", Json::from(fork.to_string())), ("data", json)]);
@@ -314,7 +315,7 @@ impl ValidatorRoutes {
         request: Request,
     ) -> ApiResult {
         let slot = Slot(Query::of(&request).number("slot")?);
-        let ssz = Reply::accepts_ssz(&request);
+        let encoding = Encoding::accepted(&request, true)?;
         context
             .query(move |chain| {
                 let fork = chain.config().fork_at(slot.epoch::<P>());
@@ -333,10 +334,7 @@ impl ValidatorRoutes {
                     payload_present: envelope.is_some(),
                     blob_data_available: envelope.is_some(),
                 };
-                if ssz {
-                    return Ok(Reply::ssz(data.encode(), fork));
-                }
-                Ok(Reply::versioned(fork, data.to_json(), None))
+                Ok(Reply::typed(encoding, fork, None, &data))
             })
             .await
     }
@@ -352,7 +350,7 @@ impl ValidatorRoutes {
             .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
         let fork = ForkName::from_name(named)
             .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))?;
-        let block = if Reply::sends_ssz(&request) {
+        let block = if Encoding::of_body(&request, true)? == Encoding::Ssz {
             SignedBlindedBeaconBlock::<P>::decode(&request.body, fork)
                 .map_err(|error| ApiError::bad_request(error.to_string()))?
         } else {

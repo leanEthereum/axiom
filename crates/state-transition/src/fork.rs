@@ -6,8 +6,8 @@ use axiom_ssz::Ssz;
 use axiom_types::{ChainConfig, ValidatorIndex, accessors::ForkState, phase0::BeaconBlockHeader};
 
 use crate::{
-    BlockError, BlockProcessor, Caches, EpochProcessor, EpochStep, PayloadEngine, Registry,
-    StateError,
+    BlockError, BlockProcessor, CachedState, Caches, EpochProcessor, EpochStep, PayloadEngine,
+    Registry, StateError, rewards::AttesterRewards,
 };
 
 /// The state transition rules of one fork, implemented on that fork's state.
@@ -85,6 +85,19 @@ pub trait Fork: ForkState + Ssz + Clone + Debug + 'static {
         processor: &mut EpochProcessor<'_, Self>,
         step: EpochStep,
     ) -> Result<(), StateError>;
+
+    /// The attestation rewards of the state's previous epoch, by vote component.
+    ///
+    /// The state is at the last slot of an epoch, after the epoch steps before the rewards.
+    /// See `process_rewards_and_penalties` in the fork's beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state breaks an invariant.
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError>;
 
     /// Applies a block, given with its header.
     ///

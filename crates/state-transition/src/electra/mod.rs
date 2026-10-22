@@ -17,8 +17,8 @@ use axiom_types::{
 };
 
 use crate::{
-    ActiveBalance, BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine,
-    Registry, StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
+    PayloadEngine, Registry, StateError,
     altair::AltairEpoch,
     capella::epoch::HistoricalSummaryUpdate,
     electra::{
@@ -29,6 +29,7 @@ use crate::{
         },
     },
     phase0::{Slashing, SlotRoots, block::RandaoReveal},
+    rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
 
@@ -88,6 +89,13 @@ impl<P: Preset> Fork for BeaconState<P> {
         step: EpochStep,
     ) -> Result<(), StateError> {
         ElectraEpoch::run(processor, step)
+    }
+
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        Ok(AltairEpoch::attester_rewards(state.beacon(), config))
     }
 
     /// Runs Electra's block processing.

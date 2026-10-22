@@ -11,8 +11,8 @@ use axiom_json::Json;
 use axiom_types::{
     ForkName, Preset,
     combined::{
-        BeaconBlock, BlindedBeaconBlock, DataColumnSidecar, ExecutionPayload, SignedBeaconBlock,
-        SignedBlindedBeaconBlock, SignedBuilderBid,
+        BeaconBlock, BeaconState, BlindedBeaconBlock, DataColumnSidecar, ExecutionPayload,
+        SignedBeaconBlock, SignedBlindedBeaconBlock, SignedBuilderBid,
     },
 };
 
@@ -55,6 +55,34 @@ impl<P: Preset> ForkedJson for SignedBeaconBlock<P> {
             Self::Deneb(block) => block.to_json(),
             Self::Electra(block) | Self::Fulu(block) => block.to_json(),
             Self::Gloas(block) => block.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
+        Ok(match fork {
+            ForkName::Phase0 => Self::Phase0(ApiJson::from_json(value)?),
+            ForkName::Altair => Self::Altair(ApiJson::from_json(value)?),
+            ForkName::Bellatrix => Self::Bellatrix(ApiJson::from_json(value)?),
+            ForkName::Capella => Self::Capella(ApiJson::from_json(value)?),
+            ForkName::Deneb => Self::Deneb(ApiJson::from_json(value)?),
+            ForkName::Electra => Self::Electra(ApiJson::from_json(value)?),
+            ForkName::Fulu => Self::Fulu(ApiJson::from_json(value)?),
+            ForkName::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+        })
+    }
+}
+
+impl<P: Preset> ForkedJson for BeaconState<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Phase0(state) => state.to_json(),
+            Self::Altair(state) => state.to_json(),
+            Self::Bellatrix(state) => state.to_json(),
+            Self::Capella(state) => state.to_json(),
+            Self::Deneb(state) => state.to_json(),
+            Self::Electra(state) => state.to_json(),
+            Self::Fulu(state) => state.to_json(),
+            Self::Gloas(state) => state.to_json(),
         }
     }
 

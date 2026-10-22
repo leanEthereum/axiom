@@ -5,6 +5,7 @@ mod database;
 mod gossip;
 mod handle;
 mod head;
+mod history;
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -14,17 +15,25 @@ use std::{
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
+use axiom_beacon_json::ForkedJson;
+use axiom_bls::PublicKey;
 use axiom_fork_choice::{
-    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, PayloadStatus, Store,
+    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, NodePayload,
+    PayloadArrival, PayloadStatus, Store,
 };
 use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
-use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
+use axiom_json::Json;
+use axiom_light_client::{
+    LightClientServer, PostState,
+    combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
+};
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
+use axiom_slasher::Slashing;
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root,
-    Slot,
+    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Gwei, Hash32, Preset,
+    Root, Slot, ValidatorIndex,
     accessors::{CoreState, ForkState},
     altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
@@ -35,14 +44,22 @@ use axiom_types::{
     phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
-pub use database::ChainDatabase;
+pub use database::{
+    ChainDatabase, Finality, HistoryStart, InvalidInterval, ReconstructionCursor, SchemaVersion,
+    SnapshotInterval, StorageMode,
+};
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
 pub use head::{ChainEvent, ExecutionHead, Head};
+use history::History;
+pub use history::{
+    HistorySegment, ProposerKeys, Reconstruction, SegmentContext, SegmentError, StateReplay,
+    VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
+};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::ChainError;
+use crate::{ApiEvent, ChainError, EventSender, EventTopic, slasher::SlasherFeed};
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
@@ -85,8 +102,14 @@ pub struct Chain<P: Preset> {
     committees: Option<(Epoch, Root, Arc<EpochCommittees>)>,
     /// Light client data derived from the canonical chain.
     light_client: LightClientServer<P>,
+    /// Where the beacon API's event stream takes its events.
+    api_events: EventSender,
     /// Operations waiting for the blocks this node's validators propose.
     pool: OperationPool<P>,
+    /// The slasher's feed, when the node runs one.
+    slasher: Option<SlasherFeed<P>>,
+    /// Past states, backfill, and the trusted checkpoint.
+    history: History<P>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -129,11 +152,8 @@ impl<P: Preset> Chain<P> {
             epoch: state.current_epoch(),
             root,
         };
-        let slot = signed.slot();
         // The anchor is trusted, so its signature is kept as given and never checked.
         let mut chain = Self::with_anchor(config, state, &signed.message(), database)?;
-        chain.database.put_block(root, signed)?;
-        chain.offer_bootstrap(root, signed);
         let anchor_state = chain
             .store
             .block_state(&root)
@@ -141,7 +161,9 @@ impl<P: Preset> Chain<P> {
             .beacon();
         chain
             .database
-            .finalize(checkpoint, checkpoint, anchor_state, &[(slot, root)], &[])?;
+            .put_anchor(checkpoint, signed, anchor_state)?;
+        chain.offer_bootstrap(root, signed);
+        chain.persist_light_client(Slot(0))?;
         Ok(chain)
     }
 
@@ -159,7 +181,12 @@ impl<P: Preset> Chain<P> {
         let block = database
             .block(checkpoint.root)?
             .ok_or(ChainError::Missing("finalized block"))?;
-        Self::with_anchor(config, state, &block.message(), database)
+        let mut chain = Self::with_anchor(config, state, &block.message(), database)?;
+        // Light client data settled before the restart is served again at once.
+        chain
+            .database
+            .restore_light_client(&mut chain.light_client)?;
+        Ok(chain)
     }
 
     /// Builds the store over an anchor and selects the first head.
@@ -169,6 +196,7 @@ impl<P: Preset> Chain<P> {
         anchor: &combined::BeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
+        let history = History::new(anchor.hash_tree_root(), anchor.state_root());
         let mut store = Store::new(config, State::new(state), anchor)?;
         let head = Self::read_head(&mut store)?;
         info!(slot = %head.slot, root = %head.root, fork = %anchor.fork_name(), "chain anchored");
@@ -184,7 +212,10 @@ impl<P: Preset> Chain<P> {
             gossip: GossipMemory::default(),
             committees: None,
             light_client: LightClientServer::new(),
+            api_events: EventSender::detached(),
             pool: OperationPool::default(),
+            slasher: None,
+            history,
         })
     }
 
@@ -197,6 +228,13 @@ impl<P: Preset> Chain<P> {
         self
     }
 
+    /// Feeds every verified vote and imported block to a slasher.
+    #[must_use]
+    pub(crate) fn with_slasher(mut self, feed: SlasherFeed<P>) -> Self {
+        self.slasher = Some(feed);
+        self
+    }
+
     /// Records into the node's exported metrics instead of a private set.
     #[must_use]
     pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
@@ -204,6 +242,19 @@ impl<P: Preset> Chain<P> {
         // Publish the anchor's head at once rather than at the first change.
         self.record_head(self.head, true);
         self
+    }
+
+    /// Publishes the beacon API's events through a hub's sender.
+    #[must_use]
+    pub fn with_events(mut self, events: EventSender) -> Self {
+        self.api_events = events;
+        self
+    }
+
+    /// Where the beacon API's event stream takes its events.
+    #[must_use]
+    pub const fn api_events(&self) -> &EventSender {
+        &self.api_events
     }
 
     /// A receiver of every future chain event.
@@ -295,6 +346,96 @@ impl<P: Preset> Chain<P> {
         self.store.block_state(root)
     }
 
+    /// Post-state of a block, from the fork choice or else from the database.
+    ///
+    /// This is the one place historical states come from.
+    /// States before the finalized anchor need an archive, which answers here once it exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn state_by_block(&self, root: Root) -> Result<Option<State<P>>, ChainError> {
+        if let Some(state) = self.store.block_state(&root) {
+            return Ok(Some(state.clone()));
+        }
+        Ok(self.database.state(root)?.map(State::new))
+    }
+
+    /// The weight of every fork choice node, as the head rule counts it.
+    ///
+    /// A block before Gloas has one node, carrying its payload.
+    /// A Gloas block also has a pending node, an empty node, and a full node once its payload arrived.
+    /// See `get_weight` in the phase0 and Gloas fork choice specs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the justified checkpoint's state is missing.
+    pub fn node_weights(&mut self) -> Result<Vec<(ForkChoiceNode, Gwei)>, ChainError> {
+        let arrivals: Vec<(Root, PayloadArrival)> = self
+            .store
+            .blocks()
+            .iter()
+            .map(|(root, node)| (*root, node.payload))
+            .collect();
+        let block_weights = self.store.ghost()?.weights();
+        let ghost = self.store.payload_ghost()?;
+        let mut weights = Vec::new();
+        for (root, arrival) in &arrivals {
+            if *arrival == PayloadArrival::Embedded {
+                let full = ForkChoiceNode {
+                    root: *root,
+                    payload: NodePayload::Full,
+                };
+                weights.push((full, block_weights.get(root).copied().unwrap_or_default()));
+                continue;
+            }
+            let pending = ForkChoiceNode::pending(*root);
+            weights.push((pending, ghost.weight(pending)));
+            for payload in [NodePayload::Empty, NodePayload::Full] {
+                if arrival.offers(payload) {
+                    let variant = ForkChoiceNode {
+                        root: *root,
+                        payload,
+                    };
+                    weights.push((variant, ghost.weight(variant)));
+                }
+            }
+        }
+        Ok(weights)
+    }
+
+    /// Root of the latest canonical block at or before a slot, if the node knows it.
+    ///
+    /// An empty slot takes the block before it, as the state at that slot does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn canonical_root_at_or_before(&self, slot: Slot) -> Result<Option<Root>, ChainError> {
+        let slot = slot.min(self.head.slot);
+        // Since finality the head's chain decides, empty slots included.
+        // The walk stops at the anchor, which may lie after the slot.
+        let blocks = self.store.blocks();
+        if let Some(root) = blocks
+            .ancestor(self.head.root, slot)
+            .filter(|root| blocks.get(root).is_some_and(|node| node.slot <= slot))
+        {
+            return Ok(Some(root));
+        }
+        // Before it, walk the finalized index back to the nearest proposed slot.
+        let earliest = self.database.earliest_slot()?.unwrap_or(Slot(0));
+        let mut current = slot;
+        loop {
+            if let Some(root) = self.database.canonical_root(current)? {
+                return Ok(Some(root));
+            }
+            if current <= earliest {
+                return Ok(None);
+            }
+            current = Slot(current.0 - 1);
+        }
+    }
+
     /// A block by root, from the database.
     ///
     /// # Errors
@@ -381,6 +522,16 @@ impl<P: Preset> Chain<P> {
         if self.store.current_slot() != slot {
             // Votes and signatures too old for any coming block leave the pool.
             self.pool.on_slot(self.store.current_slot());
+            // The slasher checks what it gathered once a slot, and returns what it found.
+            let found = self.slasher.as_ref().map(|slasher| {
+                slasher.pass(self.store.current_epoch());
+                slasher.found()
+            });
+            for slashing in found.into_iter().flatten() {
+                if let Err(error) = self.on_found_slashing(slashing) {
+                    warn!(%error, "slasher evidence refused");
+                }
+            }
         }
         if self.store.current_epoch() != epoch {
             // Messages from two epochs ago can no longer be gossiped, so forget them.
@@ -420,9 +571,15 @@ impl<P: Preset> Chain<P> {
             return Err(error.into());
         }
         drop(timer);
+        // The import verified the proposer's signature and every vote in the body.
+        if let Some(slasher) = &mut self.slasher {
+            slasher.block(&self.store, block);
+        }
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
+        self.history.note_block(block.message().state_root(), root);
         info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
+        self.announce_block(root, block.slot());
         // Every block's update is kept; the head change below decides whether it is served.
         self.offer_update(root, block);
         self.update_head()?;
@@ -451,6 +608,7 @@ impl<P: Preset> Chain<P> {
         )?;
         self.database.put_envelope(envelope)?;
         info!(%root, "imported payload envelope");
+        self.announce_envelope(envelope);
         self.update_head()?;
         Ok(root)
     }
@@ -700,6 +858,192 @@ impl<P: Preset> Chain<P> {
         )
     }
 
+    /// The state of the canonical chain at a slot, from genesis or the stored history up to the head.
+    ///
+    /// Since finality the fork choice holds the states.
+    /// Before it, an archive replays them from the nearest snapshot.
+    /// A pruned database holds no state before its finalized anchor, so those slots have none.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, or a stored block does not apply.
+    pub fn state_at_slot(&mut self, slot: Slot) -> Result<Option<State<P>>, ChainError> {
+        self.history
+            .state_at_slot(&self.store, &self.database, self.head.root, slot)
+    }
+
+    /// The state with a root, among those since finality and the finalized ones an archive indexes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, or a stored block does not apply.
+    pub fn state_by_root(&mut self, root: Root) -> Result<Option<State<P>>, ChainError> {
+        self.history
+            .state_by_root(&self.store, &self.database, self.head.root, root)
+    }
+
+    /// The oldest slot backfill must still reach, or nothing once the stored history suffices.
+    ///
+    /// An archive wants every block back to genesis.
+    /// Otherwise the window peers must serve is enough.
+    /// See `MIN_EPOCHS_FOR_BLOCK_REQUESTS` in the phase0 p2p spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn backfill_target(&self) -> Result<Option<Slot>, ChainError> {
+        let Some(start) = self.database.history_start()? else {
+            return Ok(None);
+        };
+        if start.reaches_genesis() {
+            return Ok(None);
+        }
+        let target = if self.database.mode().backfills_to_genesis() {
+            Slot(0)
+        } else {
+            let window = self.config().min_epochs_for_block_requests();
+            Epoch(self.store.current_epoch().0.saturating_sub(window)).start_slot::<P>()
+        };
+        Ok((start.slot > target).then_some(target))
+    }
+
+    /// Decompressed keys of validators, for checking past proposers' signatures.
+    ///
+    /// The registry only grows, so the head state knows every past proposer.
+    /// Unknown indices and invalid keys are left out, and the signature check then refuses.
+    #[must_use]
+    pub fn proposer_keys(&self, indices: impl IntoIterator<Item = ValidatorIndex>) -> ProposerKeys {
+        let Some(state) = self.store.block_state(&self.head.root) else {
+            return ProposerKeys::new();
+        };
+        let validators = state.beacon().validators();
+        let cache = state.pubkeys();
+        indices
+            .into_iter()
+            .filter_map(|index| {
+                let bytes = &validators.get(index.as_usize())?.pubkey;
+                // The cache mirrors a prefix of the registry; keys past it decompress here.
+                let key = if index.as_usize() < cache.len() {
+                    cache.public_key(index, bytes)
+                } else {
+                    PublicKey::from_bytes(&bytes.0).ok()
+                };
+                Some((index, key?))
+            })
+            .collect()
+    }
+
+    /// Stores a verified backfill segment, which extends the stored history towards genesis.
+    ///
+    /// A pending weak subjectivity checkpoint inside the segment is checked first.
+    ///
+    /// # Returns
+    ///
+    /// Where the stored history now begins.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the segment buries another block than the trusted one, or the write fails.
+    pub fn import_history(
+        &mut self,
+        segment: &VerifiedSegment<P>,
+    ) -> Result<HistoryStart, ChainError> {
+        if let Some(checkpoint) = self.history.weak_subjectivity() {
+            let target = checkpoint.slot::<P>();
+            if segment.start.slot <= target && target < segment.extends.slot {
+                // The latest block at or before the epoch's first slot is canonical there.
+                let canonical = segment
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find(|(_, block)| block.slot() <= target)
+                    .map(|(root, _)| *root);
+                if let Some(root) = canonical {
+                    self.history.settle(root)?;
+                }
+            }
+        }
+        self.database.put_history(segment)?;
+        Ok(segment.start)
+    }
+
+    /// Runs one bounded step of rebuilding the snapshots below a checkpoint anchor.
+    ///
+    /// # Arguments
+    ///
+    /// - `budget`: the most slots to replay in this step.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, a block does not apply, or the genesis state is wrong.
+    pub fn reconstruct_history(&mut self, budget: u64) -> Result<Reconstruction, ChainError> {
+        self.history.reconstruct(&self.database, budget)
+    }
+
+    /// Keeps a genesis state, so an archive can rebuild the states below a checkpoint anchor.
+    ///
+    /// The state must belong to this chain; its root is checked again once backfill reaches genesis.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state is of another chain, or the write fails.
+    pub fn with_genesis(self, genesis: &combined::BeaconState<P>) -> Result<Self, ChainError> {
+        let expected = self.genesis_validators_root();
+        let actual = genesis.genesis_validators_root();
+        if expected != actual {
+            return Err(ChainError::GenesisMismatch { expected, actual });
+        }
+        if self.database.mode().interval().is_some() {
+            self.database.put_snapshot(genesis)?;
+        }
+        Ok(self)
+    }
+
+    /// Holds the chain to a checkpoint the operator trusts.
+    ///
+    /// A checkpoint the stored chain already covers is checked at once.
+    /// A later one is checked when finality passes it, an earlier one when backfill does.
+    /// See the weak subjectivity sync procedure in the phase0 weak subjectivity guide.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the stored chain holds another block at the checkpoint's epoch.
+    pub fn with_weak_subjectivity(
+        mut self,
+        checkpoint: WeakSubjectivity,
+    ) -> Result<Self, ChainError> {
+        self.history.trust(checkpoint);
+        let finalized = self.store.finalized_checkpoint();
+        if checkpoint.0.epoch > finalized.epoch {
+            return Ok(self);
+        }
+        // The finalized checkpoint names the canonical block at its own epoch.
+        if checkpoint.0.epoch == finalized.epoch {
+            self.history.settle(finalized.root)?;
+            return Ok(self);
+        }
+        let state = self
+            .store
+            .block_state(&finalized.root)
+            .ok_or(ChainError::MissingState(finalized.root))?;
+        if checkpoint.check_state(state.beacon())? {
+            self.history.settle(checkpoint.0.root)?;
+            return Ok(self);
+        }
+        let covered = self
+            .database
+            .history_start()?
+            .is_some_and(|start| start.slot <= checkpoint.slot::<P>());
+        if covered
+            && let Some(root) = self
+                .database
+                .canonical_at_or_before(checkpoint.slot::<P>())?
+        {
+            self.history.settle(root)?;
+        }
+        Ok(self)
+    }
+
     /// Start of a slot, in milliseconds since the Unix epoch.
     #[must_use]
     pub const fn slot_start_ms(&self, slot: Slot) -> u64 {
@@ -716,6 +1060,11 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice refuses the vote.
     pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
         self.pool_vote(vote);
+        // Gossip rules verified the signature, and a vote of the current slot still testifies.
+        // So the slasher sees it even when the fork choice does not count it yet.
+        if let Some(slasher) = &mut self.slasher {
+            slasher.vote(&self.store, vote);
+        }
         self.store
             .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
@@ -775,6 +1124,9 @@ impl<P: Preset> Chain<P> {
             payload: claim,
         };
         self.pool_vote(&aggregate);
+        if let Some(slasher) = &self.slasher {
+            slasher.single(attester, data, *vote.signature());
+        }
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
@@ -821,6 +1173,34 @@ impl<P: Preset> Chain<P> {
         }
         self.store
             .on_attester_slashing(votes, Verification::Verify)?;
+        Ok(())
+    }
+
+    /// Takes evidence the slasher found, checks its signatures, and pools it.
+    ///
+    /// The slasher trusts the signers it was told of.
+    /// Votes resolved against another branch's committees would carry a signature that fails here.
+    /// So nothing unverifiable reaches a block this node proposes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the evidence does not verify, or slashes nobody at the head.
+    pub fn on_found_slashing(&mut self, slashing: Slashing) -> Result<(), ChainError> {
+        match slashing {
+            Slashing::Attester(votes) => {
+                self.store
+                    .on_attester_slashing(&votes, Verification::Verify)?;
+                let state = Self::head_beacon(&self.store, self.head)?;
+                info!(validators = ?votes.common_signers(), "slasher found an attester slashing");
+                self.pool.slashings_mut().insert_attester(state, votes)?;
+            }
+            Slashing::Proposer(slashing) => {
+                let state = Self::head_beacon(&self.store, self.head)?;
+                let proposer = slashing.signed_header_1.message.proposer_index;
+                info!(%proposer, "slasher found a proposer slashing");
+                self.pool.slashings_mut().insert_proposer(state, slashing)?;
+            }
+        }
         Ok(())
     }
 
@@ -1002,6 +1382,7 @@ impl<P: Preset> Chain<P> {
         .then(|| self.reorg_depth(previous, head));
 
         // Light clients are served from the new canonical chain, before finality settles it.
+        let served = self.served_light_client_updates();
         if head.root != previous.root {
             let canonical = self.canonical_since_finality(head.root);
             self.light_client.follow(canonical);
@@ -1024,11 +1405,14 @@ impl<P: Preset> Chain<P> {
                 to: head.root,
                 depth,
             });
+            self.announce_reorg(previous, head, depth);
         }
         if head.root != previous.root {
             info!(slot = %head.slot, root = %head.root, optimistic = head.optimistic, "new head");
         }
         self.announce(ChainEvent::Head(head));
+        self.announce_head(previous, head);
+        self.announce_light_client_updates(&served);
 
         if finalized {
             // Waiting items and refused blocks at or before finality can never matter again.
@@ -1037,6 +1421,7 @@ impl<P: Preset> Chain<P> {
             self.gossip.prune(finalized_slot);
             info!(epoch = %head.finalized.epoch, root = %head.finalized.root, "finalized");
             self.announce(ChainEvent::Finalized(head.finalized));
+            self.announce_finalized(head.finalized);
         }
         Ok(())
     }
@@ -1068,13 +1453,22 @@ impl<P: Preset> Chain<P> {
                     && !blocks.is_ancestor(*root, finalized.root)
             })
             .collect();
+        self.check_weak_subjectivity(finalized, &chain)?;
         let state = self
             .store
             .block_state(&finalized.root)
             .ok_or(ChainError::MissingState(finalized.root))?
             .beacon();
-        self.database
-            .finalize(previous, finalized, state, &chain, &orphans)?;
+        let archive = History::finality_records(&self.store, &self.database, previous, &chain)?;
+        self.database.finalize(&Finality {
+            previous,
+            checkpoint: finalized,
+            state,
+            chain: &chain,
+            orphans: &orphans,
+            snapshots: &archive.snapshots,
+            state_roots: &archive.state_roots,
+        })?;
         // What the finalized state carried out can never go in a block again.
         self.pool.on_finalized(state);
 
@@ -1099,9 +1493,55 @@ impl<P: Preset> Chain<P> {
             self.light_client.settle(*slot);
         }
         self.prune_light_client();
+        let previous_slot = previous.epoch.start_slot::<P>();
+        self.persist_light_client(previous_slot)?;
+
+        // Sidecars past their retention window are no longer served, so they leave the disk.
+        let pruned = self.database.prune_sidecars(self.store.current_epoch())?;
+        if pruned > 0 {
+            debug!(blocks = pruned, "pruned expired sidecars");
+        }
 
         // Only now that the disk agrees, drop the excluded blocks from memory.
         self.store.prune();
+        self.history.prune(&self.store);
+        Ok(())
+    }
+
+    /// Writes the settled light client data, from the period of a slot on.
+    fn persist_light_client(&self, from: Slot) -> Result<(), ChainError> {
+        self.database.put_light_client(
+            &self.light_client,
+            from.sync_committee_period::<P>(),
+            self.light_client_earliest(),
+        )
+    }
+
+    /// Refuses a finality that would bury another block than the trusted one at its epoch.
+    ///
+    /// The chain runs from the new finalized block back, newest first.
+    /// See the weak subjectivity sync procedure in the phase0 weak subjectivity guide.
+    fn check_weak_subjectivity(
+        &mut self,
+        finalized: Checkpoint,
+        chain: &[(Slot, Root)],
+    ) -> Result<(), ChainError> {
+        let Some(checkpoint) = self.history.weak_subjectivity() else {
+            return Ok(());
+        };
+        if finalized.epoch < checkpoint.0.epoch {
+            return Ok(());
+        }
+        let target = checkpoint.slot::<P>();
+        let canonical = match chain.iter().find(|(slot, _)| *slot <= target) {
+            Some((_, root)) => Some(*root),
+            None => self.database.canonical_at_or_before(target)?,
+        };
+        if let Some(root) = canonical {
+            self.history.settle(root).inspect_err(|error| {
+                error!(%error, "finality conflicts with the weak subjectivity checkpoint");
+            })?;
+        }
         Ok(())
     }
 
@@ -1123,6 +1563,12 @@ impl<P: Preset> Chain<P> {
     /// Bootstraps share their committee keys with the states, so each costs little memory.
     /// See the serving ranges of the Altair light client full node spec.
     fn prune_light_client(&mut self) {
+        let earliest = self.light_client_earliest();
+        self.light_client.prune(earliest);
+    }
+
+    /// The oldest slot whose light client data is served.
+    fn light_client_earliest(&self) -> Slot {
         let config = self.store.config();
         let window = config.min_epochs_for_block_requests();
         let earliest = self
@@ -1132,8 +1578,7 @@ impl<P: Preset> Chain<P> {
             .saturating_sub(window)
             .max(config.altair_fork_epoch.0);
         // Without Altair scheduled, the far future epoch saturates rather than overflows.
-        let earliest = Slot(earliest.saturating_mul(P::SLOTS_PER_EPOCH));
-        self.light_client.prune(earliest);
+        Slot(earliest.saturating_mul(P::SLOTS_PER_EPOCH))
     }
 
     /// Blocks on the old head's chain after the common ancestor with the new head.
@@ -1153,7 +1598,8 @@ impl<P: Preset> Chain<P> {
 
     /// Reads the head and its checkpoints from the store.
     fn read_head(store: &mut Store<P>) -> Result<Head, ChainError> {
-        let root = store.head()?.root;
+        let head = store.head()?;
+        let root = head.root;
         let node = *store
             .blocks()
             .get(&root)
@@ -1175,6 +1621,7 @@ impl<P: Preset> Chain<P> {
             root,
             slot: node.slot,
             optimistic: node.status != ExecutionStatus::Valid,
+            payload: head.payload,
             justified,
             finalized,
             execution: ExecutionHead {
@@ -1222,6 +1669,265 @@ impl<P: Preset> Chain<P> {
             .store_bytes_written
             .inc_by(written.saturating_sub(self.bytes_written));
         self.bytes_written = written;
+    }
+
+    /// Tells event stream clients of an imported block.
+    ///
+    /// From Gloas on, the block names its builder and the payload hash its bid commits to.
+    fn announce_block(&self, root: Root, slot: Slot) {
+        if !self.api_events.wants(EventTopic::Block) {
+            return;
+        }
+        let optimistic = self
+            .store
+            .blocks()
+            .get(&root)
+            .is_some_and(|node| node.status != ExecutionStatus::Valid);
+        let mut data = vec![
+            ("slot", Json::from(slot.0.to_string())),
+            ("block", Json::from(root.to_string())),
+            ("execution_optimistic", Json::from(optimistic)),
+        ];
+        if let Some(bid) = self.payload_bid(&root) {
+            data.push(("builder_index", Json::from(bid.builder_index.0.to_string())));
+            data.push(("block_hash", Json::from(bid.block_hash.to_string())));
+        }
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::Block,
+            Json::Object(data.into_iter().collect()),
+        ));
+    }
+
+    /// Tells event stream clients of an imported payload envelope, and that its data is available.
+    fn announce_envelope(&self, envelope: &SignedExecutionPayloadEnvelope<P>) {
+        let message = &envelope.message;
+        let root = message.beacon_block_root;
+        let slot = self
+            .store
+            .blocks()
+            .get(&root)
+            .map_or(Slot(0), |node| node.slot);
+        if self.api_events.wants(EventTopic::ExecutionPayload) {
+            let optimistic = self
+                .store
+                .blocks()
+                .get(&root)
+                .is_some_and(|node| node.status != ExecutionStatus::Valid);
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::ExecutionPayload,
+                Json::from([
+                    ("slot", Json::from(slot.0.to_string())),
+                    (
+                        "builder_index",
+                        Json::from(message.builder_index.0.to_string()),
+                    ),
+                    (
+                        "block_hash",
+                        Json::from(message.payload.block_hash.to_string()),
+                    ),
+                    ("block_root", Json::from(root.to_string())),
+                    ("execution_optimistic", Json::from(optimistic)),
+                ]),
+            ));
+        }
+        // The envelope only imports once its blobs are available, so both hold now.
+        if self.api_events.wants(EventTopic::ExecutionPayloadAvailable) {
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::ExecutionPayloadAvailable,
+                Json::from([
+                    ("slot", Json::from(slot.0.to_string())),
+                    ("block_root", Json::from(root.to_string())),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients of a new head, in both head formats.
+    ///
+    /// The dependent roots are the last block roots before the previous and current epochs.
+    /// Duties computed from those roots stay valid while the roots do.
+    /// See the head event of the beacon API.
+    fn announce_head(&self, previous: Head, head: Head) {
+        let first = self.api_events.wants(EventTopic::Head);
+        let second = self.api_events.wants(EventTopic::HeadV2);
+        if !first && !second {
+            return;
+        }
+        let Some(state) = self.store.block_state(&head.root) else {
+            return;
+        };
+        let beacon = state.beacon();
+        let epoch = head.slot.epoch::<P>();
+        let genesis = self
+            .canonical_root(Slot(0))
+            .ok()
+            .flatten()
+            .unwrap_or(Root::ZERO);
+        // The last slot before an epoch's start, or the genesis block when there is none.
+        let dependent = |epoch: Option<Epoch>| {
+            epoch
+                .and_then(|epoch| epoch.start_slot::<P>().0.checked_sub(1))
+                .and_then(|slot| beacon.block_root_at_slot(Slot(slot)))
+                .unwrap_or(genesis)
+        };
+        let previous_root = dependent(epoch.0.checked_sub(1).map(Epoch));
+        let current_root = dependent(Some(epoch));
+        let state_root = state.hash_tree_root();
+        let epoch_transition = previous.slot.epoch::<P>() != epoch;
+        if first {
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::Head,
+                Json::from([
+                    ("slot", Json::from(head.slot.0.to_string())),
+                    ("block", Json::from(head.root.to_string())),
+                    ("state", Json::from(state_root.to_string())),
+                    ("epoch_transition", Json::from(epoch_transition)),
+                    (
+                        "previous_duty_dependent_root",
+                        Json::from(previous_root.to_string()),
+                    ),
+                    (
+                        "current_duty_dependent_root",
+                        Json::from(current_root.to_string()),
+                    ),
+                    ("execution_optimistic", Json::from(head.optimistic)),
+                ]),
+            ));
+        }
+        if second {
+            let payload_status = match head.payload {
+                NodePayload::Empty => "empty",
+                NodePayload::Full => "full",
+                NodePayload::Pending => "pending",
+            };
+            let data = Json::from([
+                ("slot", Json::from(head.slot.0.to_string())),
+                ("block", Json::from(head.root.to_string())),
+                ("state", Json::from(state_root.to_string())),
+                ("payload_status", Json::from(payload_status)),
+                ("epoch_transition", Json::from(epoch_transition)),
+                (
+                    "current_epoch_dependent_root",
+                    Json::from(previous_root.to_string()),
+                ),
+                (
+                    "next_epoch_dependent_root",
+                    Json::from(current_root.to_string()),
+                ),
+                ("execution_optimistic", Json::from(head.optimistic)),
+            ]);
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::HeadV2,
+                Json::from([
+                    ("version", Json::from(beacon.fork_name().to_string())),
+                    ("data", data),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients the head left the previous head's chain.
+    fn announce_reorg(&self, previous: Head, head: Head, depth: u64) {
+        if !self.api_events.wants(EventTopic::ChainReorg) {
+            return;
+        }
+        let state_root = |root: &Root| {
+            self.store
+                .block_state(root)
+                .map_or(Root::ZERO, State::hash_tree_root)
+        };
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::ChainReorg,
+            Json::from([
+                ("slot", Json::from(head.slot.0.to_string())),
+                ("depth", Json::from(depth.to_string())),
+                ("old_head_block", Json::from(previous.root.to_string())),
+                ("new_head_block", Json::from(head.root.to_string())),
+                (
+                    "old_head_state",
+                    Json::from(state_root(&previous.root).to_string()),
+                ),
+                (
+                    "new_head_state",
+                    Json::from(state_root(&head.root).to_string()),
+                ),
+                ("epoch", Json::from(head.slot.epoch::<P>().0.to_string())),
+                ("execution_optimistic", Json::from(head.optimistic)),
+            ]),
+        ));
+    }
+
+    /// Tells event stream clients of a new finalized checkpoint.
+    fn announce_finalized(&self, finalized: Checkpoint) {
+        if !self.api_events.wants(EventTopic::FinalizedCheckpoint) {
+            return;
+        }
+        let (state_root, optimistic) = match self.store.blocks().get(&finalized.root) {
+            Some(node) => (
+                self.store
+                    .block_state(&finalized.root)
+                    .map_or(Root::ZERO, State::hash_tree_root),
+                node.status != ExecutionStatus::Valid,
+            ),
+            None => (Root::ZERO, false),
+        };
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::FinalizedCheckpoint,
+            Json::from([
+                ("block", Json::from(finalized.root.to_string())),
+                ("state", Json::from(state_root.to_string())),
+                ("epoch", Json::from(finalized.epoch.0.to_string())),
+                ("execution_optimistic", Json::from(optimistic)),
+            ]),
+        ));
+    }
+
+    /// The light client updates served now, to tell which ones a head change replaces.
+    fn served_light_client_updates(
+        &self,
+    ) -> (
+        Option<LightClientFinalityUpdate<P>>,
+        Option<LightClientOptimisticUpdate<P>>,
+    ) {
+        (
+            self.light_client.latest_finality_update().cloned(),
+            self.light_client.latest_optimistic_update().cloned(),
+        )
+    }
+
+    /// Tells event stream clients of light client updates that replaced the served ones.
+    fn announce_light_client_updates(
+        &self,
+        served: &(
+            Option<LightClientFinalityUpdate<P>>,
+            Option<LightClientOptimisticUpdate<P>>,
+        ),
+    ) {
+        let config = self.store.config();
+        if let Some(update) = self.light_client.latest_finality_update()
+            && served.0.as_ref() != Some(update)
+            && self.api_events.wants(EventTopic::LightClientFinalityUpdate)
+        {
+            let fork = config.fork_at(update.context_slot().epoch::<P>());
+            self.api_events.publish(ApiEvent::versioned(
+                EventTopic::LightClientFinalityUpdate,
+                fork,
+                update.to_json(),
+            ));
+        }
+        if let Some(update) = self.light_client.latest_optimistic_update()
+            && served.1.as_ref() != Some(update)
+            && self
+                .api_events
+                .wants(EventTopic::LightClientOptimisticUpdate)
+        {
+            let fork = config.fork_at(update.context_slot().epoch::<P>());
+            self.api_events.publish(ApiEvent::versioned(
+                EventTopic::LightClientOptimisticUpdate,
+                fork,
+                update.to_json(),
+            ));
+        }
     }
 
     /// Sends an event to every subscriber.
