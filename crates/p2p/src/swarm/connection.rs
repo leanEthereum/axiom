@@ -13,11 +13,12 @@
 //!
 //! This node opens one gossip stream and one identify stream per connection, and one stream per request.
 
-use std::{collections::BTreeMap, mem, sync::Arc};
+use std::{collections::BTreeMap, io, mem, sync::Arc};
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+    spawn,
     sync::mpsc,
 };
 
@@ -215,7 +216,7 @@ pub(super) async fn run(
 
     // The reader task turns socket bytes into plaintext for this task.
     let (reader, writer) = tcp.into_split();
-    let reader_task = tokio::spawn(read_loop(reader, secure.opener, input_tx.clone()));
+    let reader_task = spawn(read_loop(reader, secure.opener, input_tx.clone()));
     if !yamux_remainder.is_empty() {
         let _ = input_tx.send(ConnectionInput::Bytes(yamux_remainder));
     }
@@ -304,7 +305,7 @@ impl Connection {
     }
 
     /// Writes everything the session produced, sealed.
-    async fn flush(&mut self) -> std::io::Result<()> {
+    async fn flush(&mut self) -> io::Result<()> {
         let plaintext = self.session.take_output();
         if plaintext.is_empty() {
             return Ok(());
@@ -312,7 +313,7 @@ impl Connection {
         let mut wire = Vec::with_capacity(plaintext.len() + 64);
         self.sealer
             .seal(&plaintext, &mut wire)
-            .map_err(std::io::Error::other)?;
+            .map_err(io::Error::other)?;
         self.writer.write_all(&wire).await
     }
 

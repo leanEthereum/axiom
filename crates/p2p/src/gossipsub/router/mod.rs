@@ -4,6 +4,7 @@
 //!
 //! The owner reports connections, feeds RPCs, and calls the heartbeat on a timer.
 //! The router answers with RPCs to send and events for the application.
+//!
 //! Time is a duration since an arbitrary origin, passed in by the caller.
 //! Randomness comes from a seeded generator, so a simulation replays exactly.
 //!

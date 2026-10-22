@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, iter::from_fn, time::Duration};
 
 use super::*;
 use crate::{
@@ -142,7 +142,7 @@ fn duplicates_are_suppressed() {
     router.handle_rpc(&peer(1), message_rpc(b"x"), Duration::ZERO);
     router.handle_rpc(&peer(2), message_rpc(b"x"), Duration::ZERO);
     // One event for two deliveries of the same content.
-    let events: Vec<_> = std::iter::from_fn(|| router.poll_event()).collect();
+    let events: Vec<_> = from_fn(|| router.poll_event()).collect();
     assert_eq!(events.len(), 1);
 }
 

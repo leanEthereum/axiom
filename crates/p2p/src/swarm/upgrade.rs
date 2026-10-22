@@ -8,6 +8,8 @@
 //!
 //! The state machines do the protocol work; this module only moves their bytes.
 
+use std::mem;
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -118,7 +120,7 @@ async fn negotiate_secure(
 ) -> Result<Vec<u8>, NetworkError> {
     let mut buffer = [0u8; READ_CHUNK];
     // Plaintext that arrived with the last handshake message is the first input.
-    let mut input = std::mem::take(&mut session.early_plaintext);
+    let mut input = mem::take(&mut session.early_plaintext);
     let mut dialer = match role {
         Role::Initiator => Some(Dialer::new([yamux::PROTOCOL])?),
         Role::Responder => None,
