@@ -164,10 +164,10 @@ impl Packet {
         // Phase 3: a challenge carries no message; other packets carry at least a tag.
         match auth {
             AuthData::WhoAreYou { .. } if !message.is_empty() => {
-                return Err(PacketError::UnexpectedMessage);
+                return Err(PacketError::UnexpectedMessage { len: message.len() });
             }
             AuthData::Message { .. } | AuthData::Handshake { .. } if message.len() < TAG_LEN => {
-                return Err(PacketError::MessageTooShort);
+                return Err(PacketError::MessageTooShort { len: message.len() });
             }
             _ => {}
         }
@@ -240,7 +240,7 @@ mod tests {
         bytes.push(0);
         assert_eq!(
             Packet::decode(&dest, &bytes),
-            Err(PacketError::UnexpectedMessage)
+            Err(PacketError::UnexpectedMessage { len: 1 })
         );
         // A message packet whose message is 15 bytes, one short of a tag.
         let packet = Packet {
@@ -255,7 +255,7 @@ mod tests {
         };
         assert_eq!(
             Packet::decode(&dest, &packet.encode(&dest)),
-            Err(PacketError::MessageTooShort)
+            Err(PacketError::MessageTooShort { len: 15 })
         );
     }
 

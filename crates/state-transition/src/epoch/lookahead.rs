@@ -87,15 +87,14 @@ impl Lookahead {
         let keys = indices
             .iter()
             .map(|index| state.public_key(*index))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| StateError::InvalidSyncCommittee)?;
-        let aggregate =
-            PublicKey::aggregate(&keys).map_err(|_| StateError::InvalidSyncCommittee)?;
+            .collect::<Result<Vec<_>, _>>()?;
+        let aggregate = PublicKey::aggregate(&keys).map_err(StateError::InvalidSyncCommittee)?;
 
         Ok(SyncCommittee {
-            pubkeys: pubkeys
-                .try_into()
-                .map_err(|_| StateError::InvalidSyncCommittee)?,
+            pubkeys: pubkeys.try_into().map_err(|source| StateError::Capacity {
+                list: "next sync committee",
+                source,
+            })?,
             aggregate_pubkey: BlsPubkey(aggregate.to_bytes()),
         })
     }

@@ -37,11 +37,11 @@ impl<P: Preset> Operation<P> for SyncAggregate<P> {
             .copied()
             .collect::<Vec<_>>();
         let mut indices = Vec::with_capacity(members.len());
-        for pubkey in &members {
+        for (seat, pubkey) in members.iter().enumerate() {
             let index = processor
                 .state
                 .validator_index(pubkey)
-                .ok_or(BlockError::MalformedSignature)?;
+                .ok_or(StateError::UnknownSyncCommitteeMember { seat })?;
             indices.push(index);
         }
 
@@ -111,12 +111,16 @@ impl<P: Preset> SyncCommitteeSignature<'_, P> {
         let participants = bits.count_ones() as u64;
 
         if participants == 0 {
-            let signature =
-                Signature::from_bytes(&signature.0).map_err(|_| BlockError::MalformedSignature)?;
+            let signature = Signature::from_bytes(&signature.0).map_err(|source| {
+                BlockError::MalformedSignature {
+                    root: signing_root,
+                    source,
+                }
+            })?;
             return if signature.is_infinity() {
                 Ok(())
             } else {
-                Err(BlockError::InvalidSignature)
+                Err(BlockError::InvalidSignature { signatures: 1 })
             };
         }
 
@@ -136,13 +140,13 @@ impl<P: Preset> SyncCommitteeSignature<'_, P> {
             if participants > P::SYNC_COMMITTEE_SIZE / 2 {
                 let total = Self::committee_key(processor)?;
                 let absent =
-                    PublicKey::aggregate(&absentees).map_err(|_| BlockError::MalformedSignature)?;
+                    PublicKey::aggregate(&absentees).map_err(BlockError::InvalidAggregateKey)?;
                 // An aggregate that cancels to infinity is not a valid key, so the signature fails.
                 total
                     .subtract(&absent)
-                    .map_err(|_| BlockError::InvalidSignature)?
+                    .map_err(BlockError::InvalidAggregateKey)?
             } else {
-                PublicKey::aggregate(&signers).map_err(|_| BlockError::InvalidSignature)?
+                PublicKey::aggregate(&signers).map_err(BlockError::InvalidAggregateKey)?
             }
         };
         processor.verify_root(key, signing_root, signature)
@@ -155,6 +159,7 @@ impl<P: Preset> SyncCommitteeSignature<'_, P> {
             .beacon
             .current_sync_committee
             .aggregate_pubkey;
-        PublicKey::from_bytes(&stored.0).map_err(|_| BlockError::MalformedSignature)
+        PublicKey::from_bytes(&stored.0)
+            .map_err(|source| StateError::MalformedSyncCommitteeKey(source).into())
     }
 }

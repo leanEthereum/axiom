@@ -37,21 +37,34 @@ impl<P: Preset, E: ExecutionEngine<P>> Operation<P> for PayloadExecution<'_, P, 
         let payload = &body.execution_payload;
         let epoch = state.current_epoch();
 
-        if payload.parent_hash != state.latest_execution_payload_header.block_hash {
-            return Err(BlockError::PayloadParentMismatch);
+        let latest_hash = state.latest_execution_payload_header.block_hash;
+        if payload.parent_hash != latest_hash {
+            return Err(BlockError::PayloadParentMismatch {
+                claimed: payload.parent_hash,
+                expected: latest_hash,
+            });
         }
-        if payload.prev_randao != state.randao_mix(epoch) {
-            return Err(BlockError::PayloadRandaoMismatch);
+        let randao_mix = state.randao_mix(epoch);
+        if payload.prev_randao != randao_mix {
+            return Err(BlockError::PayloadRandaoMismatch {
+                claimed: payload.prev_randao,
+                expected: randao_mix,
+            });
         }
         // Timing: genesis time plus the slot's whole milliseconds, truncated to seconds.
         let slot_ms = state
             .slot
             .0
             .checked_mul(processor.config.slot_duration_ms)
-            .ok_or(StateError::Overflow)?;
+            .ok_or(StateError::Overflow {
+                quantity: "slot time in milliseconds",
+            })?;
         let expected_timestamp = state.genesis_time + slot_ms / 1000;
         if payload.timestamp != expected_timestamp {
-            return Err(BlockError::PayloadTimestampMismatch);
+            return Err(BlockError::PayloadTimestampMismatch {
+                claimed: payload.timestamp,
+                expected: expected_timestamp,
+            });
         }
         let limit = processor.config.blob_parameters(epoch).max_blobs_per_block;
         if body.blob_kzg_commitments.len() as u64 > limit {
@@ -68,7 +81,7 @@ impl<P: Preset, E: ExecutionEngine<P>> Operation<P> for PayloadExecution<'_, P, 
             execution_requests: body.execution_requests.clone(),
         };
         if !self.engine.verify_and_notify_new_payload(&request) {
-            return Err(BlockError::PayloadInvalid);
+            return Err(BlockError::PayloadInvalid(payload.block_hash));
         }
 
         processor.state.beacon.latest_execution_payload_header = ExecutionPayloadHeader {

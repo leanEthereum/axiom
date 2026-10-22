@@ -56,10 +56,16 @@ impl<P: Preset> LightClientStore<P> {
         bootstrap: &LightClientBootstrap<P>,
     ) -> Result<Self, LightClientError> {
         if !bootstrap.header.is_valid(config) {
-            return Err(LightClientError::InvalidHeader);
+            return Err(LightClientError::InvalidHeader(
+                bootstrap.header.beacon.slot,
+            ));
         }
-        if bootstrap.header.beacon.hash_tree_root() != trusted_block_root {
-            return Err(LightClientError::UntrustedBootstrap);
+        let header_root = bootstrap.header.beacon.hash_tree_root();
+        if header_root != trusted_block_root {
+            return Err(LightClientError::UntrustedBootstrap {
+                header: header_root,
+                trusted: trusted_block_root,
+            });
         }
         Branch::new(
             &bootstrap.current_sync_committee_branch,
@@ -225,22 +231,29 @@ impl<P: Preset> LightClientStore<P> {
         current_slot: Slot,
         genesis_validators_root: Root,
     ) -> Result<(), LightClientError> {
-        let aggregate = &update.sync_aggregate;
-        if (aggregate.sync_committee_bits.count_ones() as u64) < P::MIN_SYNC_COMMITTEE_PARTICIPANTS
-        {
-            return Err(LightClientError::InsufficientParticipants);
+        let participants = update.sync_aggregate.sync_committee_bits.count_ones() as u64;
+        if participants < P::MIN_SYNC_COMMITTEE_PARTICIPANTS {
+            return Err(LightClientError::InsufficientParticipants {
+                participants,
+                minimum: P::MIN_SYNC_COMMITTEE_PARTICIPANTS,
+            });
         }
 
-        if !update.attested_header.is_valid(config) {
-            return Err(LightClientError::InvalidHeader);
-        }
         let attested_slot = update.attested_header.beacon.slot;
+        if !update.attested_header.is_valid(config) {
+            return Err(LightClientError::InvalidHeader(attested_slot));
+        }
         let finalized_slot = update.finalized_header.beacon.slot;
         if !(current_slot >= update.signature_slot
             && update.signature_slot > attested_slot
             && attested_slot >= finalized_slot)
         {
-            return Err(LightClientError::InvalidSlots);
+            return Err(LightClientError::InvalidSlots {
+                current: current_slot,
+                signature: update.signature_slot,
+                attested: attested_slot,
+                finalized: finalized_slot,
+            });
         }
 
         let store_period = self
@@ -256,7 +269,10 @@ impl<P: Preset> LightClientStore<P> {
             signature_period == store_period
         };
         if !period_ok {
-            return Err(LightClientError::SkippedPeriod);
+            return Err(LightClientError::SkippedPeriod {
+                period: signature_period,
+                store_period,
+            });
         }
 
         // The update must move the finalized header, or deliver the missing next committee.
@@ -264,26 +280,29 @@ impl<P: Preset> LightClientStore<P> {
         let has_next_committee =
             !next_known && update.is_sync_committee_update() && attested_period == store_period;
         if attested_slot <= self.finalized_header.beacon.slot && !has_next_committee {
-            return Err(LightClientError::Irrelevant);
+            return Err(LightClientError::Irrelevant {
+                attested: attested_slot,
+                finalized: self.finalized_header.beacon.slot,
+            });
         }
 
         if update.is_finality_update() {
             // The genesis checkpoint's root is zero, and its header stays empty.
             let finalized_root = if finalized_slot == Slot::GENESIS {
                 if update.finalized_header != LightClientHeader::default() {
-                    return Err(LightClientError::UnexpectedData);
+                    return Err(LightClientError::UnexpectedData("finalized header"));
                 }
                 Root::ZERO
             } else {
                 if !update.finalized_header.is_valid(config) {
-                    return Err(LightClientError::InvalidHeader);
+                    return Err(LightClientError::InvalidHeader(finalized_slot));
                 }
                 update.finalized_header.beacon.hash_tree_root()
             };
             Branch::new(&update.finality_branch, FINALIZED_ROOT_GINDEX)
                 .proves(finalized_root, update.attested_header.beacon.state_root)?;
         } else if update.finalized_header != LightClientHeader::default() {
-            return Err(LightClientError::UnexpectedData);
+            return Err(LightClientError::UnexpectedData("finalized header"));
         }
 
         if update.is_sync_committee_update() {
@@ -291,7 +310,7 @@ impl<P: Preset> LightClientStore<P> {
                 && next_known
                 && update.next_sync_committee != self.next_sync_committee
             {
-                return Err(LightClientError::ConflictingCommittee);
+                return Err(LightClientError::ConflictingCommittee(attested_period));
             }
             Branch::new(
                 &update.next_sync_committee_branch,
@@ -302,7 +321,7 @@ impl<P: Preset> LightClientStore<P> {
                 update.attested_header.beacon.state_root,
             )?;
         } else if update.next_sync_committee != SyncCommittee::default() {
-            return Err(LightClientError::UnexpectedData);
+            return Err(LightClientError::UnexpectedData("next sync committee"));
         }
 
         self.verify_signature(config, update, genesis_validators_root)
@@ -324,7 +343,10 @@ impl<P: Preset> LightClientStore<P> {
             .sync_committee_period::<P>();
         if !self.is_next_sync_committee_known() {
             if finalized_period != store_period {
-                return Err(LightClientError::SkippedPeriod);
+                return Err(LightClientError::SkippedPeriod {
+                    period: finalized_period,
+                    store_period,
+                });
             }
             self.next_sync_committee = update.next_sync_committee.clone();
         } else if finalized_period == store_period + 1 {
@@ -380,10 +402,13 @@ impl<P: Preset> LightClientStore<P> {
             .pubkeys
             .iter()
             .zip(update.sync_aggregate.sync_committee_bits.iter())
-            .filter(|(_, bit)| *bit)
-            .map(|(pubkey, _)| PublicKey::from_bytes(&pubkey.0))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| LightClientError::InvalidSignature)?;
+            .enumerate()
+            .filter(|(_, (_, bit))| *bit)
+            .map(|(seat, (pubkey, _))| {
+                PublicKey::from_bytes(&pubkey.0)
+                    .map_err(|source| LightClientError::MalformedCommitteeKey { seat, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let signers: Vec<&PublicKey> = signers.iter().collect();
 
         // The committee signs in the fork of the slot before the signature slot.
@@ -392,11 +417,14 @@ impl<P: Preset> LightClientStore<P> {
         let domain = Domain::compute(DOMAIN_SYNC_COMMITTEE, fork_version, genesis_validators_root);
         let signing_root = SigningData::signing_root(&update.attested_header.beacon, domain);
         let signature = Signature::from_bytes(&update.sync_aggregate.sync_committee_signature.0)
-            .map_err(|_| LightClientError::InvalidSignature)?;
+            .map_err(LightClientError::MalformedSignature)?;
         if signature.fast_aggregate_verify(&signers, &signing_root.0) {
             Ok(())
         } else {
-            Err(LightClientError::InvalidSignature)
+            Err(LightClientError::InvalidSignature {
+                signature_slot: update.signature_slot,
+                participants: signers.len(),
+            })
         }
     }
 }

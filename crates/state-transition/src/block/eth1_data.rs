@@ -16,7 +16,10 @@ impl<P: Preset> Operation<P> for Eth1Data {
         state
             .eth1_data_votes
             .push(self.clone())
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "eth1 data votes",
+                source,
+            })?;
         let votes = state
             .eth1_data_votes
             .iter()

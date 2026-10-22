@@ -86,9 +86,13 @@ impl<P: Preset> State<P> {
         for offset in 0..=P::MIN_SEED_LOOKAHEAD {
             lookahead.extend(WeightedSampler::proposers(&state.beacon, epoch + offset)?);
         }
-        state.beacon.proposer_lookahead = lookahead
-            .try_into()
-            .map_err(|_| StateError::InvalidSyncCommittee)?;
+        state.beacon.proposer_lookahead =
+            lookahead
+                .try_into()
+                .map_err(|source| StateError::Capacity {
+                    list: "proposer lookahead",
+                    source,
+                })?;
         Ok(state)
     }
 
@@ -183,17 +187,22 @@ impl<P: Preset> State<P> {
         let block = &signed_block.message;
         if block.slot > self.beacon.slot {
             self.process_slots(config, block.slot)
-                .map_err(TransitionError::Slots)?;
+                .map_err(|source| TransitionError::Slots {
+                    target: block.slot,
+                    source,
+                })?;
         }
 
+        let invalid = |source| TransitionError::Block {
+            slot: block.slot,
+            source,
+        };
         let mut processor = BlockProcessor::new(self, config, verification);
         processor
             .verify_block_signature(signed_block)
-            .map_err(TransitionError::Block)?;
-        processor
-            .process_block(block, engine)
-            .map_err(TransitionError::Block)?;
-        processor.finish().map_err(TransitionError::Block)?;
+            .map_err(invalid)?;
+        processor.process_block(block, engine).map_err(invalid)?;
+        processor.finish().map_err(invalid)?;
 
         let computed = self.beacon.hash_tree_root();
         if block.state_root != computed {
@@ -262,7 +271,11 @@ impl<P: Preset> State<P> {
         committees
             .committee(slot, index)
             .map(<[ValidatorIndex]>::to_vec)
-            .ok_or(BlockError::UnknownCommittee(index))
+            .ok_or_else(|| BlockError::UnknownCommittee {
+                slot,
+                index,
+                committees_per_slot: committees.committees_per_slot(),
+            })
     }
 
     /// Decompressed key of a validator.
@@ -270,16 +283,18 @@ impl<P: Preset> State<P> {
     /// # Errors
     ///
     /// Fails when the validator does not exist or its key does not decompress.
-    pub fn public_key(&mut self, index: ValidatorIndex) -> Result<PublicKey, BlockError> {
-        let validator = self
-            .beacon
-            .validators
+    pub fn public_key(&mut self, index: ValidatorIndex) -> Result<PublicKey, StateError> {
+        let validators = &self.beacon.validators;
+        let validator = validators
             .get(index.as_usize())
-            .ok_or(StateError::UnknownValidator(index))?;
-        self.pubkeys.sync(&self.beacon.validators);
+            .ok_or(StateError::UnknownValidator {
+                index,
+                registry_size: validators.len(),
+            })?;
+        self.pubkeys.sync(validators);
         self.pubkeys
             .public_key(index, &validator.pubkey)
-            .ok_or(BlockError::MalformedSignature)
+            .ok_or(StateError::MalformedPublicKey(index))
     }
 
     /// Index of the validator with a key.
@@ -298,12 +313,18 @@ impl<P: Preset> State<P> {
         index: ValidatorIndex,
         delta: Gwei,
     ) -> Result<(), StateError> {
-        let balance = self
-            .beacon
-            .balances
-            .get_mut(index.as_usize())
-            .ok_or(StateError::UnknownValidator(index))?;
-        *balance = balance.checked_add(delta).ok_or(StateError::Overflow)?;
+        let registry_size = self.beacon.balances.len();
+        let balance =
+            self.beacon
+                .balances
+                .get_mut(index.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size,
+                })?;
+        *balance = balance.checked_add(delta).ok_or(StateError::Overflow {
+            quantity: "balance",
+        })?;
         Ok(())
     }
 
@@ -317,11 +338,15 @@ impl<P: Preset> State<P> {
         index: ValidatorIndex,
         delta: Gwei,
     ) -> Result<(), StateError> {
-        let balance = self
-            .beacon
-            .balances
-            .get_mut(index.as_usize())
-            .ok_or(StateError::UnknownValidator(index))?;
+        let registry_size = self.beacon.balances.len();
+        let balance =
+            self.beacon
+                .balances
+                .get_mut(index.as_usize())
+                .ok_or(StateError::UnknownValidator {
+                    index,
+                    registry_size,
+                })?;
         *balance = balance.saturating_sub(delta);
         Ok(())
     }

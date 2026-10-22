@@ -102,8 +102,12 @@ impl Service {
         seed: [u8; 32],
     ) -> Result<Self, ServiceError> {
         // The record must name the key the handshakes prove.
-        if local_enr.node_id() != NodeId::from_public_key(&key.public_key()) {
-            return Err(ServiceError::KeyMismatch);
+        let local = NodeId::from_public_key(&key.public_key());
+        if local_enr.node_id() != local {
+            return Err(ServiceError::KeyMismatch {
+                record: local_enr.node_id(),
+                local,
+            });
         }
         let mut rng = Csprng::from_seed(seed);
         let local_id = local_enr.node_id();
@@ -144,7 +148,10 @@ impl Service {
     /// Fails when the record belongs to another node.
     pub fn set_local_enr(&mut self, enr: Enr) -> Result<(), ServiceError> {
         if enr.node_id() != self.handler.local_id() {
-            return Err(ServiceError::KeyMismatch);
+            return Err(ServiceError::KeyMismatch {
+                record: enr.node_id(),
+                local: self.handler.local_id(),
+            });
         }
         self.handler.set_local_enr(enr);
         Ok(())
@@ -828,7 +835,10 @@ mod tests {
         // Node 2's record with node 1's key.
         assert_eq!(
             Service::new(key(1), record(2, 1), Config::default(), [0; 32]).map(|_| ()),
-            Err(ServiceError::KeyMismatch)
+            Err(ServiceError::KeyMismatch {
+                record: record(2, 1).node_id(),
+                local: NodeId::from_public_key(&key(1).public_key()),
+            })
         );
     }
 

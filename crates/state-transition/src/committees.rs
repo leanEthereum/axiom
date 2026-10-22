@@ -108,23 +108,30 @@ impl EpochCommittees {
         &self,
         attestation: &Attestation<P>,
     ) -> Result<BTreeSet<ValidatorIndex>, BlockError> {
-        let mut attesters = BTreeSet::new();
-        let mut offset = 0;
-        for index in attestation.committee_indices() {
-            let committee = self
-                .committee(attestation.data.slot, index)
-                .ok_or(BlockError::UnknownCommittee(index))?;
-            for (position, validator) in committee.iter().enumerate() {
-                let bit = attestation
-                    .aggregation_bits
-                    .get(offset + position)
-                    .ok_or(BlockError::AggregationBitsLengthMismatch)?;
-                if bit {
-                    attesters.insert(*validator);
-                }
-            }
-            offset += committee.len();
+        let slot = attestation.data.slot;
+        let committees = attestation
+            .committee_indices()
+            .map(|index| {
+                self.committee(slot, index)
+                    .ok_or(BlockError::UnknownCommittee {
+                        slot,
+                        index,
+                        committees_per_slot: self.committees_per_slot,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Bits past the committees are ignored here, as in the spec; only a short bitfield fails.
+        let expected = committees.iter().map(|committee| committee.len()).sum();
+        let actual = attestation.aggregation_bits.len();
+        if actual < expected {
+            return Err(BlockError::AggregationBitsLengthMismatch { expected, actual });
         }
+        let attesters = committees
+            .into_iter()
+            .flatten()
+            .zip(attestation.aggregation_bits.iter())
+            .filter_map(|(validator, bit)| bit.then_some(*validator))
+            .collect();
         Ok(attesters)
     }
 }

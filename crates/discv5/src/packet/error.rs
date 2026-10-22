@@ -1,5 +1,6 @@
 //! Reasons a datagram is not a discv5 packet for this node.
 
+use axiom_crypto::secp256k1::Secp256k1Error;
 use thiserror::Error;
 
 use crate::enr::EnrError;
@@ -46,12 +47,18 @@ pub enum PacketError {
     },
 
     /// A WHOAREYOU packet carries a message.
-    #[error("WHOAREYOU packet carries a message")]
-    UnexpectedMessage,
+    #[error("WHOAREYOU packet carries a message of {len} bytes")]
+    UnexpectedMessage {
+        /// Bytes after the header.
+        len: usize,
+    },
 
     /// A message packet's message is shorter than an authentication tag.
-    #[error("message is shorter than its tag")]
-    MessageTooShort,
+    #[error("message of {len} bytes is shorter than its 16-byte tag")]
+    MessageTooShort {
+        /// Bytes after the header.
+        len: usize,
+    },
 
     /// A handshake names a signature size other than 64.
     #[error("signature size {0} is not 64")]
@@ -62,8 +69,8 @@ pub enum PacketError {
     EphemeralKeySize(u8),
 
     /// A handshake's ephemeral key is not a curve point.
-    #[error("ephemeral key is not on the curve")]
-    EphemeralKey,
+    #[error("ephemeral key: {0}")]
+    EphemeralKey(#[source] Secp256k1Error),
 
     /// A handshake carries an invalid node record.
     #[error("handshake record: {0}")]

@@ -88,7 +88,10 @@ impl<P: Preset> Operation<P> for ConsolidationRequest {
                 source_index,
                 target_index,
             })
-            .map_err(|_| StateError::ListFull)?;
+            .map_err(|source| StateError::Capacity {
+                list: "pending consolidations",
+                source,
+            })?;
         Ok(())
     }
 }

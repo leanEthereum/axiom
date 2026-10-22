@@ -14,6 +14,7 @@
 //!
 //! See the `p2p-interface.md` specs from phase0 to Fulu, which define each rule as a function.
 
+mod detail;
 mod error;
 mod seen;
 mod signers;
@@ -21,6 +22,7 @@ mod signing_claim;
 mod validator;
 mod view;
 
+pub use detail::Detail;
 pub use error::GossipError;
 pub use seen::Seen;
 pub use validator::GossipValidator;

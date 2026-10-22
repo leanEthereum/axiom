@@ -31,35 +31,54 @@ impl<P: Preset> Operation<P> for Attestation<P> {
         // Phase 1: timing.
         let target_epoch = data.target.epoch;
         if target_epoch != state.previous_epoch() && target_epoch != current_epoch {
-            return Err(BlockError::AttestationTargetEpochOutOfRange(target_epoch));
+            return Err(BlockError::AttestationTargetEpochOutOfRange {
+                target: target_epoch,
+                current: current_epoch,
+            });
         }
         if target_epoch != data.slot.epoch::<P>() {
-            return Err(BlockError::AttestationTargetSlotMismatch);
+            return Err(BlockError::AttestationTargetSlotMismatch {
+                target: target_epoch,
+                slot: data.slot,
+            });
         }
         let included_after = data.slot.checked_add(P::MIN_ATTESTATION_INCLUSION_DELAY);
         if included_after.is_none_or(|earliest| earliest > state.slot) {
-            return Err(BlockError::AttestationTooEarly);
+            return Err(BlockError::AttestationTooEarly {
+                slot: data.slot,
+                state_slot: state.slot,
+            });
         }
 
         // Phase 2: committees.
         if data.index.0 != 0 {
-            return Err(BlockError::AttestationIndexNotZero);
+            return Err(BlockError::AttestationIndexNotZero(data.index));
         }
         let committees = processor.state.committees(target_epoch)?;
         let mut offset = 0;
         for index in self.committee_indices() {
-            let committee = committees
-                .committee(data.slot, index)
-                .ok_or(BlockError::UnknownCommittee(index))?;
+            let committee = committees.committee(data.slot, index).ok_or_else(|| {
+                BlockError::UnknownCommittee {
+                    slot: data.slot,
+                    index,
+                    committees_per_slot: committees.committees_per_slot(),
+                }
+            })?;
             let any_participant = (offset..offset + committee.len())
                 .any(|bit| self.aggregation_bits.get(bit) == Some(true));
             if !any_participant {
-                return Err(BlockError::EmptyCommittee(index));
+                return Err(BlockError::EmptyCommittee {
+                    slot: data.slot,
+                    index,
+                });
             }
             offset += committee.len();
         }
         if self.aggregation_bits.len() != offset {
-            return Err(BlockError::AggregationBitsLengthMismatch);
+            return Err(BlockError::AggregationBitsLengthMismatch {
+                expected: offset,
+                actual: self.aggregation_bits.len(),
+            });
         }
 
         // Phase 3: flags earned, and the signature.
@@ -71,7 +90,10 @@ impl<P: Preset> Operation<P> for Attestation<P> {
                 .copied()
                 .collect::<Vec<_>>()
                 .try_into()
-                .map_err(|_| BlockError::AggregationBitsLengthMismatch)?,
+                .map_err(|source| StateError::Capacity {
+                    list: "attesting indices",
+                    source,
+                })?,
             data: data.clone(),
             signature: self.signature,
         })?;
@@ -154,7 +176,10 @@ impl<'a, P: Preset> Inclusion<'a, P> {
             &state.previous_justified_checkpoint
         };
         if data.source != *justified {
-            return Err(BlockError::AttestationSourceMismatch);
+            return Err(BlockError::AttestationSourceMismatch {
+                claimed: data.source,
+                justified: *justified,
+            });
         }
 
         let target_root =

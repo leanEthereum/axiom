@@ -80,9 +80,12 @@ impl DepositQueue {
             } else if exited {
                 postponed.push(deposit.clone());
             } else {
-                let after = processed_amount
-                    .checked_add(deposit.amount)
-                    .ok_or(StateError::Overflow)?;
+                let after =
+                    processed_amount
+                        .checked_add(deposit.amount)
+                        .ok_or(StateError::Overflow {
+                            quantity: "processed deposit amount",
+                        })?;
                 churn_limit_reached = after > self.available;
                 if churn_limit_reached {
                     break;
@@ -99,7 +102,10 @@ impl DepositQueue {
             state
                 .pending_deposits
                 .push(deposit)
-                .map_err(|_| StateError::ListFull)?;
+                .map_err(|source| StateError::Capacity {
+                    list: "pending deposits",
+                    source,
+                })?;
         }
         state.deposit_balance_to_consume = if churn_limit_reached {
             self.available - processed_amount

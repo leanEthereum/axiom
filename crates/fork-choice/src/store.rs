@@ -76,8 +76,12 @@ impl<P: Preset> Store<P> {
         anchor_state: BeaconState<P>,
         anchor_block: &BeaconBlock<P>,
     ) -> Result<Self, ForkChoiceError> {
-        if anchor_block.state_root != anchor_state.hash_tree_root() {
-            return Err(ForkChoiceError::AnchorMismatch);
+        let computed = anchor_state.hash_tree_root();
+        if anchor_block.state_root != computed {
+            return Err(ForkChoiceError::AnchorMismatch {
+                claimed: anchor_block.state_root,
+                computed,
+            });
         }
         let anchor_root = anchor_block.hash_tree_root();
         let checkpoint = Checkpoint {
@@ -236,7 +240,7 @@ impl<P: Preset> Store<P> {
     /// Fails when the head still holds the proposer boost, or its state is missing.
     pub fn proposer_head(&mut self, head: Root, slot: Slot) -> Result<Root, ForkChoiceError> {
         if self.proposer_boost_root == head {
-            return Err(ForkChoiceError::HeadStillBoosted);
+            return Err(ForkChoiceError::HeadStillBoosted(head));
         }
         let head_block = *self
             .blocks
@@ -291,10 +295,13 @@ impl<P: Preset> Store<P> {
             return Ok(());
         }
 
-        let parent_state = self
-            .block_states
-            .get(&block.parent_root)
-            .ok_or(ForkChoiceError::UnknownParent(block.parent_root))?;
+        let parent_state =
+            self.block_states
+                .get(&block.parent_root)
+                .ok_or(ForkChoiceError::UnknownParent {
+                    root,
+                    parent: block.parent_root,
+                })?;
         let current = self.current_slot();
         if block.slot > current {
             return Err(ForkChoiceError::FutureBlock {
@@ -303,14 +310,21 @@ impl<P: Preset> Store<P> {
             });
         }
         let finalized = self.checkpoints.finalized();
-        if block.slot <= finalized.epoch.start_slot::<P>() {
-            return Err(ForkChoiceError::BeforeFinalized(block.slot));
+        let finalized_slot = finalized.epoch.start_slot::<P>();
+        if block.slot <= finalized_slot {
+            return Err(ForkChoiceError::BeforeFinalized {
+                slot: block.slot,
+                finalized: finalized_slot,
+            });
         }
         if self.checkpoint_block(block.parent_root, finalized.epoch) != Some(finalized.root) {
-            return Err(ForkChoiceError::NotDescendantOfFinalized);
+            return Err(ForkChoiceError::NotDescendantOfFinalized {
+                root,
+                finalized: finalized.root,
+            });
         }
         if availability == DataAvailability::Unavailable {
-            return Err(ForkChoiceError::DataUnavailable);
+            return Err(ForkChoiceError::DataUnavailable(root));
         }
 
         let mut state = parent_state.clone();
@@ -321,7 +335,10 @@ impl<P: Preset> Store<P> {
         }
         state
             .state_transition(&self.config, signed_block, verification, &payload)
-            .map_err(ForkChoiceError::InvalidBlock)?;
+            .map_err(|source| ForkChoiceError::InvalidBlock {
+                root,
+                source: Box::new(source),
+            })?;
 
         // The head before this block decides whether it may take the proposer boost.
         let head = self.head()?;
@@ -432,7 +449,10 @@ impl<P: Preset> Store<P> {
                 .copied()
                 .collect::<Vec<_>>()
                 .try_into()
-                .map_err(|_| ForkChoiceError::State(StateError::ListFull))?,
+                .map_err(|source| StateError::Capacity {
+                    list: "attesting indices",
+                    source,
+                })?,
             data: attestation.data.clone(),
             signature: attestation.signature,
         };
@@ -470,7 +490,10 @@ impl<P: Preset> Store<P> {
             .data
             .is_slashable_with(&slashing.attestation_2.data)
         {
-            return Err(ForkChoiceError::NotSlashable);
+            return Err(ForkChoiceError::NotSlashable {
+                first_target: slashing.attestation_1.data.target.epoch,
+                second_target: slashing.attestation_2.data.target.epoch,
+            });
         }
         let justified_root = self.checkpoints.justified().root;
         let config = self.config.clone();
@@ -588,11 +611,17 @@ impl<P: Preset> Store<P> {
         if !is_from_block {
             let current = self.current_epoch();
             if target.epoch != current && target.epoch != current.saturating_sub(1) {
-                return Err(ForkChoiceError::AttestationEpochOutOfRange(target.epoch));
+                return Err(ForkChoiceError::AttestationEpochOutOfRange {
+                    target: target.epoch,
+                    current,
+                });
             }
         }
         if target.epoch != data.slot.epoch::<P>() {
-            return Err(ForkChoiceError::AttestationTargetSlotMismatch);
+            return Err(ForkChoiceError::AttestationTargetSlotMismatch {
+                target: target.epoch,
+                slot: data.slot,
+            });
         }
         if !self.blocks.contains(&target.root) {
             return Err(ForkChoiceError::UnknownTarget(target.root));
@@ -602,15 +631,25 @@ impl<P: Preset> Store<P> {
             .get(&data.beacon_block_root)
             .ok_or(ForkChoiceError::UnknownHead(data.beacon_block_root))?;
         if head.slot > data.slot {
-            return Err(ForkChoiceError::HeadFromFuture);
+            return Err(ForkChoiceError::HeadFromFuture {
+                slot: data.slot,
+                head_slot: head.slot,
+            });
         }
         // The LMD vote must agree with the FFG vote: the target is the head's checkpoint.
         if self.checkpoint_block(data.beacon_block_root, target.epoch) != Some(target.root) {
-            return Err(ForkChoiceError::TargetNotHeadCheckpoint);
+            return Err(ForkChoiceError::TargetNotHeadCheckpoint {
+                target: target.root,
+                head: data.beacon_block_root,
+            });
         }
         // Timing: a vote only counts from the slot after it was cast.
-        if self.current_slot() < data.slot + 1 {
-            return Err(ForkChoiceError::AttestationFromFuture(data.slot));
+        let current = self.current_slot();
+        if current < data.slot + 1 {
+            return Err(ForkChoiceError::AttestationFromFuture {
+                slot: data.slot,
+                current,
+            });
         }
         Ok(())
     }

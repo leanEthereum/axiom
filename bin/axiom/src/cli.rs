@@ -12,7 +12,7 @@ use axiom_node::{AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings,
 use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
-use axiom_yaml::Yaml;
+use axiom_yaml::{ParseError, Yaml};
 use thiserror::Error;
 
 use crate::run::{PresetName, Run};
@@ -91,14 +91,32 @@ pub(crate) enum CliError {
     #[error("give either --genesis-state, or both --checkpoint-state and --checkpoint-block")]
     ConflictingAnchors,
     /// The config file cannot be read.
-    #[error("cannot read the config file: {0}")]
-    ConfigFile(io::Error),
+    #[error("cannot read the config file {}: {source}", .path.display())]
+    ConfigFile {
+        /// The config file.
+        path: PathBuf,
+        /// The operating system's error.
+        #[source]
+        source: io::Error,
+    },
     /// The config file is not valid YAML.
-    #[error("config file is not YAML: {0}")]
-    ConfigYaml(String),
+    #[error("config file {} is not YAML: {source}", .path.display())]
+    ConfigYaml {
+        /// The config file.
+        path: PathBuf,
+        /// Where and why the parser stopped.
+        #[source]
+        source: ParseError,
+    },
     /// The config file has a bad value.
-    #[error("config file: {0}")]
-    Config(ConfigError),
+    #[error("config file {}: {source}", .path.display())]
+    Config {
+        /// The config file.
+        path: PathBuf,
+        /// The key and the value that is wrong.
+        #[source]
+        source: ConfigError,
+    },
 }
 
 /// The flags as given, before they are resolved into a configuration.
@@ -298,15 +316,23 @@ impl Cli {
     /// The preset and chain configuration, from the config file or the network name.
     fn chain(&self) -> Result<(PresetName, ChainConfig), CliError> {
         if let Some(path) = &self.config {
-            let text = fs::read_to_string(path).map_err(CliError::ConfigFile)?;
-            let yaml =
-                Yaml::parse(&text).map_err(|error| CliError::ConfigYaml(error.to_string()))?;
+            let text = fs::read_to_string(path).map_err(|source| CliError::ConfigFile {
+                path: path.clone(),
+                source,
+            })?;
+            let yaml = Yaml::parse(&text).map_err(|source| CliError::ConfigYaml {
+                path: path.clone(),
+                source,
+            })?;
             // The file's own preset base wins over the network flag.
             let preset = match yaml.get("PRESET_BASE").and_then(Yaml::as_str) {
                 Some("minimal") => PresetName::Minimal,
                 _ => PresetName::Mainnet,
             };
-            let chain = ChainConfig::from_yaml(&yaml).map_err(CliError::Config)?;
+            let chain = ChainConfig::from_yaml(&yaml).map_err(|source| CliError::Config {
+                path: path.clone(),
+                source,
+            })?;
             return Ok((preset, chain));
         }
         match self.network.as_deref() {
