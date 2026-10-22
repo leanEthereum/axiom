@@ -150,7 +150,7 @@ impl<P: Preset> Node<P> {
         let identity = match &config.network {
             Some(settings) => {
                 let identity = Self::open_identity(&config, settings)?;
-                let columns = Self::custody_columns(chain.config(), &identity)?;
+                let columns = Self::sampling_columns(chain.config(), &identity)?;
                 chain = chain.with_custody(columns);
                 Some(identity)
             }
@@ -389,17 +389,20 @@ impl<P: Preset> Node<P> {
         Ok((key, identity))
     }
 
-    /// The columns of every custody group the node keeps.
+    /// The columns the node samples: those of its custody groups, and more if sampling needs it.
     ///
-    /// See `get_custody_groups` and `compute_columns_for_custody_group` in the Fulu DAS spec.
-    fn custody_columns(
+    /// A node samples at least the spec's samples per slot, whatever its custody.
+    /// The draw is a prefix: the first groups drawn are exactly the custody groups.
+    /// See `get_custody_groups` and "Custody sampling" in the Fulu DAS core spec.
+    fn sampling_columns(
         config: &ChainConfig,
         identity: &(NodeKey, NetworkIdentity),
     ) -> Result<Vec<ColumnIndex>, NodeError> {
         let (_, identity) = identity;
+        let sampling_size = identity.custody_group_count.max(config.samples_per_slot);
         let groups = identity
             .node_id
-            .custody_groups(identity.custody_group_count, config)
+            .custody_groups(sampling_size, config)
             .map_err(NodeError::Custody)?;
         let mut columns = Vec::new();
         for group in groups {
