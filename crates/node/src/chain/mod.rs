@@ -847,12 +847,13 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice refuses the vote.
     pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
         self.pool_vote(vote);
-        self.store
-            .on_attestation(vote, false, Verification::Verify)?;
-        // The store verified the signature against the target's committees.
+        // Gossip rules verified the signature, and a vote of the current slot still testifies.
+        // So the slasher sees it even when the fork choice does not count it yet.
         if let Some(slasher) = &mut self.slasher {
             slasher.vote(&self.store, vote);
         }
+        self.store
+            .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
     }
 
@@ -910,14 +911,14 @@ impl<P: Preset> Chain<P> {
             payload: claim,
         };
         self.pool_vote(&aggregate);
+        if let Some(slasher) = &self.slasher {
+            slasher.single(attester, data, *vote.signature());
+        }
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
         self.store
             .on_attestation(&aggregate, false, Verification::Verify)?;
-        if let Some(slasher) = &self.slasher {
-            slasher.single(attester, data, *vote.signature());
-        }
         Ok(())
     }
 

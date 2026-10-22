@@ -170,6 +170,7 @@ dependencies = [
  "axiom-node",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",
