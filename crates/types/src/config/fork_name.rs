@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::Preset;
+use crate::{Gwei, Preset};
 
 /// A beacon chain fork, in activation order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -182,6 +182,32 @@ impl ForkName {
             Self::Electra | Self::Fulu | Self::Gloas => P::MAX_ATTESTER_SLASHINGS_ELECTRA,
         }
     }
+
+    /// Bytes of hash output that one balance-weighted draw consumes.
+    ///
+    /// Electra widened draws from one byte to two, so large stakes are sampled more finely.
+    /// See `compute_proposer_index` in the phase0 and Electra beacon chain specs.
+    #[must_use]
+    pub const fn random_value_bytes(self) -> usize {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => 1,
+            Self::Electra | Self::Fulu | Self::Gloas => 2,
+        }
+    }
+
+    /// Effective balance a candidate needs to pass every balance-weighted draw.
+    ///
+    /// Sampling weighs candidates against the largest effective balance a validator may hold.
+    /// Electra raised that cap for compounding validators, see EIP-7251.
+    #[must_use]
+    pub const fn max_sampling_balance<P: Preset>(self) -> Gwei {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => {
+                P::MAX_EFFECTIVE_BALANCE
+            }
+            Self::Electra | Self::Fulu | Self::Gloas => P::MAX_EFFECTIVE_BALANCE_ELECTRA,
+        }
+    }
 }
 
 impl fmt::Display for ForkName {
@@ -236,6 +262,30 @@ mod tests {
             .map(ForkName::whistleblower_reward_quotient::<Mainnet>)
             .to_vec();
         assert_eq!(whistleblower, [512, 512, 512, 512, 512, 4096, 4096, 4096]);
+    }
+
+    #[test]
+    fn sampling_widens_at_electra() {
+        // One-byte draws against 32 ETH through Deneb, then two-byte draws against 2048 ETH.
+        let bytes: Vec<usize> = ForkName::ALL.map(ForkName::random_value_bytes).to_vec();
+        assert_eq!(bytes, [1, 1, 1, 1, 1, 2, 2, 2]);
+
+        let ceilings: Vec<u64> = ForkName::ALL
+            .map(|fork| fork.max_sampling_balance::<Mainnet>().0)
+            .to_vec();
+        assert_eq!(
+            ceilings,
+            [
+                32_000_000_000,
+                32_000_000_000,
+                32_000_000_000,
+                32_000_000_000,
+                32_000_000_000,
+                2_048_000_000_000,
+                2_048_000_000_000,
+                2_048_000_000_000
+            ]
+        );
     }
 
     #[test]

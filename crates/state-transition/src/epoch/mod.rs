@@ -1,37 +1,13 @@
 //! Epoch processing: the accounting run once at the end of every epoch.
 
-mod consolidations;
-mod deposits;
-mod effective_balance;
-mod finality;
-mod inactivity;
-mod lookahead;
-mod participation;
-mod registry_updates;
-mod rewards;
-mod rollover;
-mod slashings;
+use axiom_types::{self, ChainConfig, Epoch};
 
-use axiom_types::{ChainConfig, Epoch, Preset};
-use consolidations::ConsolidationQueue;
-use deposits::DepositQueue;
-use effective_balance::Hysteresis;
-use finality::Justification;
-use inactivity::InactivityUpdates;
-use lookahead::Lookahead;
-pub use participation::Participation;
-use registry_updates::RegistryUpdates;
-pub use rewards::Deltas;
-use rewards::RewardsAndPenalties;
-use rollover::Rollover;
-use slashings::CorrelationPenalty;
+use crate::{ActiveBalance, CachedState, Fork, Registry, StateError};
 
-use crate::{ActiveBalance, State, StateError, registry::Registry};
-
-/// One sub-transition of epoch processing, in spec order.
+/// One sub-transition of epoch processing, across every fork.
 ///
-/// Spec tests exercise each one on its own.
-/// See `process_epoch` in the Fulu beacon chain spec.
+/// Each fork runs a subset, in its own order, and spec tests exercise each one on its own.
+/// See `process_epoch` in each fork's beacon chain spec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EpochStep {
     /// Justify and finalize checkpoints from target votes.
@@ -50,25 +26,33 @@ pub enum EpochStep {
     PendingDeposits,
     /// Move the stake of consolidated validators.
     PendingConsolidations,
+    /// Settle the builder payments whose bids reached their quorum.
+    BuilderPendingPayments,
     /// Round balances into effective balances, with hysteresis.
     EffectiveBalanceUpdates,
     /// Clear the next epoch's slashings slot.
     SlashingsReset,
     /// Carry the randao mix into the next epoch's slot.
     RandaoMixesReset,
-    /// Summarize a full period of block and state roots.
+    /// Accumulate a full period of block and state roots, before Capella.
+    HistoricalRootsUpdate,
+    /// Summarize a full period of block and state roots, from Capella on.
     HistoricalSummariesUpdate,
-    /// Rotate participation flags into the previous epoch.
+    /// Rotate pending attestations into the previous epoch, before Altair.
+    ParticipationRecordUpdates,
+    /// Rotate participation flags into the previous epoch, from Altair on.
     ParticipationFlagUpdates,
     /// Rotate sync committees at the end of a period.
     SyncCommitteeUpdates,
     /// Shift the proposer lookahead by one epoch.
     ProposerLookahead,
+    /// Shift the payload timeliness committees by one epoch.
+    PtcWindow,
 }
 
 impl EpochStep {
-    /// Every step, in the order an epoch transition runs them.
-    pub const ALL: [Self; 15] = [
+    /// Every step of every fork.
+    pub const ALL: [Self; 19] = [
         Self::JustificationAndFinalization,
         Self::InactivityUpdates,
         Self::RewardsAndPenalties,
@@ -77,13 +61,17 @@ impl EpochStep {
         Self::Eth1DataReset,
         Self::PendingDeposits,
         Self::PendingConsolidations,
+        Self::BuilderPendingPayments,
         Self::EffectiveBalanceUpdates,
         Self::SlashingsReset,
         Self::RandaoMixesReset,
+        Self::HistoricalRootsUpdate,
         Self::HistoricalSummariesUpdate,
+        Self::ParticipationRecordUpdates,
         Self::ParticipationFlagUpdates,
         Self::SyncCommitteeUpdates,
         Self::ProposerLookahead,
+        Self::PtcWindow,
     ];
 
     /// The step's name, as the spec's test vectors spell it.
@@ -98,13 +86,17 @@ impl EpochStep {
             Self::Eth1DataReset => "eth1_data_reset",
             Self::PendingDeposits => "pending_deposits",
             Self::PendingConsolidations => "pending_consolidations",
+            Self::BuilderPendingPayments => "builder_pending_payments",
             Self::EffectiveBalanceUpdates => "effective_balance_updates",
             Self::SlashingsReset => "slashings_reset",
             Self::RandaoMixesReset => "randao_mixes_reset",
+            Self::HistoricalRootsUpdate => "historical_roots_update",
             Self::HistoricalSummariesUpdate => "historical_summaries_update",
+            Self::ParticipationRecordUpdates => "participation_record_updates",
             Self::ParticipationFlagUpdates => "participation_flag_updates",
             Self::SyncCommitteeUpdates => "sync_committee_updates",
             Self::ProposerLookahead => "proposer_lookahead",
+            Self::PtcWindow => "ptc_window",
         }
     }
 
@@ -119,27 +111,29 @@ impl EpochStep {
 ///
 /// # Overview
 ///
+/// The processor holds what every fork's epoch processing shares.
 /// Each step is its own type, built from what the step reads and then applied.
 /// Totals that stay fixed through the early steps are computed once, up front.
 #[derive(Debug)]
-pub struct EpochProcessor<'a, P: Preset> {
-    /// The state being transitioned.
-    state: &'a mut State<P>,
+pub struct EpochProcessor<'a, S> {
+    /// The state being transitioned, with its caches.
+    pub(crate) state: CachedState<'a, S>,
     /// The chain configuration.
-    config: &'a ChainConfig,
+    pub(crate) config: &'a ChainConfig,
     /// The epoch that is ending.
-    current_epoch: Epoch,
+    pub(crate) current_epoch: Epoch,
     /// Total active balance of the ending epoch.
     ///
     /// Only the effective balance step changes it, and no later step reads it.
-    total_active_balance: ActiveBalance,
+    pub(crate) total_active_balance: ActiveBalance,
 }
 
-impl<'a, P: Preset> EpochProcessor<'a, P> {
+impl<'a, S: Fork> EpochProcessor<'a, S> {
     /// A processor for a state at the last slot of an epoch.
-    pub fn new(state: &'a mut State<P>, config: &'a ChainConfig) -> Self {
-        let current_epoch = state.beacon.current_epoch();
-        let total_active_balance = ActiveBalance::of(&state.beacon);
+    #[must_use]
+    pub fn new(state: CachedState<'a, S>, config: &'a ChainConfig) -> Self {
+        let current_epoch = state.beacon().current_epoch();
+        let total_active_balance = ActiveBalance::of(state.beacon());
         Self {
             state,
             config,
@@ -148,87 +142,71 @@ impl<'a, P: Preset> EpochProcessor<'a, P> {
         }
     }
 
-    /// Runs every step in order.
+    /// Runs every step of the fork, in order.
     ///
     /// # Errors
     ///
     /// Fails when the state breaks an invariant.
     pub fn process(&mut self) -> Result<(), StateError> {
-        EpochStep::ALL
-            .into_iter()
-            .try_for_each(|step| self.run(step))
+        S::EPOCH_STEPS
+            .iter()
+            .try_for_each(|step| S::process_epoch_step(self, *step))
     }
 
     /// Runs one step.
     ///
     /// # Errors
     ///
-    /// Fails when the state breaks an invariant.
+    /// Fails when the step is not one of the fork's, or the state breaks an invariant.
     pub fn run(&mut self, step: EpochStep) -> Result<(), StateError> {
-        let current = self.current_epoch;
-        match step {
-            EpochStep::JustificationAndFinalization => {
-                Justification::tally(&self.participation()).weigh(&mut self.state.beacon)
-            }
-            EpochStep::InactivityUpdates => {
-                InactivityUpdates::new(&self.participation(), self.config)
-                    .apply(&mut self.state.beacon);
-                Ok(())
-            }
-            EpochStep::RewardsAndPenalties => {
-                RewardsAndPenalties::new(&self.participation(), self.config).apply(self.state)
-            }
-            EpochStep::RegistryUpdates => {
-                RegistryUpdates::new(&self.state.beacon, self.config).apply(&mut self.registry())
-            }
-            EpochStep::Slashings => {
-                CorrelationPenalty::new(&self.state.beacon, self.total_active_balance)?
-                    .apply(self.state)
-            }
-            EpochStep::Eth1DataReset => {
-                Rollover::new(current).reset_eth1_data(&mut self.state.beacon);
-                Ok(())
-            }
-            EpochStep::PendingDeposits => {
-                DepositQueue::new(&self.state.beacon, self.config, self.total_active_balance)
-                    .apply(&mut self.registry())
-            }
-            EpochStep::PendingConsolidations => ConsolidationQueue::new(current).apply(self.state),
-            EpochStep::EffectiveBalanceUpdates => {
-                Hysteresis::new::<P>().apply(&mut self.state.beacon);
-                Ok(())
-            }
-            EpochStep::SlashingsReset => {
-                Rollover::new(current).reset_slashings(&mut self.state.beacon);
-                Ok(())
-            }
-            EpochStep::RandaoMixesReset => {
-                Rollover::new(current).reset_randao_mix(&mut self.state.beacon);
-                Ok(())
-            }
-            EpochStep::HistoricalSummariesUpdate => {
-                Rollover::new(current).update_historical_summaries(&mut self.state.beacon)
-            }
-            EpochStep::ParticipationFlagUpdates => {
-                Rollover::rotate_participation(&mut self.state.beacon)
-            }
-            EpochStep::SyncCommitteeUpdates => {
-                Lookahead::new(current).rotate_sync_committees(self.state)
-            }
-            EpochStep::ProposerLookahead => {
-                Lookahead::new(current).shift_proposers(&mut self.state.beacon)
-            }
+        if !S::EPOCH_STEPS.contains(&step) {
+            return Err(Self::unsupported(step));
         }
+        S::process_epoch_step(self, step)
     }
 
-    /// The ending epoch's participation, as rewards and finality read it.
+    /// The state being transitioned, with its caches.
+    pub const fn state(&mut self) -> &mut CachedState<'a, S> {
+        &mut self.state
+    }
+
+    /// The epoch that is ending.
     #[must_use]
-    pub const fn participation(&self) -> Participation<'_, P> {
-        Participation::new(&self.state.beacon, self.total_active_balance)
+    pub const fn current_epoch(&self) -> Epoch {
+        self.current_epoch
+    }
+
+    /// Total active balance of the ending epoch.
+    #[must_use]
+    pub const fn total_active_balance(&self) -> ActiveBalance {
+        self.total_active_balance
     }
 
     /// The state's registry, under the ending epoch's total active balance.
-    const fn registry(&mut self) -> Registry<'_, P> {
-        Registry::new(self.state, self.config, self.total_active_balance)
+    pub const fn registry(&mut self) -> Registry<'_, S> {
+        Registry::new(
+            self.state.reborrow(),
+            self.config,
+            self.total_active_balance,
+        )
+    }
+
+    /// The error for a step this fork has no rule for.
+    ///
+    /// A step outside the fork's list is foreign to it.
+    /// A step on the list without a rule is one whose fork code is not written yet.
+    #[must_use]
+    pub fn unsupported(step: EpochStep) -> StateError {
+        if S::EPOCH_STEPS.contains(&step) {
+            StateError::RulesMissing {
+                fork: S::FORK,
+                rules: step.name(),
+            }
+        } else {
+            StateError::StepNotInFork {
+                step: step.name(),
+                fork: S::FORK,
+            }
+        }
     }
 }

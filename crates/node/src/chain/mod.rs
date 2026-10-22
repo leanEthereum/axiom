@@ -20,6 +20,7 @@ use axiom_state_transition::{EpochCommittees, State, Verification};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root, Slot,
+    accessors::CoreState,
     fulu::{
         AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
         Checkpoint, CommitteeBits, DataColumnSidecar, SignedBeaconBlock, SingleAttestation,
@@ -246,7 +247,7 @@ impl<P: Preset> Chain<P> {
         // Every state carries it unchanged; the head's state is always held.
         self.store
             .block_state(&self.head.root)
-            .map_or(Root::ZERO, |state| state.beacon().genesis_validators_root)
+            .map_or(Root::ZERO, |state| state.beacon().genesis_validators_root())
     }
 
     /// The digest of the fork active at an epoch, which names gossip topics and tags responses.
@@ -690,9 +691,10 @@ impl<P: Preset> Chain<P> {
 
         // A block's post-state caches the header of its own payload.
         let payload_hash = |root: &Root| -> Hash32 {
-            store.block_state(root).map_or(Hash32::ZERO, |state| {
-                state.beacon().latest_execution_payload_header.block_hash
-            })
+            store
+                .block_state(root)
+                .and_then(|state| state.beacon().latest_execution_block_hash())
+                .unwrap_or(Hash32::ZERO)
         };
         Ok(Head {
             root,
@@ -701,7 +703,10 @@ impl<P: Preset> Chain<P> {
             justified,
             finalized,
             execution: ExecutionHead {
-                head: state.beacon().latest_execution_payload_header.block_hash,
+                head: state
+                    .beacon()
+                    .latest_execution_block_hash()
+                    .unwrap_or(Hash32::ZERO),
                 safe: payload_hash(&justified.root),
                 finalized: payload_hash(&finalized.root),
             },
@@ -722,14 +727,14 @@ impl<P: Preset> Chain<P> {
             let beacon = state.beacon();
             metrics
                 .previous_justified_epoch
-                .set_count(beacon.previous_justified_checkpoint.epoch.0);
+                .set_count(beacon.previous_justified_checkpoint().epoch.0);
             metrics
                 .processed_deposits
-                .set_count(beacon.eth1_deposit_index);
+                .set_count(beacon.eth1_deposit_index());
             if new_epoch {
                 let epoch = beacon.current_epoch();
                 let active = beacon
-                    .validators
+                    .validators()
                     .iter()
                     .filter(|validator| validator.is_active_at(epoch))
                     .count();

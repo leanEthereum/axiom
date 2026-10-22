@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use axiom_state_transition::EpochCommittees;
-use axiom_types::{CommitteeIndex, Gwei, Preset, Root, ValidatorIndex, fulu::BeaconState};
+use axiom_types::{
+    CommitteeIndex, Gwei, Preset, Root, ValidatorIndex, accessors::CoreState, combined::BeaconState,
+};
 
 use super::slot_range::SlotRange;
 use crate::{ForkChoiceError, Ghost, Store, committee_weight::CommitteeWeight};
@@ -62,7 +64,7 @@ impl<'a, P: Preset> Safety<'a, P> {
             .committee_members(range)?
             .into_iter()
             .filter(|index| store.votes.is_equivocating(*index))
-            .filter_map(|index| state.validators.get(index.as_usize()))
+            .filter_map(|index| state.validators().get(index.as_usize()))
             .filter(|validator| validator.is_active_at(epoch))
             .map(|validator| validator.effective_balance)
             .sum();
@@ -153,7 +155,7 @@ impl<'a, P: Preset> Safety<'a, P> {
             .committee_members(range)?
             .into_iter()
             .filter_map(|index| {
-                let validator = state.validators.get(index.as_usize())?;
+                let validator = state.validators().get(index.as_usize())?;
                 let votes_for_node = self
                     .store
                     .votes

@@ -39,7 +39,7 @@ pub enum SignedBeaconBlock<P: Preset> {
 impl<P: Preset> SignedBeaconBlock<P> {
     /// The fork the block belongs to.
     #[must_use]
-    pub const fn fork(&self) -> ForkName {
+    pub const fn fork_name(&self) -> ForkName {
         match self {
             Self::Phase0(_) => ForkName::Phase0,
             Self::Altair(_) => ForkName::Altair,
@@ -172,7 +172,7 @@ mod tests {
 
         let decoded = SignedBeaconBlock::<Minimal>::decode_at(&signed.encode(), &config).unwrap();
 
-        assert_eq!(decoded.fork(), ForkName::Capella);
+        assert_eq!(decoded.fork_name(), ForkName::Capella);
         assert_eq!(decoded.slot(), Slot(24));
         assert_eq!(decoded.block_root(), signed.message.hash_tree_root());
         assert_eq!(decoded, SignedBeaconBlock::Capella(signed));

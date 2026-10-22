@@ -7,7 +7,7 @@ use axiom_fork_choice::{DataAvailability, FastConfirmation, PayloadStatus, Store
 use axiom_kzg::Kzg;
 use axiom_state_transition::Verification;
 use axiom_types::{
-    ChainConfig, Epoch, Hash32, Preset, Root, Slot,
+    ChainConfig, Epoch, ForkName, Hash32, Preset, Root, Slot,
     fulu::{
         Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar,
         SignedBeaconBlock,
@@ -126,7 +126,7 @@ impl<P: Preset> StoreReplay<P> {
 
     /// Data availability of a block step, from the columns the step lists.
     pub(super) fn availability(case: &Case, step: &Yaml) -> Result<DataAvailability, Failure> {
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu);
         // No columns listed means nothing to sample; an empty list means sampling failed.
         let availability = match step.get("columns").and_then(Yaml::as_sequence) {
             None => DataAvailability::Available,
@@ -330,7 +330,7 @@ impl<P: Preset> Runner for StoreReplay<P> {
         let anchor_state = case.ssz::<BeaconState<P>>("anchor_state")?;
         let anchor_block = case.ssz::<BeaconBlock<P>>("anchor_block")?;
         let mut store = Store::new(
-            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu),
             anchor_state,
             &anchor_block,
         )

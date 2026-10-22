@@ -3,14 +3,17 @@
 use std::marker::PhantomData;
 
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List};
-use axiom_state_transition::{Deltas, EpochProcessor, State};
+use axiom_state_transition::{
+    ActiveBalance,
+    altair::epoch::{Deltas, Participation},
+};
 use axiom_types::{
     ChainConfig, Gwei, Preset,
+    accessors::ParticipationState,
     constants::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX},
-    fulu::BeaconState,
 };
 
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Runner, forks::SpecFork};
 
 /// The deltas container of the rewards test format.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,10 +41,12 @@ impl<P: Preset> Container for DeltasVector<P> {
 }
 
 /// Computes every component's deltas, and compares each with its vector.
+///
+/// The components are Altair's participation flags, so this serves Altair and later forks.
 #[derive(Debug, Default)]
-pub struct Rewards<P>(PhantomData<P>);
+pub struct Rewards<P, F>(PhantomData<(P, F)>);
 
-impl<P: Preset> Rewards<P> {
+impl<P: Preset, F: SpecFork> Rewards<P, F> {
     /// Compares computed deltas with a vector file.
     fn compare(case: &Case, stem: &str, computed: &Deltas) -> Result<(), Failure> {
         let expected = case.ssz::<DeltasVector<P>>(stem)?;
@@ -55,16 +60,18 @@ impl<P: Preset> Rewards<P> {
     }
 }
 
-impl<P: Preset> Runner for Rewards<P> {
+impl<P: Preset, F: SpecFork> Runner for Rewards<P, F>
+where
+    F::State<P>: ParticipationState,
+{
     fn name(&self) -> &'static str {
         "rewards"
     }
 
     fn run_case(&self, _handler: &str, case: &Case) -> Result<(), Failure> {
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
-        let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
-        let processor = EpochProcessor::new(&mut state, &config);
-        let participation = processor.participation();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(F::FORK);
+        let state = case.ssz::<F::State<P>>("pre")?;
+        let participation = Participation::new(&state, ActiveBalance::of(&state));
         Self::compare(
             case,
             "source_deltas",

@@ -3,16 +3,59 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::{EpochProcessor, EpochStep, State, Verification};
-use axiom_types::{ChainConfig, Preset, fulu::BeaconState};
+use axiom_types::{ChainConfig, Preset, accessors::ForkState};
 
-use super::BEACON_STATE_FIELDS;
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Runner, forks::SpecFork};
 
 /// Runs the handler's sub-transition, then the full transition when the case provides one.
+///
+/// The fork's own rules decide each step, so one runner serves every fork.
 #[derive(Debug, Default)]
-pub struct EpochProcessing<P>(PhantomData<P>);
+pub struct EpochProcessing<P, F>(PhantomData<(P, F)>);
 
-impl<P: Preset> Runner for EpochProcessing<P> {
+impl<P: Preset, F: SpecFork> EpochProcessing<P, F> {
+    /// Runs one step, or the whole transition, on a state file.
+    fn run(
+        case: &Case,
+        stem: &str,
+        config: &ChainConfig,
+        verification: Verification,
+        step: Option<EpochStep>,
+    ) -> Result<Option<Result<State<P>, String>>, Failure> {
+        let Some(pre) = case.ssz_if_present::<F::State<P>>(stem)? else {
+            return Ok(None);
+        };
+        let mut state = State::new(pre.into_any());
+        state.set_verification(verification);
+        let typed = state
+            .of_fork::<F::State<P>>()
+            .ok_or_else(|| Failure::new("pre-state is not of the case's fork"))?;
+        let mut processor = EpochProcessor::new(typed, config);
+        let outcome = match step {
+            Some(step) => processor.run(step),
+            None => processor.process(),
+        };
+        Ok(Some(
+            outcome.map(|()| state).map_err(|error| error.to_string()),
+        ))
+    }
+
+    /// Compares an outcome with the expected state file, or with its absence.
+    fn compare(case: &Case, stem: &str, outcome: Result<State<P>, String>) -> Result<(), Failure> {
+        match (outcome, case.ssz_if_present::<F::State<P>>(stem)?) {
+            (Ok(state), Some(expected)) => {
+                let actual = F::State::<P>::from_any(state.beacon())
+                    .ok_or_else(|| Failure::new("post-state left the case's fork"))?;
+                F::STATE_FIELDS.check(&expected, actual)
+            }
+            (Err(_), None) => Ok(()),
+            (Ok(_), None) => Err(Failure(format!("{stem}: succeeded, the vector rejects it"))),
+            (Err(error), Some(_)) => Err(Failure(format!("{stem}: failed: {error}"))),
+        }
+    }
+}
+
+impl<P: Preset, F: SpecFork> Runner for EpochProcessing<P, F> {
     fn name(&self) -> &'static str {
         "epoch_processing"
     }
@@ -20,7 +63,7 @@ impl<P: Preset> Runner for EpochProcessing<P> {
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
         let step = EpochStep::from_name(handler)
             .ok_or_else(|| Failure(format!("unsupported epoch step {handler}")))?;
-        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis();
+        let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(F::FORK);
         let verification = if case.meta()?.bls_ignored() {
             Verification::Skip
         } else {
@@ -28,40 +71,13 @@ impl<P: Preset> Runner for EpochProcessing<P> {
         };
 
         // Phase 1: the sub-transition on its own.
-        let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
-        state.set_verification(verification);
-        let outcome = EpochProcessor::new(&mut state, &config).run(step);
-        match (outcome, case.ssz_if_present::<BeaconState<P>>("post")?) {
-            (Ok(()), Some(expected)) => {
-                BEACON_STATE_FIELDS.check(&expected, state.beacon())?;
-            }
-            (Err(_), None) => {}
-            (Ok(()), None) => return Err(Failure::new("step succeeded, the vector rejects it")),
-            (Err(error), Some(_)) => return Err(Failure(format!("step failed: {error}"))),
-        }
+        let outcome = Self::run(case, "pre", &config, verification, Some(step))?
+            .ok_or_else(|| Failure::new("case has no pre-state"))?;
+        Self::compare(case, "post", outcome)?;
 
         // Phase 2: the whole epoch transition, when the case carries its endpoints.
-        if let Some(pre_epoch) = case.ssz_if_present::<BeaconState<P>>("pre_epoch")? {
-            let mut state = State::new(pre_epoch);
-            state.set_verification(verification);
-            let outcome = EpochProcessor::new(&mut state, &config).process();
-            match (
-                outcome,
-                case.ssz_if_present::<BeaconState<P>>("post_epoch")?,
-            ) {
-                (Ok(()), Some(expected)) => {
-                    BEACON_STATE_FIELDS
-                        .check(&expected, state.beacon())
-                        .map_err(|failure| Failure(format!("full epoch: {failure}")))?;
-                }
-                (Err(_), None) => {}
-                (Ok(()), None) => {
-                    return Err(Failure::new("full epoch succeeded, the vector rejects it"));
-                }
-                (Err(error), Some(_)) => {
-                    return Err(Failure(format!("full epoch failed: {error}")));
-                }
-            }
+        if let Some(outcome) = Self::run(case, "pre_epoch", &config, verification, None)? {
+            Self::compare(case, "post_epoch", outcome)?;
         }
         Ok(())
     }

@@ -2,8 +2,8 @@
 
 use axiom_state_transition::State;
 use axiom_types::{
-    Gwei, Preset, Root, ValidatorIndex,
-    fulu::{BeaconState, Checkpoint},
+    Gwei, Preset, Root, ValidatorIndex, accessors::CoreState, combined::BeaconState,
+    fulu::Checkpoint,
 };
 
 use super::{safety::Safety, slot_range::SlotRange};
@@ -91,7 +91,7 @@ impl<'a, P: Preset> CurrentTarget<'a, P> {
         let target = self.target;
         let epoch = state.current_epoch();
         let mut score = Gwei::ZERO;
-        for (index, validator) in state.validators.iter().enumerate() {
+        for (index, validator) in state.validators().iter().enumerate() {
             if !validator.is_active_at(epoch) || validator.slashed {
                 continue;
             }

@@ -21,72 +21,80 @@ fn ssz_static_mainnet() {
 
 #[test]
 fn operations_minimal() {
-    Suite::run(&Operations::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&Operations::<Minimal, Fulu>::default(), "minimal", "fulu");
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(&Operations::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&Operations::<Mainnet, Fulu>::default(), "mainnet", "fulu");
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(&EpochProcessing::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(
+        &EpochProcessing::<Minimal, Fulu>::default(),
+        "minimal",
+        "fulu",
+    );
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(&EpochProcessing::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(
+        &EpochProcessing::<Mainnet, Fulu>::default(),
+        "mainnet",
+        "fulu",
+    );
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(&Blocks::<Minimal>::sanity(), "minimal", "fulu");
+    Suite::run(&Blocks::<Minimal, Fulu>::sanity(), "minimal", "fulu");
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(&Blocks::<Mainnet>::sanity(), "mainnet", "fulu");
+    Suite::run(&Blocks::<Mainnet, Fulu>::sanity(), "mainnet", "fulu");
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(&Blocks::<Minimal>::finality(), "minimal", "fulu");
+    Suite::run(&Blocks::<Minimal, Fulu>::finality(), "minimal", "fulu");
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(&Blocks::<Mainnet>::finality(), "mainnet", "fulu");
+    Suite::run(&Blocks::<Mainnet, Fulu>::finality(), "mainnet", "fulu");
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(&Blocks::<Minimal>::random(), "minimal", "fulu");
+    Suite::run(&Blocks::<Minimal, Fulu>::random(), "minimal", "fulu");
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(&Blocks::<Mainnet>::random(), "mainnet", "fulu");
+    Suite::run(&Blocks::<Mainnet, Fulu>::random(), "mainnet", "fulu");
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(&Rewards::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&Rewards::<Minimal, Fulu>::default(), "minimal", "fulu");
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(&Rewards::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&Rewards::<Mainnet, Fulu>::default(), "mainnet", "fulu");
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(&Fork::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&Fork::<Minimal, Fulu>::default(), "minimal", "fulu");
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(&Fork::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&Fork::<Mainnet, Fulu>::default(), "mainnet", "fulu");
 }
 
 #[test]

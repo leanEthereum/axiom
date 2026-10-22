@@ -6,7 +6,8 @@
 use axiom_bls::BlsError;
 use axiom_ssz::CapacityError;
 use axiom_types::{
-    Bytes32, CommitteeIndex, Epoch, Hash32, Root, Slot, ValidatorIndex, fulu::Checkpoint,
+    Bytes32, CommitteeIndex, Epoch, ForkName, Hash32, Root, Slot, ValidatorIndex,
+    phase0::Checkpoint,
 };
 use thiserror::Error;
 
@@ -81,6 +82,36 @@ pub enum StateError {
     /// The aggregate key a sync committee stores does not decompress.
     #[error("sync committee aggregate key does not decompress: {0}")]
     MalformedSyncCommitteeKey(#[source] BlsError),
+    /// An epoch step was asked of a fork that does not run it.
+    #[error("{fork} does not run the {step} epoch step")]
+    StepNotInFork {
+        /// The step, as the spec's test vectors name it.
+        step: &'static str,
+        /// The state's fork.
+        fork: ForkName,
+    },
+    /// A fork's rules for a part of the transition are not written yet.
+    #[error("{fork} {rules} is not implemented")]
+    RulesMissing {
+        /// The state's fork.
+        fork: ForkName,
+        /// The part of the transition, such as block processing.
+        rules: &'static str,
+    },
+    /// A phase0 pending attestation does not translate into Altair participation flags.
+    ///
+    /// The attestation passed block processing, so a valid chain never holds such a one.
+    #[error("pending attestation of slot {slot} does not translate: {source}")]
+    PendingAttestation {
+        /// The attestation's slot.
+        slot: Slot,
+        /// Why its flags or attesters cannot be computed.
+        #[source]
+        source: Box<BlockError>,
+    },
+    /// The state was asked to upgrade past the last fork.
+    #[error("{0} is the last fork, so its state has nothing to upgrade to")]
+    NoNextFork(ForkName),
 }
 
 /// A block that breaks a rule of block processing.
@@ -332,6 +363,16 @@ pub enum TransitionError {
         /// The rule the block breaks.
         #[source]
         source: BlockError,
+    },
+    /// The block belongs to another fork than the state at its slot.
+    #[error("block at slot {slot} is a {block} block, the state at that slot is {state}")]
+    ForkMismatch {
+        /// The block's slot.
+        slot: Slot,
+        /// The block's fork.
+        block: ForkName,
+        /// The fork of the state advanced to the block's slot.
+        state: ForkName,
     },
     /// The block's state root does not match the post-state.
     #[error("block claims state root {claimed}, post-state root is {computed}")]

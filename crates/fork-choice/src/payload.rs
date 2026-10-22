@@ -1,7 +1,7 @@
 //! The execution engine's verdict on a block's payload, as the fork choice consumes it.
 
 use axiom_state_transition::{ExecutionEngine, KnownVerdict};
-use axiom_types::{Hash32, Preset, fulu::NewPayloadRequest};
+use axiom_types::Hash32;
 
 /// The engine's answer to a new payload, simplified to what the fork choice needs.
 ///
@@ -27,8 +27,8 @@ impl PayloadStatus {
     }
 }
 
-impl<P: Preset> ExecutionEngine<P> for PayloadStatus {
-    fn verify_and_notify_new_payload(&self, request: &NewPayloadRequest<P>) -> bool {
+impl<R> ExecutionEngine<R> for PayloadStatus {
+    fn verify_and_notify_new_payload(&self, request: &R) -> bool {
         // An optimistic import treats a pending verdict as success.
         KnownVerdict(self.is_importable()).verify_and_notify_new_payload(request)
     }

@@ -7,7 +7,7 @@ use std::{
 
 use axiom_snappy::raw;
 use axiom_ssz::{Root, Ssz};
-use axiom_types::{ChainConfig, Preset};
+use axiom_types::{ChainConfig, ForkName, Preset};
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
@@ -156,12 +156,14 @@ impl Case {
 
     /// The configuration of the case: its own file when it ships one, the preset's otherwise.
     ///
+    /// The preset's configuration activates every fork up to the case's at genesis.
+    ///
     /// # Errors
     ///
     /// Fails when the case's configuration file does not parse.
-    pub fn config<P: Preset>(&self) -> Result<ChainConfig, Failure> {
+    pub fn config<P: Preset>(&self, fork: ForkName) -> Result<ChainConfig, Failure> {
         if !self.has("config.yaml") {
-            return Ok(ChainConfig::for_preset::<P>().with_forks_at_genesis());
+            return Ok(ChainConfig::for_preset::<P>().with_forks_at_genesis(fork));
         }
         ChainConfig::from_yaml(&self.yaml("config.yaml")?)
             .map_err(|error| Failure(format!("config.yaml: {error}")))

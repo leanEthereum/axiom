@@ -2,13 +2,15 @@
 
 use axiom_types::{
     BlsPubkey, Preset, ValidatorIndex,
+    accessors::CoreState,
+    combined::BeaconState,
     constants::{
         DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER, DOMAIN_CONTRIBUTION_AND_PROOF,
         DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, SYNC_COMMITTEE_SUBNET_COUNT,
     },
     fulu::{
-        Attestation, BeaconState, IndexedAttestation, SignedAggregateAndProof,
-        SignedContributionAndProof, SyncAggregatorSelectionData,
+        Attestation, IndexedAttestation, SignedAggregateAndProof, SignedContributionAndProof,
+        SyncAggregatorSelectionData,
     },
 };
 
@@ -42,7 +44,7 @@ impl<'a, P: Preset> Signers<'a, P> {
         let aggregator_detail = Detail::Validator(message.aggregator_index);
         // Committee membership was checked, so the index is in range for an honest message.
         let aggregator = state
-            .validators
+            .validators()
             .get(message.aggregator_index.as_usize())
             .ok_or_else(|| {
                 GossipError::reject("aggregator is not a member of the committee")
@@ -111,13 +113,17 @@ impl<'a, P: Preset> Signers<'a, P> {
     /// At a period boundary that is the next committee.
     pub(crate) fn sync_committee_for_next_slot(self) -> Vec<BlsPubkey> {
         let state = self.state;
-        let committee = if state.slot.sync_committee_period::<P>()
-            == (state.slot + 1).sync_committee_period::<P>()
-        {
-            &state.current_sync_committee
-        } else {
-            &state.next_sync_committee
+        // Phase0 has no sync committee, so nobody signs.
+        let Some(committees) = state.sync_committees() else {
+            return Vec::new();
         };
+        let slot = state.slot();
+        let committee =
+            if slot.sync_committee_period::<P>() == (slot + 1).sync_committee_period::<P>() {
+                committees.current_sync_committee()
+            } else {
+                committees.next_sync_committee()
+            };
         committee.pubkeys.to_vec()
     }
 
@@ -145,7 +151,7 @@ impl<'a, P: Preset> Signers<'a, P> {
         let state = self.state;
         let keys: Vec<BlsPubkey> = attesters
             .iter()
-            .map(|index| state.validators[index.as_usize()].pubkey)
+            .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
         let domain = state.domain(DOMAIN_BEACON_ATTESTER, aggregate.data.target.epoch);
         SigningClaim::new(&aggregate.data, domain, &aggregate.signature).is_signed_by_all(&keys)
@@ -160,7 +166,7 @@ impl<'a, P: Preset> Signers<'a, P> {
         let state = self.state;
         let keys: Vec<BlsPubkey> = indices
             .iter()
-            .map(|index| state.validators[index.as_usize()].pubkey)
+            .map(|index| state.validators()[index.as_usize()].pubkey)
             .collect();
         let domain = state.domain(DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch);
         SigningClaim::new(&attestation.data, domain, &attestation.signature).is_signed_by_all(&keys)

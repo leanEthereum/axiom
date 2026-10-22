@@ -20,7 +20,7 @@ use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{
-    ChainConfig, Minimal,
+    ChainConfig, ForkName, Minimal,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
 };
 use tokio::{
@@ -151,7 +151,7 @@ impl TestNode {
     async fn start_with(fixture: &Fixture, config: NodeConfig, address: SocketAddr) -> Self {
         let (stop, stopped) = oneshot::channel::<()>();
         let task = task::spawn(Node::<Minimal>::run(
-            ChainConfig::minimal().with_forks_at_genesis(),
+            ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu),
             config,
             Arc::new(ManualClock::at(fixture.now_ms)),
             async move {
@@ -429,7 +429,7 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
     let mut state = State::new(genesis);
     state
         .state_transition(
-            &ChainConfig::minimal().with_forks_at_genesis(),
+            &ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu),
             &anchor,
             Verification::Verify,
             &KnownVerdict(true),

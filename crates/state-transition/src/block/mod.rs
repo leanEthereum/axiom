@@ -1,77 +1,66 @@
 //! Block processing: applying one block's contents to the state at its slot.
 
-mod eth1_data;
-mod execution_payload;
-mod header;
-mod operations;
-mod randao;
-mod sync_aggregate;
-mod withdrawals;
-
 use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BlsSignature, ChainConfig, Domain, Preset, Root, ValidatorIndex,
+    BlsSignature, ChainConfig, Domain, Root, ValidatorIndex,
+    accessors::CoreState,
     constants::{DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER},
-    fulu::{BeaconBlock, BeaconBlockBody, IndexedAttestation, SignedBeaconBlock, SigningData},
+    phase0::{AttestationData, BeaconBlockHeader, SigningData},
 };
-pub use execution_payload::PayloadExecution;
-use randao::RandaoReveal;
-pub use withdrawals::ExpectedWithdrawals;
 
 use crate::{
-    ActiveBalance, BlockError, ExecutionEngine, SignatureBatch, State, StateError, Verification,
-    registry::Registry,
+    ActiveBalance, BlockError, CachedState, Fork, PayloadEngine, Registry, SignatureBatch,
+    StateError, Verification,
 };
 
 /// One part of a block that processing checks, then applies to the state.
 ///
-/// The header, the payload's withdrawals, the payload, the randao reveal, the eth1 vote,
-/// every kind of operation, and the sync aggregate each implement it.
-/// See `process_block` and `process_operations` in the Fulu beacon chain spec.
-pub trait Operation<P: Preset> {
+/// # Overview
+///
+/// A part whose rule no fork rewrote implements this for every state that has its fields.
+/// A fork that rewrites the rule of a part it keeps wraps the part in a type of its own.
+/// Each fork's block processing then names the version it runs, part by part.
+pub trait Operation<S> {
     /// Checks the part against the state, then applies it.
     ///
     /// # Errors
     ///
     /// Fails when the part is invalid, which invalidates the whole block.
-    fn apply(&self, processor: &mut BlockProcessor<'_, P>) -> Result<(), BlockError>;
+    fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError>;
 }
 
 /// Applies a block to a state, collecting signatures for one batch check at the end.
 ///
 /// # Overview
 ///
-/// The parts apply in the spec's order, each its own operation:
-///
-/// 1. The header.
-/// 2. The withdrawals.
-/// 3. The execution payload.
-/// 4. The RANDAO reveal.
-/// 5. The eth1 data.
-/// 6. The operations.
-/// 7. The sync aggregate.
+/// The processor holds what every fork's block processing shares.
+/// That is the state, the configuration, the signature batch, and the block's total active balance.
+/// Each fork's rules decide which parts apply, in which order.
 ///
 /// A step that fails leaves the state half-updated.
 /// The caller discards that state, since an invalid block has no post-state.
 #[derive(Debug)]
-pub struct BlockProcessor<'a, P: Preset> {
-    /// The state being transitioned.
-    state: &'a mut State<P>,
+pub struct BlockProcessor<'a, S: ?Sized> {
+    /// The state being transitioned, with its caches.
+    pub(crate) state: CachedState<'a, S>,
     /// The chain configuration.
-    config: &'a ChainConfig,
+    pub(crate) config: &'a ChainConfig,
     /// Signatures checked together at the end.
-    signatures: SignatureBatch,
+    pub(crate) signatures: SignatureBatch,
     /// Total active balance, fixed for the whole block.
     ///
     /// Activity changes only at epoch boundaries, and effective balances only in epoch processing.
-    total_active_balance: ActiveBalance,
+    pub(crate) total_active_balance: ActiveBalance,
 }
 
-impl<'a, P: Preset> BlockProcessor<'a, P> {
+impl<'a, S: CoreState + ?Sized> BlockProcessor<'a, S> {
     /// A processor for a state already advanced to the block's slot.
+    ///
+    /// The verification setting governs only this processor's signature batch.
+    #[must_use]
     pub fn new(
-        state: &'a mut State<P>,
+        state: CachedState<'a, S>,
         config: &'a ChainConfig,
         verification: Verification,
     ) -> Self {
@@ -84,55 +73,9 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         }
     }
 
-    /// Runs every step of block processing.
-    ///
-    /// See `process_block` in the Fulu beacon chain spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails at the first broken rule.
-    pub fn process_block(
-        &mut self,
-        block: &BeaconBlock<P>,
-        engine: &impl ExecutionEngine<P>,
-    ) -> Result<(), BlockError> {
-        let body = &block.body;
-        self.apply(&block.header())?;
-        self.apply(body.execution_payload.withdrawals.as_slice())?;
-        self.apply(&PayloadExecution::new(body, engine))?;
-        self.apply(&RandaoReveal(body.randao_reveal))?;
-        self.apply(&body.eth1_data)?;
-        self.process_operations(body)?;
-        self.apply(&body.sync_aggregate)
-    }
-
-    /// Applies every operation of a body, in the spec's order.
-    ///
-    /// # Errors
-    ///
-    /// Fails at the first invalid operation.
-    pub fn process_operations(&mut self, body: &BeaconBlockBody<P>) -> Result<(), BlockError> {
-        // Fulu retired deposits from the deposit contract; they arrive as requests instead.
-        if !body.deposits.is_empty() {
-            return Err(BlockError::DepositsNotAllowed(body.deposits.len()));
-        }
-        self.apply_all(&body.proposer_slashings)?;
-        self.apply_all(&body.attester_slashings)?;
-        self.apply_all(&body.attestations)?;
-        self.apply_all(&body.voluntary_exits)?;
-        self.apply_all(&body.bls_to_execution_changes)?;
-        self.apply_all(&body.execution_requests.deposits)?;
-        self.apply_all(&body.execution_requests.withdrawals)?;
-        self.apply_all(&body.execution_requests.consolidations)
-    }
-
-    /// Applies one operation.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the operation is invalid.
-    pub fn apply<O: Operation<P> + ?Sized>(&mut self, operation: &O) -> Result<(), BlockError> {
-        operation.apply(self)
+    /// The state being transitioned, with its caches.
+    pub const fn state(&mut self) -> &mut CachedState<'a, S> {
+        &mut self.state
     }
 
     /// Checks every collected signature, which completes the block.
@@ -144,8 +87,9 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         self.signatures.verify()
     }
 
-    /// Queues the check of the proposer's signature over the block.
+    /// Queues the check of the proposer's signature over a block, given by its header.
     ///
+    /// The header has the block's root, so the signing root is the same.
     /// See `verify_block_signature` in the phase0 beacon chain spec.
     ///
     /// # Errors
@@ -153,14 +97,12 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
     /// Fails when the proposer does not exist or the signature is malformed.
     pub fn verify_block_signature(
         &mut self,
-        signed_block: &SignedBeaconBlock<P>,
+        header: &BeaconBlockHeader,
+        signature: &BlsSignature,
     ) -> Result<(), BlockError> {
-        let block = &signed_block.message;
-        let domain = self
-            .state
-            .beacon
-            .domain(DOMAIN_BEACON_PROPOSER, self.state.beacon.current_epoch());
-        self.verify_signature(block.proposer_index, block, domain, &signed_block.signature)
+        let state = self.state.beacon();
+        let domain = state.domain(DOMAIN_BEACON_PROPOSER, state.current_epoch());
+        self.verify_signature(header.proposer_index, header, domain, signature)
     }
 
     /// Queues the check of an indexed attestation: sorted unique signers, and their aggregate signature.
@@ -172,9 +114,10 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
     /// Fails when the indices are empty, unsorted, repeated, or unknown, or the signature is malformed.
     pub fn verify_indexed_attestation(
         &mut self,
-        attestation: &IndexedAttestation<P>,
+        indices: &[ValidatorIndex],
+        data: &AttestationData,
+        signature: &BlsSignature,
     ) -> Result<(), BlockError> {
-        let indices = &attestation.attesting_indices;
         if indices.is_empty() {
             return Err(BlockError::EmptyAttestingIndices);
         }
@@ -186,7 +129,7 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
             });
         }
         // Every index must name a validator, signatures checked or not.
-        let registry_size = self.state.beacon.validators.len();
+        let registry_size = self.state.beacon().validators().len();
         if let Some(unknown) = indices
             .iter()
             .find(|index| index.as_usize() >= registry_size)
@@ -208,26 +151,18 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
         let key = PublicKey::aggregate(&keys).map_err(BlockError::InvalidAggregateKey)?;
         let domain = self
             .state
-            .beacon
-            .domain(DOMAIN_BEACON_ATTESTER, attestation.data.target.epoch);
-        let root = SigningData::signing_root(&attestation.data, domain);
-        self.verify_root(key, root, &attestation.signature)
-    }
-
-    /// The state's registry, under the block's total active balance.
-    const fn registry(&mut self) -> Registry<'_, P> {
-        Registry::new(self.state, self.config, self.total_active_balance)
-    }
-
-    /// Applies a list of operations in order.
-    fn apply_all<O: Operation<P>>(&mut self, operations: &[O]) -> Result<(), BlockError> {
-        operations
-            .iter()
-            .try_for_each(|operation| operation.apply(self))
+            .beacon()
+            .domain(DOMAIN_BEACON_ATTESTER, data.target.epoch);
+        let root = SigningData::signing_root(data, domain);
+        self.verify_root(key, root, signature)
     }
 
     /// Queues a check that a validator signed an object in a domain.
-    fn verify_signature<T: Ssz>(
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator does not exist, or its key or the signature is malformed.
+    pub fn verify_signature<T: Ssz>(
         &mut self,
         signer: ValidatorIndex,
         object: &T,
@@ -243,12 +178,76 @@ impl<'a, P: Preset> BlockProcessor<'a, P> {
     }
 
     /// Queues a check of a signature over a precomputed root.
-    fn verify_root(
+    ///
+    /// # Errors
+    ///
+    /// Fails when the signature is malformed.
+    pub fn verify_root(
         &mut self,
         key: PublicKey,
         root: Root,
         signature: &BlsSignature,
     ) -> Result<(), BlockError> {
         self.signatures.push(key, root, signature)
+    }
+
+    /// Whether signatures are checked, so callers can skip building keys they will not use.
+    #[must_use]
+    pub fn checks_signatures(&self) -> bool {
+        self.signatures.is_enabled()
+    }
+}
+
+impl<S: Fork> BlockProcessor<'_, S> {
+    /// Runs every step of the fork's block processing.
+    ///
+    /// # Errors
+    ///
+    /// Fails at the first broken rule.
+    pub fn process_block<E: PayloadEngine<S::Preset>>(
+        &mut self,
+        block: &S::Block,
+        engine: &E,
+    ) -> Result<(), BlockError> {
+        let header = S::block_header(block);
+        S::process_block(self, block, &header, engine)
+    }
+
+    /// Applies one operation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the operation is invalid.
+    pub fn apply<O: Operation<S> + ?Sized>(&mut self, operation: &O) -> Result<(), BlockError> {
+        operation.apply(self)
+    }
+
+    /// Applies a list of operations in order.
+    ///
+    /// # Errors
+    ///
+    /// Fails at the first invalid operation.
+    pub fn apply_all<O: Operation<S>>(&mut self, operations: &[O]) -> Result<(), BlockError> {
+        operations
+            .iter()
+            .try_for_each(|operation| operation.apply(self))
+    }
+
+    /// Proposer of the block's slot, by the rules of the state's fork.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the epoch has no active validator.
+    pub fn proposer(&self) -> Result<ValidatorIndex, StateError> {
+        S::beacon_proposer_index(self.state.beacon())
+    }
+
+    /// The state's registry, under the block's total active balance.
+    pub const fn registry(&mut self) -> Registry<'_, S> {
+        Registry::new(
+            self.state.reborrow(),
+            self.config,
+            self.total_active_balance,
+        )
     }
 }

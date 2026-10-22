@@ -13,7 +13,7 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    BlsSignature, ChainConfig, CommitteeIndex, Hash32, Preset,
+    BlsSignature, ChainConfig, CommitteeIndex, ForkName, Hash32, Preset,
     fulu::{
         Attestation, AttesterSlashing, BeaconBlock, BeaconState, SignedBeaconBlock,
         SingleAttestation,
@@ -206,7 +206,7 @@ impl<P: Preset> Runner for ChainReplay<P> {
         let database = ChainDatabase::open(&directory.0)
             .map_err(|error| Failure(format!("database: {error}")))?;
         let chain = Chain::from_anchor(
-            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu),
             anchor_state,
             &SignedBeaconBlock {
                 message: anchor_block,
@@ -224,7 +224,7 @@ impl<P: Preset> Runner for ChainReplay<P> {
         let database = ChainDatabase::<P>::open(&directory.0)
             .map_err(|error| Failure(format!("reopening the database: {error}")))?;
         let resumed = Chain::resume(
-            ChainConfig::for_preset::<P>().with_forks_at_genesis(),
+            ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu),
             database,
         )
         .map_err(|error| Failure(format!("resume failed: {error}")))?;

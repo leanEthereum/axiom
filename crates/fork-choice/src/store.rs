@@ -3,14 +3,12 @@
 use std::collections::HashMap;
 
 use axiom_ssz::Ssz;
-use axiom_state_transition::{
-    BlockProcessor, EpochProcessor, EpochStep, State, StateError, Verification,
-};
+use axiom_state_transition::{BlockProcessor, EpochStep, State, Verification};
 use axiom_types::{
     ChainConfig, Epoch, Hash32, Preset, Root, Slot, SlotClock,
+    accessors::CoreState,
     fulu::{
-        Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, IndexedAttestation,
-        SignedBeaconBlock,
+        Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, SignedBeaconBlock,
     },
 };
 
@@ -204,7 +202,7 @@ impl<P: Preset> Store<P> {
         } else {
             self.block_states
                 .get(&root)
-                .map(|state| state.beacon().current_justified_checkpoint)
+                .map(|state| state.beacon().current_justified_checkpoint())
         }
     }
 
@@ -345,8 +343,8 @@ impl<P: Preset> Store<P> {
 
         // The head before this block decides whether it may take the proposer boost.
         let head = self.head()?;
-        let justified = state.beacon().current_justified_checkpoint;
-        let finalized = state.beacon().finalized_checkpoint;
+        let justified = state.beacon().current_justified_checkpoint();
+        let finalized = state.beacon().finalized_checkpoint();
 
         self.blocks.insert(
             root,
@@ -409,7 +407,7 @@ impl<P: Preset> Store<P> {
     /// A checkpoint sync and a spec vector's history both do so.
     pub fn insert_validated_block(&mut self, block: &BeaconBlock<P>, state: State<P>) {
         let root = block.hash_tree_root();
-        let justified = state.beacon().current_justified_checkpoint;
+        let justified = state.beacon().current_justified_checkpoint();
         self.blocks.insert(
             root,
             BlockNode {
@@ -446,22 +444,10 @@ impl<P: Preset> Store<P> {
         let attesters = state
             .attesting_indices(attestation)
             .map_err(ForkChoiceError::InvalidAttestation)?;
-        let indexed = IndexedAttestation::<P> {
-            attesting_indices: attesters
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                .try_into()
-                .map_err(|source| StateError::Capacity {
-                    list: "attesting indices",
-                    source,
-                })?,
-            data: attestation.data.clone(),
-            signature: attestation.signature,
-        };
-        let mut processor = BlockProcessor::new(state, &config, verification);
+        let indices: Vec<_> = attesters.iter().copied().collect();
+        let mut processor = BlockProcessor::new(state.any_fork(), &config, verification);
         processor
-            .verify_indexed_attestation(&indexed)
+            .verify_indexed_attestation(&indices, &attestation.data, &attestation.signature)
             .and_then(|()| processor.finish())
             .map_err(ForkChoiceError::InvalidAttestation)?;
 
@@ -504,10 +490,17 @@ impl<P: Preset> Store<P> {
             .block_states
             .get_mut(&justified_root)
             .ok_or(ForkChoiceError::MissingState(justified_root))?;
-        let mut processor = BlockProcessor::new(state, &config, verification);
+        let mut processor = BlockProcessor::new(state.any_fork(), &config, verification);
+        let (first, second) = (&slashing.attestation_1, &slashing.attestation_2);
         processor
-            .verify_indexed_attestation(&slashing.attestation_1)
-            .and_then(|()| processor.verify_indexed_attestation(&slashing.attestation_2))
+            .verify_indexed_attestation(&first.attesting_indices, &first.data, &first.signature)
+            .and_then(|()| {
+                processor.verify_indexed_attestation(
+                    &second.attesting_indices,
+                    &second.data,
+                    &second.signature,
+                )
+            })
             .and_then(|()| processor.finish())
             .map_err(ForkChoiceError::InvalidAttestation)?;
 
@@ -573,7 +566,7 @@ impl<P: Preset> Store<P> {
                 .ok_or(ForkChoiceError::MissingState(checkpoint.root))?
                 .clone();
             let start = checkpoint.epoch.start_slot::<P>();
-            if state.beacon().slot < start {
+            if state.beacon().slot() < start {
                 state.process_slots(&self.config, start)?;
             }
             self.checkpoint_states.insert(checkpoint, state);
@@ -694,10 +687,9 @@ impl<P: Preset> Store<P> {
             .get(&root)
             .ok_or(ForkChoiceError::MissingState(root))?
             .clone();
-        EpochProcessor::new(&mut state, &self.config)
-            .run(EpochStep::JustificationAndFinalization)?;
-        let justified = state.beacon().current_justified_checkpoint;
-        let finalized = state.beacon().finalized_checkpoint;
+        state.process_epoch_step(&self.config, EpochStep::JustificationAndFinalization)?;
+        let justified = state.beacon().current_justified_checkpoint();
+        let finalized = state.beacon().finalized_checkpoint();
 
         self.unrealized_justifications.insert(root, justified);
         self.checkpoints.update_unrealized(justified, finalized);

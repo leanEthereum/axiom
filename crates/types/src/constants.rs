@@ -2,7 +2,7 @@
 //!
 //! Names follow the consensus specs, so a reader can search both side by side.
 
-use crate::{DomainType, Gwei};
+use crate::{BlsSignature, BuilderIndex, DomainType, Gwei};
 
 /// Bits of justification history the state keeps, enough for the four finality rules.
 ///
@@ -37,6 +37,22 @@ pub const ETH1_ADDRESS_WITHDRAWAL_PREFIX: u8 = 0x01;
 /// See EIP-7251.
 pub const COMPOUNDING_WITHDRAWAL_PREFIX: u8 = 0x02;
 
+/// Withdrawal credential prefix of a builder, whose deposits join the builder registry.
+///
+/// See EIP-7732 and the Gloas beacon chain spec.
+pub const BUILDER_WITHDRAWAL_PREFIX: u8 = 0xb0;
+
+/// The compressed point at infinity of G2, a placeholder signature.
+///
+/// Stake moved between queues carries it, since its key was already proven.
+/// See the Altair BLS extensions and `queue_excess_active_balance` in the Electra spec.
+pub const G2_POINT_AT_INFINITY: BlsSignature = {
+    let mut bytes = [0; 96];
+    // The compression flag and the infinity flag, with every coordinate bit clear.
+    bytes[0] = 0xc0;
+    BlsSignature(bytes)
+};
+
 /// Version byte of a versioned hash that commits to a KZG commitment.
 ///
 /// See EIP-4844.
@@ -60,6 +76,42 @@ pub const WITHDRAWAL_REQUEST_TYPE: u8 = 0x01;
 
 /// Execution request type byte of consolidation requests.
 pub const CONSOLIDATION_REQUEST_TYPE: u8 = 0x02;
+
+/// Execution request type byte of builder deposit requests.
+///
+/// See EIP-7732 and the Gloas beacon chain spec.
+pub const BUILDER_DEPOSIT_REQUEST_TYPE: u8 = 0x03;
+
+/// Execution request type byte of builder exit requests.
+///
+/// See EIP-7732 and the Gloas beacon chain spec.
+pub const BUILDER_EXIT_REQUEST_TYPE: u8 = 0x04;
+
+/// Bit that marks a withdrawal's validator index as a builder index.
+///
+/// Builders and validators then share one withdrawal container.
+/// It sits far above any registry size, so no validator index carries it.
+/// See the Gloas beacon chain spec.
+pub const BUILDER_INDEX_FLAG: u64 = 1 << 40;
+
+/// Builder index a bid names when the proposer builds its own payload.
+///
+/// See the Gloas beacon chain spec.
+pub const BUILDER_INDEX_SELF_BUILD: BuilderIndex = BuilderIndex(u64::MAX);
+
+/// Numerator of the share of a slot's committees whose vote settles a builder payment.
+///
+/// Six tenths of the weight must attest the payload's block before its builder pays.
+/// See `get_builder_payment_quorum_threshold` in the Gloas beacon chain spec.
+pub const BUILDER_PAYMENT_THRESHOLD_NUMERATOR: u64 = 6;
+
+/// Denominator of the builder payment threshold.
+pub const BUILDER_PAYMENT_THRESHOLD_DENOMINATOR: u64 = 10;
+
+/// Version of the builders a deposit registers.
+///
+/// See the Gloas beacon chain spec.
+pub const PAYLOAD_BUILDER_VERSION: u8 = 0;
 
 /// Flag index of a timely vote for the source checkpoint.
 pub const TIMELY_SOURCE_FLAG_INDEX: usize = 0;
@@ -129,6 +181,20 @@ pub const DOMAIN_CONTRIBUTION_AND_PROOF: DomainType = DomainType([0x09, 0, 0, 0]
 
 /// Domain of withdrawal credential changes.
 pub const DOMAIN_BLS_TO_EXECUTION_CHANGE: DomainType = DomainType([0x0a, 0, 0, 0]);
+
+/// Domain of builder bids and payload envelopes.
+///
+/// See EIP-7732 and the Gloas beacon chain spec.
+pub const DOMAIN_BEACON_BUILDER: DomainType = DomainType([0x0b, 0, 0, 0]);
+
+/// Domain of payload timeliness attestations.
+pub const DOMAIN_PTC_ATTESTER: DomainType = DomainType([0x0c, 0, 0, 0]);
+
+/// Domain of proposer preferences.
+pub const DOMAIN_PROPOSER_PREFERENCES: DomainType = DomainType([0x0d, 0, 0, 0]);
+
+/// Domain of builder deposits.
+pub const DOMAIN_BUILDER_DEPOSIT: DomainType = DomainType([0x0e, 0, 0, 0]);
 
 /// Domain prefix reserved for applications built on beacon chain keys.
 pub const DOMAIN_APPLICATION_MASK: DomainType = DomainType([0x00, 0, 0, 0x01]);

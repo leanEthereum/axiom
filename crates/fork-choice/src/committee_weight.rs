@@ -1,6 +1,6 @@
 //! One slot's committee weight, the unit of proposer boost and reorg thresholds.
 
-use axiom_types::{Gwei, Preset, fulu::BeaconState};
+use axiom_types::{Gwei, Preset, accessors::CoreState, combined::BeaconState};
 
 /// The stake of one slot's committees in a state.
 ///
@@ -14,7 +14,7 @@ impl CommitteeWeight {
     pub(crate) fn of<P: Preset>(state: &BeaconState<P>) -> Self {
         let epoch = state.current_epoch();
         let total: Gwei = state
-            .validators
+            .validators()
             .iter()
             .filter(|validator| validator.is_active_at(epoch) && !validator.slashed)
             .map(|validator| validator.effective_balance)

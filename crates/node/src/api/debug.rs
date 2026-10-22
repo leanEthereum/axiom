@@ -3,8 +3,7 @@
 use axiom_fork_choice::ExecutionStatus;
 use axiom_http::Request;
 use axiom_json::Json;
-use axiom_ssz::Ssz;
-use axiom_types::Preset;
+use axiom_types::{Preset, accessors::CoreState};
 
 use super::{
     ApiContext,

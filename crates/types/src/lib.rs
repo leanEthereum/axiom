@@ -7,10 +7,14 @@
 //! A fork module re-exports its predecessor and defines only the containers its spec changed.
 //! The combined module wraps the containers that differ by fork in one enum each.
 //!
+//! The accessor traits name groups of state fields, and each fork's state implements its groups.
+//! Code that reads a group then serves every fork that has it.
+//!
 //! Every container mirrors the consensus specs field for field.
 //! Containers whose collections depend on the preset take it as a type parameter.
 //! A mainnet block and a minimal block are therefore different types.
 
+pub mod accessors;
 mod config;
 pub mod constants;
 mod preset;

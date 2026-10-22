@@ -78,6 +78,17 @@ impl<'a> ConfigEntry<'a> {
             "AGGREGATE_DUE_BPS" => config.aggregate_due_bps = number()?,
             "SYNC_MESSAGE_DUE_BPS" => config.sync_message_due_bps = number()?,
             "CONTRIBUTION_DUE_BPS" => config.contribution_due_bps = number()?,
+            "ATTESTATION_DUE_BPS_GLOAS" => config.attestation_due_bps_gloas = number()?,
+            "AGGREGATE_DUE_BPS_GLOAS" => config.aggregate_due_bps_gloas = number()?,
+            "SYNC_MESSAGE_DUE_BPS_GLOAS" => config.sync_message_due_bps_gloas = number()?,
+            "CONTRIBUTION_DUE_BPS_GLOAS" => config.contribution_due_bps_gloas = number()?,
+            "PAYLOAD_DUE_BPS" => config.payload_due_bps = number()?,
+            "PAYLOAD_ATTESTATION_DUE_BPS" => config.payload_attestation_due_bps = number()?,
+            "MIN_BUILDER_WITHDRAWABILITY_DELAY" => {
+                config.min_builder_withdrawability_delay = number()?;
+            }
+            "CHURN_LIMIT_QUOTIENT_GLOAS" => config.churn_limit_quotient_gloas = number()?,
+            "MAX_REQUEST_PAYLOADS" => config.max_request_payloads = number()?,
             "INACTIVITY_SCORE_BIAS" => config.inactivity_score_bias = number()?,
             "INACTIVITY_SCORE_RECOVERY_RATE" => config.inactivity_score_recovery_rate = number()?,
             "MIN_PER_EPOCH_CHURN_LIMIT" => config.min_per_epoch_churn_limit = number()?,
@@ -157,6 +168,9 @@ impl<'a> ConfigEntry<'a> {
             }
             "MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT" => {
                 config.max_per_epoch_activation_exit_churn_limit = Gwei(number()?);
+            }
+            "MAX_PER_EPOCH_ACTIVATION_CHURN_LIMIT_GLOAS" => {
+                config.max_per_epoch_activation_churn_limit_gloas = Gwei(number()?);
             }
             "BALANCE_PER_ADDITIONAL_CUSTODY_GROUP" => {
                 config.balance_per_additional_custody_group = Gwei(number()?);

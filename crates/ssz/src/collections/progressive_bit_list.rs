@@ -50,7 +50,7 @@ impl ProgressiveBitList {
     }
 
     /// Iterates over the bits in order.
-    pub fn iter(&self) -> impl Iterator<Item = bool> + '_ {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = bool> + '_ {
         self.0.iter()
     }
 
