@@ -23,6 +23,7 @@ Allowed, and already declared in the root `Cargo.toml`:
 - `tracing` and `tracing-subscriber`, for telemetry, with default features off and no serde.
 - `thiserror`, for error types.
 - `proptest`, as a dev-dependency only.
+- `criterion`, as a dev-dependency of benchmarks only.
 
 Everything else is written here:
 
@@ -134,6 +135,12 @@ More rules:
 - Tests have no header doc. Their bodies are narrated line by line with concrete numbers.
 
 ## Testing
+
+- Unit and property tests live in the file they test, in a `#[cfg(test)] mod tests` at the bottom.
+- `tests/` holds only black-box suites over the public API: end-to-end runs, simulations, crash and model tests, and conformance against external vector files.
+  A unit test moves to `tests/` only if keeping it inline would make its file unreadable.
+- Benchmarks are criterion benches under `benches/`, never ignored tests.
+  Each bench target sets `harness = false` and drives criterion from a plain `main`, without its macros.
 
 - Consensus spec vectors are the interop contract. They run from `testing/ef-tests`.
 - Property tests with `proptest` for every law: round-trips, reference equality, determinism.
