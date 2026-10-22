@@ -2,7 +2,8 @@
 //!
 //! A point (X : Y : Z) stands for the affine point (X / Z, Y / Z).
 //! Z = 0 is the point at infinity.
-//! The formulas are those of Renes, Costello, and Batina, "Complete addition formulas for prime order elliptic curves", eprint 2015/1060, specialized to a = 0.
+//! The formulas are the complete addition formulas of Renes, Costello, and Batina.
+//! See eprint 2015/1060, specialized to a = 0.
 //! Complete means one formula handles every input, including doubling and the identity.
 //! There is no branch to leak timing, and no exceptional case to forget.
 
@@ -141,7 +142,7 @@ impl G2Projective {
     ///
     /// # Algorithm
     ///
-    /// Budroni and Pintore, "Efficient hash maps to G2 on BLS curves", section 4.1, as written in RFC 9380 appendix G.3.
+    /// See Budroni and Pintore, section 4.1, as written in RFC 9380 appendix G.3.
     /// It evaluates a polynomial in psi instead of a 636-bit scalar multiplication:
     ///
     /// ```text

@@ -26,7 +26,8 @@
 //!
 //! References:
 //!
-//! - Kate, Zaverucha, Goldberg, "Constant-Size Commitments to Polynomials and Their Applications", ASIACRYPT 2010.
+//! - Kate, Zaverucha, Goldberg, ASIACRYPT 2010:
+//!   "Constant-Size Commitments to Polynomials and Their Applications".
 //! - Feist, Khovratovich, "Fast amortized KZG proofs", eprint 2023/033, for all cell proofs at once.
 //! - EIP-4844, shard blob transactions, and EIP-7594, peer data availability sampling.
 
