@@ -1,6 +1,7 @@
 //! Wall-clock time, injected so a simulation can replace it.
 
 use std::{
+    fmt,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -12,7 +13,7 @@ use std::{
 ///
 /// The node never reads the system clock directly.
 /// Tests and simulations drive time by hand instead.
-pub trait Clock: Send + Sync + 'static {
+pub trait Clock: fmt::Debug + Send + Sync + 'static {
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> u64;
 }

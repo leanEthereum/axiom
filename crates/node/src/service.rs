@@ -7,9 +7,14 @@ use std::{
 
 use axiom_execution::{EngineClient, JwtSecret};
 use axiom_http::{Server, ServerConfig};
+use axiom_p2p::{
+    Multiaddr,
+    secure::plaintext::PlaintextConfig,
+    swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
+};
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
-use axiom_types::{BeaconState, ChainConfig, Preset};
+use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, Slot};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -21,7 +26,8 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, ExecutionLayer, NodeError,
+    BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, ExecutionLayer,
+    NetworkIdentity, NetworkService, NetworkSetup, NodeError, NodeKey,
 };
 
 /// How many times per slot the fork choice clock advances.
@@ -39,6 +45,17 @@ pub struct EngineConfig {
     pub jwt_secret: PathBuf,
 }
 
+/// How the node joins the peer-to-peer network.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkSettings {
+    /// TCP address libp2p listens on.
+    pub listen_address: SocketAddr,
+    /// Peers to dial at startup.
+    pub boot_nodes: Vec<Multiaddr>,
+    /// Custody groups to keep, at least the spec's custody requirement.
+    pub custody_group_count: u64,
+}
+
 /// Everything an operator chooses about a node.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeConfig {
@@ -52,6 +69,19 @@ pub struct NodeConfig {
     pub metrics_address: Option<SocketAddr>,
     /// The execution engine; none follows the chain optimistically.
     pub engine: Option<EngineConfig>,
+    /// The peer-to-peer network; none runs the node alone.
+    pub network: Option<NetworkSettings>,
+}
+
+/// The running chain, as the services started after it see it.
+#[derive(Clone, Copy, Debug)]
+struct StartedChain<'a, P: Preset> {
+    /// The chain thread.
+    handle: &'a ChainHandle<P>,
+    /// Genesis, in milliseconds since the Unix epoch.
+    genesis_time_ms: u64,
+    /// Slot length in milliseconds.
+    slot_ms: u64,
 }
 
 /// A beacon node for one preset.
@@ -92,8 +122,20 @@ impl<P: Preset> Node<P> {
         }
 
         // The chain, from the database's anchor or from genesis.
-        let chain = Self::open_chain(chain_config, &config)?.with_metrics(metrics.clone());
+        let mut chain = Self::open_chain(chain_config, &config)?.with_metrics(metrics.clone());
+
+        // The network identity fixes which columns the node custodies.
+        let identity = match &config.network {
+            Some(settings) => {
+                let identity = Self::open_identity(&config, settings)?;
+                let columns = Self::custody_columns(chain.config(), &identity)?;
+                chain = chain.with_custody(columns);
+                Some(identity)
+            }
+            None => None,
+        };
         let events = chain.subscribe();
+        let genesis_time_ms = chain.store().genesis_time_ms();
         let slot_ms = chain.config().slot_duration_ms;
         let (handle, chain_thread) = ChainHandle::spawn(chain).map_err(|error| NodeError::Io {
             context: "spawning the chain thread",
@@ -101,13 +143,71 @@ impl<P: Preset> Node<P> {
         })?;
 
         // The engine, or a stand-in that keeps every payload optimistic.
-        let execution = Arc::new(Self::open_engine(config.engine.as_ref())?.with_metrics(metrics));
+        let execution =
+            Arc::new(Self::open_engine(config.engine.as_ref())?.with_metrics(metrics.clone()));
 
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);
-        let mut servers: Vec<JoinHandle<()>> = Vec::new();
+        let servers = Self::start_servers(&config, &handle, &execution, registry, &stopped).await?;
+
+        // The network, when configured, runs its own event loop.
+        let network = match (identity, &config.network) {
+            (Some(identity), Some(settings)) => {
+                let started = StartedChain {
+                    handle: &handle,
+                    genesis_time_ms,
+                    slot_ms,
+                };
+                let services = (Arc::clone(&execution), Arc::clone(&clock), metrics);
+                Some(Self::start_network(identity, settings, started, services).await?)
+            }
+            _ => None,
+        };
+
+        // Background loops run until aborted.
+        let ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
+        let follower = task::spawn(Self::follow(handle.clone(), events, execution));
+
+        shutdown.await;
+        info!("shutting down");
+
+        // Servers first, so no request reaches a chain that is going away.
+        let _unwatched = stop.send(true);
+        for server in servers {
+            let _finished = server.await;
+        }
+        if let Some((p2p, service)) = network {
+            // A swarm that already stopped needs no second notice.
+            let _stopped = p2p.shutdown();
+            service.abort();
+            let _cancelled = service.await;
+        }
+        ticker.abort();
+        follower.abort();
+        let _cancelled = ticker.await;
+        let _cancelled = follower.await;
+
+        // The chain thread ends once the last handle is gone and its queue drains.
+        drop(handle);
+        task::spawn_blocking(move || chain_thread.join())
+            .await
+            .map_err(|_| NodeError::ChainStopped)?
+            .map_err(|_| NodeError::ChainStopped)?;
+        info!("stopped");
+        Ok(())
+    }
+
+    /// Binds the beacon API and the metrics endpoint, when configured.
+    async fn start_servers(
+        config: &NodeConfig,
+        handle: &ChainHandle<P>,
+        execution: &Arc<ExecutionLayer>,
+        registry: Registry,
+        stopped: &watch::Receiver<bool>,
+    ) -> Result<Vec<JoinHandle<()>>, NodeError> {
+        let mut servers = Vec::new();
         if let Some(address) = config.http_address {
-            let router = BeaconApi::router(handle.clone(), Arc::clone(&execution));
+            let router = BeaconApi::router(handle.clone(), Arc::clone(execution));
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Io {
@@ -127,32 +227,51 @@ impl<P: Preset> Node<P> {
             info!(%address, "metrics listening");
             servers.push(task::spawn(server.serve(Self::signal(stopped.clone()))));
         }
+        Ok(servers)
+    }
 
-        // Background loops run until aborted.
-        let ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
-        let follower = task::spawn(Self::follow(handle.clone(), events, execution));
-
-        shutdown.await;
-        info!("shutting down");
-
-        // Servers first, so no request reaches a chain that is going away.
-        let _unwatched = stop.send(true);
-        for server in servers {
-            let _finished = server.await;
-        }
-        ticker.abort();
-        follower.abort();
-        let _cancelled = ticker.await;
-        let _cancelled = follower.await;
-
-        // The chain thread ends once the last handle is gone and its queue drains.
-        drop(handle);
-        task::spawn_blocking(move || chain_thread.join())
+    /// Starts libp2p and the network service over it.
+    ///
+    /// # Returns
+    ///
+    /// The network handle, for shutdown, and the service's task.
+    async fn start_network(
+        (key, identity): (NodeKey, NetworkIdentity),
+        settings: &NetworkSettings,
+        chain: StartedChain<'_, P>,
+        (execution, clock, metrics): (Arc<ExecutionLayer>, Arc<dyn Clock>, NodeMetrics),
+    ) -> Result<(NetworkHandle, JoinHandle<()>), NodeError> {
+        // Topics are named by the fork of the wall clock's epoch, not the anchor's.
+        let elapsed = clock.now_ms().saturating_sub(chain.genesis_time_ms);
+        let epoch = Slot(elapsed / chain.slot_ms).epoch::<P>();
+        let (config, custody, fork_digest) = chain
+            .handle
+            .run(move |chain| {
+                (
+                    chain.config().clone(),
+                    chain.custody().clone(),
+                    chain.fork_digest(epoch),
+                )
+            })
             .await
-            .map_err(|_| NodeError::ChainStopped)?
             .map_err(|_| NodeError::ChainStopped)?;
-        info!("stopped");
-        Ok(())
+
+        let (network, events) = Self::start_p2p(&key, settings).await?;
+        let service = NetworkService::start(
+            network.clone(),
+            &identity,
+            chain.handle.clone(),
+            NetworkSetup {
+                config,
+                fork_digest,
+                epoch,
+                custody,
+                execution,
+                clock,
+                metrics,
+            },
+        );
+        Ok((network, task::spawn(service.run(events))))
     }
 
     /// Opens the database and builds the chain from its anchor or from genesis.
@@ -176,6 +295,58 @@ impl<P: Preset> Node<P> {
             "starting from genesis"
         );
         Ok(Chain::from_genesis(chain_config, genesis, database)?)
+    }
+
+    /// Loads or creates the node key, and derives the network identity from it.
+    fn open_identity(
+        config: &NodeConfig,
+        settings: &NetworkSettings,
+    ) -> Result<(NodeKey, NetworkIdentity), NodeError> {
+        // Without a data directory the key lives only as long as the process.
+        let key = match &config.data_dir {
+            Some(directory) => NodeKey::load_or_generate(&directory.join("network").join("key")),
+            None => NodeKey::generate(),
+        }
+        .map_err(|error| NodeError::Io {
+            context: "loading the node key",
+            error,
+        })?;
+        let identity = NetworkIdentity {
+            node_id: key.node_id(),
+            custody_group_count: settings.custody_group_count,
+            boot_nodes: settings.boot_nodes.clone(),
+        };
+        Ok((key, identity))
+    }
+
+    /// The columns of every custody group the node keeps.
+    ///
+    /// See `get_custody_groups` and `compute_columns_for_custody_group` in the Fulu DAS spec.
+    fn custody_columns(
+        config: &ChainConfig,
+        identity: &(NodeKey, NetworkIdentity),
+    ) -> Result<Vec<ColumnIndex>, NodeError> {
+        let (_, identity) = identity;
+        let groups = identity
+            .node_id
+            .custody_groups(identity.custody_group_count, config)
+            .map_err(NodeError::Custody)?;
+        let mut columns = Vec::new();
+        for group in groups {
+            columns.extend(group.columns::<P>(config).map_err(NodeError::Custody)?);
+        }
+        Ok(columns)
+    }
+
+    /// Starts the libp2p stack.
+    async fn start_p2p(
+        key: &NodeKey,
+        settings: &NetworkSettings,
+    ) -> Result<(NetworkHandle, NetworkEvents), NodeError> {
+        let public = key.public_key();
+        let mut p2p = NetworkConfig::new(public.clone(), Arc::new(PlaintextConfig::new(public)));
+        p2p.listen_addr = Multiaddr::from_tcp(settings.listen_address);
+        swarm::start(p2p).await.map_err(NodeError::Network)
     }
 
     /// Connects to the engine, when one is configured.

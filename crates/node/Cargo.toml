@@ -14,10 +14,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-crypto.workspace = true
+axiom-das.workspace = true
 axiom-execution.workspace = true
 axiom-fork-choice.workspace = true
+axiom-gossip.workspace = true
 axiom-http.workspace = true
 axiom-json.workspace = true
+axiom-kzg.workspace = true
+axiom-p2p.workspace = true
 axiom-ssz.workspace = true
 axiom-state-transition.workspace = true
 axiom-store.workspace = true

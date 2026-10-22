@@ -1,10 +1,12 @@
 //! The chain's on-disk layout: every table and key format in one place.
 
-use std::{marker::PhantomData, path::Path};
+use std::{marker::PhantomData, path::Path, sync::Arc};
 
 use axiom_ssz::Ssz;
 use axiom_store::{Batch, Options, Store, Table};
-use axiom_types::{BeaconState, Checkpoint, Preset, Root, SignedBeaconBlock, Slot};
+use axiom_types::{
+    BeaconState, Checkpoint, ColumnIndex, DataColumnSidecar, Preset, Root, SignedBeaconBlock, Slot,
+};
 
 use crate::ChainError;
 
@@ -19,6 +21,7 @@ const FINALIZED_KEY: &[u8] = b"finalized";
 ///     table       key                    value
 ///     blocks      block root (32 bytes)  SSZ signed block
 ///     states      block root (32 bytes)  SSZ post-state, kept for finalized blocks only
+///     columns     root (32) + index (8)  SSZ data column sidecar of a custody column
 ///     canonical   slot (8 bytes, BE)     root of the finalized chain's block at that slot
 ///     meta        "finalized"            SSZ checkpoint the node resumes from
 /// ```
@@ -32,6 +35,8 @@ pub struct ChainDatabase<P: Preset> {
     blocks: Table,
     /// Post-states by block root.
     states: Table,
+    /// Custody columns by block root and index.
+    columns: Table,
     /// Finalized block roots by slot.
     canonical: Table,
     /// Single named records.
@@ -64,6 +69,7 @@ impl<P: Preset> ChainDatabase<P> {
         Ok(Self {
             blocks: store.table("blocks")?,
             states: store.table("states")?,
+            columns: store.table("columns")?,
             canonical: store.table("canonical")?,
             meta: store.table("meta")?,
             store,
@@ -89,6 +95,40 @@ impl<P: Preset> ChainDatabase<P> {
         self.read(self.blocks, &root.0, "block")
     }
 
+    /// Stores the custody columns of an imported block in one atomic write.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write fails.
+    pub fn put_columns(
+        &self,
+        root: Root,
+        columns: &[Arc<DataColumnSidecar<P>>],
+    ) -> Result<(), ChainError> {
+        let mut batch = Batch::new();
+        for column in columns {
+            batch.put(
+                self.columns,
+                &Self::column_key(root, column.index),
+                &column.encode(),
+            )?;
+        }
+        Ok(self.store.write(&batch)?)
+    }
+
+    /// A stored column of a block, if this node custodies it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails or the stored bytes do not decode.
+    pub fn column(
+        &self,
+        root: Root,
+        index: ColumnIndex,
+    ) -> Result<Option<DataColumnSidecar<P>>, ChainError> {
+        self.read(self.columns, &Self::column_key(root, index), "column")
+    }
+
     /// The finalized checkpoint and its post-state, if the node ever finalized one.
     ///
     /// # Errors
@@ -104,6 +144,22 @@ impl<P: Preset> ChainDatabase<P> {
             .read(self.states, &checkpoint.root.0, "state")?
             .ok_or(ChainError::Missing("finalized state"))?;
         Ok(Some((checkpoint, state)))
+    }
+
+    /// The earliest slot whose canonical block the database holds.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails or the index holds a malformed key.
+    pub fn earliest_slot(&self) -> Result<Option<Slot>, ChainError> {
+        // Big-endian slot keys sort by slot, so the first key is the earliest.
+        let Some(key) = self.store.snapshot().entries(self.canonical)?.keys().next() else {
+            return Ok(None);
+        };
+        let bytes: [u8; 8] = key
+            .try_into()
+            .map_err(|_| ChainError::Missing("well-formed canonical index key"))?;
+        Ok(Some(Slot(u64::from_be_bytes(bytes))))
     }
 
     /// Whether the database holds an anchor to resume from.
@@ -154,9 +210,14 @@ impl<P: Preset> ChainDatabase<P> {
             batch.put(self.canonical, &slot.0.to_be_bytes(), &root.0)?;
         }
 
-        // Blocks off the finalized chain can never become canonical again.
+        // Blocks off the finalized chain can never become canonical again, nor their columns.
+        let snapshot = self.store.snapshot();
         for root in orphans {
             batch.delete(self.blocks, &root.0)?;
+            // Column keys start with the block root, so a prefix scan finds exactly the stored ones.
+            for key in snapshot.prefix(self.columns, &root.0)?.keys() {
+                batch.delete(self.columns, &key)?;
+            }
         }
         Ok(self.store.write(&batch)?)
     }
@@ -165,6 +226,14 @@ impl<P: Preset> ChainDatabase<P> {
     #[must_use]
     pub fn bytes_written(&self) -> u64 {
         self.store.metrics().bytes_written()
+    }
+
+    /// Key of a column: the block root, then the index in big-endian.
+    fn column_key(root: Root, index: ColumnIndex) -> [u8; 40] {
+        let mut key = [0; 40];
+        key[..32].copy_from_slice(&root.0);
+        key[32..].copy_from_slice(&index.0.to_be_bytes());
+        key
     }
 
     /// Reads and decodes one record.
@@ -224,6 +293,11 @@ mod tests {
         for (block, root) in [&one, &two, &three].into_iter().zip(roots) {
             database.put_block(root, block).unwrap();
         }
+        let column = DataColumnSidecar::<Minimal> {
+            index: ColumnIndex(3),
+            ..DataColumnSidecar::default()
+        };
+        database.put_columns(roots[1], &[Arc::new(column)]).unwrap();
         let checkpoint = Checkpoint {
             epoch: Epoch(1),
             root: roots[2],
@@ -241,12 +315,34 @@ mod tests {
 
         // The anchor reads back whole.
         assert_eq!(database.finalized().unwrap(), Some((checkpoint, state)));
-        // Slot 2 was skipped on the finalized chain.
+        // Slot 1 is the earliest the index holds, and slot 2 was skipped.
+        assert_eq!(database.earliest_slot().unwrap(), Some(Slot(1)));
         assert_eq!(database.canonical_root(Slot(1)).unwrap(), Some(roots[0]));
         assert_eq!(database.canonical_root(Slot(2)).unwrap(), None);
-        // The orphan is gone, the finalized blocks stay.
+        // The orphan and its column are gone, the finalized blocks stay.
         assert_eq!(database.block(roots[1]).unwrap(), None);
+        assert_eq!(database.column(roots[1], ColumnIndex(3)).unwrap(), None);
         assert_eq!(database.block(roots[2]).unwrap(), Some(three));
+    }
+
+    #[test]
+    fn columns_round_trip_by_root_and_index() {
+        let database = Database::in_memory().unwrap();
+        let root = Root([5; 32]);
+        let column = DataColumnSidecar::<Minimal> {
+            index: ColumnIndex(77),
+            ..DataColumnSidecar::default()
+        };
+
+        database
+            .put_columns(root, &[Arc::new(column.clone())])
+            .unwrap();
+
+        assert_eq!(
+            database.column(root, ColumnIndex(77)).unwrap(),
+            Some(column)
+        );
+        assert_eq!(database.column(root, ColumnIndex(76)).unwrap(), None);
     }
 
     #[test]

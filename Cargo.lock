@@ -13,6 +13,7 @@ name = "axiom"
 version = "0.1.0"
 dependencies = [
  "axiom-node",
+ "axiom-p2p",
  "axiom-telemetry",
  "axiom-types",
  "axiom-yaml",
@@ -150,10 +151,15 @@ dependencies = [
 name = "axiom-node"
 version = "0.1.0"
 dependencies = [
+ "axiom-crypto",
+ "axiom-das",
  "axiom-execution",
  "axiom-fork-choice",
+ "axiom-gossip",
  "axiom-http",
  "axiom-json",
+ "axiom-kzg",
+ "axiom-p2p",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-store",

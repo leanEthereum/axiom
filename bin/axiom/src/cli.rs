@@ -2,7 +2,8 @@
 
 use std::{error::Error, fmt, fs, io, net::SocketAddr, path::PathBuf};
 
-use axiom_node::{EngineConfig, NodeConfig};
+use axiom_node::{EngineConfig, NetworkSettings, NodeConfig};
+use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
 use axiom_yaml::Yaml;
@@ -24,6 +25,10 @@ OPTIONS:
     --http-address <ADDR>        beacon API address [default: 127.0.0.1:5052]
     --no-http                    disable the beacon API
     --metrics-address <ADDR>     Prometheus endpoint address [default: disabled]
+    --listen-address <ADDR>      libp2p TCP address [default: 0.0.0.0:9000]
+    --boot-node <MULTIADDR>      peer to dial at startup, repeatable
+    --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
+    --no-network                 run without peers
     --execution-endpoint <URL>   engine API endpoint, such as http://127.0.0.1:8551
     --jwt-secret <FILE>          hex JWT secret shared with the engine
     --log <FILTER>               log filter, such as info,axiom_node=debug [default: info]
@@ -34,6 +39,9 @@ OPTIONS:
 
 /// Default address of the beacon API, the port every client uses.
 const DEFAULT_HTTP_ADDRESS: &str = "127.0.0.1:5052";
+
+/// Default libp2p address, the port every client uses.
+const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:9000";
 
 /// What the command line asks for.
 #[derive(Debug)]
@@ -105,6 +113,14 @@ pub(crate) struct Cli {
     no_http: bool,
     /// The metrics address.
     metrics_address: Option<SocketAddr>,
+    /// The libp2p address.
+    listen_address: Option<SocketAddr>,
+    /// Peers to dial at startup.
+    boot_nodes: Vec<Multiaddr>,
+    /// Custody groups to keep.
+    custody_groups: Option<u64>,
+    /// Whether the network is off.
+    no_network: bool,
     /// The engine endpoint.
     execution_endpoint: Option<String>,
     /// The engine secret file.
@@ -146,6 +162,29 @@ impl Cli {
                         value("--metrics-address")?,
                     )?);
                 }
+                "--listen-address" => {
+                    cli.listen_address = Some(Self::address(
+                        "--listen-address",
+                        value("--listen-address")?,
+                    )?);
+                }
+                "--boot-node" => {
+                    let text = value("--boot-node")?;
+                    let address = text.parse().map_err(|_| CliError::InvalidValue {
+                        flag: "--boot-node",
+                        value: text,
+                    })?;
+                    cli.boot_nodes.push(address);
+                }
+                "--custody-groups" => {
+                    let text = value("--custody-groups")?;
+                    let count = text.parse().map_err(|_| CliError::InvalidValue {
+                        flag: "--custody-groups",
+                        value: text,
+                    })?;
+                    cli.custody_groups = Some(count);
+                }
+                "--no-network" => cli.no_network = true,
                 "--execution-endpoint" => {
                     cli.execution_endpoint = Some(value("--execution-endpoint")?);
                 }
@@ -168,10 +207,28 @@ impl Cli {
             (None, None) => None,
             _ => return Err(CliError::IncompleteEngine),
         };
+        let network = if self.no_network {
+            None
+        } else {
+            Some(NetworkSettings {
+                listen_address: self
+                    .listen_address
+                    .unwrap_or_else(|| Self::default_address(DEFAULT_LISTEN_ADDRESS)),
+                boot_nodes: self.boot_nodes,
+                // Every node keeps at least the spec's minimum.
+                custody_group_count: self
+                    .custody_groups
+                    .unwrap_or(chain.custody_requirement)
+                    .max(chain.custody_requirement),
+            })
+        };
         let http_address = if self.no_http {
             None
         } else {
-            Some(self.http_address.unwrap_or_else(Self::default_http_address))
+            Some(
+                self.http_address
+                    .unwrap_or_else(|| Self::default_address(DEFAULT_HTTP_ADDRESS)),
+            )
         };
         Ok(Run {
             preset,
@@ -182,6 +239,7 @@ impl Cli {
                 http_address,
                 metrics_address: self.metrics_address,
                 engine,
+                network,
             },
             log: LogConfig {
                 filter: self.log.unwrap_or_else(|| "info".to_owned()),
@@ -234,12 +292,12 @@ impl Cli {
         }
     }
 
-    /// The beacon API's default address.
-    fn default_http_address() -> SocketAddr {
-        // Invariant: the constant is a literal IPv4 socket address, so it always parses.
-        DEFAULT_HTTP_ADDRESS
+    /// A default address from its literal.
+    fn default_address(literal: &str) -> SocketAddr {
+        // Invariant: every default is a literal IPv4 socket address, so it always parses.
+        literal
             .parse()
-            .expect("the default address is a valid literal")
+            .expect("default addresses are valid literals")
     }
 }
 
@@ -268,6 +326,11 @@ mod tests {
             run.node,
             NodeConfig {
                 http_address: Some("127.0.0.1:5052".parse().unwrap()),
+                network: Some(NetworkSettings {
+                    listen_address: "0.0.0.0:9000".parse().unwrap(),
+                    boot_nodes: Vec::new(),
+                    custody_group_count: 4,
+                }),
                 ..NodeConfig::default()
             }
         );
@@ -295,6 +358,12 @@ mod tests {
             "debug",
             "--log-format",
             "json",
+            "--listen-address",
+            "127.0.0.1:9001",
+            "--boot-node",
+            "/ip4/10.0.0.1/tcp/9000",
+            "--custody-groups",
+            "128",
         ]);
 
         assert_eq!(run.preset, PresetName::Minimal);
@@ -309,6 +378,11 @@ mod tests {
                 engine: Some(EngineConfig {
                     url: "http://127.0.0.1:8551".to_owned(),
                     jwt_secret: "jwt.hex".into(),
+                }),
+                network: Some(NetworkSettings {
+                    listen_address: "127.0.0.1:9001".parse().unwrap(),
+                    boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
+                    custody_group_count: 128,
                 }),
             }
         );
@@ -343,6 +417,13 @@ mod tests {
             parse(&["--http-address", "localhost"]),
             Err(CliError::InvalidValue {
                 flag: "--http-address",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["--boot-node", "not-a-multiaddr"]),
+            Err(CliError::InvalidValue {
+                flag: "--boot-node",
                 ..
             })
         ));

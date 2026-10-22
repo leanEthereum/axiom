@@ -1,20 +1,30 @@
 //! The chain: the fork choice store, its database, and the head it selects.
 
+mod availability;
 mod database;
+mod gossip;
 mod handle;
 mod head;
 
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
+pub use availability::Submission;
+use availability::{AvailabilityBuffer, ReadyBlock};
 use axiom_fork_choice::{DataAvailability, ExecutionStatus, PayloadStatus, Store};
+use axiom_gossip::{ChainView, GossipValidator};
 use axiom_ssz::Ssz;
 use axiom_state_transition::{State, Verification};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, BlsSignature,
-    ChainConfig, Checkpoint, Hash32, Preset, Root, SignedBeaconBlock, Slot,
+    ChainConfig, Checkpoint, ColumnIndex, DataColumnSidecar, Epoch, ForkDigest, Hash32, Preset,
+    Root, SignedBeaconBlock, Slot,
 };
 pub use database::ChainDatabase;
+use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
 pub use head::{ChainEvent, ExecutionHead, Head};
 use tokio::sync::broadcast;
@@ -54,6 +64,10 @@ pub struct Chain<P: Preset> {
     metrics: NodeMetrics,
     /// Database bytes written as of the last metrics update.
     bytes_written: u64,
+    /// Blocks waiting for their custody columns.
+    availability: AvailabilityBuffer<P>,
+    /// What gossip validation remembers.
+    gossip: GossipMemory,
 }
 
 impl<P: Preset> Chain<P> {
@@ -153,7 +167,19 @@ impl<P: Preset> Chain<P> {
             events: broadcast::channel(EVENT_BACKLOG).0,
             metrics: NodeMetrics::detached(),
             bytes_written: 0,
+            // Until told otherwise, sample every column: the strictest availability rule.
+            availability: AvailabilityBuffer::new((0..P::NUMBER_OF_COLUMNS).map(ColumnIndex)),
+            gossip: GossipMemory::default(),
         })
+    }
+
+    /// Samples only the given columns, as this node's custody assigns.
+    ///
+    /// See `get_custody_groups` and `compute_columns_for_custody_group` in the Fulu DAS spec.
+    #[must_use]
+    pub fn with_custody(mut self, columns: impl IntoIterator<Item = ColumnIndex>) -> Self {
+        self.availability = AvailabilityBuffer::new(columns);
+        self
     }
 
     /// Records into the node's exported metrics instead of a private set.
@@ -210,6 +236,22 @@ impl<P: Preset> Chain<P> {
         self.database.block(root)
     }
 
+    /// The root that binds signatures and topics to this chain's genesis validator set.
+    #[must_use]
+    pub fn genesis_validators_root(&self) -> Root {
+        // Every state carries it unchanged; the head's state is always held.
+        self.store
+            .block_state(&self.head.root)
+            .map_or(Root::ZERO, |state| state.beacon().genesis_validators_root)
+    }
+
+    /// The digest of the fork active at an epoch, which names gossip topics and tags responses.
+    #[must_use]
+    pub fn fork_digest(&self, epoch: Epoch) -> ForkDigest {
+        self.config()
+            .fork_digest(self.genesis_validators_root(), epoch)
+    }
+
     /// Root of the canonical block proposed at a slot, if any.
     ///
     /// Since finality the head's chain decides; before it, the finalized index does.
@@ -242,7 +284,12 @@ impl<P: Preset> Chain<P> {
     ///
     /// Fails when the head cannot be recomputed.
     pub fn on_tick(&mut self, time_ms: u64) -> Result<(), ChainError> {
+        let epoch = self.store.current_epoch();
         self.store.on_tick(time_ms);
+        if self.store.current_epoch() != epoch {
+            // Messages from two epochs ago can no longer be gossiped, so forget them.
+            self.gossip.seen.prune::<P>(self.store.current_epoch());
+        }
         self.metrics
             .clock_slot
             .set_count(self.store.current_slot().0);
@@ -281,6 +328,86 @@ impl<P: Preset> Chain<P> {
         info!(slot = %block.message.slot, %root, "imported block");
         self.update_head()?;
         Ok(root)
+    }
+
+    /// Hands over a block that passed gossip or sync checks, with its payload verdict.
+    ///
+    /// The block imports now if its data is complete, or later when the last column arrives.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the block is imported now and the fork choice refuses it.
+    pub fn submit_block(
+        &mut self,
+        block: Arc<SignedBeaconBlock<P>>,
+        payload: PayloadStatus,
+    ) -> Result<Submission, ChainError> {
+        let root = block.message.hash_tree_root();
+        match self
+            .availability
+            .offer_block(root, ReadyBlock { block, payload })
+        {
+            Some(ready) => self
+                .import_ready(root, &ready)
+                .map(|()| Submission::Imported(root)),
+            None => Ok(Submission::Waiting(root)),
+        }
+    }
+
+    /// Hands over a verified custody column, which may complete a waiting block.
+    ///
+    /// # Returns
+    ///
+    /// The root of the block the column released and imported, if any.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a released block is refused by the fork choice.
+    pub fn submit_column(
+        &mut self,
+        column: Arc<DataColumnSidecar<P>>,
+    ) -> Result<Option<Root>, ChainError> {
+        let root = column.signed_block_header.message.hash_tree_root();
+        match self.availability.offer_column(root, column) {
+            Some(ready) => self.import_ready(root, &ready).map(|()| Some(root)),
+            None => Ok(None),
+        }
+    }
+
+    /// The columns this node samples and serves.
+    #[must_use]
+    pub const fn custody(&self) -> &BTreeSet<ColumnIndex> {
+        self.availability.custody()
+    }
+
+    /// Runs gossip validation against the chain.
+    ///
+    /// The validator borrows the store and the gossip memory for the duration of the check.
+    pub fn validate_gossip<R>(
+        &mut self,
+        check: impl FnOnce(&mut GossipValidator<'_, '_, P>) -> R,
+    ) -> R {
+        let mut view = ChainView::new(
+            &mut self.store,
+            &self.gossip.unimported,
+            &self.gossip.payload_statuses,
+        );
+        let mut validator = GossipValidator::new(&mut view, &mut self.gossip.seen);
+        check(&mut validator)
+    }
+
+    /// Imports a block whose data is available, then stores its columns.
+    fn import_ready(&mut self, root: Root, ready: &ReadyBlock<P>) -> Result<(), ChainError> {
+        let columns = self.availability.take_columns(&root);
+        match self.import_block(&ready.block, DataAvailability::Available, ready.payload) {
+            Ok(_) => self.database.put_columns(root, &columns),
+            Err(error) => {
+                // Remember the refusal, so gossip refuses the block's descendants too.
+                let invalid_payload = matches!(ready.payload, PayloadStatus::Invalid { .. });
+                self.gossip.refuse(root, &ready.block, invalid_payload);
+                Err(error)
+            }
+        }
     }
 
     /// Counts a vote received on its own, outside any block.
@@ -368,6 +495,8 @@ impl<P: Preset> Chain<P> {
 
         if head.finalized.epoch > previous.finalized.epoch {
             self.finalize(previous.finalized, head.finalized)?;
+            self.availability
+                .prune(head.finalized.epoch.start_slot::<P>());
             info!(epoch = %head.finalized.epoch, root = %head.finalized.root, "finalized");
             self.announce(ChainEvent::Finalized(head.finalized));
         }

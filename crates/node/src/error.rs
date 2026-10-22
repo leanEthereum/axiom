@@ -2,8 +2,10 @@
 
 use std::{error::Error, fmt, io};
 
+use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
+use axiom_p2p::swarm::NetworkError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
@@ -86,6 +88,10 @@ pub enum NodeError {
     Jwt(JwtError),
     /// The node's metrics could not be registered.
     Metrics(RegistryError),
+    /// The custody group count is out of range.
+    Custody(CustodyError),
+    /// The peer-to-peer stack failed to start.
+    Network(NetworkError),
     /// The chain thread stopped before the node did.
     ChainStopped,
 }
@@ -100,6 +106,8 @@ impl fmt::Display for NodeError {
             Self::Engine(error) => write!(f, "execution engine: {error}"),
             Self::Jwt(error) => write!(f, "JWT secret: {error}"),
             Self::Metrics(error) => write!(f, "metrics: {error}"),
+            Self::Custody(error) => write!(f, "custody: {error}"),
+            Self::Network(error) => write!(f, "network: {error}"),
             Self::ChainStopped => f.write_str("chain service stopped unexpectedly"),
         }
     }
@@ -114,6 +122,8 @@ impl Error for NodeError {
             Self::Engine(error) => Some(error),
             Self::Jwt(error) => Some(error),
             Self::Metrics(error) => Some(error),
+            Self::Custody(error) => Some(error),
+            Self::Network(error) => Some(error),
             Self::NoAnchor | Self::ChainStopped => None,
         }
     }

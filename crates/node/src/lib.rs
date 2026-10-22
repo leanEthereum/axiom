@@ -17,11 +17,15 @@ mod chain;
 mod clock;
 mod engine;
 mod error;
+mod network;
 mod service;
 
 pub use api::BeaconApi;
-pub use chain::{Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Head};
+pub use chain::{
+    Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Head, Submission,
+};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
-pub use service::{EngineConfig, Node, NodeConfig};
+pub use network::{NetworkIdentity, NetworkService, NetworkSetup, NodeKey};
+pub use service::{EngineConfig, NetworkSettings, Node, NodeConfig};
