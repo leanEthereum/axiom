@@ -46,7 +46,7 @@ use axiom_types::{
     deneb::{self, Blob},
     electra,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
-    gloas,
+    gloas, phase0,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -223,11 +223,21 @@ impl TestNode {
         config: NodeConfig,
         address: SocketAddr,
     ) -> Self {
+        Self::start_with_clock(ManualClock::at(now_ms), chain_config, config, address).await
+    }
+
+    /// Starts a node whose clock the test keeps a handle on, to move it by hand.
+    async fn start_with_clock(
+        clock: ManualClock,
+        chain_config: ChainConfig,
+        config: NodeConfig,
+        address: SocketAddr,
+    ) -> Self {
         let (stop, stopped) = oneshot::channel::<()>();
         let task = task::spawn(Node::<Minimal>::run(
             chain_config,
             config,
-            Arc::new(ManualClock::at(now_ms)),
+            Arc::new(clock),
             async move {
                 let _stopped = stopped.await;
             },
@@ -471,6 +481,23 @@ impl TestNode {
             slot,
             Some(envelope.message.payload.slot_number.to_string().as_str())
         );
+    }
+
+    /// Polls a route until a text member reaches a value, for about ten seconds.
+    async fn reaches(&self, members: &[&str], value: &str, path: &str) -> bool {
+        for _ in 0..500 {
+            let reply = self.json(path).await.ok();
+            let found = members
+                .iter()
+                .try_fold(reply.as_ref(), |json, name| json.map(|json| json.get(name)))
+                .flatten()
+                .and_then(Json::as_str);
+            if found == Some(value) {
+                return true;
+            }
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        false
     }
 
     /// The head block's root, as the header route reports it.
@@ -1670,4 +1697,144 @@ fn a_node_streams_its_events_and_serves_its_routes_in_json_and_ssz() {
         drop(stream);
         node.stop().await;
     });
+}
+
+/// A metric's value in a node's Prometheus text, when it is exported.
+async fn metric(address: SocketAddr, name: &str) -> Option<String> {
+    let client = Client::new(
+        Endpoint::parse(&format!("http://{address}")).expect("a socket address is a valid URL"),
+        ClientConfig::default(),
+    );
+    let response = client
+        .send(&Request::new(Method::Get, "/metrics"))
+        .await
+        .ok()?;
+    let text = String::from_utf8_lossy(&response.body).into_owned();
+    text.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name} ")))
+        .map(str::to_owned)
+}
+
+#[test]
+fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis and three blocks, at slots 1, 2, and 3.
+    // Slots last a minute, so the once-a-slot status refresh never runs during the test.
+    // Range sync then never learns that A is ahead: only a lookup can bring B the blocks.
+    let config = ChainConfig {
+        slot_duration_ms: 60_000,
+        ..ChainConfig::minimal()
+    };
+    let genesis_case = Case::new(vectors.consensus().join(PYSPEC_GENESIS));
+    let genesis: phase0::BeaconState<Minimal> = genesis_case
+        .ssz("state")
+        .expect("the genesis vector decodes");
+    let mut builder = ChainBuilder::new(config.clone(), genesis).expect("pyspec genesis");
+    let blocks: Vec<combined::SignedBeaconBlock<Minimal>> = (0..3)
+        .map(|_| builder.propose().expect("a block").block().clone())
+        .collect();
+    let tip = format!("{}", blocks[2].block_root());
+    let genesis_root = format!(
+        "{}",
+        combined::BeaconBlock::genesis(builder.genesis()).hash_tree_root()
+    );
+    let (directory, genesis_path) = write_genesis("lookup", &builder);
+    let slot_ms = |slot: u64| (builder.genesis().genesis_time() * 1000) + slot * 60_000;
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        // A stands at slot 3 and B at genesis, so B ignores blocks 1 and 2 as from the future.
+        //
+        //     A: clock at slot 3       B: clock at slot 0, dials A
+        //     blocks 1, 2 published    ignored, from a future slot
+        //     B's clock moves to slot 3
+        //     block 3 published        parent 2 unknown: B looks up 2, then 1
+        let settings = |listen_address, boot_nodes| NetworkSettings {
+            listen_address,
+            boot_nodes,
+            custody_group_count: 4,
+            discovery: None,
+        };
+        let node_config = |network, http, metrics| NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            http_address: Some(http),
+            metrics_address: metrics,
+            network: Some(network),
+            ..NodeConfig::default()
+        };
+        let a_address = free_address();
+        let a_api = free_address();
+        let a = TestNode::start_with(
+            slot_ms(3),
+            config.clone(),
+            node_config(settings(a_address, Vec::new()), a_api, None),
+            a_api,
+        )
+        .await;
+        let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port())
+            .parse()
+            .unwrap();
+        let b_clock = ManualClock::at(slot_ms(0));
+        let b_api = free_address();
+        let b_metrics = free_address();
+        let b = TestNode::start_with_clock(
+            b_clock.clone(),
+            config.clone(),
+            node_config(settings(free_address(), vec![boot]), b_api, Some(b_metrics)),
+            b_api,
+        )
+        .await;
+
+        // Wait for the connection, then a few gossip heartbeats for the topics to be known.
+        assert!(
+            a.reaches(&["data", "connected"], "1", "/eth/v1/node/peer_count")
+                .await,
+            "node B never connected to node A"
+        );
+        time::sleep(Duration::from_millis(2_000)).await;
+
+        // Blocks 1 and 2 reach B by gossip, from its future: B ignores them.
+        for block in &blocks[..2] {
+            assert_eq!(a.publish_any(block).await.status, StatusCode::OK);
+        }
+        time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(b.head_root().await.as_deref(), Some(genesis_root.as_str()));
+
+        // B's clock reaches slot 3; its fork choice follows at the next tick.
+        b_clock.set(slot_ms(3));
+        assert!(
+            b.reaches(&["data", "sync_distance"], "3", "/eth/v1/node/syncing")
+                .await,
+            "node B's fork choice never reached slot 3"
+        );
+
+        // Block 3 arrives timely; its unknown parent starts a lookup that chases 2, then 1.
+        assert_eq!(a.publish_any(&blocks[2]).await.status, StatusCode::OK);
+        let head = wait_for_head(&b, &tip).await;
+        assert_eq!(
+            head.as_deref(),
+            Some(tip.as_str()),
+            "node B never looked the blocks up"
+        );
+
+        // One lookup was created, and it completed by importing the three blocks.
+        assert_eq!(
+            metric(b_metrics, "sync_lookups_created_total")
+                .await
+                .as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            metric(b_metrics, "sync_lookups_completed_total")
+                .await
+                .as_deref(),
+            Some("1")
+        );
+
+        b.stop().await;
+        a.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
 }

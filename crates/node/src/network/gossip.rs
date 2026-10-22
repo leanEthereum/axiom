@@ -11,6 +11,7 @@ use axiom_json::Json;
 use axiom_kzg::Kzg;
 use axiom_light_client::combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate};
 use axiom_p2p::{
+    PeerId,
     eth::{GossipKind, GossipTopic},
     gossipsub::{MessageId, Topic, ValidationOutcome},
     swarm::NetworkHandle,
@@ -18,7 +19,7 @@ use axiom_p2p::{
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlobData, ForkName, Preset, SubnetId,
+    BlobData, ForkName, Preset, Root, SubnetId,
     altair::{self, SignedContributionAndProof, SyncCommitteeMessage},
     bellatrix, capella,
     capella::SignedBlsToExecutionChange,
@@ -31,10 +32,13 @@ use axiom_types::{
     },
     phase0::{self, ProposerSlashing, SignedVoluntaryExit},
 };
-use tokio::time;
+use tokio::{sync::mpsc::UnboundedSender, time};
 use tracing::{debug, warn};
 
-use super::forks::ForkDigests;
+use super::{
+    forks::ForkDigests,
+    sync::{LookupEvent, MissingBlock},
+};
 use crate::{
     ApiEvent, Chain, ChainError, ChainHandle, Clock, EventSender, EventTopic, ExecutionLayer,
 };
@@ -42,7 +46,7 @@ use crate::{
 /// Work on the chain that an accepted message leaves, run after it was forwarded.
 type ChainJob<P> = Box<dyn FnOnce(&mut Chain<P>) -> Result<(), ChainError> + Send>;
 
-/// A message that passed validation and still has work to do once forwarded.
+/// What remains to do with a message once its verdict is reported.
 enum Accepted<P: Preset> {
     /// A block, to be judged by the engine and imported.
     Block(Arc<combined::SignedBeaconBlock<P>>),
@@ -50,6 +54,8 @@ enum Accepted<P: Preset> {
     Envelope(Arc<SignedExecutionPayloadEnvelope<P>>),
     /// Anything else the chain consumes: votes, slashings, sidecars.
     Job(ChainJob<P>),
+    /// An ignored message that needs a block the chain lacks, for a lookup to fetch.
+    Lookup(MissingBlock<P>),
 }
 
 /// How an accepted message goes out on the beacon API's event stream.
@@ -110,8 +116,26 @@ pub(crate) struct GossipHandler<P: Preset> {
     metrics: NodeMetrics,
     /// The fork each topic digest names.
     forks: Arc<ForkDigests>,
+    /// Where accepted messages and missing blocks go.
+    sinks: GossipSinks<P>,
+}
+
+/// Where gossip goes besides the chain: event stream clients, and lookups.
+#[derive(Debug)]
+pub(crate) struct GossipSinks<P: Preset> {
     /// Where accepted messages go out to event stream clients.
-    events: EventSender,
+    pub(crate) events: EventSender,
+    /// Where missing blocks go, for lookups to fetch.
+    pub(crate) lookups: UnboundedSender<LookupEvent<P>>,
+}
+
+impl<P: Preset> Clone for GossipSinks<P> {
+    fn clone(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            lookups: self.lookups.clone(),
+        }
+    }
 }
 
 impl<P: Preset> Clone for GossipHandler<P> {
@@ -123,7 +147,7 @@ impl<P: Preset> Clone for GossipHandler<P> {
             network: self.network.clone(),
             metrics: self.metrics.clone(),
             forks: Arc::clone(&self.forks),
-            events: self.events.clone(),
+            sinks: self.sinks.clone(),
         }
     }
 }
@@ -137,7 +161,7 @@ impl<P: Preset> GossipHandler<P> {
         network: NetworkHandle,
         metrics: NodeMetrics,
         forks: Arc<ForkDigests>,
-        events: EventSender,
+        sinks: GossipSinks<P>,
     ) -> Self {
         Self {
             chain,
@@ -146,12 +170,12 @@ impl<P: Preset> GossipHandler<P> {
             network,
             metrics,
             forks,
-            events,
+            sinks,
         }
     }
 
-    /// Validates one message, reports the verdict, then acts on it.
-    pub(crate) async fn handle(&self, id: MessageId, topic: &Topic, data: Vec<u8>) {
+    /// Validates one message from a peer, reports the verdict, then acts on it.
+    pub(crate) async fn handle(&self, id: MessageId, topic: &Topic, data: Vec<u8>, source: PeerId) {
         let Ok(topic) = topic.as_str().parse::<GossipTopic>() else {
             // The router only delivers subscribed topics, so this cannot be an honest message.
             self.report(id, "unknown", ValidationOutcome::Reject).await;
@@ -166,7 +190,7 @@ impl<P: Preset> GossipHandler<P> {
         let (outcome, accepted) = self.validate(fork, topic.kind, data).await;
         self.report(id, name, outcome).await;
         if let Some(accepted) = accepted {
-            self.apply(accepted).await;
+            self.apply(accepted, source).await;
         }
     }
 
@@ -205,7 +229,7 @@ impl<P: Preset> GossipHandler<P> {
         let now = self.clock.now_ms();
         match kind {
             GossipKind::BeaconBlock => {
-                self.check(
+                self.check_or_look_up(
                     data,
                     Announce::Nothing,
                     move |validator, block: &F::SignedBeaconBlock| {
@@ -216,11 +240,12 @@ impl<P: Preset> GossipHandler<P> {
                         self.announce_block(&block);
                         Some(Accepted::Block(Arc::new(block)))
                     },
+                    |block, _| MissingBlock::Parent(Arc::new(F::into_any_block(block))),
                 )
                 .await
             }
             GossipKind::BeaconAggregateAndProof => {
-                self.check(
+                self.check_or_look_up(
                     data,
                     Announce::Nothing,
                     move |validator, aggregate: &F::SignedAggregateAndProof| {
@@ -230,11 +255,12 @@ impl<P: Preset> GossipHandler<P> {
                         let vote = aggregate.aggregate().committee_vote();
                         Some(Self::job(move |chain| chain.on_vote(&vote)))
                     },
+                    |_, root| MissingBlock::Root(root),
                 )
                 .await
             }
             GossipKind::BeaconAttestation(subnet) => {
-                self.check(
+                self.check_or_look_up(
                     data,
                     Announce::Plain(if F::FORK.single_attestations() {
                         EventTopic::SingleAttestation
@@ -248,6 +274,7 @@ impl<P: Preset> GossipHandler<P> {
                         let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
                         Some(Self::job(move |chain| chain.on_subnet_vote(&vote, claim)))
                     },
+                    |_, root| MissingBlock::Root(root),
                 )
                 .await
             }
@@ -566,6 +593,33 @@ impl<P: Preset> GossipHandler<P> {
         R: FnOnce(&mut GossipValidator<'_, '_, P>, &M) -> Result<(), GossipError> + Send + 'static,
         T: FnOnce(M) -> Option<Accepted<P>>,
     {
+        self.check_or_look_up(data, announce, rule, then, |_, root| {
+            MissingBlock::Root(root)
+        })
+        .await
+    }
+
+    /// Runs a gossip rule as the plain check does, and names a block the chain lacks.
+    ///
+    /// A message ignored for want of a block is kept for a lookup, as the p2p spec allows.
+    ///
+    /// # Arguments
+    ///
+    /// - `missing`: what a lookup fetches for an ignored message and the root it lacks.
+    async fn check_or_look_up<M, R, T, L>(
+        &self,
+        data: Vec<u8>,
+        announce: Announce,
+        rule: R,
+        then: T,
+        missing: L,
+    ) -> Checked<P>
+    where
+        M: Ssz + ApiJson + Send + 'static,
+        R: FnOnce(&mut GossipValidator<'_, '_, P>, &M) -> Result<(), GossipError> + Send + 'static,
+        T: FnOnce(M) -> Option<Accepted<P>>,
+        L: FnOnce(M, Root) -> MissingBlock<P>,
+    {
         let Ok(message) = M::decode(&data) else {
             return (ValidationOutcome::Reject, None);
         };
@@ -578,12 +632,15 @@ impl<P: Preset> GossipHandler<P> {
             .await;
         match checked {
             Ok((Ok(()), message)) => {
-                announce.publish(&self.events, &message);
+                announce.publish(&self.sinks.events, &message);
                 (ValidationOutcome::Accept, then(message))
             }
-            Ok((Err(error @ GossipError::Ignore { .. }), _)) => {
+            Ok((Err(error @ GossipError::Ignore { .. }), message)) => {
                 debug!(%error, "gossip ignored");
-                (ValidationOutcome::Ignore, None)
+                let lookup = error
+                    .unseen_block()
+                    .map(|root| Accepted::Lookup(missing(message, root)));
+                (ValidationOutcome::Ignore, lookup)
             }
             Ok((Err(error @ GossipError::Reject { .. }), _)) => {
                 debug!(%error, "gossip rejected");
@@ -594,8 +651,8 @@ impl<P: Preset> GossipHandler<P> {
         }
     }
 
-    /// Acts on an accepted message, after it was forwarded.
-    async fn apply(&self, accepted: Accepted<P>) {
+    /// Acts on a message after its verdict, forwarded or kept for a lookup.
+    async fn apply(&self, accepted: Accepted<P>, source: PeerId) {
         let outcome = match accepted {
             Accepted::Block(block) => {
                 let payload = self.execution.verdict(&self.chain, &block).await;
@@ -622,6 +679,14 @@ impl<P: Preset> GossipHandler<P> {
                     .await
             }
             Accepted::Job(job) => self.chain.run(job).await,
+            Accepted::Lookup(missing) => {
+                // A stopped network loop has no lookups to start.
+                let _stopped = self.sinks.lookups.send(LookupEvent::Missing {
+                    peer: source,
+                    missing,
+                });
+                return;
+            }
         };
         match outcome {
             Ok(Ok(())) | Err(_) => {}
@@ -632,8 +697,8 @@ impl<P: Preset> GossipHandler<P> {
 
     /// Tells event stream clients of a block that passed gossip validation.
     fn announce_block(&self, block: &combined::SignedBeaconBlock<P>) {
-        if self.events.wants(EventTopic::BlockGossip) {
-            self.events.publish(ApiEvent::json(
+        if self.sinks.events.wants(EventTopic::BlockGossip) {
+            self.sinks.events.publish(ApiEvent::json(
                 EventTopic::BlockGossip,
                 Json::from([
                     ("slot", Json::from(block.slot().0.to_string())),
@@ -645,9 +710,9 @@ impl<P: Preset> GossipHandler<P> {
 
     /// Tells event stream clients of a blob sidecar that passed gossip validation.
     fn announce_blob(&self, sidecar: &BlobSidecar<P>) {
-        if self.events.wants(EventTopic::BlobSidecar) {
+        if self.sinks.events.wants(EventTopic::BlobSidecar) {
             let header = &sidecar.signed_block_header.message;
-            self.events.publish(ApiEvent::json(
+            self.sinks.events.publish(ApiEvent::json(
                 EventTopic::BlobSidecar,
                 Json::from([
                     (
@@ -671,8 +736,8 @@ impl<P: Preset> GossipHandler<P> {
 
     /// Tells event stream clients of a data column sidecar that passed gossip validation.
     fn announce_column(&self, column: &combined::DataColumnSidecar<P>) {
-        if self.events.wants(EventTopic::DataColumnSidecar) {
-            self.events.publish(ApiEvent::json(
+        if self.sinks.events.wants(EventTopic::DataColumnSidecar) {
+            self.sinks.events.publish(ApiEvent::json(
                 EventTopic::DataColumnSidecar,
                 Json::from([
                     ("block_root", Json::from(column.block_root().to_string())),
@@ -687,7 +752,7 @@ impl<P: Preset> GossipHandler<P> {
     ///
     /// The envelope names its block, whose slot the chain knows.
     async fn announce_envelope(&self, envelope: &SignedExecutionPayloadEnvelope<P>) {
-        if !self.events.wants(EventTopic::ExecutionPayloadGossip) {
+        if !self.sinks.events.wants(EventTopic::ExecutionPayloadGossip) {
             return;
         }
         let message = &envelope.message;
@@ -695,7 +760,7 @@ impl<P: Preset> GossipHandler<P> {
         let Ok(Ok(Some(slot))) = self.chain.run(move |chain| chain.block_slot(root)).await else {
             return;
         };
-        self.events.publish(ApiEvent::json(
+        self.sinks.events.publish(ApiEvent::json(
             EventTopic::ExecutionPayloadGossip,
             Json::from([
                 ("slot", Json::from(slot.0.to_string())),

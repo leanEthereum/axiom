@@ -57,7 +57,7 @@ use self::{
     handshake::Handshakes,
     peers::{PeerAction, PeerBook, PeerManager, PeerSubnets},
     server::RequestServer,
-    sync::{BackfillOutcome, BackfillSync, BatchOutcome, RangeSync},
+    sync::{BackfillOutcome, BackfillSync, BatchOutcome, BlockLookups, LookupEvent, RangeSync},
     topics::Subscriptions,
 };
 use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
@@ -136,6 +136,10 @@ pub(crate) struct NetworkService<P: Preset> {
     backfill: BackfillSync<P>,
     /// Processed backfill batches, until the run loop takes them.
     backfill_outcomes: Option<UnboundedReceiver<BackfillOutcome>>,
+    /// Blocks fetched by root for gossip that named them.
+    lookups: BlockLookups<P>,
+    /// Missing blocks and processed lookups, until the run loop takes them.
+    lookup_events: Option<UnboundedReceiver<LookupEvent<P>>>,
     /// Inbound requests answered at once.
     requests: Arc<Semaphore>,
     /// Gossip messages in validation at once.
@@ -255,6 +259,7 @@ impl<P: Preset> NetworkService<P> {
             config.clone(),
             Arc::clone(&forks),
         );
+        let (lookups, lookup_events) = sync.lookups(metrics.clone());
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
             attnets: AtomicU64::new(0),
@@ -269,7 +274,7 @@ impl<P: Preset> NetworkService<P> {
                 network.clone(),
                 metrics.clone(),
                 Arc::clone(&forks),
-                events,
+                lookups.sinks(events),
             ),
             server: Arc::new(RequestServer::new(
                 chain.clone(),
@@ -280,6 +285,8 @@ impl<P: Preset> NetworkService<P> {
             sync_outcomes: Some(sync_outcomes),
             backfill,
             backfill_outcomes: Some(backfill_outcomes),
+            lookups,
+            lookup_events: Some(lookup_events),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
             subscriptions: Subscriptions::new(
@@ -345,6 +352,7 @@ impl<P: Preset> NetworkService<P> {
         let mut discovered = self.discovery_events.take();
         let mut outcomes = self.sync_outcomes.take();
         let mut backfilled = self.backfill_outcomes.take();
+        let mut looked_up = self.lookup_events.take();
         loop {
             // Without discovery, its branch simply never completes.
             let found = async {
@@ -366,13 +374,25 @@ impl<P: Preset> NetworkService<P> {
                     None => pending().await,
                 }
             };
+            let lookup = async {
+                match &mut looked_up {
+                    Some(receiver) => receiver.recv().await,
+                    None => pending().await,
+                }
+            };
             let others = Either::race(
                 found,
                 Either::race(processed, Either::race(backfill, upkeep.tick())),
             );
-            match Either::race(events.next(), others).await {
-                Either::Left(Some(event)) => self.handle(event).await,
-                Either::Left(None) => break,
+            let network = Either::race(events.next(), lookup);
+            match Either::race(network, others).await {
+                Either::Left(Either::Left(Some(event))) => self.handle(event).await,
+                Either::Left(Either::Left(None)) => break,
+                Either::Left(Either::Right(Some(event))) => {
+                    self.lookups.on_event(event, self.clock.now_ms()).await;
+                    self.hand_off().await;
+                }
+                Either::Left(Either::Right(None)) => looked_up = None,
                 Either::Right(Either::Left(Some(event))) => {
                     let plans = self
                         .discovery
@@ -557,21 +577,12 @@ impl<P: Preset> NetworkService<P> {
                 }
                 self.request_metadata(peer, Protocol::MetaDataV3).await;
             }
-            NetworkEvent::PeerDisconnected { peer } => {
-                let now = self.now();
-                self.peers.on_disconnected(&peer, now);
-                self.goodbyes.retain(|_, known| *known != peer);
-                self.pings.retain(|_, known| *known != peer);
-                self.metadata_requests
-                    .retain(|_, (known, _)| *known != peer);
-                self.peer_book.disconnected(&peer);
-                self.handshakes.forget(&peer);
-                self.metrics.peers.set_count(self.peers.len() as u64);
-                self.sync.on_disconnect(&peer).await;
-                self.backfill.on_disconnect(&peer).await;
-            }
+            NetworkEvent::PeerDisconnected { peer } => self.on_disconnected(&peer).await,
             NetworkEvent::GossipMessage {
-                id, topic, data, ..
+                id,
+                source,
+                topic,
+                data,
             } => {
                 // Validation is bounded.
                 // Past the limit, the loop waits and the swarm's queue absorbs the rest.
@@ -580,7 +591,7 @@ impl<P: Preset> NetworkService<P> {
                 };
                 let gossip = self.gossip.clone();
                 task::spawn(async move {
-                    gossip.handle(id, &topic, data).await;
+                    gossip.handle(id, &topic, data, source).await;
                     drop(permit);
                 });
             }
@@ -642,6 +653,21 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
+    /// Forgets a peer that left, in peer management and in every sync.
+    async fn on_disconnected(&mut self, peer: &PeerId) {
+        let now = self.now();
+        self.peers.on_disconnected(peer, now);
+        self.goodbyes.retain(|_, known| known != peer);
+        self.pings.retain(|_, known| known != peer);
+        self.metadata_requests.retain(|_, (known, _)| known != peer);
+        self.peer_book.disconnected(peer);
+        self.handshakes.forget(peer);
+        self.metrics.peers.set_count(self.peers.len() as u64);
+        self.sync.on_disconnect(peer).await;
+        self.backfill.on_disconnect(peer).await;
+        self.lookups.on_disconnect(peer, self.clock.now_ms()).await;
+    }
+
     /// Routes a response chunk to the ping, metadata, handshake or sync request it answers.
     async fn on_response(&mut self, request: RequestId, chunk: &ResponseChunk) {
         if let Some(peer) = self.pings.remove(&request) {
@@ -677,6 +703,8 @@ impl<P: Preset> NetworkService<P> {
             self.sync.on_chunk(request, chunk);
         } else if self.backfill.owns(request) {
             self.backfill.on_chunk(request, chunk);
+        } else if self.lookups.owns(request) {
+            self.lookups.on_chunk(request, chunk);
         }
     }
 
@@ -689,7 +717,9 @@ impl<P: Preset> NetworkService<P> {
         }
         self.sync.on_end(request).await;
         self.backfill.on_end(request).await;
+        self.lookups.on_end(request, self.clock.now_ms()).await;
         self.punish_dropped().await;
+        self.hand_off().await;
     }
 
     /// Handles a failed request, scoring the peer for faults a failure reveals.
@@ -736,7 +766,7 @@ impl<P: Preset> NetworkService<P> {
             }
             return;
         }
-        if self.sync.owns(request) || self.backfill.owns(request) {
+        if self.sync.owns(request) || self.backfill.owns(request) || self.lookups.owns(request) {
             match error {
                 // A block, blob or column request that times out costs a mid-tolerance fault.
                 RequestError::Timeout { .. } => self.report(&peer, PeerAction::MidTolerance).await,
@@ -752,7 +782,21 @@ impl<P: Preset> NetworkService<P> {
         }
         self.sync.on_failure(request).await;
         self.backfill.on_failure(request).await;
+        self.lookups.on_failure(request, self.clock.now_ms()).await;
         self.punish_dropped().await;
+        self.hand_off().await;
+    }
+
+    /// Reports the peers lookups dropped, and asks for the status of those too deep for a lookup.
+    ///
+    /// The status answers show range sync how far ahead those peers are.
+    async fn hand_off(&mut self) {
+        for peer in self.lookups.take_dropped() {
+            self.report(&peer, PeerAction::LowTolerance).await;
+        }
+        for peer in self.lookups.take_handoffs() {
+            self.send_status(peer).await;
+        }
     }
 
     /// The wall clock, as the peer manager measures time.

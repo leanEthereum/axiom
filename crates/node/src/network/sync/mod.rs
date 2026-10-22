@@ -1,8 +1,10 @@
 //! Catching up: fetching blocks, their data, and their payloads from peers that are ahead.
 //!
 //! Range sync moves forward from the head; backfill moves backward from the stored history.
+//! Lookups fetch by root the blocks gossip named that the chain does not know.
 
 mod backfill;
+mod lookup;
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -16,6 +18,7 @@ use axiom_p2p::{
     swarm::{NetworkError, NetworkHandle, RequestId},
 };
 use axiom_ssz::{List, Root, Ssz};
+use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     BlobData, ChainConfig, ColumnIndex, ForkDigest, Preset, Slot, combined,
     deneb::BlobSidecar,
@@ -27,7 +30,10 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-pub(crate) use self::backfill::{BackfillOutcome, BackfillSync};
+pub(crate) use self::{
+    backfill::{BackfillOutcome, BackfillSync},
+    lookup::{BlockLookups, LookupEvent, MissingBlock},
+};
 use super::{
     forks::ForkDigests,
     requests::{BlocksByRangeRequest, ColumnsByRangeRequest, SlotRangeRequest},
@@ -93,13 +99,23 @@ impl Fetch {
         slot.epoch::<P>().0.saturating_add(window) >= current.epoch::<P>().0
     }
 
-    /// The method that fetches it.
+    /// The method that fetches it by slot range.
     const fn protocol(self) -> Protocol {
         match self {
             Self::Blocks => Protocol::BeaconBlocksByRangeV2,
             Self::Blobs => Protocol::BlobSidecarsByRangeV1,
             Self::Columns => Protocol::DataColumnSidecarsByRangeV1,
             Self::Envelopes => Protocol::ExecutionPayloadEnvelopesByRangeV1,
+        }
+    }
+
+    /// The method that fetches it by block root.
+    const fn by_root(self) -> Protocol {
+        match self {
+            Self::Blocks => Protocol::BeaconBlocksByRootV2,
+            Self::Blobs => Protocol::BlobSidecarsByRootV1,
+            Self::Columns => Protocol::DataColumnSidecarsByRootV1,
+            Self::Envelopes => Protocol::ExecutionPayloadEnvelopesByRootV1,
         }
     }
 }
@@ -254,6 +270,34 @@ impl<P: Preset> Batch<P> {
         })
     }
 
+    /// Sends requests by root to a peer, each with its encoded body.
+    ///
+    /// The items come back in any order and from any fork, so the range fields stay empty.
+    async fn by_root(
+        network: &NetworkHandle,
+        peer: PeerId,
+        bodies: Vec<(Fetch, Vec<u8>)>,
+    ) -> Result<Self, NetworkError> {
+        let mut requests = Vec::with_capacity(bodies.len());
+        for (fetch, body) in bodies {
+            let id = network
+                .send_request(peer.clone(), fetch.by_root(), body)
+                .await?;
+            requests.push((id, fetch));
+        }
+        debug!(%peer, requests = requests.len(), "requested by root");
+        Ok(Self {
+            peer,
+            start: Slot(0),
+            count: 0,
+            open: requests.len(),
+            requests,
+            fault: None,
+            failed: false,
+            received: Received::default(),
+        })
+    }
+
     /// Whether a request is one of the batch's.
     fn owns(&self, request: RequestId) -> bool {
         self.requests.iter().any(|(id, _)| *id == request)
@@ -359,7 +403,7 @@ impl<P: Preset> Batch<P> {
 
 /// What processing a batch led to.
 #[derive(Debug)]
-enum Verdict {
+pub(crate) enum Verdict {
     /// Every block imported or waits for data; the range is done.
     Done,
     /// The first block's parent is unknown: the head is on a fork the peer does not share.
@@ -632,6 +676,21 @@ impl<P: Preset> RangeSync<P> {
     /// Counts a failed batch against a peer.
     fn strike(&mut self, peer: &PeerId) {
         *self.strikes.entry(peer.clone()).or_default() += 1;
+    }
+
+    /// Lookups beside this sync, fetching from the same network for the same chain.
+    pub(crate) fn lookups(
+        &self,
+        metrics: NodeMetrics,
+    ) -> (BlockLookups<P>, UnboundedReceiver<LookupEvent<P>>) {
+        BlockLookups::new(
+            self.chain.clone(),
+            Arc::clone(&self.execution),
+            self.network.clone(),
+            self.config.clone(),
+            Arc::clone(&self.forks),
+            metrics,
+        )
     }
 
     /// Peers dropped for bad data since the last call, for peer management to ban.

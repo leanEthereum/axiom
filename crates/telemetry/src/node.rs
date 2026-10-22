@@ -59,6 +59,15 @@ pub struct NodeMetrics {
 
     /// Bytes the store has written.
     pub store_bytes_written: Counter,
+
+    /// Lookups started for blocks gossip named and the chain lacked.
+    pub sync_lookups_created: Counter,
+
+    /// Lookups whose blocks were all imported.
+    pub sync_lookups_completed: Counter,
+
+    /// Lookups given up, by reason.
+    pub sync_lookups_dropped: CounterVec<1>,
 }
 
 impl NodeMetrics {
@@ -128,6 +137,19 @@ impl NodeMetrics {
             )?,
             store_bytes_written: registry
                 .counter("store_bytes_written_total", "Bytes written to the store.")?,
+            sync_lookups_created: registry.counter(
+                "sync_lookups_created_total",
+                "Block lookups started for unknown roots.",
+            )?,
+            sync_lookups_completed: registry.counter(
+                "sync_lookups_completed_total",
+                "Block lookups whose blocks were imported.",
+            )?,
+            sync_lookups_dropped: registry.counter_vec(
+                "sync_lookups_dropped_total",
+                "Block lookups given up, by reason.",
+                ["reason"],
+            )?,
         })
     }
 
