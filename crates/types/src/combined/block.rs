@@ -3,9 +3,22 @@
 use axiom_ssz::{DecodeError, Root, Ssz};
 
 use crate::{
-    ChainConfig, ForkName, Preset, Slot, ValidatorIndex, altair, bellatrix, capella, deneb,
-    electra, fulu, gloas, phase0,
+    ChainConfig, ForkName, Hash32, KzgCommitment, Preset, Slot, ValidatorIndex, altair, bellatrix,
+    capella, deneb, electra, fulu, gloas, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
 };
+
+/// The execution blocks a beacon block links: the one it builds on and the one it commits to.
+///
+/// Before Gloas both come from the block's payload, and both are zero before the merge.
+/// From Gloas on they come from the builder's bid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecutionHashes {
+    /// The execution block the beacon block builds on.
+    pub parent_block_hash: Hash32,
+    /// The execution block the beacon block commits to.
+    pub block_hash: Hash32,
+}
 
 /// A beacon block of whichever fork it belongs to.
 ///
@@ -114,6 +127,99 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.hash_tree_root(),
             Self::Electra(block) | Self::Fulu(block) => block.hash_tree_root(),
             Self::Gloas(block) => block.hash_tree_root(),
+        }
+    }
+
+    /// The execution blocks the block links.
+    #[must_use]
+    pub const fn execution_hashes(&self) -> ExecutionHashes {
+        let (parent_block_hash, block_hash) = match self {
+            Self::Phase0(_) | Self::Altair(_) => (Hash32::ZERO, Hash32::ZERO),
+            Self::Bellatrix(block) => {
+                let payload = &block.body.execution_payload;
+                (payload.parent_hash, payload.block_hash)
+            }
+            Self::Capella(block) => {
+                let payload = &block.body.execution_payload;
+                (payload.parent_hash, payload.block_hash)
+            }
+            Self::Deneb(block) => {
+                let payload = &block.body.execution_payload;
+                (payload.parent_hash, payload.block_hash)
+            }
+            Self::Electra(block) | Self::Fulu(block) => {
+                let payload = &block.body.execution_payload;
+                (payload.parent_hash, payload.block_hash)
+            }
+            Self::Gloas(block) => {
+                let bid = &block.body.signed_execution_payload_bid.message;
+                (bid.parent_block_hash, bid.block_hash)
+            }
+        };
+        ExecutionHashes {
+            parent_block_hash,
+            block_hash,
+        }
+    }
+
+    /// Whether the block carries a payload other than the empty one.
+    ///
+    /// A Bellatrix block before the merge carries the empty payload.
+    /// See `is_merge_transition_block` in the Bellatrix beacon chain spec.
+    #[must_use]
+    pub fn carries_execution_payload(&self) -> bool {
+        match self {
+            Self::Phase0(_) | Self::Altair(_) | Self::Gloas(_) => false,
+            Self::Bellatrix(block) => block.body.execution_payload != Default::default(),
+            Self::Capella(block) => block.body.execution_payload != Default::default(),
+            Self::Deneb(block) => block.body.execution_payload != Default::default(),
+            Self::Electra(block) | Self::Fulu(block) => {
+                block.body.execution_payload != Default::default()
+            }
+        }
+    }
+
+    /// Commitments to the blobs the block's payload carries, from Deneb until Gloas.
+    ///
+    /// From Gloas on the commitments sit in the bid, and the envelope's data is sampled.
+    #[must_use]
+    pub fn blob_kzg_commitments(&self) -> &[KzgCommitment] {
+        match self {
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Gloas(_) => &[],
+            Self::Deneb(block) => &block.body.blob_kzg_commitments,
+            Self::Electra(block) | Self::Fulu(block) => &block.body.blob_kzg_commitments,
+        }
+    }
+
+    /// The votes the block carries, reduced to the fields every fork shares.
+    #[must_use]
+    pub fn committee_votes(&self) -> Vec<CommitteeVote> {
+        match self {
+            Self::Phase0(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
+            Self::Altair(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
+            Self::Bellatrix(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
+            Self::Capella(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
+            Self::Deneb(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
+            Self::Electra(block) | Self::Fulu(block) => block.body.attestations.iter().map(electra::Attestation::committee_vote).collect(),
+            Self::Gloas(block) => block.body.attestations.iter().map(gloas::Attestation::committee_vote).collect(),
+        }
+    }
+
+    /// The attester slashings the block carries, reduced to the fields every fork shares.
+    #[must_use]
+    pub fn conflicting_votes(&self) -> Vec<ConflictingVotes> {
+        match self {
+            Self::Phase0(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
+            Self::Altair(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
+            Self::Bellatrix(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
+            Self::Capella(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
+            Self::Deneb(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
+            Self::Electra(block) | Self::Fulu(block) => block.body.attester_slashings.iter().map(electra::AttesterSlashing::conflicting_votes).collect(),
+            Self::Gloas(block) => block.body.attester_slashings.iter().map(gloas::AttesterSlashing::conflicting_votes).collect(),
         }
     }
 

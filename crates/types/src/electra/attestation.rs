@@ -4,7 +4,11 @@ use axiom_ssz::{
     BitList, BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
 };
 
-use crate::{BlsSignature, CommitteeIndex, Preset, ValidatorIndex, electra::AttestationData};
+use crate::{
+    BlsSignature, CommitteeIndex, Preset, ValidatorIndex,
+    electra::AttestationData,
+    vote::{CommitteeVote, IndexedVote, PayloadClaim},
+};
 
 /// Participation bits of every committee in an attestation, concatenated in committee order.
 pub type AggregationBits<P> = BitList<<P as Preset>::MaxValidatorsPerSlot>;
@@ -67,6 +71,20 @@ impl<P: Preset> Attestation<P> {
             .filter(|(_, bit)| *bit)
             .map(|(index, _)| CommitteeIndex::from(index))
     }
+
+    /// The vote reduced to the fields every fork shares.
+    ///
+    /// The committee bits name the committees, see EIP-7549.
+    #[must_use]
+    pub fn committee_vote(&self) -> CommitteeVote {
+        CommitteeVote {
+            data: self.data.clone(),
+            signature: self.signature,
+            committees: self.committee_indices().collect(),
+            bits: self.aggregation_bits.iter().collect(),
+            payload: PayloadClaim::Silent,
+        }
+    }
 }
 
 /// An attestation with its participants listed by validator index.
@@ -103,6 +121,18 @@ impl<P: Preset> Container for IndexedAttestation<P> {
             data: fields.field()?,
             signature: fields.field()?,
         })
+    }
+}
+
+impl<P: Preset> IndexedAttestation<P> {
+    /// The vote reduced to the fields every fork shares.
+    #[must_use]
+    pub fn indexed_vote(&self) -> IndexedVote {
+        IndexedVote {
+            indices: self.attesting_indices.iter().copied().collect(),
+            data: self.data.clone(),
+            signature: self.signature,
+        }
     }
 }
 

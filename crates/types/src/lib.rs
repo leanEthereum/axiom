@@ -29,6 +29,7 @@ pub mod electra;
 pub mod fulu;
 pub mod gloas;
 pub mod phase0;
+pub mod vote;
 
 pub use axiom_ssz::Root;
 

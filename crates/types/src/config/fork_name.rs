@@ -227,6 +227,24 @@ impl ForkName {
         }
     }
 
+    /// Whether fork choice checks a merge transition block against the terminal proof-of-work block.
+    ///
+    /// Only Bellatrix checks it: Capella drops the check, since the merge is long done.
+    /// See `validate_merge_block` in the Bellatrix fork choice spec.
+    #[must_use]
+    pub const fn validates_merge_block(self) -> bool {
+        match self {
+            Self::Bellatrix => true,
+            Self::Phase0
+            | Self::Altair
+            | Self::Capella
+            | Self::Deneb
+            | Self::Electra
+            | Self::Fulu
+            | Self::Gloas => false,
+        }
+    }
+
     /// Whether the state fixes each epoch's proposers one epoch ahead.
     ///
     /// A reorg at an epoch boundary then cannot change who proposes, see EIP-7917.
