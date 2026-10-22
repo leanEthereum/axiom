@@ -88,6 +88,7 @@ axiom-http = { path = "crates/http" }
 axiom-execution = { path = "crates/execution" }
 axiom-crypto = { path = "crates/crypto" }
 axiom-telemetry = { path = "crates/telemetry" }
+axiom-p2p = { path = "crates/p2p" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"

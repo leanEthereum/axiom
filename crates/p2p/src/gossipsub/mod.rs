@@ -1,0 +1,35 @@
+//! Gossipsub v1.0, v1.1, and v1.2: topic-based publish and subscribe over a sparse mesh.
+//!
+//! # Overview
+//!
+//! Each node keeps, per topic, a mesh of about D peers that receive full messages.
+//! Other topic peers hear only identifiers, through periodic IHAVE gossip.
+//!
+//! ```text
+//!   publisher ──full──▶ mesh peer ──full──▶ its mesh peers ──▶ ...      eager push
+//!       │
+//!       └──IHAVE [ids]──▶ non-mesh peer ──IWANT [id]──▶ full message    lazy pull
+//! ```
+//!
+//! The heartbeat keeps each mesh between D_low and D_high with GRAFT and PRUNE.
+//! v1.1 adds backoff, peer exchange, flood publishing, and peer scoring.
+//! v1.2 adds IDONTWANT, so mesh peers skip sending a large message twice.
+//!
+//! Ethereum runs gossipsub with StrictNoSign and content-derived 20-byte identifiers.
+//! See `libp2p/specs/pubsub/gossipsub` and `specs/phase0/p2p-interface.md`.
+
+mod config;
+mod mcache;
+mod router;
+mod rpc;
+pub mod score;
+mod seen;
+mod types;
+
+pub use config::{GossipsubConfig, MessageIdFn};
+pub use router::{GossipsubEvent, PublishError, Router};
+pub use rpc::{
+    ControlMessage, Graft, IDontWant, IHave, IWant, PeerInfo, Prune, RawMessage, Rpc, SubOpts,
+};
+pub use score::{PeerScore, PeerScoreParams, PeerScoreThresholds, TopicScoreParams};
+pub use types::{MESSAGE_ID_LEN, MessageId, ProtocolVersion, Topic, ValidationOutcome};
