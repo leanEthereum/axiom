@@ -3,9 +3,8 @@
 use std::{num::NonZero, panic, thread};
 
 use crate::{
-    keymanager::UnlockError,
-    keys::{Keystore, Password},
-    signing::{Bls, LocalKey},
+    keys::{Keystore, KeystoreError, Password},
+    signing::LocalKey,
 };
 
 /// A keystore with the password that should open it.
@@ -33,9 +32,9 @@ impl SealedKey {
     /// # Errors
     ///
     /// Fails on a wrong password, or a secret that does not match the stored public key.
-    pub(crate) fn open(&self) -> Result<LocalKey<Bls>, UnlockError> {
+    pub(crate) fn open(&self) -> Result<LocalKey, KeystoreError> {
         let secret = self.keystore.decrypt(&self.password)?;
-        Ok(LocalKey::new(secret.secret_key())?)
+        Ok(LocalKey::new(secret.secret_key()))
     }
 
     /// Decrypts every key, one result per key in input order.
@@ -45,7 +44,7 @@ impl SealedKey {
     /// Opening a production scrypt keystore mixes 128 N r = 256 MiB, so it is slow.
     /// The keys split into one contiguous share per core, so a restart scales with the cores.
     /// Peak memory is then one scrypt buffer per core.
-    pub(crate) fn open_all(sealed: &[Self]) -> Vec<Result<LocalKey<Bls>, UnlockError>> {
+    pub(crate) fn open_all(sealed: &[Self]) -> Vec<Result<LocalKey, KeystoreError>> {
         let cores = thread::available_parallelism().map_or(1, NonZero::get);
         let share = sealed.len().div_ceil(cores).max(1);
         thread::scope(|scope| {
@@ -111,7 +110,7 @@ mod tests {
             .enumerate()
             .map(|(i, key)| {
                 if i == 2 {
-                    Err(UnlockError::Keystore(KeystoreError::WrongPassword).to_string())
+                    Err(KeystoreError::WrongPassword.to_string())
                 } else {
                     Ok(key.keystore().pubkey())
                 }

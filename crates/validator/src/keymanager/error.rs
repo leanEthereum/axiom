@@ -7,18 +7,7 @@ use axiom_http::HttpError;
 use axiom_json::ParseError;
 use thiserror::Error;
 
-use crate::{keys::KeystoreError, signing::LocalKeyError};
-
-/// Why a keystore did not open.
-#[derive(Debug, Error)]
-pub enum UnlockError {
-    /// The password is wrong, or the decrypted secret does not match the stored public key.
-    #[error("keystore: {0}")]
-    Keystore(#[from] KeystoreError),
-    /// The decrypted secret cannot sign as a local key.
-    #[error("local key: {0}")]
-    Key(#[from] LocalKeyError),
-}
+use crate::keys::KeystoreError;
 
 /// Why the key directory could not be read or written.
 #[derive(Debug, Error)]
@@ -56,7 +45,7 @@ pub enum DirectoryError {
         path: PathBuf,
         /// Why it did not open.
         #[source]
-        source: Box<UnlockError>,
+        source: Box<KeystoreError>,
     },
     /// The remote key list is not JSON.
     #[error("remote keys {}: {source}", path.display())]

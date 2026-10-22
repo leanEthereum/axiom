@@ -5,14 +5,14 @@ use thiserror::Error;
 
 use crate::{
     protection::{ProtectionError, Refusal},
-    signing::{Bls, Cleared, LocalKey, LocalKeyError, RemoteError, RemoteSigner, SigningContext},
+    signing::{Cleared, LocalKey, RemoteError, RemoteSigner, SigningContext},
 };
 
 /// A validator's signing key, wherever it lives.
 #[derive(Debug)]
 pub enum ValidatorSigner {
     /// A key decrypted into this process.
-    Local(LocalKey<Bls>),
+    Local(LocalKey),
     /// A key a remote signer holds.
     Remote(RemoteSigner),
 }
@@ -31,14 +31,14 @@ impl ValidatorSigner {
     ///
     /// # Errors
     ///
-    /// Fails when the local scheme or the remote signer refuses.
+    /// Fails when the remote signer refuses or cannot be reached.
     pub async fn sign<P: Preset>(
         &self,
         cleared: &Cleared<'_, P>,
         context: &SigningContext,
     ) -> Result<BlsSignature, SignError> {
         match self {
-            Self::Local(key) => Ok(key.sign(cleared.root())?),
+            Self::Local(key) => Ok(key.sign(cleared.root())),
             Self::Remote(signer) => Ok(signer
                 .sign(cleared.request(), cleared.root(), context)
                 .await?),
@@ -61,9 +61,6 @@ pub enum SignError {
     /// Slashing protection refused the message or failed.
     #[error("slashing protection: {0}")]
     Protection(#[from] ProtectionError),
-    /// The local key failed.
-    #[error("local key: {0}")]
-    Local(#[from] LocalKeyError),
     /// The remote signer failed.
     #[error("remote signer: {0}")]
     Remote(#[from] RemoteError),

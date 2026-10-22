@@ -12,6 +12,7 @@ use std::{
 };
 
 use axiom_beacon_json::ApiJson;
+use axiom_bls::{PublicKey, Signature};
 use axiom_http::{HttpError, Method, Request, Router, StatusCode};
 use axiom_json::Json;
 use axiom_node::ManualClock;
@@ -23,7 +24,7 @@ use axiom_types::{
 };
 use axiom_validator::{
     duties::SlotTimer,
-    keymanager::{KeyDirectory, Keymanager, UnlockError},
+    keymanager::{KeyDirectory, Keymanager},
     keys::{
         DerivationPath, EncryptionParams, Kdf, Keystore, KeystoreError, Password, SecretKeyBytes,
     },
@@ -31,7 +32,7 @@ use axiom_validator::{
         Interchange, ProtectionError, Refusal, SignedAttestation, SignedBlock, SlashingDatabase,
         ValidatorHistory, VoteCheck,
     },
-    signing::{Bls, LocalKey, SignatureScheme, SigningContext, SigningGuard, ValidatorSigner},
+    signing::{LocalKey, SigningContext, SigningGuard, ValidatorSigner},
     validators::{DEFAULT_GAS_LIMIT, ProposerDefaults, ValidatorStore},
 };
 use tokio::runtime::Builder;
@@ -140,7 +141,7 @@ impl Fixture {
 
     /// Runs a key that is already decrypted, as one loaded at startup.
     fn run(&self, n: u8) -> BlsPubkey {
-        let key = LocalKey::<Bls>::new(secret(n).secret_key()).expect("BLS keys are stateless");
+        let key = LocalKey::new(secret(n).secret_key());
         self.store
             .add(ValidatorSigner::Local(key), true)
             .expect("an in-memory database registers keys")
@@ -367,7 +368,7 @@ fn a_repeated_keystore_is_a_duplicate_and_a_wrong_password_an_error() {
         ("keystores", strings(&[&five, &five, &keystore(6, "pw")])),
         ("passwords", strings(&["pw", "pw", "wrong"])),
     ]);
-    let wrong = UnlockError::Keystore(KeystoreError::WrongPassword);
+    let wrong = KeystoreError::WrongPassword;
     assert_eq!(
         fixture.call(Method::Post, "/eth/v1/keystores", Some(&body)),
         (
@@ -551,7 +552,12 @@ fn a_voluntary_exit_verifies_under_the_capella_domain() {
         );
         let signature = BlsSignature::from_json(data.get("signature").unwrap()).unwrap();
         let root = SigningData::signing_root(&message, domain);
-        assert!(Bls::verify(&five, None, root, &signature));
+        let public = PublicKey::from_bytes(&five.0).unwrap();
+        assert!(
+            Signature::from_bytes(&signature.0)
+                .unwrap()
+                .verify(&public, &root.0)
+        );
     };
 
     // An explicit epoch 4, then the default: slot 17 is in epoch 2.

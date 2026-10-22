@@ -19,7 +19,7 @@ use crate::{
     },
     keys::{Keystore, Password},
     protection::Interchange,
-    signing::{Bls, LocalKey, ValidatorSigner},
+    signing::{LocalKey, ValidatorSigner},
 };
 
 /// The routes over keys decrypted into this process.
@@ -226,7 +226,7 @@ impl LocalKeystores {
         &self,
         keystore: &Keystore,
         password: &str,
-        key: LocalKey<Bls>,
+        key: LocalKey,
         interchange: Option<&Interchange>,
     ) -> ImportStatus {
         let pubkey = keystore.pubkey();

@@ -20,7 +20,7 @@ use axiom_validator::{
     beacon::{BeaconClient, BeaconNodes},
     duties::{ClientSettings, DutyContext, SlotTimer, ValidatorClient},
     protection::SlashingDatabase,
-    signing::{Bls, LocalKey, SigningContext, SigningGuard, ValidatorSigner},
+    signing::{LocalKey, SigningContext, SigningGuard, ValidatorSigner},
     validators::{DEFAULT_GAS_LIMIT, ProposerDefaults, ValidatorStore},
 };
 use tokio::{runtime::Builder, sync::oneshot, task, time};
@@ -57,11 +57,10 @@ fn schedule() -> ChainConfig {
 }
 
 /// The pyspec key of a validator: the secret is its index plus one.
-fn pyspec_key(index: u64) -> LocalKey<Bls> {
+fn pyspec_key(index: u64) -> LocalKey {
     let mut bytes = [0; 32];
     bytes[24..].copy_from_slice(&(index + 1).to_be_bytes());
     LocalKey::new(SecretKey::from_bytes(&bytes).expect("small scalars are keys"))
-        .expect("BLS keys are stateless")
 }
 
 /// A decimal string member of a JSON object.

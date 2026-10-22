@@ -253,7 +253,7 @@ pub enum RemoteError {
 mod tests {
     use std::{sync::Mutex, time::Duration};
 
-    use axiom_bls::SecretKey;
+    use axiom_bls::{PublicKey, SecretKey, Signature};
     use axiom_http::{ClientConfig, Endpoint, Response, Router, Server, ServerConfig};
     use axiom_types::{
         BuilderIndex, ChainConfig, CommitteeIndex, Minimal, Slot, gloas,
@@ -262,7 +262,6 @@ mod tests {
     use tokio::{runtime::Builder, sync::oneshot, task};
 
     use super::*;
-    use crate::signing::{Bls, SignatureScheme};
 
     /// The secret key 7, which the stand-in signer holds.
     fn secret() -> SecretKey {
@@ -285,7 +284,7 @@ mod tests {
                         .required::<Root>("signingRoot")
                         .unwrap();
                     bodies.lock().unwrap().push(body);
-                    let signature = Bls::sign(&secret(), None, root).unwrap();
+                    let signature = BlsSignature(secret().sign(&root.0).to_bytes());
                     let reply = Json::from([("signature", signature.to_json())]);
                     Response::new(StatusCode::OK).with_body(JSON, reply.to_string().into_bytes())
                 }
@@ -322,7 +321,7 @@ mod tests {
                     Endpoint::parse(&format!("http://{address}")).unwrap(),
                     config,
                 );
-                let pubkey = Bls::public_key(&secret());
+                let pubkey = BlsPubkey(secret().public_key().to_bytes());
                 let signer = RemoteSigner::new(Arc::new(client), pubkey);
 
                 // A vote at slot 9 on the minimal chain.
@@ -342,7 +341,12 @@ mod tests {
                 let signature = signer.sign(&request, root, &context).await.unwrap();
 
                 // The signature verifies over the root the client computed.
-                assert!(Bls::verify(&pubkey, None, root, &signature));
+                let public = PublicKey::from_bytes(&pubkey.0).unwrap();
+                assert!(
+                    Signature::from_bytes(&signature.0)
+                        .unwrap()
+                        .verify(&public, &root.0)
+                );
 
                 // The body named the type, the fork record of epoch 1, and the vote itself.
                 let body = bodies.lock().unwrap().pop().unwrap();

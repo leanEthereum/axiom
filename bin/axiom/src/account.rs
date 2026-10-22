@@ -232,9 +232,6 @@ pub(crate) enum AccountError {
     /// No local key, or no registry entry, for the validator.
     #[error("no local key or registry entry for validator {0}")]
     UnknownKey(BlsPubkey),
-    /// The key refused to sign.
-    #[error("signing: {0}")]
-    Sign(String),
 }
 
 impl Account {
@@ -514,9 +511,7 @@ impl Exit {
             let ValidatorSigner::Local(local) = key.signer else {
                 return Err(AccountError::UnknownKey(self.pubkey));
             };
-            let signature = local
-                .sign(root)
-                .map_err(|error| AccountError::Sign(error.to_string()))?;
+            let signature = local.sign(root);
             let exit = SignedVoluntaryExit {
                 message: VoluntaryExit {
                     epoch,

@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(entry.verify(), Ok(()));
         assert_eq!(DepositEntry::from_json(&entry.to_json()), Ok(entry.clone()));
 
-        // The signing seam computes the same root from the chain's genesis fork version.
+        // The signing context computes the same root from the chain's genesis fork version.
         let context = SigningContext::new(Arc::new(ChainConfig::mainnet()), Root([0x11; 32]));
         let message = entry.message();
         let root = context.signing_root(&SigningRequest::<Mainnet>::Deposit(&message));

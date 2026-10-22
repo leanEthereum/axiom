@@ -150,7 +150,7 @@ mod tests {
         beacon::{BeaconClient, BeaconNodes},
         duties::{ClientSettings, SlotTimer},
         protection::SlashingDatabase,
-        signing::{Bls, LocalKey, SigningContext, SigningGuard, ValidatorSigner},
+        signing::{LocalKey, SigningContext, SigningGuard, ValidatorSigner},
         validators::{ProposerDefaults, ValidatorStore},
     };
 
@@ -208,7 +208,7 @@ mod tests {
                 for index in [1_u64, 2] {
                     let mut bytes = [0; 32];
                     bytes[31] = index as u8 + 1;
-                    let key = LocalKey::<Bls>::new(SecretKey::from_bytes(&bytes).unwrap()).unwrap();
+                    let key = LocalKey::new(SecretKey::from_bytes(&bytes).unwrap());
                     let pubkey = store.add(ValidatorSigner::Local(key), false).unwrap();
                     store.set_index(&pubkey, ValidatorIndex(index));
                     keys.push(pubkey);

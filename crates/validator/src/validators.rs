@@ -364,14 +364,14 @@ impl ValidatorStore {
 
 #[cfg(test)]
 mod tests {
-    use axiom_bls::SecretKey;
+    use axiom_bls::{PublicKey, SecretKey, Signature};
     use axiom_types::{ChainConfig, Epoch, Minimal, Root, Slot, phase0::Checkpoint};
     use tokio::runtime::Builder;
 
     use super::*;
     use crate::{
         protection::SlashingDatabase,
-        signing::{Bls, LocalKey, SignatureScheme, SigningContext},
+        signing::{LocalKey, SigningContext},
     };
 
     /// A store on the minimal chain, with one local key of secret 5, enabled or not.
@@ -387,7 +387,7 @@ mod tests {
         );
         let mut bytes = [0; 32];
         bytes[31] = 5;
-        let key = LocalKey::<Bls>::new(SecretKey::from_bytes(&bytes).unwrap()).unwrap();
+        let key = LocalKey::new(SecretKey::from_bytes(&bytes).unwrap());
         let pubkey = store.add(ValidatorSigner::Local(key), enabled).unwrap();
         (store, pubkey)
     }
@@ -422,12 +422,13 @@ mod tests {
                     .guard()
                     .context()
                     .signing_root(&SigningRequest::<Minimal>::Attestation(&first));
-                assert!(Bls::verify(
-                    &pubkey,
-                    None,
-                    root,
-                    signatures[0].as_ref().unwrap()
-                ));
+                let signature = signatures[0].as_ref().unwrap();
+                let public = PublicKey::from_bytes(&pubkey.0).unwrap();
+                assert!(
+                    Signature::from_bytes(&signature.0)
+                        .unwrap()
+                        .verify(&public, &root.0)
+                );
                 assert!(matches!(signatures[1], Err(SignError::Protection(_))));
             });
     }

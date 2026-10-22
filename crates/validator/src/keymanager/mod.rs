@@ -35,7 +35,7 @@ use std::{io, marker::PhantomData, net::SocketAddr, sync::Arc};
 use axiom_http::{Router, Server, ServerConfig};
 use axiom_types::Preset;
 pub use directory::{KeyDirectory, KeySource, LoadedKey};
-pub use error::{DirectoryError, UnlockError};
+pub use error::DirectoryError;
 
 use self::{
     auth::ApiToken, exit::ExitSigner, keystores::LocalKeystores, registry::KeyRegistry,
