@@ -530,7 +530,7 @@ mod tests {
 
         // Told to always prepare, the desk visits the chain even with nobody prepared.
         let always = ProposerService::new(
-            proposer.chain.clone(),
+            proposer.chain,
             Arc::new(ExecutionLayer::disconnected()),
             Arc::new(ManualClock::at(0)),
             ExecutionAddress::ZERO,

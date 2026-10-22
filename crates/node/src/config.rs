@@ -4,6 +4,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -32,9 +33,14 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, ChainSettings, CheckpointServer,
-    Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState, MonitorSettings,
-    NodeError, NodeKey, PortMappingSettings, ProposerReorgs, StorageMode, WeakSubjectivity,
-    WeakSubjectivityError, api::ApiServices, genesis::GenesisSync, network::NetworkIdentity,
+    ClientStatsSettings, Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState,
+    MonitorSettings, NodeError, NodeKey, PortMappingSettings, ProposerReorgs, StorageMode,
+    WeakSubjectivity, WeakSubjectivityError,
+    api::ApiServices,
+    client_stats::ClientStats,
+    genesis::GenesisSync,
+    monitor::{MonitorMetrics, ValidatorMonitor},
+    network::NetworkIdentity,
     slasher::SlasherFeed,
 };
 
@@ -326,6 +332,8 @@ pub struct NodeConfig {
     pub shutdown_after_sync: bool,
     /// The validators the node watches, and how closely.
     pub monitor: MonitorSettings,
+    /// Where the node pushes its client stats; none pushes nothing.
+    pub client_stats: Option<ClientStatsSettings>,
 }
 
 /// How the node builds blocks for the validators it serves.
@@ -496,6 +504,40 @@ impl NodeConfig {
             }
             None => chain,
         })
+    }
+
+    /// Watches the validators the operator named, with the monitor's own metrics.
+    pub(crate) fn attach_monitor<P: Preset>(
+        &self,
+        chain: Chain<P>,
+        registry: &Registry,
+    ) -> Result<Chain<P>, NodeError> {
+        let metrics = MonitorMetrics::register(registry).map_err(NodeError::Metrics)?;
+        Ok(chain.with_monitor(ValidatorMonitor::new(&self.monitor, metrics)))
+    }
+
+    /// Starts pushing client stats, when an endpoint is configured.
+    pub(crate) fn start_client_stats<P: Preset>(
+        &self,
+        chain: &ChainHandle<P>,
+        clock: &Arc<dyn Clock>,
+        metrics: NodeMetrics,
+    ) -> Result<Option<JoinHandle<()>>, NodeError> {
+        let Some(settings) = &self.client_stats else {
+            return Ok(None);
+        };
+        let stats = ClientStats::new(
+            settings,
+            chain.clone(),
+            Arc::clone(clock),
+            metrics,
+            self.data_dir.as_deref(),
+        )
+        .map_err(|source| NodeError::ClientStats {
+            endpoint: settings.endpoint.clone(),
+            source,
+        })?;
+        Ok(Some(task::spawn(stats.run())))
     }
 
     /// Starts the slasher, when enabled, with its history beside the chain's, and feeds it the chain.

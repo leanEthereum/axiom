@@ -13,6 +13,7 @@
 mod api;
 mod chain;
 mod checkpoint;
+mod client_stats;
 mod clock;
 mod config;
 mod engine;
@@ -38,6 +39,7 @@ pub use chain::{
     VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
 pub use checkpoint::{CheckpointError, CheckpointServer};
+pub use client_stats::{ClientStatsSettings, DEFAULT_PUSH_PERIOD};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
     AnchorSource, BuilderClientSettings, BuilderFallback, DatabaseSettings, EngineConfig,

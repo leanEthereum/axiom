@@ -12,7 +12,7 @@ mod histogram;
 mod histogram_vec;
 mod instrument;
 mod name;
-mod process;
+pub(crate) mod process;
 mod registry;
 mod timer;
 

@@ -16,7 +16,6 @@ use crate::{
     ChainHandle, Clock, EventHub, EventSender, ExecutionLayer, NetworkSettings, NodeConfig,
     NodeError, NodeKey, ProposerService, ProposerSettings, Publisher,
     api::ApiServices,
-    monitor::{MonitorMetrics, ValidatorMonitor},
     network::{
         AttestationSubnets, Discovery, ForkDigests, NatMetrics, NetworkIdentity, NetworkService,
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
@@ -251,9 +250,7 @@ impl<P: Preset> Node<P> {
             event_sender.clone(),
         ))
         .await?;
-        // The validator monitor watches the validators the operator named, with its own metrics.
-        let monitor_metrics = MonitorMetrics::register(&registry).map_err(NodeError::Metrics)?;
-        let chain = chain.with_monitor(ValidatorMonitor::new(&config.monitor, monitor_metrics));
+        let chain = config.attach_monitor(chain, &registry)?;
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.
@@ -269,6 +266,7 @@ impl<P: Preset> Node<P> {
 
         // The engine, or a stand-in that keeps every payload optimistic.
         let execution = Arc::new(config.open_engine()?.with_metrics(metrics.clone()));
+        let stats = config.start_client_stats(&handle, &clock, metrics.clone())?;
 
         // The network, when configured, runs its own event loop.
         let network = match (identity, &config.network) {
@@ -350,7 +348,7 @@ impl<P: Preset> Node<P> {
             service.abort();
             let _cancelled = service.await;
         }
-        Self::abort_all([ticker, follower, preparer, hub]).await;
+        Self::abort_all([ticker, follower, preparer, hub].into_iter().chain(stats)).await;
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);
