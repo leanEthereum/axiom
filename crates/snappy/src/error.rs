@@ -1,5 +1,7 @@
 //! Reasons compressed input fails to decode.
 
+use std::io;
+
 use thiserror::Error;
 
 /// Input that is not valid Snappy data, or that decodes past the caller's bound.
@@ -88,4 +90,18 @@ pub enum SnappyError {
         /// Masked checksum of the decoded bytes.
         computed: u32,
     },
+}
+
+impl From<SnappyError> for io::Error {
+    /// Wraps a decoding error as an I/O error of the matching kind.
+    ///
+    /// Truncation reports an unexpected end of file, and every other error invalid data.
+    fn from(err: SnappyError) -> Self {
+        let kind = if err == SnappyError::UnexpectedEnd {
+            io::ErrorKind::UnexpectedEof
+        } else {
+            io::ErrorKind::InvalidData
+        };
+        Self::new(kind, err)
+    }
 }

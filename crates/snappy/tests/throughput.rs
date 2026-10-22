@@ -103,13 +103,20 @@ fn report(name: &str, corpus: &[u8]) {
     });
     // Gossip compresses many small messages, where per-call setup dominates.
     //
-    // One output buffer is reused, as a gossip pipeline would.
+    // One encoder and one output buffer are reused, as a gossip pipeline would.
+    let mut encoder = raw::Encoder::new();
     let mut out = Vec::new();
     let small = megabytes_per_second(n, || {
         for message in corpus.chunks(MESSAGE_LEN) {
             out.clear();
-            raw::compress_into(black_box(message), &mut out);
+            encoder.compress_into(black_box(message), &mut out);
             black_box(&out);
+        }
+    });
+    // The one-shot form allocates its table and its output per message.
+    let small_one_shot = megabytes_per_second(n, || {
+        for message in corpus.chunks(MESSAGE_LEN) {
+            black_box(raw::compress(black_box(message)));
         }
     });
     let crc = megabytes_per_second(n, || {
@@ -118,6 +125,7 @@ fn report(name: &str, corpus: &[u8]) {
     println!("    raw compress      {compress:>8.0} MB/s");
     println!("    raw decompress    {decompress:>8.0} MB/s");
     println!("    raw compress 512B {small:>8.0} MB/s");
+    println!("    one-shot 512B     {small_one_shot:>8.0} MB/s");
     println!("    frame compress    {frame_compress:>8.0} MB/s");
     println!("    frame decompress  {frame_decompress:>8.0} MB/s");
     println!("    crc32c            {crc:>8.0} MB/s");
