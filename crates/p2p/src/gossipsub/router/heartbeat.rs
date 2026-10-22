@@ -138,7 +138,11 @@ impl Router {
         }
 
         // Step 5: opportunistic grafting lifts a mesh whose median score sagged.
-        if self.scoring.is_some() && self.heartbeat_ticks % config.opportunistic_graft_ticks == 0 {
+        if self.scoring.is_some()
+            && self
+                .heartbeat_ticks
+                .is_multiple_of(config.opportunistic_graft_ticks)
+        {
             self.opportunistic_graft(topic, now);
         }
     }
@@ -283,9 +287,13 @@ impl Router {
         // Target max(D_lazy, gossip_factor * eligible) peers.
         //
         //     40 eligible, factor 0.25 → 10 > D_lazy 6 → gossip to 10
-        let factor_target = (self.config.gossip_factor
-            * f64::from(u32::try_from(candidates.len()).unwrap_or(u32::MAX)))
-            as usize;
+        // Invariant: the factor lies in [0, 1], so the product is a non-negative count.
+        let eligible = f64::from(u32::try_from(candidates.len()).unwrap_or(u32::MAX));
+        #[expect(
+            clippy::cast_sign_loss,
+            reason = "the product is clamped to be non-negative"
+        )]
+        let factor_target = (self.config.gossip_factor * eligible).max(0.0) as usize;
         let target = self.config.gossip_lazy.max(factor_target);
         self.rng.shuffle(&mut candidates);
         candidates.truncate(target);

@@ -133,9 +133,10 @@ impl RateLimiter {
             .max(now);
         let new_tat = tat + interval * tokens;
         // Conforming when the debt stays within one period.
-        let debt = new_tat - now;
+        // Invariant: new_tat >= now, so the debt is never negative.
+        let debt = new_tat.saturating_sub(now);
         if debt > quota.period {
-            return Err(RateLimited::RetryAfter(debt - quota.period));
+            return Err(RateLimited::RetryAfter(debt.saturating_sub(quota.period)));
         }
         self.buckets.insert((peer.clone(), protocol), new_tat);
         Ok(())

@@ -44,6 +44,7 @@ pub mod ping;
 pub mod protobuf;
 mod rng;
 pub mod secure;
+pub mod swarm;
 pub mod varint;
 pub mod yamux;
 

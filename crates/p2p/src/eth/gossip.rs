@@ -162,7 +162,7 @@ mod tests {
         let data = encode_gossip(&[0; 100]);
         assert!(matches!(
             decode_gossip(&data, 10),
-            Err(GossipDecodeError::CompressedTooLarge { .. }) | Err(GossipDecodeError::Snappy(_))
+            Err(GossipDecodeError::CompressedTooLarge { .. } | GossipDecodeError::Snappy(_))
         ));
     }
 

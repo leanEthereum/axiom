@@ -21,7 +21,7 @@ struct SplitMix(u64);
 
 impl SplitMix {
     /// The next 64 random bits.
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -30,7 +30,7 @@ impl SplitMix {
     }
 
     /// A value in 0..bound.
-    fn below(&mut self, bound: u64) -> u64 {
+    const fn below(&mut self, bound: u64) -> u64 {
         self.next() % bound
     }
 }
@@ -130,8 +130,8 @@ impl Network {
         }
         for (i, j) in links {
             let (id_i, id_j) = (network.ids[i].clone(), network.ids[j].clone());
-            network.nodes[i].add_peer(id_j, ProtocolVersion::V1_2, true);
-            network.nodes[j].add_peer(id_i, ProtocolVersion::V1_1, false);
+            network.nodes[i].add_peer(&id_j, ProtocolVersion::V1_2, true);
+            network.nodes[j].add_peer(&id_i, ProtocolVersion::V1_1, false);
         }
         // Heartbeats with a random phase per node, as real nodes start at different times.
         for i in 0..n {
@@ -224,7 +224,7 @@ fn messages_reach_every_node_and_meshes_stay_in_bounds() {
     let topic = Topic::new(TOPIC);
     let mut network = Network::new(50, 10, 0x5eed, &topic);
     for node in &mut network.nodes {
-        node.subscribe(topic.clone(), Duration::ZERO);
+        node.subscribe(&topic, Duration::ZERO);
     }
     for i in 0..network.nodes.len() {
         network.flush(i, 0);
@@ -275,7 +275,7 @@ fn simulation_is_deterministic() {
         let topic = Topic::new(TOPIC);
         let mut network = Network::new(20, 6, 42, &topic);
         for node in &mut network.nodes {
-            node.subscribe(topic.clone(), Duration::ZERO);
+            node.subscribe(&topic, Duration::ZERO);
         }
         for i in 0..network.nodes.len() {
             network.flush(i, 0);

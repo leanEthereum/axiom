@@ -57,14 +57,6 @@ impl Rng {
             items.swap(i, j);
         }
     }
-
-    /// Fills a buffer with random bytes.
-    pub(crate) fn fill(&mut self, bytes: &mut [u8]) {
-        for chunk in bytes.chunks_mut(8) {
-            let word = self.next_u64().to_le_bytes();
-            chunk.copy_from_slice(&word[..chunk.len()]);
-        }
-    }
 }
 
 #[cfg(test)]

@@ -122,6 +122,10 @@ impl PeerScore {
 
     /// The score of a peer at a time; unknown peers score zero.
     #[must_use]
+    #[expect(
+        clippy::suboptimal_flops,
+        reason = "the sum reads term by term as the spec writes it"
+    )]
     pub fn score(&self, peer: &PeerId, now: Duration) -> f64 {
         let Some(stats) = self.peers.get(peer) else {
             return 0.0;
@@ -346,7 +350,7 @@ impl PeerScore {
             // Credited when validation finishes.
             DeliveryStatus::Pending | DeliveryStatus::Ignored => {}
             DeliveryStatus::Valid(validated) => {
-                self.mark_duplicate_delivery(from, topic, Some(validated), now)
+                self.mark_duplicate_delivery(from, topic, Some(validated), now);
             }
             DeliveryStatus::Invalid => self.mark_invalid(from, topic),
         }
@@ -490,12 +494,10 @@ impl PeerScore {
 ///
 /// The deficit then stops counting as P3, so it is charged once, as P3b.
 fn apply_mesh_failure(ts: &mut TopicStats, tp: &TopicScoreParams) {
-    if ts.in_mesh
-        && ts.mesh_message_deliveries_active
-        && ts.mesh_message_deliveries < tp.mesh_message_deliveries_threshold
-    {
-        let deficit = tp.mesh_message_deliveries_threshold - ts.mesh_message_deliveries;
-        ts.mesh_failure_penalty += deficit * deficit;
+    // Threshold: only an active member that under-delivered carries a deficit.
+    let deficit = tp.mesh_message_deliveries_threshold - ts.mesh_message_deliveries;
+    if ts.in_mesh && ts.mesh_message_deliveries_active && deficit > 0.0 {
+        ts.mesh_failure_penalty = deficit.mul_add(deficit, ts.mesh_failure_penalty);
     }
     ts.in_mesh = false;
     ts.mesh_message_deliveries_active = false;
@@ -649,7 +651,7 @@ mod tests {
         assert!((score.score(&a, Duration::from_secs(1)) - 4.0).abs() < 1e-9);
         // A positive peer is forgotten at once on disconnect.
         score.remove_peer(&a, Duration::from_secs(1));
-        assert_eq!(score.score(&a, Duration::from_secs(1)), 0.0);
+        assert!(score.score(&a, Duration::from_secs(1)).abs() < f64::EPSILON);
     }
 
     #[test]

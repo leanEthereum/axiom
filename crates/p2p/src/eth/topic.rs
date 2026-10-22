@@ -99,7 +99,7 @@ impl FromStr for GossipKind {
             }
             digits.parse().ok()
         };
-        let families: [(&str, fn(u64) -> Self); 4] = [
+        let families: [(&str, SubnetKind); 4] = [
             ("beacon_attestation_", Self::BeaconAttestation),
             ("sync_committee_", Self::SyncCommittee),
             ("blob_sidecar_", Self::BlobSidecar),
@@ -111,6 +111,9 @@ impl FromStr for GossipKind {
             .ok_or(TopicError::UnknownName)
     }
 }
+
+/// Builds a subnet topic kind from its subnet number.
+type SubnetKind = fn(u64) -> GossipKind;
 
 /// A full consensus topic: fork digest, kind, and encoding.
 ///

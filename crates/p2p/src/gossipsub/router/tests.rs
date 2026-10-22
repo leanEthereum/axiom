@@ -34,7 +34,7 @@ fn scoring() -> (PeerScoreParams, PeerScoreThresholds) {
 fn router_with_peers(n: u8) -> Router {
     let mut router = Router::new(GossipsubConfig::default(), Some(scoring()), 7);
     for seed in 1..=n {
-        router.add_peer(peer(seed), ProtocolVersion::V1_2, seed % 2 == 0);
+        router.add_peer(&peer(seed), ProtocolVersion::V1_2, seed % 2 == 0);
         let subscribe = Rpc {
             subscriptions: vec![SubOpts {
                 subscribe: true,
@@ -44,7 +44,7 @@ fn router_with_peers(n: u8) -> Router {
         };
         router.handle_rpc(&peer(seed), subscribe, Duration::ZERO);
     }
-    router.subscribe(topic(), Duration::ZERO);
+    router.subscribe(&topic(), Duration::ZERO);
     drain(&mut router);
     router
 }
@@ -77,7 +77,7 @@ fn subscribing_grafts_up_to_d_peers() {
     // Fixture state: 20 subscribed peers, D = 8.
     let mut router = Router::new(GossipsubConfig::default(), None, 1);
     for seed in 1..=20 {
-        router.add_peer(peer(seed), ProtocolVersion::V1_2, false);
+        router.add_peer(&peer(seed), ProtocolVersion::V1_2, false);
         router.handle_rpc(
             &peer(seed),
             Rpc {
@@ -90,7 +90,7 @@ fn subscribing_grafts_up_to_d_peers() {
             Duration::ZERO,
         );
     }
-    router.subscribe(topic(), Duration::ZERO);
+    router.subscribe(&topic(), Duration::ZERO);
     // Exactly 8 peers join the mesh, and each of them receives a GRAFT.
     assert_eq!(router.mesh_peers(&topic()).count(), 8);
     let sent = drain(&mut router);

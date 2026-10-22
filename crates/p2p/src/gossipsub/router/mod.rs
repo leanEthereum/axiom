@@ -264,8 +264,8 @@ impl Router {
     }
 
     /// Registers a connected peer and tells it this node's subscriptions.
-    pub fn add_peer(&mut self, peer: PeerId, version: ProtocolVersion, outbound: bool) {
-        if self.peers.contains_key(&peer) {
+    pub fn add_peer(&mut self, peer: &PeerId, version: ProtocolVersion, outbound: bool) {
+        if self.peers.contains_key(peer) {
             return;
         }
         self.peers.insert(
@@ -293,7 +293,14 @@ impl Router {
             })
             .collect();
         if !subscriptions.is_empty() {
-            self.control_rpc(&peer).subscriptions.extend(subscriptions);
+            self.control_rpc(peer).subscriptions.extend(subscriptions);
+        }
+    }
+
+    /// Updates the protocol revision of a peer, once its stream negotiation settles.
+    pub fn set_peer_version(&mut self, peer: &PeerId, version: ProtocolVersion) {
+        if let Some(state) = self.peers.get_mut(peer) {
+            state.version = version;
         }
     }
 
@@ -330,7 +337,7 @@ impl Router {
     }
 
     /// Joins a topic, returning whether this node was not already in it.
-    pub fn subscribe(&mut self, topic: Topic, now: Duration) -> bool {
+    pub fn subscribe(&mut self, topic: &Topic, now: Duration) -> bool {
         if !self.subscriptions.insert(topic.clone()) {
             return false;
         }
@@ -345,16 +352,16 @@ impl Router {
         // Phase 2: build the mesh, starting from the fanout peers already in use.
         let mut members: Vec<PeerId> = self
             .fanout
-            .remove(&topic)
+            .remove(topic)
             .unwrap_or_default()
             .into_iter()
-            .filter(|peer| self.peer_score(peer, now) >= 0.0 && !self.in_backoff(&topic, peer, now))
+            .filter(|peer| self.peer_score(peer, now) >= 0.0 && !self.in_backoff(topic, peer, now))
             .collect();
-        self.fanout_last_published.remove(&topic);
+        self.fanout_last_published.remove(topic);
         members.truncate(self.config.mesh_n);
         // Top up with random topic peers.
         if members.len() < self.config.mesh_n {
-            let mut candidates = self.graft_candidates(&topic, &members, now);
+            let mut candidates = self.graft_candidates(topic, &members, now);
             self.rng.shuffle(&mut candidates);
             members.extend(
                 candidates
@@ -364,7 +371,7 @@ impl Router {
         }
         self.mesh.insert(topic.clone(), BTreeSet::new());
         for peer in members {
-            self.graft_peer(&topic, peer, now);
+            self.graft_peer(topic, peer, now);
         }
         true
     }
@@ -400,16 +407,16 @@ impl Router {
         data: Vec<u8>,
         now: Duration,
     ) -> Result<MessageId, PublishError> {
-        let message = RawMessage::anonymous(topic.clone(), data);
+        let message = RawMessage::anonymous(topic, data);
         // The envelope must fit in one RPC frame.
         if message.encode().len() + 16 > self.config.max_transmit_size {
             return Err(PublishError::MessageTooLarge);
         }
-        let id = (self.config.message_id)(&topic, &message.data);
+        let id = (self.config.message_id)(&message.topic, &message.data);
         if self.seen.contains(&id) {
             return Err(PublishError::Duplicate);
         }
-        let recipients = self.publish_recipients(&topic, now);
+        let recipients = self.publish_recipients(&message.topic, now);
         if recipients.is_empty() {
             return Err(PublishError::InsufficientPeers);
         }
@@ -624,8 +631,7 @@ impl Router {
                 backoff: None,
             };
         }
-        let mut peers = Vec::new();
-        if px {
+        let peers = if px {
             let mut candidates: Vec<PeerId> = self
                 .topic_peers(topic)
                 .filter(|candidate| *candidate != peer && self.peer_score(candidate, now) >= 0.0)
@@ -633,14 +639,16 @@ impl Router {
                 .collect();
             self.rng.shuffle(&mut candidates);
             candidates.truncate(self.config.prune_peers);
-            peers = candidates
+            candidates
                 .into_iter()
                 .map(|id| PeerInfo {
                     peer_id: Some(id),
                     signed_peer_record: None,
                 })
-                .collect();
-        }
+                .collect()
+        } else {
+            Vec::new()
+        };
         Prune {
             topic: topic.clone(),
             peers,
