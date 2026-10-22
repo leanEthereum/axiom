@@ -14,6 +14,6 @@ pub use historical_roots::HistoricalRootsUpdate;
 pub use justification::Justification;
 pub use participation::{Inclusion, PendingParticipation, VotePart};
 pub use registry_updates::RegistryUpdates;
-pub use rewards::{AttestationRewards, Deltas, RewardsAndPenalties};
+pub use rewards::{AttestationRewards, BaseReward, Deltas, InclusionShares, RewardsAndPenalties};
 pub use rollover::Rollover;
 pub use slashings::CorrelationPenalty;

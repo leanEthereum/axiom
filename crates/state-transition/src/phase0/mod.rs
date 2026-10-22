@@ -11,7 +11,7 @@ mod slashing;
 mod slot;
 
 use axiom_types::{
-    Preset, ValidatorIndex,
+    ChainConfig, Preset, ValidatorIndex,
     phase0::{BeaconBlock, BeaconBlockHeader, BeaconState},
 };
 pub use exits::ExitQueue;
@@ -20,15 +20,16 @@ pub use slashing::Slashing;
 pub use slot::SlotRoots;
 
 use crate::{
-    BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
-    StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
+    PayloadEngine, Registry, StateError,
     phase0::{
         block::{AttestationRecord, DepositQuota, RandaoReveal},
         epoch::{
-            CorrelationPenalty, HistoricalRootsUpdate, Hysteresis, Justification,
-            PendingParticipation, RegistryUpdates, RewardsAndPenalties, Rollover,
+            AttestationRewards, CorrelationPenalty, HistoricalRootsUpdate, Hysteresis,
+            Justification, PendingParticipation, RegistryUpdates, RewardsAndPenalties, Rollover,
         },
     },
+    rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
 
@@ -104,6 +105,16 @@ impl<P: Preset> Fork for BeaconState<P> {
             }
             _ => Phase0Epoch::run(processor, step),
         }
+    }
+
+    fn attester_rewards(
+        mut state: CachedState<'_, Self>,
+        _config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        let total = ActiveBalance::of(state.beacon());
+        let participation = PendingParticipation::new(&mut state, total)?;
+        let rewards = AttestationRewards::new(state.beacon(), &participation);
+        AttesterRewards::of_pending(&rewards, state.beacon())
     }
 
     /// Runs phase0's block processing.

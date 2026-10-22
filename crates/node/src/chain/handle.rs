@@ -72,6 +72,16 @@ impl<P: Preset> ChainHandle<P> {
         Ok((Self { jobs }, thread))
     }
 
+    /// A handle to no chain, whose every request fails as if the chain had stopped.
+    ///
+    /// It lets a service be built where no request will run, such as to list routes.
+    #[must_use]
+    pub fn stopped() -> Self {
+        // The receiver drops at once, so every send fails.
+        let (jobs, _) = mpsc::channel::<Job<P>>(1);
+        Self { jobs }
+    }
+
     /// Runs a closure on the chain thread and returns its result.
     ///
     /// # Errors

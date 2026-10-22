@@ -239,6 +239,17 @@ impl ForkName {
         }
     }
 
+    /// Whether an attestation subnet carries one validator's vote alone, naming its committee.
+    ///
+    /// From Electra, subnets carry single attestations and aggregates span committees, see EIP-7549.
+    #[must_use]
+    pub const fn single_attestations(self) -> bool {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => false,
+            Self::Electra | Self::Fulu | Self::Gloas => true,
+        }
+    }
+
     /// Whether fork choice weighs a block's payload apart from the block itself.
     ///
     /// Gloas blocks commit to a builder's bid, and the payload follows in an envelope.

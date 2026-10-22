@@ -14,17 +14,23 @@ use std::{
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
+use axiom_beacon_json::ForkedJson;
 use axiom_fork_choice::{
-    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, PayloadStatus, Store,
+    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, NodePayload,
+    PayloadArrival, PayloadStatus, Store,
 };
 use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
-use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
+use axiom_json::Json;
+use axiom_light_client::{
+    LightClientServer, PostState,
+    combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
+};
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root,
-    Slot,
+    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Gwei, Hash32, Preset,
+    Root, Slot,
     accessors::{CoreState, ForkState},
     altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
@@ -42,7 +48,7 @@ pub use head::{ChainEvent, ExecutionHead, Head};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
-use crate::ChainError;
+use crate::{ApiEvent, ChainError, EventSender, EventTopic};
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
@@ -85,6 +91,8 @@ pub struct Chain<P: Preset> {
     committees: Option<(Epoch, Root, Arc<EpochCommittees>)>,
     /// Light client data derived from the canonical chain.
     light_client: LightClientServer<P>,
+    /// Where the beacon API's event stream takes its events.
+    api_events: EventSender,
     /// Operations waiting for the blocks this node's validators propose.
     pool: OperationPool<P>,
 }
@@ -184,6 +192,7 @@ impl<P: Preset> Chain<P> {
             gossip: GossipMemory::default(),
             committees: None,
             light_client: LightClientServer::new(),
+            api_events: EventSender::detached(),
             pool: OperationPool::default(),
         })
     }
@@ -204,6 +213,19 @@ impl<P: Preset> Chain<P> {
         // Publish the anchor's head at once rather than at the first change.
         self.record_head(self.head, true);
         self
+    }
+
+    /// Publishes the beacon API's events through a hub's sender.
+    #[must_use]
+    pub fn with_events(mut self, events: EventSender) -> Self {
+        self.api_events = events;
+        self
+    }
+
+    /// Where the beacon API's event stream takes its events.
+    #[must_use]
+    pub const fn api_events(&self) -> &EventSender {
+        &self.api_events
     }
 
     /// A receiver of every future chain event.
@@ -293,6 +315,96 @@ impl<P: Preset> Chain<P> {
     #[must_use]
     pub fn state(&self, root: &Root) -> Option<&State<P>> {
         self.store.block_state(root)
+    }
+
+    /// Post-state of a block, from the fork choice or else from the database.
+    ///
+    /// This is the one place historical states come from.
+    /// States before the finalized anchor need an archive, which answers here once it exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn state_by_block(&self, root: Root) -> Result<Option<State<P>>, ChainError> {
+        if let Some(state) = self.store.block_state(&root) {
+            return Ok(Some(state.clone()));
+        }
+        Ok(self.database.state(root)?.map(State::new))
+    }
+
+    /// The weight of every fork choice node, as the head rule counts it.
+    ///
+    /// A block before Gloas has one node, carrying its payload.
+    /// A Gloas block also has a pending node, an empty node, and a full node once its payload arrived.
+    /// See `get_weight` in the phase0 and Gloas fork choice specs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the justified checkpoint's state is missing.
+    pub fn node_weights(&mut self) -> Result<Vec<(ForkChoiceNode, Gwei)>, ChainError> {
+        let arrivals: Vec<(Root, PayloadArrival)> = self
+            .store
+            .blocks()
+            .iter()
+            .map(|(root, node)| (*root, node.payload))
+            .collect();
+        let block_weights = self.store.ghost()?.weights();
+        let ghost = self.store.payload_ghost()?;
+        let mut weights = Vec::new();
+        for (root, arrival) in &arrivals {
+            if *arrival == PayloadArrival::Embedded {
+                let full = ForkChoiceNode {
+                    root: *root,
+                    payload: NodePayload::Full,
+                };
+                weights.push((full, block_weights.get(root).copied().unwrap_or_default()));
+                continue;
+            }
+            let pending = ForkChoiceNode::pending(*root);
+            weights.push((pending, ghost.weight(pending)));
+            for payload in [NodePayload::Empty, NodePayload::Full] {
+                if arrival.offers(payload) {
+                    let variant = ForkChoiceNode {
+                        root: *root,
+                        payload,
+                    };
+                    weights.push((variant, ghost.weight(variant)));
+                }
+            }
+        }
+        Ok(weights)
+    }
+
+    /// Root of the latest canonical block at or before a slot, if the node knows it.
+    ///
+    /// An empty slot takes the block before it, as the state at that slot does.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn canonical_root_at_or_before(&self, slot: Slot) -> Result<Option<Root>, ChainError> {
+        let slot = slot.min(self.head.slot);
+        // Since finality the head's chain decides, empty slots included.
+        // The walk stops at the anchor, which may lie after the slot.
+        let blocks = self.store.blocks();
+        if let Some(root) = blocks
+            .ancestor(self.head.root, slot)
+            .filter(|root| blocks.get(root).is_some_and(|node| node.slot <= slot))
+        {
+            return Ok(Some(root));
+        }
+        // Before it, walk the finalized index back to the nearest proposed slot.
+        let earliest = self.database.earliest_slot()?.unwrap_or(Slot(0));
+        let mut current = slot;
+        loop {
+            if let Some(root) = self.database.canonical_root(current)? {
+                return Ok(Some(root));
+            }
+            if current <= earliest {
+                return Ok(None);
+            }
+            current = Slot(current.0 - 1);
+        }
     }
 
     /// A block by root, from the database.
@@ -420,6 +532,7 @@ impl<P: Preset> Chain<P> {
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
         info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
+        self.announce_block(root, block.slot());
         // Every block's update is kept; the head change below decides whether it is served.
         self.offer_update(root, block);
         self.update_head()?;
@@ -448,6 +561,7 @@ impl<P: Preset> Chain<P> {
         )?;
         self.database.put_envelope(envelope)?;
         info!(%root, "imported payload envelope");
+        self.announce_envelope(envelope);
         self.update_head()?;
         Ok(root)
     }
@@ -991,6 +1105,7 @@ impl<P: Preset> Chain<P> {
         .then(|| self.reorg_depth(previous, head));
 
         // Light clients are served from the new canonical chain, before finality settles it.
+        let served = self.served_light_client_updates();
         if head.root != previous.root {
             let canonical = self.canonical_since_finality(head.root);
             self.light_client.follow(canonical);
@@ -1013,11 +1128,14 @@ impl<P: Preset> Chain<P> {
                 to: head.root,
                 depth,
             });
+            self.announce_reorg(previous, head, depth);
         }
         if head.root != previous.root {
             info!(slot = %head.slot, root = %head.root, optimistic = head.optimistic, "new head");
         }
         self.announce(ChainEvent::Head(head));
+        self.announce_head(previous, head);
+        self.announce_light_client_updates(&served);
 
         if finalized {
             // Waiting items and refused blocks at or before finality can never matter again.
@@ -1026,6 +1144,7 @@ impl<P: Preset> Chain<P> {
             self.gossip.prune(finalized_slot);
             info!(epoch = %head.finalized.epoch, root = %head.finalized.root, "finalized");
             self.announce(ChainEvent::Finalized(head.finalized));
+            self.announce_finalized(head.finalized);
         }
         Ok(())
     }
@@ -1142,7 +1261,8 @@ impl<P: Preset> Chain<P> {
 
     /// Reads the head and its checkpoints from the store.
     fn read_head(store: &mut Store<P>) -> Result<Head, ChainError> {
-        let root = store.head()?.root;
+        let head = store.head()?;
+        let root = head.root;
         let node = *store
             .blocks()
             .get(&root)
@@ -1164,6 +1284,7 @@ impl<P: Preset> Chain<P> {
             root,
             slot: node.slot,
             optimistic: node.status != ExecutionStatus::Valid,
+            payload: head.payload,
             justified,
             finalized,
             execution: ExecutionHead {
@@ -1211,6 +1332,265 @@ impl<P: Preset> Chain<P> {
             .store_bytes_written
             .inc_by(written.saturating_sub(self.bytes_written));
         self.bytes_written = written;
+    }
+
+    /// Tells event stream clients of an imported block.
+    ///
+    /// From Gloas on, the block names its builder and the payload hash its bid commits to.
+    fn announce_block(&self, root: Root, slot: Slot) {
+        if !self.api_events.wants(EventTopic::Block) {
+            return;
+        }
+        let optimistic = self
+            .store
+            .blocks()
+            .get(&root)
+            .is_some_and(|node| node.status != ExecutionStatus::Valid);
+        let mut data = vec![
+            ("slot", Json::from(slot.0.to_string())),
+            ("block", Json::from(root.to_string())),
+            ("execution_optimistic", Json::from(optimistic)),
+        ];
+        if let Some(bid) = self.payload_bid(&root) {
+            data.push(("builder_index", Json::from(bid.builder_index.0.to_string())));
+            data.push(("block_hash", Json::from(bid.block_hash.to_string())));
+        }
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::Block,
+            Json::Object(data.into_iter().collect()),
+        ));
+    }
+
+    /// Tells event stream clients of an imported payload envelope, and that its data is available.
+    fn announce_envelope(&self, envelope: &SignedExecutionPayloadEnvelope<P>) {
+        let message = &envelope.message;
+        let root = message.beacon_block_root;
+        let slot = self
+            .store
+            .blocks()
+            .get(&root)
+            .map_or(Slot(0), |node| node.slot);
+        if self.api_events.wants(EventTopic::ExecutionPayload) {
+            let optimistic = self
+                .store
+                .blocks()
+                .get(&root)
+                .is_some_and(|node| node.status != ExecutionStatus::Valid);
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::ExecutionPayload,
+                Json::from([
+                    ("slot", Json::from(slot.0.to_string())),
+                    (
+                        "builder_index",
+                        Json::from(message.builder_index.0.to_string()),
+                    ),
+                    (
+                        "block_hash",
+                        Json::from(message.payload.block_hash.to_string()),
+                    ),
+                    ("block_root", Json::from(root.to_string())),
+                    ("execution_optimistic", Json::from(optimistic)),
+                ]),
+            ));
+        }
+        // The envelope only imports once its blobs are available, so both hold now.
+        if self.api_events.wants(EventTopic::ExecutionPayloadAvailable) {
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::ExecutionPayloadAvailable,
+                Json::from([
+                    ("slot", Json::from(slot.0.to_string())),
+                    ("block_root", Json::from(root.to_string())),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients of a new head, in both head formats.
+    ///
+    /// The dependent roots are the last block roots before the previous and current epochs.
+    /// Duties computed from those roots stay valid while the roots do.
+    /// See the head event of the beacon API.
+    fn announce_head(&self, previous: Head, head: Head) {
+        let first = self.api_events.wants(EventTopic::Head);
+        let second = self.api_events.wants(EventTopic::HeadV2);
+        if !first && !second {
+            return;
+        }
+        let Some(state) = self.store.block_state(&head.root) else {
+            return;
+        };
+        let beacon = state.beacon();
+        let epoch = head.slot.epoch::<P>();
+        let genesis = self
+            .canonical_root(Slot(0))
+            .ok()
+            .flatten()
+            .unwrap_or(Root::ZERO);
+        // The last slot before an epoch's start, or the genesis block when there is none.
+        let dependent = |epoch: Option<Epoch>| {
+            epoch
+                .and_then(|epoch| epoch.start_slot::<P>().0.checked_sub(1))
+                .and_then(|slot| beacon.block_root_at_slot(Slot(slot)))
+                .unwrap_or(genesis)
+        };
+        let previous_root = dependent(epoch.0.checked_sub(1).map(Epoch));
+        let current_root = dependent(Some(epoch));
+        let state_root = state.hash_tree_root();
+        let epoch_transition = previous.slot.epoch::<P>() != epoch;
+        if first {
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::Head,
+                Json::from([
+                    ("slot", Json::from(head.slot.0.to_string())),
+                    ("block", Json::from(head.root.to_string())),
+                    ("state", Json::from(state_root.to_string())),
+                    ("epoch_transition", Json::from(epoch_transition)),
+                    (
+                        "previous_duty_dependent_root",
+                        Json::from(previous_root.to_string()),
+                    ),
+                    (
+                        "current_duty_dependent_root",
+                        Json::from(current_root.to_string()),
+                    ),
+                    ("execution_optimistic", Json::from(head.optimistic)),
+                ]),
+            ));
+        }
+        if second {
+            let payload_status = match head.payload {
+                NodePayload::Empty => "empty",
+                NodePayload::Full => "full",
+                NodePayload::Pending => "pending",
+            };
+            let data = Json::from([
+                ("slot", Json::from(head.slot.0.to_string())),
+                ("block", Json::from(head.root.to_string())),
+                ("state", Json::from(state_root.to_string())),
+                ("payload_status", Json::from(payload_status)),
+                ("epoch_transition", Json::from(epoch_transition)),
+                (
+                    "current_epoch_dependent_root",
+                    Json::from(previous_root.to_string()),
+                ),
+                (
+                    "next_epoch_dependent_root",
+                    Json::from(current_root.to_string()),
+                ),
+                ("execution_optimistic", Json::from(head.optimistic)),
+            ]);
+            self.api_events.publish(ApiEvent::json(
+                EventTopic::HeadV2,
+                Json::from([
+                    ("version", Json::from(beacon.fork_name().to_string())),
+                    ("data", data),
+                ]),
+            ));
+        }
+    }
+
+    /// Tells event stream clients the head left the previous head's chain.
+    fn announce_reorg(&self, previous: Head, head: Head, depth: u64) {
+        if !self.api_events.wants(EventTopic::ChainReorg) {
+            return;
+        }
+        let state_root = |root: &Root| {
+            self.store
+                .block_state(root)
+                .map_or(Root::ZERO, State::hash_tree_root)
+        };
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::ChainReorg,
+            Json::from([
+                ("slot", Json::from(head.slot.0.to_string())),
+                ("depth", Json::from(depth.to_string())),
+                ("old_head_block", Json::from(previous.root.to_string())),
+                ("new_head_block", Json::from(head.root.to_string())),
+                (
+                    "old_head_state",
+                    Json::from(state_root(&previous.root).to_string()),
+                ),
+                (
+                    "new_head_state",
+                    Json::from(state_root(&head.root).to_string()),
+                ),
+                ("epoch", Json::from(head.slot.epoch::<P>().0.to_string())),
+                ("execution_optimistic", Json::from(head.optimistic)),
+            ]),
+        ));
+    }
+
+    /// Tells event stream clients of a new finalized checkpoint.
+    fn announce_finalized(&self, finalized: Checkpoint) {
+        if !self.api_events.wants(EventTopic::FinalizedCheckpoint) {
+            return;
+        }
+        let (state_root, optimistic) = match self.store.blocks().get(&finalized.root) {
+            Some(node) => (
+                self.store
+                    .block_state(&finalized.root)
+                    .map_or(Root::ZERO, State::hash_tree_root),
+                node.status != ExecutionStatus::Valid,
+            ),
+            None => (Root::ZERO, false),
+        };
+        self.api_events.publish(ApiEvent::json(
+            EventTopic::FinalizedCheckpoint,
+            Json::from([
+                ("block", Json::from(finalized.root.to_string())),
+                ("state", Json::from(state_root.to_string())),
+                ("epoch", Json::from(finalized.epoch.0.to_string())),
+                ("execution_optimistic", Json::from(optimistic)),
+            ]),
+        ));
+    }
+
+    /// The light client updates served now, to tell which ones a head change replaces.
+    fn served_light_client_updates(
+        &self,
+    ) -> (
+        Option<LightClientFinalityUpdate<P>>,
+        Option<LightClientOptimisticUpdate<P>>,
+    ) {
+        (
+            self.light_client.latest_finality_update().cloned(),
+            self.light_client.latest_optimistic_update().cloned(),
+        )
+    }
+
+    /// Tells event stream clients of light client updates that replaced the served ones.
+    fn announce_light_client_updates(
+        &self,
+        served: &(
+            Option<LightClientFinalityUpdate<P>>,
+            Option<LightClientOptimisticUpdate<P>>,
+        ),
+    ) {
+        let config = self.store.config();
+        if let Some(update) = self.light_client.latest_finality_update()
+            && served.0.as_ref() != Some(update)
+            && self.api_events.wants(EventTopic::LightClientFinalityUpdate)
+        {
+            let fork = config.fork_at(update.context_slot().epoch::<P>());
+            self.api_events.publish(ApiEvent::versioned(
+                EventTopic::LightClientFinalityUpdate,
+                fork,
+                update.to_json(),
+            ));
+        }
+        if let Some(update) = self.light_client.latest_optimistic_update()
+            && served.1.as_ref() != Some(update)
+            && self
+                .api_events
+                .wants(EventTopic::LightClientOptimisticUpdate)
+        {
+            let fork = config.fork_at(update.context_slot().epoch::<P>());
+            self.api_events.publish(ApiEvent::versioned(
+                EventTopic::LightClientOptimisticUpdate,
+                fork,
+                update.to_json(),
+            ));
+        }
     }
 
     /// Sends an event to every subscriber.

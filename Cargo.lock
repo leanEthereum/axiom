@@ -251,7 +251,9 @@ dependencies = [
 name = "axiom-light-client"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
  "axiom-bls",
+ "axiom-json",
  "axiom-ssz",
  "axiom-types",
  "thiserror",

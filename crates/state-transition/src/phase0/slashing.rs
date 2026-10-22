@@ -65,8 +65,16 @@ impl Slashing {
             effective_balance / S::FORK.whistleblower_reward_quotient::<S::Preset>();
         let proposer_reward = whistleblower_reward * PROPOSER_WEIGHT / WEIGHT_DENOMINATOR;
         registry.state.increase_balance(proposer, proposer_reward)?;
+        let whistleblower_share = whistleblower_reward - proposer_reward;
         registry
             .state
-            .increase_balance(whistleblower, whistleblower_reward - proposer_reward)
+            .increase_balance(whistleblower, whistleblower_share)?;
+        // A block's slashing has no other whistleblower, so its proposer takes both shares.
+        let ledger = &mut registry.state.caches.proposer_ledger;
+        ledger.slashing += proposer_reward;
+        if whistleblower == proposer {
+            ledger.slashing += whistleblower_share;
+        }
+        Ok(())
     }
 }

@@ -20,6 +20,9 @@ const U64_DIGITS: usize = 20;
 /// Most digits a 256-bit value can need, the 78 of 2^256 - 1.
 const U256_DIGITS: usize = 78;
 
+/// The largest 8-bit value, as the error message prints it.
+const U8_MAX: &str = "255";
+
 /// The largest 64-bit value, as the error message prints it.
 const U64_MAX: &str = "18446744073709551615";
 
@@ -75,6 +78,15 @@ impl<'a> Decimal<'a> {
             return Err(DecimalError::LeadingZero);
         }
         Ok(Self(text))
+    }
+
+    /// The value as an 8-bit integer.
+    pub(crate) fn to_u8(self) -> Result<u8, DecimalError> {
+        let value = self.to_u64()?;
+        u8::try_from(value).map_err(|_| DecimalError::Overflow {
+            digits: self.0.len(),
+            max: U8_MAX,
+        })
     }
 
     /// The value as a 64-bit integer.

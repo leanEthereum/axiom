@@ -10,6 +10,7 @@ use std::{
     time::Duration,
 };
 
+use axiom_beacon_json::ApiJson;
 use axiom_discv5::Enr;
 use axiom_ef_tests::{
     Case, Vectors,
@@ -33,7 +34,10 @@ use axiom_node::{
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
-use axiom_state_transition::{KnownVerdict, State, Verification};
+use axiom_state_transition::{
+    KnownVerdict, State, Verification,
+    rewards::{AttesterRewards, BlockRewards, SyncCommitteeReward},
+};
 use axiom_types::{
     ChainConfig, Epoch, ForkName, Hash32, KzgCommitment, KzgProof, Minimal, Slot,
     accessors::CoreState,
@@ -44,6 +48,8 @@ use axiom_types::{
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
 };
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
     runtime::Builder,
     sync::oneshot,
     task::{self, JoinHandle},
@@ -181,6 +187,8 @@ impl BlobBundle {
 
 /// A node running in the test's runtime, with a client for its API.
 struct TestNode {
+    /// The beacon API's address.
+    address: SocketAddr,
     /// The beacon API client.
     client: Client,
     /// Stops the node.
@@ -239,7 +247,12 @@ impl TestNode {
             }
             time::sleep(Duration::from_millis(10)).await;
         }
-        Self { client, stop, task }
+        Self {
+            address,
+            client,
+            stop,
+            task,
+        }
     }
 
     /// Publishes a block of any fork over the API, without blobs.
@@ -331,7 +344,7 @@ impl TestNode {
     /// Publishes a Gloas payload envelope over the API.
     async fn publish_envelope(&self, proposal: &Proposal<Minimal>) -> Option<Response> {
         let envelope = proposal.envelope()?;
-        let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelope")
+        let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelopes")
             .with_body("application/octet-stream", envelope.encode());
         Some(self.client.send(&request).await.expect("node answers"))
     }
@@ -949,7 +962,10 @@ fn a_node_syncs_from_genesis_through_every_fork() {
 
         // Before importing the merge block of slot 16, B asked its engine for the terminal block.
         // The terminal block at 1000 led to its parent at 999, and nothing else was looked up.
-        let expected = vec![terminal.to_json(), TERMINAL_PARENT.to_json()];
+        let expected = vec![
+            JsonCodec::to_json(&terminal),
+            JsonCodec::to_json(&TERMINAL_PARENT),
+        ];
         assert_eq!(pow_lookups(&b_engine), expected);
         // Every payload came back valid, so B's head is fully verified.
         let syncing = b.json("/eth/v1/node/syncing").await.unwrap();
@@ -1163,6 +1179,124 @@ fn a_node_serves_light_client_data_that_follows_its_canonical_chain() {
     let _ignored = fs::remove_dir_all(&directory);
 }
 
+/// Sends a JSON body to a route and parses the answer, or says why it did not answer.
+async fn post_json(node: &TestNode, path: &str, body: &str) -> Result<Json, (StatusCode, String)> {
+    let request =
+        Request::new(Method::Post, path).with_body("application/json", body.as_bytes().to_vec());
+    let response = node.client.send(&request).await.expect("node answers");
+    if response.status != StatusCode::OK {
+        return Err((response.status, body_text(&response)));
+    }
+    Ok(Json::parse(&response.body).expect("the answer is JSON"))
+}
+
+#[test]
+fn a_node_reports_the_rewards_its_blocks_and_epochs_paid() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the pyspec phase0 genesis, Altair from epoch 1, every validator voting.
+    // Blocks fill slots 1 to 23, and the clock stands at slot 25, in epoch 3.
+    let config = ChainConfig::minimal().with_fork_epoch(ForkName::Altair, Epoch(1));
+    let genesis_bytes = Case::new(vectors.consensus().join(PYSPEC_GENESIS))
+        .ssz_bytes("state")
+        .expect("case has a genesis state");
+    let genesis = combined::BeaconState::<Minimal>::decode_at(&genesis_bytes, &config).unwrap();
+    let mut builder = ChainBuilder::<Minimal>::new(config.clone(), genesis.clone())
+        .unwrap()
+        .with_participation(Participation::Full);
+    let mut parents = Vec::new();
+    let mut chain = Vec::new();
+    for _ in 1..=23 {
+        parents.push(builder.state().clone());
+        chain.push(builder.propose().unwrap());
+    }
+    let tip_state = builder.state().clone();
+
+    // Expected answers, from the reward rules applied to the builder's own states.
+    let block_20 = chain[19].block();
+    let block_rewards = BlockRewards::of_block(parents[19].clone(), block_20, &config).unwrap();
+    let sync = SyncCommitteeReward::of_block(parents[19].clone(), block_20, &config).unwrap();
+    let epoch_1 = AttesterRewards::of_epoch(tip_state, &config, Epoch(1)).unwrap();
+
+    let directory = env::temp_dir().join(format!("axiom-rewards-{}", process::id()));
+    fs::create_dir_all(&directory).expect("temporary directory is writable");
+    let genesis_path = directory.join("genesis.ssz");
+    fs::write(&genesis_path, &genesis_bytes).expect("temporary directory is writable");
+    let now_ms = (genesis.genesis_time() + 6 * 25) * 1000;
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let address = free_address();
+        let node_config = NodeConfig {
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            http_address: Some(address),
+            ..NodeConfig::default()
+        };
+        let node = TestNode::start_with(now_ms, config.clone(), node_config, address).await;
+        node.publish_chain(&chain).await;
+
+        // Block 20 paid its proposer for the votes and the sync signatures it carries.
+        let answer = node.json("/eth/v1/beacon/rewards/blocks/20").await.unwrap();
+        let data = answer.get("data").unwrap();
+        assert_eq!(
+            data.get("total").and_then(Json::as_str),
+            Some(block_rewards.total().0.to_string().as_str())
+        );
+        assert_eq!(
+            data.get("sync_aggregate").and_then(Json::as_str),
+            Some(block_rewards.sync_aggregate.0.to_string().as_str())
+        );
+
+        // A filter on one committee member and one unknown index keeps that member only.
+        let member = sync[0];
+        let body = format!(r#"["{}","9999"]"#, member.validator_index.0);
+        let answer = post_json(&node, "/eth/v1/beacon/rewards/sync_committee/20", &body)
+            .await
+            .unwrap();
+        let expected = format!(
+            r#"[{{"validator_index":"{}","reward":"{}"}}]"#,
+            member.validator_index.0, member.reward.0
+        );
+        assert_eq!(answer.get("data").unwrap().to_string(), expected);
+
+        // Epoch 1's votes were paid when epoch 2 ended: one entry per eligible validator.
+        let answer = post_json(&node, "/eth/v1/beacon/rewards/attestations/1", "")
+            .await
+            .unwrap();
+        let data = answer.get("data").unwrap();
+        let totals = data.get("total_rewards").and_then(Json::as_array).unwrap();
+        assert_eq!(totals.len(), epoch_1.validators.len());
+        assert_eq!(
+            totals[0].get("head").and_then(Json::as_str),
+            Some(epoch_1.validators[0].head.0.to_string().as_str())
+        );
+        let ideal = data.get("ideal_rewards").and_then(Json::as_array).unwrap();
+        assert_eq!(ideal.len(), epoch_1.ideal.len());
+
+        // Epoch 2's votes are paid when epoch 3 ends, which the clock has not reached.
+        assert_eq!(
+            post_json(&node, "/eth/v1/beacon/rewards/attestations/2", "").await,
+            Err((
+                StatusCode::NOT_FOUND,
+                r#"{"code":404,"message":"the votes of epoch 2 are paid when epoch 3 ends"}"#
+                    .to_owned()
+            ))
+        );
+
+        // A phase0 block has no sync committee to reward.
+        assert_eq!(
+            post_json(&node, "/eth/v1/beacon/rewards/sync_committee/3", "")
+                .await
+                .map_err(|(status, _)| status),
+            Err(StatusCode::BAD_REQUEST)
+        );
+
+        node.stop().await;
+    });
+    let _ignored = fs::remove_dir_all(&directory);
+}
+
 /// Publishes two blocks with blobs to node A, and checks node B range-syncs blocks and blobs.
 ///
 /// The genesis is the anchor of a fork choice case of the fork, with every fork up to it active.
@@ -1289,4 +1423,151 @@ fn a_node_publishes_deneb_blobs_and_a_peer_syncs_them() {
 #[test]
 fn a_node_publishes_electra_blobs_and_a_peer_syncs_them() {
     publish_blobs_and_sync(ForkName::Electra);
+}
+
+/// Reads server-sent events from a stream until a count of them arrived.
+///
+/// The body is chunked; each event's data line holds compact JSON on one line.
+async fn read_events(stream: &mut TcpStream, count: usize) -> Vec<(String, Json)> {
+    let mut text = String::new();
+    let mut buffer = [0; 4096];
+    loop {
+        // Event names and data lines sit apart from the chunk framing, one per line.
+        let names: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("event: "))
+            .collect();
+        let data: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        if names.len() >= count && data.len() >= count {
+            return names
+                .into_iter()
+                .zip(data)
+                .take(count)
+                .map(|(name, data)| {
+                    (
+                        name.to_owned(),
+                        Json::parse(data).expect("an event holds JSON"),
+                    )
+                })
+                .collect();
+        }
+        let read = time::timeout(Duration::from_secs(10), stream.read(&mut buffer))
+            .await
+            .expect("an event arrives in time")
+            .expect("the stream reads");
+        assert_ne!(read, 0, "the stream closed early: {text}");
+        text.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
+}
+
+#[test]
+fn a_node_streams_its_events_and_serves_its_routes_in_json_and_ssz() {
+    let Some(fixture) = Fixture::load("events") else {
+        return;
+    };
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let node = TestNode::start(&fixture, None).await;
+
+        // A client subscribes to blocks and heads before anything is published.
+        let mut stream = TcpStream::connect(node.address).await.unwrap();
+        stream
+            .write_all(b"GET /eth/v1/events?topics=block,head HTTP/1.1\r\nhost: x\r\naccept: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        let mut head = [0; 1];
+        stream.read_exact(&mut head).await.unwrap();
+
+        // Each of the two blocks gives a block event, then a head event.
+        for name in BLOCKS {
+            let response = node.publish(&fixture.contents(name)).await;
+            assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        }
+        let events = read_events(&mut stream, 4).await;
+        let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["block", "head", "block", "head"]);
+        let (_, last_head) = &events[3];
+        assert_eq!(last_head.get("slot").and_then(Json::as_str), Some("2"));
+        assert_eq!(last_head.get("block").and_then(Json::as_str), Some(HEAD));
+        // The node runs without an engine, so every payload stays optimistic.
+        assert_eq!(
+            last_head.get("execution_optimistic").and_then(Json::as_bool),
+            Some(true)
+        );
+        let (_, first_block) = &events[0];
+        assert_eq!(first_block.get("slot").and_then(Json::as_str), Some("1"));
+        assert_eq!(first_block.get("block").and_then(Json::as_str), Some(BLOCKS[0].trim_start_matches("block_")));
+
+        // The head block in JSON reads back as the block the SSZ route serves.
+        let (bytes, fork) = node.ssz("/eth/v2/beacon/blocks/head").await.unwrap();
+        let json = node.json("/eth/v2/beacon/blocks/head").await.unwrap();
+        assert_eq!(json.get("version").and_then(Json::as_str), Some(fork.as_str()));
+        let read = <SignedBeaconBlock<Minimal> as ApiJson>::from_json(json.get("data").unwrap()).unwrap();
+        assert_eq!(read.encode(), bytes);
+
+        // The blinded head swaps its payload for the header its post-state recorded.
+        let blinded = node.json("/eth/v1/beacon/blinded_blocks/head").await.unwrap();
+        let body = |json: &Json| {
+            json.get("data")
+                .and_then(|data| data.get("message"))
+                .and_then(|message| message.get("body"))
+                .cloned()
+                .unwrap()
+        };
+        let full_hash = body(&json)
+            .get("execution_payload")
+            .and_then(|payload| payload.get("block_hash"))
+            .cloned();
+        let blinded_body = body(&blinded);
+        assert_eq!(blinded_body.get("execution_payload"), None);
+        assert_eq!(
+            blinded_body
+                .get("execution_payload_header")
+                .and_then(|header| header.get("block_hash"))
+                .cloned(),
+            full_hash
+        );
+
+        // The head state in JSON reads back as the state the SSZ route serves.
+        let (bytes, _) = node.ssz("/eth/v2/debug/beacon/states/head").await.unwrap();
+        let json = node.json("/eth/v2/debug/beacon/states/head").await.unwrap();
+        let read = <BeaconState<Minimal> as ApiJson>::from_json(json.get("data").unwrap()).unwrap();
+        assert_eq!(read.encode(), bytes);
+
+        // Every genesis validator is active, with its balance.
+        let validators = node.json("/eth/v1/beacon/states/head/validators").await.unwrap();
+        let count = read.validators.len();
+        let data = validators.get("data").and_then(Json::as_array).unwrap();
+        assert_eq!(data.len(), count);
+        assert_eq!(data[0].get("status").and_then(Json::as_str), Some("active_ongoing"));
+
+        // The state at slot 3, past the last block, is the head state advanced one slot.
+        let root = node.json("/eth/v1/beacon/states/2/root").await.unwrap();
+        let advanced = node.json("/eth/v1/beacon/states/3/root").await;
+        assert!(advanced.is_err(), "slot 3 is past the clock");
+        assert!(root.get("data").and_then(|data| data.get("root")).is_some());
+
+        // The spec route echoes the minimal preset.
+        let spec = node.json("/eth/v1/config/spec").await.unwrap();
+        let data = spec.get("data").unwrap();
+        assert_eq!(data.get("SLOTS_PER_EPOCH").and_then(Json::as_str), Some("8"));
+        assert_eq!(data.get("PRESET_BASE").and_then(Json::as_str), Some("minimal"));
+
+        // Committees of the head epoch cover every active validator once.
+        let committees = node.json("/eth/v1/beacon/states/head/committees").await.unwrap();
+        let members: usize = committees
+            .get("data")
+            .and_then(Json::as_array)
+            .unwrap()
+            .iter()
+            .map(|committee| committee.get("validators").and_then(Json::as_array).unwrap().len())
+            .sum();
+        assert_eq!(members, count);
+
+        drop(stream);
+        node.stop().await;
+    });
 }

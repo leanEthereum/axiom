@@ -1,22 +1,21 @@
 //! The light client routes: bootstraps, best updates by period, and the latest updates.
 //!
-//! Each answer is SSZ, tagged with the fork of the data's attested header.
+//! Each answer is JSON or SSZ, tagged with the fork of the data's attested header.
 //! See the light client routes of the beacon API.
 
 use std::str::FromStr;
 
+use axiom_beacon_json::ForkedJson;
 use axiom_http::{Request, Response, StatusCode};
-use axiom_json::Data;
+use axiom_json::{Data, Json};
 use axiom_types::{Preset, Root, Slot};
 
 use super::{
     ApiContext,
+    encoding::{Encoding, SSZ},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
 use crate::Chain;
-
-/// Media type of a sequence of SSZ response chunks.
-const SSZ: &str = "application/octet-stream";
 
 /// Routes under `/eth/v1/beacon/light_client`.
 #[derive(Clone, Copy, Debug)]
@@ -43,9 +42,7 @@ impl LightClientRoutes {
 
     /// The bootstrap of a finalized epoch boundary block.
     async fn bootstrap<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::accepts_ssz(&request) {
-            return Err(ApiError::not_acceptable());
-        }
+        let encoding = Encoding::accepted(&request, true)?;
         let text = request
             .param("block_root")
             .ok_or_else(|| ApiError::bad_request("missing block root"))?;
@@ -60,27 +57,41 @@ impl LightClientRoutes {
                     .ok_or_else(|| ApiError::not_found("no bootstrap for the block"))?;
                 Ok(Self::reply(
                     chain,
+                    encoding,
                     bootstrap.context_slot(),
+                    bootstrap,
                     bootstrap.encode(),
                 ))
             })
             .await
     }
 
-    /// The best updates of consecutive periods, as length-prefixed chunks.
+    /// The best updates of consecutive periods.
     ///
+    /// JSON lists each update with its fork's name.
+    /// SSZ sends length-prefixed chunks.
     /// Each chunk is an 8-byte little-endian length, the fork digest, then the update.
     /// The length counts the digest and the update.
     async fn updates<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::accepts_ssz(&request) {
-            return Err(ApiError::not_acceptable());
-        }
+        let encoding = Encoding::accepted(&request, true)?;
         let range: PeriodRange = request.query.as_deref().unwrap_or_default().parse()?;
         context
             .query(move |chain| {
-                let mut body = Vec::new();
                 let server = chain.light_client();
-                for update in server.updates_by_range(range.start_period, range.count) {
+                let updates = server.updates_by_range(range.start_period, range.count);
+                if encoding == Encoding::Json {
+                    let mut items = Vec::new();
+                    for update in updates {
+                        let epoch = update.context_slot().epoch::<P>();
+                        items.push(Json::from([
+                            ("version", Reply::text(&chain.config().fork_at(epoch))),
+                            ("data", update.to_json()),
+                        ]));
+                    }
+                    return Ok(Reply::json(StatusCode::OK, &Json::Array(items)));
+                }
+                let mut body = Vec::new();
+                for update in updates {
                     let digest = chain.fork_digest(update.context_slot().epoch::<P>());
                     let payload = update.encode();
                     let length = (digest.0.len() + payload.len()) as u64;
@@ -95,40 +106,54 @@ impl LightClientRoutes {
 
     /// The latest update proving finality on the canonical chain.
     async fn finality_update<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::accepts_ssz(&request) {
-            return Err(ApiError::not_acceptable());
-        }
+        let encoding = Encoding::accepted(&request, true)?;
         context
-            .query(|chain| {
+            .query(move |chain| {
                 let update = chain
                     .light_client()
                     .latest_finality_update()
                     .ok_or_else(|| ApiError::not_found("no finality update"))?;
-                Ok(Self::reply(chain, update.context_slot(), update.encode()))
+                Ok(Self::reply(
+                    chain,
+                    encoding,
+                    update.context_slot(),
+                    update,
+                    update.encode(),
+                ))
             })
             .await
     }
 
     /// The latest update of the canonical chain, without its finality proof.
     async fn optimistic_update<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::accepts_ssz(&request) {
-            return Err(ApiError::not_acceptable());
-        }
+        let encoding = Encoding::accepted(&request, true)?;
         context
-            .query(|chain| {
+            .query(move |chain| {
                 let update = chain
                     .light_client()
                     .latest_optimistic_update()
                     .ok_or_else(|| ApiError::not_found("no optimistic update"))?;
-                Ok(Self::reply(chain, update.context_slot(), update.encode()))
+                Ok(Self::reply(
+                    chain,
+                    encoding,
+                    update.context_slot(),
+                    update,
+                    update.encode(),
+                ))
             })
             .await
     }
 
-    /// An SSZ answer tagged with the fork in force at the data's attested slot.
-    fn reply<P: Preset>(chain: &Chain<P>, context_slot: Slot, bytes: Vec<u8>) -> Response {
+    /// An answer tagged with the fork in force at the data's attested slot.
+    fn reply<P: Preset>(
+        chain: &Chain<P>,
+        encoding: Encoding,
+        context_slot: Slot,
+        data: &impl ForkedJson,
+        bytes: Vec<u8>,
+    ) -> Response {
         let fork = chain.config().fork_at(context_slot.epoch::<P>());
-        Reply::ssz(bytes, fork)
+        Reply::object(encoding, fork, None, || data.to_json(), || bytes)
     }
 }
 

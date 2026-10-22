@@ -3,7 +3,7 @@
 //! Hand-written peers on raw sockets pin down exact bytes and connection reuse.
 
 use std::{
-    future::Future,
+    future::{self, Future},
     net::SocketAddr,
     sync::{
         Arc,
@@ -13,8 +13,8 @@ use std::{
 };
 
 use axiom_http::{
-    Client, ClientConfig, Endpoint, HttpError, Limits, Method, ProtocolError, Request, Response,
-    Router, Server, ServerConfig, StatusCode,
+    BodyStream, Client, ClientConfig, Endpoint, HttpError, Limits, Method, ProtocolError, Request,
+    Response, Router, Server, ServerConfig, StatusCode,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -356,5 +356,96 @@ fn shutdown_finishes_in_flight_requests() {
         // The server returns once drained, and the port no longer accepts.
         handle.await.unwrap();
         assert!(TcpStream::connect(address).await.is_err());
+    });
+}
+
+#[test]
+fn a_streamed_body_goes_out_chunked_until_its_producer_stops() {
+    run(async {
+        // Fixture state: a route that streams two events, then drops its sender.
+        let router = Router::new().route(Method::Get, "/events", |_| async {
+            let (sender, stream) = BodyStream::channel(4);
+            tokio::spawn(async move {
+                for event in ["event: head\ndata: 1\n\n", "event: head\ndata: 2\n\n"] {
+                    sender.send(event.as_bytes().to_vec()).await.unwrap();
+                }
+            });
+            Response::streaming(StatusCode::OK, "text/event-stream", stream)
+        });
+        let server = Server::bind("127.0.0.1:0", router, ServerConfig::default())
+            .await
+            .unwrap();
+        let address = server.local_addr().unwrap();
+        let (trigger, signal) = oneshot::channel::<()>();
+        let handle = tokio::spawn(server.serve(async {
+            let _ = signal.await;
+        }));
+
+        // The client reads until the server closes: a chunked head, two chunks, the end.
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET /events HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("transfer-encoding: chunked"), "{head}");
+        assert!(head.contains("connection: close"), "{head}");
+        assert!(!head.contains("content-length"), "{head}");
+
+        // Each event is 21 bytes, hex 15.
+        assert_eq!(
+            body,
+            "15\r\nevent: head\ndata: 1\n\n\r\n15\r\nevent: head\ndata: 2\n\n\r\n0\r\n\r\n"
+        );
+
+        trigger.send(()).unwrap();
+        handle.await.unwrap();
+    });
+}
+
+#[test]
+fn shutdown_ends_a_stream_that_never_finishes() {
+    run(async {
+        // Fixture state: a route whose producer stays alive and silent forever.
+        let router = Router::new().route(Method::Get, "/events", |_| async {
+            let (sender, stream) = BodyStream::channel(1);
+            tokio::spawn(async move {
+                let _sender = sender;
+                future::pending::<()>().await;
+            });
+            Response::streaming(StatusCode::OK, "text/event-stream", stream)
+        });
+        let server = Server::bind("127.0.0.1:0", router, ServerConfig::default())
+            .await
+            .unwrap();
+        let address = server.local_addr().unwrap();
+        let (trigger, signal) = oneshot::channel::<()>();
+        let handle = tokio::spawn(server.serve(async {
+            let _ = signal.await;
+        }));
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET /events HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        time::sleep(Duration::from_millis(50)).await;
+
+        // Shutdown ends the stream with the last chunk, well inside the grace period.
+        trigger.send(()).unwrap();
+        let mut bytes = Vec::new();
+        time::timeout(Duration::from_secs(2), stream.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .ends_with("\r\n\r\n0\r\n\r\n")
+        );
+        handle.await.unwrap();
     });
 }

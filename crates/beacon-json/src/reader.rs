@@ -33,6 +33,11 @@ impl<'a> Reader<'a> {
         Decimal::parse(self.text("a decimal string")?).map_err(ApiJsonError::decimal)
     }
 
+    /// Reads a canonical decimal string of an 8-bit value.
+    pub(crate) fn u8(self) -> Result<u8, ApiJsonError> {
+        self.decimal()?.to_u8().map_err(ApiJsonError::decimal)
+    }
+
     /// Reads a canonical decimal string of a 64-bit value.
     pub(crate) fn u64(self) -> Result<u64, ApiJsonError> {
         self.decimal()?.to_u64().map_err(ApiJsonError::decimal)
@@ -119,6 +124,20 @@ impl<'a> Fields<'a> {
                 Err(ApiJsonError::new(ApiJsonErrorKind::Missing).in_member(name))
             }
             Some(value) => T::from_json(value).map_err(|error| error.in_member(name)),
+        }
+    }
+
+    /// Reads a present member with a reader of its own, for a scalar with no codec of its type.
+    pub(crate) fn read<T>(
+        self,
+        name: &'static str,
+        read: impl FnOnce(Reader<'a>) -> Result<T, ApiJsonError>,
+    ) -> Result<T, ApiJsonError> {
+        match self.0.get(name) {
+            None | Some(Json::Null) => {
+                Err(ApiJsonError::new(ApiJsonErrorKind::Missing).in_member(name))
+            }
+            Some(value) => read(Reader::new(value)).map_err(|error| error.in_member(name)),
         }
     }
 }

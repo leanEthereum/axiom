@@ -11,7 +11,7 @@ use axiom_types::{
 
 use crate::{
     ActiveBalance, BlockError, CachedState, Fork, PayloadEngine, Registry, SignatureBatch,
-    StateError, Verification,
+    StateError, Verification, rewards::ProposerLedger,
 };
 
 /// One part of a block that processing checks, then applies to the state.
@@ -64,6 +64,8 @@ impl<'a, S: CoreState + ?Sized> BlockProcessor<'a, S> {
         config: &'a ChainConfig,
         verification: Verification,
     ) -> Self {
+        // Invariant: each block's ledger starts empty, so it holds this block's payments only.
+        state.caches.proposer_ledger = ProposerLedger::default();
         let total_active_balance = ActiveBalance::of(state.beacon());
         Self {
             state,

@@ -1,5 +1,6 @@
 //! What the rest of the node needs to know about the canonical chain.
 
+use axiom_fork_choice::NodePayload;
 use axiom_types::{Hash32, Root, Slot, phase0::Checkpoint};
 
 /// The canonical head and the checkpoints behind it.
@@ -11,6 +12,8 @@ pub struct Head {
     pub slot: Slot,
     /// Whether the engine has yet to validate the head's payload.
     pub optimistic: bool,
+    /// What the chain does with the head block's payload; always full before Gloas.
+    pub payload: NodePayload,
     /// The latest justified checkpoint the fork choice uses.
     pub justified: Checkpoint,
     /// The latest finalized checkpoint.

@@ -79,6 +79,18 @@ impl Vectors {
         self.root.join("bls12-381-tests")
     }
 
+    /// The configuration and preset files of the pinned consensus specs release.
+    #[must_use]
+    pub fn spec_configs(&self) -> PathBuf {
+        self.root.join("consensus-specs")
+    }
+
+    /// The beacon node API definition, at its pinned commit.
+    #[must_use]
+    pub fn beacon_apis(&self) -> PathBuf {
+        self.root.join("beacon-apis")
+    }
+
     /// Root of the general vectors of the older release that still ships the generic SSZ runner.
     #[must_use]
     pub fn general(&self) -> PathBuf {

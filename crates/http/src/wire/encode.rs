@@ -1,7 +1,7 @@
 //! The byte writer behind request and response serialization.
 //!
-//! Bodies are always sent whole with a content length, never chunked.
-//! Every message here is built in memory first, so its length is known.
+//! Bodies held whole are sent with a content length.
+//! A streamed body's head announces the chunked coding, and its chunks follow separately.
 //!
 //! ```text
 //!     HTTP/1.1 200 OK\r\n
@@ -74,7 +74,13 @@ impl Encoder {
         Ok(())
     }
 
-    /// Writes the content length field, the only framing this encoder emits.
+    /// Writes the chunked transfer coding field, for a body of unknown length.
+    pub(crate) fn chunked(&mut self) {
+        self.out
+            .extend_from_slice(b"transfer-encoding: chunked\r\n");
+    }
+
+    /// Writes the content length field, for a body held whole.
     pub(crate) fn content_length(&mut self, len: usize) {
         let _ = write!(self.out, "content-length: {len}\r\n");
     }

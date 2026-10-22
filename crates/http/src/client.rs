@@ -148,6 +148,7 @@ impl Client {
             status: head.status,
             headers: head.headers,
             body,
+            stream: None,
         })
     }
 

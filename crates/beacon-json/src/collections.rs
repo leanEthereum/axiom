@@ -11,8 +11,8 @@
 
 use axiom_json::{Data, Json};
 use axiom_ssz::{
-    BitList, BitVector, ByteList, ByteVector, Length, List, ProgressiveBitList, ProgressiveList,
-    Ssz, Vector,
+    BitList, BitVector, ByteList, ByteVector, Length, List, PersistentList,
+    PersistentProgressiveList, PersistentVector, ProgressiveBitList, ProgressiveList, Ssz, Vector,
 };
 
 use crate::{ApiJson, ApiJsonError, ApiJsonErrorKind, reader::Reader};
@@ -141,6 +141,55 @@ impl<T: ApiJson, N: Length> ApiJson for Vector<T, N> {
 }
 
 impl<T: ApiJson> ApiJson for ProgressiveList<T> {
+    fn to_json(&self) -> Json {
+        Json::Array(self.iter().map(ApiJson::to_json).collect())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        // No limit to check: the request size bounds the element count.
+        Reader::new(value).items()?.decode().map(Self::from)
+    }
+}
+
+impl<T: ApiJson + Ssz + Sync, N: Length> ApiJson for PersistentList<T, N> {
+    fn to_json(&self) -> Json {
+        Json::Array(self.iter().map(ApiJson::to_json).collect())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        let items = Reader::new(value).items()?;
+        // Refuse an oversized list before decoding any element of it.
+        ApiJsonErrorKind::check_limit(N::LEN, items.len())?;
+        let actual = items.len();
+        Self::try_from(items.decode()?)
+            .map_err(|_| ApiJsonErrorKind::TooLong {
+                limit: N::LEN,
+                actual,
+            })
+            .map_err(ApiJsonError::new)
+    }
+}
+
+impl<T: ApiJson + Ssz + Sync, N: Length> ApiJson for PersistentVector<T, N> {
+    fn to_json(&self) -> Json {
+        Json::Array(self.iter().map(ApiJson::to_json).collect())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        let items = Reader::new(value).items()?;
+        // A vector's length is exact.
+        ApiJsonErrorKind::check_length(N::LEN, items.len())?;
+        let actual = items.len();
+        Self::try_from(items.decode()?)
+            .map_err(|_| ApiJsonErrorKind::WrongLength {
+                expected: N::LEN,
+                actual,
+            })
+            .map_err(ApiJsonError::new)
+    }
+}
+
+impl<T: ApiJson + Ssz + Sync> ApiJson for PersistentProgressiveList<T> {
     fn to_json(&self) -> Json {
         Json::Array(self.iter().map(ApiJson::to_json).collect())
     }
