@@ -31,7 +31,8 @@ use std::sync::Arc;
 
 use axiom_fork_choice::ExecutionStatus;
 use axiom_http::{Method, Router};
-use axiom_types::{ExecutionAddress, Preset, Root, Slot};
+use axiom_json::Json;
+use axiom_types::{ChainConfig, ExecutionAddress, Preset, Root, Slot};
 use tokio::task;
 
 use self::{
@@ -164,6 +165,12 @@ pub(crate) struct ApiServices<P: Preset> {
 pub struct BeaconApi;
 
 impl BeaconApi {
+    /// A chain configuration as the spec route renders it: config.yaml names, string scalars.
+    #[must_use]
+    pub fn chain_config_json(config: &ChainConfig, preset_base: &str) -> Json {
+        Json::Object(ConfigRoutes::config_members(config, preset_base).collect())
+    }
+
     /// The router serving every supported route.
     #[must_use]
     pub(crate) fn router<P: Preset>(chain: ChainHandle<P>, services: ApiServices<P>) -> Router {

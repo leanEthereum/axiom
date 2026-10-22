@@ -5,6 +5,7 @@ mod cli;
 mod database;
 mod manager;
 mod network;
+mod node_json;
 mod run;
 mod startup;
 mod validator;

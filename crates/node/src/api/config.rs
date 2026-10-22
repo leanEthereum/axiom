@@ -119,22 +119,7 @@ impl ConfigRoutes {
         for (name, value) in P::entries() {
             object.insert(name, Reply::number(value));
         }
-        for (name, value) in config.entries(P::NAME) {
-            let json = match value {
-                ConfigValue::Number(number) => Reply::number(number),
-                ConfigValue::Text(text) => Json::from(text),
-                ConfigValue::Schedule(schedule) => Json::Array(
-                    schedule
-                        .into_iter()
-                        .map(|(epoch, limit)| {
-                            Json::from([
-                                ("EPOCH", Reply::number(epoch.0)),
-                                ("MAX_BLOBS_PER_BLOCK", Reply::number(limit)),
-                            ])
-                        })
-                        .collect(),
-                ),
-            };
+        for (name, json) in Self::config_members(config, P::NAME) {
             object.insert(name, json);
         }
         for (name, domain) in DOMAINS {
@@ -147,6 +132,34 @@ impl ConfigRoutes {
             object.insert(name, Reply::number(value));
         }
         Json::Object(object)
+    }
+
+    /// The configuration's values under their config.yaml names, every scalar a string.
+    pub(crate) fn config_members(
+        config: &ChainConfig,
+        preset_base: &str,
+    ) -> impl Iterator<Item = (&'static str, Json)> {
+        config
+            .entries(preset_base)
+            .into_iter()
+            .map(|(name, value)| {
+                let json = match value {
+                    ConfigValue::Number(number) => Reply::number(number),
+                    ConfigValue::Text(text) => Json::from(text),
+                    ConfigValue::Schedule(schedule) => Json::Array(
+                        schedule
+                            .into_iter()
+                            .map(|(epoch, limit)| {
+                                Json::from([
+                                    ("EPOCH", Reply::number(epoch.0)),
+                                    ("MAX_BLOBS_PER_BLOCK", Reply::number(limit)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                };
+                (name, json)
+            })
     }
 
     /// Every fork the configuration schedules, with the version before it.

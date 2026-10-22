@@ -86,6 +86,12 @@ impl EmbeddedGenesis {
         Self { network, framed }
     }
 
+    /// The network the state starts.
+    #[must_use]
+    pub const fn network(&self) -> &'static str {
+        self.network
+    }
+
     /// The SSZ bytes, with every chunk checksum verified.
     fn decompress(self) -> Result<Vec<u8>, NodeError> {
         frame::decompress(self.framed, MAX_EMBEDDED_BYTES).map_err(|source| {

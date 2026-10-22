@@ -15,7 +15,7 @@ pub(crate) const STORAGE_USAGE: &str = "\
     --auto-compact-db <BOOL>     compact the database as it runs [default: true]
     --prune-blobs <BOOL>         delete sidecars past their retention window [default: true]
     --epochs-per-blob-prune <EPOCHS>
-                                 epochs between sidecar pruning rounds [default: 1]
+                                 epochs between sidecar pruning rounds [default: 256]
     --blob-prune-margin-epochs <EPOCHS>
                                  epochs of sidecars kept past the window [default: 0]
 ";
@@ -130,7 +130,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_keep_compacting_and_pruning() {
+    fn defaults_keep_compacting_and_prune_every_256_epochs() {
+        assert_eq!(resolve(&[]).unwrap().pruning.interval_epochs, 256);
         assert_eq!(
             resolve(&[]).unwrap(),
             StorageChoice {

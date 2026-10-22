@@ -1,18 +1,18 @@
 //! What the node does before it starts: purge its database, and write out its configuration.
 
 use std::{
-    fmt::{self, Display},
     fs,
     io::{self, BufRead, IsTerminal},
     path::{Path, PathBuf},
 };
 
-use axiom_node::NodeConfig;
-use axiom_types::{ChainConfig, ConfigValue};
+use axiom_json::Json;
+use axiom_node::{BeaconApi, NodeConfig};
+use axiom_types::ChainConfig;
 use thiserror::Error;
 use tracing::{info, warn};
 
-use crate::{cli::Purge, run::PresetName};
+use crate::{cli::Purge, node_json::NodeJson, run::PresetName};
 
 /// The word an operator types to confirm a purge.
 const PURGE_CONFIRMATION: &str = "confirm";
@@ -78,12 +78,12 @@ impl Purge {
     }
 }
 
-/// Files the resolved configurations are written to before the node starts.
+/// Files the resolved configurations are written to before the node starts, as JSON.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Dumps {
-    /// Where the node configuration goes, as Rust debug text.
+    /// Where the node configuration goes.
     pub(crate) config: Option<PathBuf>,
-    /// Where the chain configuration goes, as the spec's YAML.
+    /// Where the chain configuration goes, under its config.yaml names.
     pub(crate) chain_config: Option<PathBuf>,
 }
 
@@ -95,47 +95,18 @@ impl Dumps {
         chain: &ChainConfig,
         preset: PresetName,
     ) -> Result<(), StartupError> {
-        let write = |path: &PathBuf, text: String| {
-            fs::write(path, text).map_err(|error| StartupError::Dump {
+        let write = |path: &PathBuf, json: Json| {
+            fs::write(path, format!("{json}\n")).map_err(|error| StartupError::Dump {
                 path: path.clone(),
                 error,
             })
         };
         if let Some(path) = &self.config {
-            write(path, format!("{node:#?}\n"))?;
+            write(path, NodeJson(node).to_json())?;
         }
         if let Some(path) = &self.chain_config {
-            write(path, ChainYaml { chain, preset }.to_string())?;
-        }
-        Ok(())
-    }
-}
-
-/// A chain configuration written as the spec's configuration files write it.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ChainYaml<'a> {
-    /// The configuration.
-    pub(crate) chain: &'a ChainConfig,
-    /// The preset it was built for.
-    pub(crate) preset: PresetName,
-}
-
-impl Display for ChainYaml<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (key, value) in self.chain.entries(self.preset.name()) {
-            match value {
-                ConfigValue::Number(number) => writeln!(f, "{key}: {number}")?,
-                // Quotes keep hex and long decimals as text, as the spec files write them.
-                ConfigValue::Text(text) => writeln!(f, "{key}: '{text}'")?,
-                ConfigValue::Schedule(entries) if entries.is_empty() => writeln!(f, "{key}: []")?,
-                ConfigValue::Schedule(entries) => {
-                    writeln!(f, "{key}:")?;
-                    for (epoch, blobs) in entries {
-                        writeln!(f, "  - EPOCH: {epoch}")?;
-                        writeln!(f, "    MAX_BLOBS_PER_BLOCK: {blobs}")?;
-                    }
-                }
-            }
+            // The spec route's rendering, so the dump and the API agree byte for byte.
+            write(path, BeaconApi::chain_config_json(chain, preset.name()))?;
         }
         Ok(())
     }
@@ -145,66 +116,36 @@ impl Display for ChainYaml<'_> {
 mod tests {
     use std::{env, process};
 
-    use axiom_types::{BlobParameters, BlobSchedule, Epoch};
-    use axiom_yaml::Yaml;
-
     use super::*;
 
-    /// Reads a written configuration back.
-    fn reread(chain: &ChainConfig, preset: PresetName) -> ChainConfig {
-        let text = ChainYaml { chain, preset }.to_string();
-        let yaml = Yaml::parse(&text).unwrap();
-        ChainConfig::from_yaml(&yaml).unwrap()
-    }
-
     #[test]
-    fn written_chain_configurations_read_back_whole() {
-        // Mainnet has a blob schedule; minimal has none and every fork in the far future.
-        assert_eq!(
-            reread(&ChainConfig::mainnet(), PresetName::Mainnet),
-            ChainConfig::mainnet()
-        );
-        assert_eq!(
-            reread(&ChainConfig::minimal(), PresetName::Minimal),
-            ChainConfig::minimal()
-        );
-        // An emptied schedule stays empty rather than taking the base's.
-        let unscheduled = ChainConfig {
-            blob_schedule: BlobSchedule::new(Vec::new()),
-            ..ChainConfig::mainnet()
-        };
-        assert_eq!(reread(&unscheduled, PresetName::Mainnet), unscheduled);
-        // A one-entry schedule keeps its entry.
-        let scheduled = ChainConfig {
-            blob_schedule: BlobSchedule::new(vec![BlobParameters {
-                epoch: Epoch(7),
-                max_blobs_per_block: 3,
-            }]),
-            ..ChainConfig::minimal()
-        };
-        assert_eq!(reread(&scheduled, PresetName::Minimal), scheduled);
-    }
-
-    #[test]
-    fn dumps_write_both_files() {
+    fn dumps_write_both_files_as_json() {
         let directory = env::temp_dir().join(format!("axiom-dumps-{}", process::id()));
         fs::create_dir_all(&directory).unwrap();
         let dumps = Dumps {
-            config: Some(directory.join("node.txt")),
-            chain_config: Some(directory.join("config.yaml")),
+            config: Some(directory.join("node.json")),
+            chain_config: Some(directory.join("config.json")),
         };
-        dumps
-            .write(
-                &NodeConfig::default(),
-                &ChainConfig::minimal(),
-                PresetName::Minimal,
-            )
-            .unwrap();
+        let node = NodeConfig::default();
+        let chain = ChainConfig::minimal();
+        dumps.write(&node, &chain, PresetName::Minimal).unwrap();
 
-        let node = fs::read_to_string(directory.join("node.txt")).unwrap();
-        assert_eq!(node, format!("{:#?}\n", NodeConfig::default()));
-        let chain = fs::read_to_string(directory.join("config.yaml")).unwrap();
-        assert!(chain.starts_with("PRESET_BASE: 'minimal'\n"), "{chain}");
+        // Each file is the JSON text of its rendering, on one line.
+        let written = fs::read_to_string(directory.join("node.json")).unwrap();
+        assert_eq!(written, format!("{}\n", NodeJson(&node).to_json()));
+        let written = fs::read_to_string(directory.join("config.json")).unwrap();
+        let parsed = Json::parse(written.trim_end().as_bytes()).unwrap();
+        assert_eq!(parsed, BeaconApi::chain_config_json(&chain, "minimal"));
+
+        // Keys are the config.yaml names, scalars strings, as the spec route writes them.
+        let Json::Object(object) = parsed else {
+            panic!("expected an object");
+        };
+        assert_eq!(object.get("PRESET_BASE"), Some(&Json::from("minimal")));
+        assert_eq!(
+            object.get("MIN_GENESIS_TIME"),
+            Some(&Json::from(chain.min_genesis_time.to_string()))
+        );
         fs::remove_dir_all(&directory).unwrap();
     }
 

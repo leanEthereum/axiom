@@ -77,10 +77,10 @@ pub struct SidecarPruning {
 
 impl Default for SidecarPruning {
     fn default() -> Self {
-        // Prune at every finality, keeping exactly the window peers may ask for.
+        // A round every 256 epochs, about 27 hours on mainnet, keeping the window peers ask for.
         Self {
             enabled: true,
-            interval_epochs: 1,
+            interval_epochs: 256,
             margin_epochs: 0,
         }
     }

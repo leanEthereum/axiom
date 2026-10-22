@@ -13,8 +13,8 @@ pub(crate) const BEHAVIOUR_USAGE: &str = "\
     --disable-light-client-server
                                  derive and serve no light client data
     --shutdown-after-sync        stop once the head reaches the wall clock
-    --dump-config <FILE>         write the resolved node configuration, then run
-    --dump-chain-config <FILE>   write the chain configuration as YAML, then run
+    --dump-config <FILE>         write the resolved node configuration as JSON, then run
+    --dump-chain-config <FILE>   write the chain configuration as JSON, then run
 ";
 
 /// The behaviour flags as given.
