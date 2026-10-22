@@ -63,7 +63,9 @@ impl Encoder {
         let valid_name = !name.is_empty() && Charset::Token.admits(name.as_bytes());
         let valid_value = Charset::FieldValue.admits(value.as_bytes());
         if !valid_name || !valid_value {
-            return Err(HttpError::InvalidHeader);
+            return Err(HttpError::InvalidHeader {
+                name: name.to_owned(),
+            });
         }
         self.out.extend_from_slice(name.as_bytes());
         self.out.extend_from_slice(b": ");

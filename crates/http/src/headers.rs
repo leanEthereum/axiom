@@ -103,8 +103,8 @@ impl Headers {
             // No transfer coding: the content length frames the body, if present.
             return Ok(length.map(BodyLength::Fixed));
         }
-        if length.is_some() {
-            return Err(ProtocolError::ConflictingLength);
+        if let Some(content_length) = length {
+            return Err(ProtocolError::CodingWithLength { content_length });
         }
 
         // Exactly one coding, chunked, across all transfer-encoding fields.
@@ -139,8 +139,11 @@ impl Headers {
                 .parse()
                 .map_err(|_| ProtocolError::InvalidContentLength)?;
             match length {
-                Some(previous) if previous != value => {
-                    return Err(ProtocolError::ConflictingLength);
+                Some(first) if first != value => {
+                    return Err(ProtocolError::ConflictingLength {
+                        first,
+                        second: value,
+                    });
                 }
                 _ => length = Some(value),
             }

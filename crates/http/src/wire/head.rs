@@ -215,7 +215,9 @@ impl<'a> HeadLines<'a> {
         let Some(end) = window.windows(4).position(|four| four == b"\r\n\r\n") else {
             // No terminator yet: wait for more bytes, unless the limit is already reached.
             return if buf.len() >= limits.max_head_bytes {
-                Err(ProtocolError::HeadTooLarge)
+                Err(ProtocolError::HeadTooLarge {
+                    limit: limits.max_head_bytes,
+                })
             } else {
                 Ok(None)
             };
@@ -244,16 +246,23 @@ impl<'a> HeadLines<'a> {
         let mut fields = self.fields;
         let mut headers = Headers::new();
         while !fields.is_empty() {
+            // Every field parsed so far is in the map, so its size is this line's position.
+            let invalid = ProtocolError::InvalidHeader {
+                index: headers.len(),
+            };
+
             // Each line ends at its CRLF; the head splitter guarantees the last one has it.
             let Some(line_end) = fields.windows(2).position(|two| two == b"\r\n") else {
-                return Err(ProtocolError::InvalidHeader);
+                return Err(invalid);
             };
             let line = &fields[..line_end];
             fields = &fields[line_end + 2..];
 
             // Count before parsing, so a flood of fields stops at the limit.
             if headers.len() == limits.max_headers {
-                return Err(ProtocolError::TooManyHeaders);
+                return Err(ProtocolError::TooManyHeaders {
+                    limit: limits.max_headers,
+                });
             }
 
             // name ":" OWS value OWS
@@ -262,20 +271,20 @@ impl<'a> HeadLines<'a> {
             // That rejects whitespace before the colon and obsolete line folding,
             // as RFC 9112 section 5.1 and 5.2 require of a server.
             let Some(colon) = line.iter().position(|&byte| byte == b':') else {
-                return Err(ProtocolError::InvalidHeader);
+                return Err(invalid);
             };
             let (name, value) = (&line[..colon], &line[colon + 1..]);
             if name.is_empty() || !Charset::Token.admits(name) {
-                return Err(ProtocolError::InvalidHeader);
+                return Err(invalid);
             }
 
             // Strip optional whitespace around the value, then check what remains.
             let value = value.trim_ascii();
             if !Charset::FieldValue.admits(value) {
-                return Err(ProtocolError::InvalidHeader);
+                return Err(invalid);
             }
             // Bytes from 0x80 up are allowed on the wire but must form UTF-8 here.
-            let value = str::from_utf8(value).map_err(|_| ProtocolError::InvalidHeader)?;
+            let value = str::from_utf8(value).map_err(|_| invalid)?;
 
             // A token is ASCII, so this conversion keeps every byte.
             let name: String = name.iter().copied().map(char::from).collect();
@@ -356,17 +365,17 @@ mod tests {
         // Space before the colon is a smuggling vector, so RFC 9112 requires a 400.
         assert_eq!(
             request("GET / HTTP/1.1\r\nHost : x\r\n\r\n"),
-            Err(ProtocolError::InvalidHeader)
+            Err(ProtocolError::InvalidHeader { index: 0 })
         );
-        // Obsolete line folding starts a line with whitespace.
+        // Obsolete line folding starts the second line with whitespace.
         assert_eq!(
             request("GET / HTTP/1.1\r\nA: b\r\n c\r\n\r\n"),
-            Err(ProtocolError::InvalidHeader)
+            Err(ProtocolError::InvalidHeader { index: 1 })
         );
-        // A bare LF inside a field value.
+        // A bare LF inside the first field value.
         assert_eq!(
             request("GET / HTTP/1.1\r\nA: b\nc\r\n\r\n"),
-            Err(ProtocolError::InvalidHeader)
+            Err(ProtocolError::InvalidHeader { index: 0 })
         );
     }
 
@@ -380,7 +389,7 @@ mod tests {
         let text = b"GET / HTTP/1.1\r\nHost: abcdefgh\r\n\r\n";
         assert_eq!(
             RequestHead::parse(text, &tight),
-            Err(ProtocolError::HeadTooLarge)
+            Err(ProtocolError::HeadTooLarge { limit: 20 })
         );
 
         // Two fields against a limit of one.
@@ -391,7 +400,7 @@ mod tests {
         let text = b"GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\n\r\n";
         assert_eq!(
             RequestHead::parse(text, &few),
-            Err(ProtocolError::TooManyHeaders)
+            Err(ProtocolError::TooManyHeaders { limit: 1 })
         );
     }
 
@@ -404,7 +413,10 @@ mod tests {
             ("Content-Length: 5, 5\r\n", Ok(BodyLength::Fixed(5))),
             (
                 "Content-Length: 5\r\nContent-Length: 6\r\n",
-                Err(ProtocolError::ConflictingLength),
+                Err(ProtocolError::ConflictingLength {
+                    first: 5,
+                    second: 6,
+                }),
             ),
             (
                 "Content-Length: -1\r\n",
@@ -413,7 +425,7 @@ mod tests {
             ("Transfer-Encoding: Chunked\r\n", Ok(BodyLength::Chunked)),
             (
                 "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n",
-                Err(ProtocolError::ConflictingLength),
+                Err(ProtocolError::CodingWithLength { content_length: 5 }),
             ),
             (
                 "Transfer-Encoding: gzip, chunked\r\n",

@@ -96,7 +96,7 @@ impl Client {
         let bytes = request.encode(self.endpoint.authority())?;
         time::timeout(timeout, self.exchange(request.method, &bytes))
             .await
-            .map_err(|_| HttpError::Timeout)?
+            .map_err(|_| HttpError::Timeout { after: timeout })?
     }
 
     /// Sends bytes on a pooled connection, falling back to a fresh one if the pooled one is dead.
@@ -157,7 +157,9 @@ impl Client {
         let address = (self.endpoint.host(), self.endpoint.port());
         let stream = time::timeout(self.config.connect_timeout, TcpStream::connect(address))
             .await
-            .map_err(|_| HttpError::Timeout)??;
+            .map_err(|_| HttpError::Timeout {
+                after: self.config.connect_timeout,
+            })??;
         // Requests are small and latency-bound; Nagle's delay would only add to it.
         stream.set_nodelay(true)?;
         Ok(Connection::new(stream, self.config.limits))

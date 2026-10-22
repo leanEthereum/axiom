@@ -1,6 +1,6 @@
 //! Errors of the wire format and of the transport.
 
-use std::io;
+use std::{io, time::Duration};
 
 use thiserror::Error;
 
@@ -12,17 +12,33 @@ use crate::StatusCode;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProtocolError {
-    /// The head is longer than the limit allows.
-    #[error("message head exceeds the size limit")]
-    HeadTooLarge,
+    /// The head, or a chunked body's trailer section, is longer than the limit allows.
+    ///
+    /// The parser stops at the limit, so the full length is never known.
+    #[error("message head exceeds the limit of {limit} bytes")]
+    HeadTooLarge {
+        /// The most bytes allowed.
+        limit: usize,
+    },
 
     /// The head has more fields than the limit allows.
-    #[error("message head has too many fields")]
-    TooManyHeaders,
+    #[error("message head has more than {limit} fields")]
+    TooManyHeaders {
+        /// The most fields allowed.
+        limit: usize,
+    },
 
     /// The body is longer than the limit allows.
-    #[error("message body exceeds the size limit")]
-    BodyTooLarge,
+    ///
+    /// The size is exact for a declared length and a lower bound otherwise.
+    /// The reader refuses a body as soon as it crosses the limit, before reading the rest.
+    #[error("message body of at least {size} bytes exceeds the limit of {limit} bytes")]
+    BodyTooLarge {
+        /// The body bytes declared or received so far.
+        size: u64,
+        /// The most bytes allowed.
+        limit: usize,
+    },
 
     /// The request line is not a method, a target, and a version.
     #[error("malformed request line")]
@@ -45,18 +61,35 @@ pub enum ProtocolError {
     UnsupportedVersion,
 
     /// A field line is not a token, a colon, and a value.
-    #[error("malformed header field")]
-    InvalidHeader,
+    #[error("malformed header field at position {index}")]
+    InvalidHeader {
+        /// The zero-based position of the field line in the head.
+        index: usize,
+    },
 
     /// A content length is not a decimal number.
     #[error("malformed content length")]
     InvalidContentLength,
 
-    /// The message declares its length twice in ways that disagree.
+    /// Two content lengths disagree.
     ///
     /// RFC 9112 section 6.3 makes this a request smuggling hazard.
-    #[error("message length is declared inconsistently")]
-    ConflictingLength,
+    #[error("content lengths {first} and {second} disagree")]
+    ConflictingLength {
+        /// The first length declared.
+        first: u64,
+        /// The later length that differs.
+        second: u64,
+    },
+
+    /// A message declares both a transfer coding and a content length.
+    ///
+    /// RFC 9112 section 6.3 makes this a request smuggling hazard.
+    #[error("message declares both a transfer coding and content length {content_length}")]
+    CodingWithLength {
+        /// The declared content length.
+        content_length: u64,
+    },
 
     /// A transfer coding other than chunked alone.
     #[error("unsupported transfer coding")]
@@ -76,10 +109,10 @@ impl ProtocolError {
     #[must_use]
     pub const fn status(self) -> StatusCode {
         match self {
-            Self::HeadTooLarge | Self::TooManyHeaders => {
+            Self::HeadTooLarge { .. } | Self::TooManyHeaders { .. } => {
                 StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
             }
-            Self::BodyTooLarge => StatusCode::CONTENT_TOO_LARGE,
+            Self::BodyTooLarge { .. } => StatusCode::CONTENT_TOO_LARGE,
             Self::UnknownMethod | Self::UnsupportedTransferEncoding => StatusCode::NOT_IMPLEMENTED,
             Self::UnsupportedVersion => StatusCode::HTTP_VERSION_NOT_SUPPORTED,
             _ => StatusCode::BAD_REQUEST,
@@ -99,9 +132,12 @@ pub enum HttpError {
     #[error("i/o error: {0}")]
     Io(#[from] io::Error),
 
-    /// The exchange did not finish in time.
-    #[error("timed out")]
-    Timeout,
+    /// The exchange, or the connect inside it, did not finish in time.
+    #[error("timed out after {after:?}")]
+    Timeout {
+        /// The timeout that expired.
+        after: Duration,
+    },
 
     /// The peer closed the connection before sending a response.
     #[error("connection closed before a response")]
@@ -112,8 +148,13 @@ pub enum HttpError {
     InvalidUrl,
 
     /// A field name or value cannot be written without corrupting the message.
-    #[error("header field cannot be written")]
-    InvalidHeader,
+    ///
+    /// The value stays out of the error, as it may carry a credential.
+    #[error("header field {name:?} cannot be written")]
+    InvalidHeader {
+        /// The field name, quoted with escapes when printed.
+        name: String,
+    },
 }
 
 impl HttpError {

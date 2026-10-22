@@ -77,10 +77,10 @@ impl RequestsList {
         let mut requests = ExecutionRequests::<P>::default();
         let mut previous: Option<u8> = None;
 
-        for element in &self.0 {
+        for (index, element) in self.0.iter().enumerate() {
             // Split the type byte from the data; a lone type byte has no data.
             let Some((&kind, data)) = element.split_first() else {
-                return Err(RequestsError::MissingType);
+                return Err(RequestsError::MissingType { index });
             };
             if ![
                 DEPOSIT_REQUEST_TYPE,
@@ -89,10 +89,10 @@ impl RequestsList {
             ]
             .contains(&kind)
             {
-                return Err(RequestsError::UnknownType(kind));
+                return Err(RequestsError::UnknownType { index, kind });
             }
             if data.is_empty() {
-                return Err(RequestsError::Empty(kind));
+                return Err(RequestsError::Empty { index, kind });
             }
 
             // Strictly ascending, which also rules out a type appearing twice.
@@ -220,7 +220,8 @@ mod tests {
         let list = RequestsList::encode(&sample());
         let (deposits, consolidations) = (list.as_slice()[0].clone(), list.as_slice()[1].clone());
 
-        // Reversed order, a repeat, a lone type byte, and an unknown type.
+        // Reversed order, a repeat, a lone type byte, an empty element, and an unknown type.
+        // The last three sit at position 1, after a valid deposit element.
         let cases = [
             (
                 vec![consolidations, deposits.clone()],
@@ -236,9 +237,24 @@ mod tests {
                     current: 0x00,
                 },
             ),
-            (vec![vec![0x01]], RequestsError::Empty(0x01)),
-            (vec![Vec::new()], RequestsError::MissingType),
-            (vec![vec![0x03, 0xff]], RequestsError::UnknownType(0x03)),
+            (
+                vec![deposits.clone(), vec![0x01]],
+                RequestsError::Empty {
+                    index: 1,
+                    kind: 0x01,
+                },
+            ),
+            (
+                vec![deposits.clone(), Vec::new()],
+                RequestsError::MissingType { index: 1 },
+            ),
+            (
+                vec![deposits.clone(), vec![0x03, 0xff]],
+                RequestsError::UnknownType {
+                    index: 1,
+                    kind: 0x03,
+                },
+            ),
         ];
         for (list, expected) in cases {
             assert_eq!(RequestsList::from(list).decode::<Minimal>(), Err(expected));

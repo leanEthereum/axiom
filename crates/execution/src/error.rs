@@ -45,20 +45,38 @@ pub enum EngineError {
 #[non_exhaustive]
 pub enum EnvelopeError {
     /// The response is not an object.
-    #[error("response is not an object")]
-    NotAnObject,
+    #[error("response is a JSON {found}, not an object")]
+    NotAnObject {
+        /// The JSON type of the response.
+        found: &'static str,
+    },
 
     /// The version member is missing or not "2.0".
     #[error("jsonrpc member is not \"2.0\"")]
     WrongVersion,
 
+    /// The id is absent, or not an integer as this client's ids always are.
+    #[error("response lacks the integer id {expected} of its request")]
+    MissingId {
+        /// The id the request carried.
+        expected: u64,
+    },
+
     /// The id does not echo the request's id.
-    #[error("id does not match the request")]
-    IdMismatch,
+    #[error("response id {found} does not echo request id {expected}")]
+    IdMismatch {
+        /// The id the request carried.
+        expected: u64,
+        /// The id the response carried.
+        found: u64,
+    },
 
     /// Neither or both of the result and error members are present.
-    #[error("response needs exactly one of result and error")]
-    ResultOrError,
+    #[error("response holds {present} of the result and error members, not exactly one")]
+    ResultOrError {
+        /// How many of the two members are present: zero or two.
+        present: usize,
+    },
 
     /// The error member lacks an integer code or a string message.
     #[error("error object lacks a code or message")]
@@ -239,16 +257,29 @@ pub enum WireErrorKind {
 #[non_exhaustive]
 pub enum RequestsError {
     /// An element is empty, without even a type byte.
-    #[error("request element has no type byte")]
-    MissingType,
+    #[error("request element {index} has no type byte")]
+    MissingType {
+        /// The element's position in the list.
+        index: usize,
+    },
 
     /// A type byte names no known request type.
-    #[error("unknown request type 0x{0:02x}")]
-    UnknownType(u8),
+    #[error("request element {index} has unknown type 0x{kind:02x}")]
+    UnknownType {
+        /// The element's position in the list.
+        index: usize,
+        /// The type byte found.
+        kind: u8,
+    },
 
     /// An element is only a type byte, with no request data after it.
-    #[error("request type 0x{0:02x} has no data")]
-    Empty(u8),
+    #[error("request element {index} of type 0x{kind:02x} has no data")]
+    Empty {
+        /// The element's position in the list.
+        index: usize,
+        /// The element's type byte.
+        kind: u8,
+    },
 
     /// A type does not strictly exceed the one before it, so the list is unordered or repeats.
     #[error("request type 0x{current:02x} follows 0x{previous:02x}, not strictly ascending")]
@@ -260,6 +291,8 @@ pub enum RequestsError {
     },
 
     /// The request data is not the SSZ list its type requires.
+    ///
+    /// Types strictly ascend, so the type alone locates the element.
     #[error("request type 0x{0:02x}: {1}")]
     Ssz(u8, DecodeError),
 }

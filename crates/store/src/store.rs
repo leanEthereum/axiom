@@ -99,7 +99,7 @@ impl Store {
     /// - Recording the new table fails.
     pub fn table(&self, name: &str) -> Result<Table, Error> {
         if name.is_empty() || name.len() > MAX_TABLE_NAME {
-            return Err(Error::InvalidTableName);
+            return Err(Error::InvalidTableName { length: name.len() });
         }
         // Hold the writer lock across lookup and creation, so two threads agree on one handle.
         let mut log = self.lock_log();

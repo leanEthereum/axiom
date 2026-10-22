@@ -191,13 +191,19 @@ fn client_enforces_timeout_and_body_limit() {
         let timed_out = client
             .send_with_timeout(&request, Duration::from_millis(50))
             .await;
-        assert!(matches!(timed_out, Err(HttpError::Timeout)));
+        assert!(matches!(
+            timed_out,
+            Err(HttpError::Timeout { after }) if after == Duration::from_millis(50)
+        ));
 
         // 1000 declared bytes against a 999-byte limit.
         let too_large = client.send(&request).await;
         assert!(matches!(
             too_large,
-            Err(HttpError::Protocol(ProtocolError::BodyTooLarge))
+            Err(HttpError::Protocol(ProtocolError::BodyTooLarge {
+                size: 1000,
+                limit: 999
+            }))
         ));
         peer.await.unwrap();
     });
