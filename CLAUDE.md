@@ -19,11 +19,16 @@ Axiom owns its protocol stack. A dependency must earn its place.
 Allowed, and already declared in the root `Cargo.toml`:
 
 - `sha2`, for SHA-256.
-- `tokio`, for the async runtime at the orchestration edge only.
-- `tracing` and `tracing-subscriber`, for telemetry.
+- `tokio`, for the async runtime at the effectful edge only, with the features it needs.
+- `tracing` and `tracing-subscriber`, for telemetry, with default features off and no serde.
 - `proptest`, as a dev-dependency only.
 
-Everything else is written here: SSZ, merkleization, BLS12-381, KZG, snappy, YAML, networking.
+Everything else is written here:
+
+- Encodings: SSZ and merkleization, snappy, YAML, JSON, RLP.
+- Cryptography: BLS12-381, KZG, secp256k1, X25519, Keccak, the AEADs.
+- Systems: the database, HTTP, the engine API, Prometheus metrics.
+- Networking: libp2p, Noise, yamux, gossipsub, discv5.
 
 Adding a crate requires a reason recorded in the commit message and in the root manifest.
 
@@ -36,17 +41,24 @@ Errors implement `Display` and `std::error::Error` by hand.
 Dependencies point one way only.
 
 ```text
-L0  ssz, yaml, snappy, bls12-381       encodings and arithmetic          pure
-L0  bls, kzg                           signature and commitment schemes  pure
-L0  types                              newtypes, presets, containers     pure
-L1  state-transition                   per-slot, per-block, per-epoch    pure
-L2  fork-choice                        the store and its handlers        pure
-L3  network, storage, execution, ...   adapters                          effects
-L4  node                               orchestration                     async
-L5  bin/axiom                          the binary                        async
+L0  ssz, yaml, snappy, json, rlp            encodings                          pure
+L0  bls12-381, bls, kzg, crypto             curves, signatures, commitments    pure
+L0  types                                   newtypes, presets, containers      pure
+L1  state-transition                        per-slot, per-block, per-epoch     pure
+L2  fork-choice, das, gossip, light-client  the store and the network's rules  pure
+L3  store, http, execution, p2p, discv5     database, sockets, engine API      effects
+L3  telemetry                               logs and metrics                   effects
+L4  node                                    chain thread, services, sync       async
+L5  bin/axiom                               the command line                   async
 ```
 
 Nothing in L0 to L2 reads a clock, opens a socket, touches a disk, spawns a task, or logs.
+
+Scoped data-parallel threads are allowed in L0 when they are always joined and the result is deterministic.
+KZG uses them for multi-scalar multiplications.
+
+The node's chain lives on one thread and owns all consensus state.
+Async services reach it through a queue of closures, so no lock guards consensus data.
 
 ## Rust style
 
@@ -101,9 +113,8 @@ More rules:
 
 ```sh
 cargo build --workspace
-cargo test --workspace
-make -C testing/ef-tests            # download the consensus spec vectors
-cargo test -p axiom-ef-tests --release
+make -C testing/ef-tests            # download the consensus spec, BLS, and KZG vectors
+cargo test --workspace --release
 cargo +nightly fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
