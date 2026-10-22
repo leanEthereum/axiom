@@ -41,6 +41,7 @@ dependencies = [
 name = "axiom-das"
 version = "0.1.0"
 dependencies = [
+ "axiom-kzg",
  "axiom-ssz",
  "axiom-types",
 ]
@@ -53,6 +54,7 @@ dependencies = [
  "axiom-das",
  "axiom-fork-choice",
  "axiom-gossip",
+ "axiom-kzg",
  "axiom-light-client",
  "axiom-snappy",
  "axiom-ssz",
@@ -91,6 +93,7 @@ dependencies = [
  "axiom-bls",
  "axiom-das",
  "axiom-fork-choice",
+ "axiom-kzg",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-types",

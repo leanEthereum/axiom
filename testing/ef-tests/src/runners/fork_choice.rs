@@ -4,6 +4,7 @@ use std::{collections::HashMap, fmt::Debug, marker::PhantomData};
 
 use axiom_das::ColumnSidecar;
 use axiom_fork_choice::{DataAvailability, FastConfirmation, PayloadStatus, Store};
+use axiom_kzg::Kzg;
 use axiom_state_transition::Verification;
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar, Epoch,
@@ -147,7 +148,9 @@ impl<P: Preset> StoreReplay<P> {
                         .as_str()
                         .ok_or_else(|| Failure::new("column name is not a string"))?;
                     let sidecar = case.ssz::<DataColumnSidecar<P>>(name)?;
-                    available &= ColumnSidecar(&sidecar).verify_structure(&config).is_ok();
+                    let column = ColumnSidecar(&sidecar);
+                    available &= column.verify_structure(&config).is_ok()
+                        && column.verify_kzg_proofs(Kzg::mainnet()).is_ok();
                 }
                 if available {
                     DataAvailability::Available

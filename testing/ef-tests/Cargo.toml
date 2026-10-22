@@ -18,6 +18,7 @@ axiom-bls.workspace = true
 axiom-das.workspace = true
 axiom-fork-choice.workspace = true
 axiom-gossip.workspace = true
+axiom-kzg.workspace = true
 axiom-light-client.workspace = true
 axiom-snappy.workspace = true
 axiom-ssz.workspace = true

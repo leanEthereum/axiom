@@ -4,6 +4,7 @@ use std::{collections::HashMap, marker::PhantomData};
 
 use axiom_fork_choice::{BlockNode, ExecutionStatus, Store};
 use axiom_gossip::{ChainView, GossipError, GossipValidator, Seen};
+use axiom_kzg::Kzg;
 use axiom_ssz::{Root, Ssz};
 use axiom_state_transition::{KnownVerdict, Verification};
 use axiom_types::{
@@ -193,7 +194,7 @@ impl<'c, P: Preset> GossipCase<'c, P> {
                 &self.case.ssz::<DataColumnSidecar<P>>(name)?,
                 now,
                 subnet,
-                |_| true,
+                Kzg::mainnet(),
             ),
             other => return Err(Failure(format!("unsupported topic {other}"))),
         })

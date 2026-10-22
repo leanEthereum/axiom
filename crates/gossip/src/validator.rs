@@ -5,6 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 use axiom_bls::{PublicKey, Signature};
 use axiom_das::ColumnSidecar;
 use axiom_fork_choice::ExecutionStatus;
+use axiom_kzg::Kzg;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{EpochCommittees, State};
 use axiom_types::{
@@ -734,9 +735,8 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         Ok(())
     }
 
-    /// Validates a data column sidecar on its subnet, given a verdict on its KZG proofs.
+    /// Validates a data column sidecar on its subnet, including its cell proofs.
     ///
-    /// The cell proofs need KZG, which the caller runs, so the verdict comes in.
     /// See `validate_data_column_sidecar_gossip` in the Fulu p2p spec.
     ///
     /// # Errors
@@ -747,7 +747,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         sidecar: &DataColumnSidecar<P>,
         now_ms: u64,
         subnet: SubnetId,
-        proofs_valid: impl FnOnce(&DataColumnSidecar<P>) -> bool,
+        kzg: &Kzg,
     ) -> Verdict {
         let header = &sidecar.signed_block_header.message;
         let key = (header.slot, header.proposer_index, sidecar.index);
@@ -807,7 +807,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         if checked.verify_inclusion_proof().is_err() {
             return Err(GossipError::Reject("invalid sidecar inclusion proof"));
         }
-        if !proofs_valid(sidecar) {
+        if ColumnSidecar(sidecar).verify_kzg_proofs(kzg).is_err() {
             return Err(GossipError::Reject("invalid sidecar kzg proofs"));
         }
         let parent_state = self.parent_state(&header.parent_root, header.slot)?;
