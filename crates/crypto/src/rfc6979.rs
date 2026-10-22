@@ -1,6 +1,7 @@
 //! Deterministic ECDSA nonces from HMAC-SHA256, per RFC 6979, section 3.2.
+//!
+//! Every curve here has a 256-bit order and signs 256-bit hashes, so one generator serves all.
 
-use super::scalar::Scalar;
 use crate::{ct::wipe, hmac::HmacSha256};
 
 /// The HMAC-DRBG state that turns a key and a message into a stream of nonce candidates.
@@ -19,7 +20,8 @@ use crate::{ct::wipe, hmac::HmacSha256};
 /// ```
 ///
 /// With a 256-bit order and a 256-bit hash, bits2int is the identity on 32 bytes.
-pub(super) struct NonceGenerator {
+/// The curve decides which candidates are in range, so the generator never names a scalar type.
+pub(crate) struct NonceGenerator {
     /// The HMAC key K.
     key: [u8; 32],
     /// The chaining value V.
@@ -32,7 +34,7 @@ impl NonceGenerator {
     /// Seeds the generator with the secret key and the reduced message hash.
     ///
     /// Both inputs are 32-byte big-endian integers modulo n: int2octets and bits2octets of the RFC.
-    pub(super) fn new(secret: &[u8; 32], message: &[u8; 32]) -> Self {
+    pub(crate) fn new(secret: &[u8; 32], message: &[u8; 32]) -> Self {
         // Step b and c of RFC 6979, section 3.2: V = 0x01 * 32, K = 0x00 * 32.
         let mut generator = Self {
             key: [0; 32],
@@ -53,10 +55,11 @@ impl NonceGenerator {
         generator
     }
 
-    /// The next nonce in [1, n).
+    /// The next candidate the curve accepts, decoded by it.
     ///
+    /// The decoder returns a nonce for a candidate in [1, n), and nothing otherwise.
     /// A signer calls again when the nonce gives r = 0 or s = 0, which RFC 6979 also covers.
-    pub(super) fn next_nonce(&mut self) -> Scalar {
+    pub(crate) fn next_nonce<S>(&mut self, decode: impl Fn(&[u8; 32]) -> Option<S>) -> S {
         loop {
             // Step h.3 of RFC 6979: after any rejected candidate, stir K and V.
             if self.started {
@@ -71,10 +74,8 @@ impl NonceGenerator {
             // Step h.2: one HMAC output fills the 256-bit candidate.
             self.value = HmacSha256::mac(&self.key, &self.value);
 
-            // Timing: a candidate fails with probability below 2^-127, and failure is not secret.
-            if let Some(nonce) = Scalar::from_bytes(&self.value)
-                && !nonce.is_zero().reveal()
-            {
+            // Timing: for a 256-bit order a refusal is rare, and whether it happened is not secret.
+            if let Some(nonce) = decode(&self.value) {
                 return nonce;
             }
         }
@@ -98,6 +99,15 @@ mod tests {
     /// Decodes a 32-byte hex string in a test vector.
     fn hex(text: &str) -> [u8; 32] {
         array::from_fn(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap())
+    }
+
+    /// Takes every candidate as it comes, which holds for these vectors' first candidates.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "it has the shape of a curve's decoder"
+    )]
+    fn accept_all(candidate: &[u8; 32]) -> Option<[u8; 32]> {
+        Some(*candidate)
     }
 
     #[test]
@@ -131,21 +141,56 @@ mod tests {
         ];
         for (secret, message, nonce) in cases {
             let mut generator = NonceGenerator::new(&secret, &message);
-            assert_eq!(generator.next_nonce().to_bytes(), hex(nonce));
+            assert_eq!(generator.next_nonce(accept_all), hex(nonce));
         }
+    }
+
+    #[test]
+    fn nonces_of_the_p256_vectors() {
+        // RFC 6979, appendix A.2.5: NIST P-256 with SHA-256.
+        // Both hashes are below n, so reduction leaves them unchanged.
+        //
+        //     SHA-256("sample") = af2bdbe1...
+        //     SHA-256("test")   = 9f86d081...
+        let secret = hex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+        let cases = [
+            (
+                "af2bdbe1aa9b6ec1e2ade1d694f41fc71a831d0268e9891562113d8a62add1bf",
+                "a6e3c57dd01abe90086538398355dd4c3b17aa873382b0f24d6129493d8aad60",
+            ),
+            (
+                "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                "d16b6ae827f17175e040871a1c7ec3500192c4c92677336ec2537acaee0008e0",
+            ),
+        ];
+        for (message, nonce) in cases {
+            let mut generator = NonceGenerator::new(&secret, &hex(message));
+            assert_eq!(generator.next_nonce(accept_all), hex(nonce));
+        }
+    }
+
+    #[test]
+    fn rejected_candidates_are_skipped() {
+        // A decoder that refuses the first candidate receives the second one.
+        let mut reference = NonceGenerator::new(&[1; 32], &[2; 32]);
+        let first = reference.next_nonce(accept_all);
+        let second = reference.next_nonce(accept_all);
+        let mut generator = NonceGenerator::new(&[1; 32], &[2; 32]);
+        let nonce = generator.next_nonce(|candidate| (*candidate != first).then_some(*candidate));
+        assert_eq!(nonce, second);
     }
 
     #[test]
     fn retries_continue_the_stream() {
         // A second candidate differs from the first and is again in range.
         let mut generator = NonceGenerator::new(&[1; 32], &[2; 32]);
-        let first = generator.next_nonce();
-        let second = generator.next_nonce();
+        let first = generator.next_nonce(accept_all);
+        let second = generator.next_nonce(accept_all);
         assert_ne!(first, second);
 
         // The stream is deterministic: a fresh generator repeats it.
         let mut again = NonceGenerator::new(&[1; 32], &[2; 32]);
-        assert_eq!(again.next_nonce(), first);
-        assert_eq!(again.next_nonce(), second);
+        assert_eq!(again.next_nonce(accept_all), first);
+        assert_eq!(again.next_nonce(accept_all), second);
     }
 }

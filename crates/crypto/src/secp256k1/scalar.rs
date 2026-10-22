@@ -2,8 +2,7 @@
 
 use std::array;
 
-use super::uint::{U256, U320};
-use crate::ct::Mask;
+use crate::{ct::Mask, uint::U256};
 
 /// The group order n in four little-endian 64-bit limbs, per SEC 2, section 2.4.1.
 const N: [u64; 4] = [
@@ -104,6 +103,13 @@ impl Scalar {
         let value = U256::from_be_bytes(bytes);
         let (_, borrow) = value.sub_with_borrow(Self::ORDER);
         Mask::from_bit(borrow).reveal().then_some(Self(value.0))
+    }
+
+    /// Decodes a nonce candidate, refusing zero and values at or above n.
+    ///
+    /// Timing: a candidate fails with probability below 2^-127, and failure is not secret.
+    pub(super) fn from_nonce_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        Self::from_bytes(bytes).filter(|nonce| !nonce.is_zero().reveal())
     }
 
     /// Decodes 32 big-endian bytes and reduces modulo n.
@@ -241,36 +247,8 @@ impl Scalar {
     /// Every non-zero digit is odd and in (-2^(w-1), 2^(w-1)), and any two are w positions apart.
     /// Used only on public scalars: the digit pattern depends on the value.
     pub(super) fn wnaf_vartime(self, width: u32) -> [i8; 257] {
-        // Digit i multiplies 2^i.
-        // Most digits stay zero.
-        let mut digits = [0_i8; 257];
-        let window = 1_u64 << width;
-
-        // A five-limb copy holds the running value, which may reach 2^256 after adding a digit.
-        let mut k = U320::from_u256(self.to_uint());
-        let mut position = 0;
-        while !k.is_zero() {
-            if k.low() & 1 == 1 {
-                // Take the low w bits as a signed digit, then clear them from k.
-                //
-                //     low = 0b10011 (19), w = 5 -> digit 19 - 32 = -13, k += 13
-                let low = k.low() & (window - 1);
-                if low < window / 2 {
-                    // A positive digit: subtract it.
-                    digits[position] = (low as u8).cast_signed();
-                    k.sub_small(low);
-                } else {
-                    // A negative digit low - 2^w: add its magnitude.
-                    // The magnitude is below 2^(w-1), since low is odd.
-                    let magnitude = window - low;
-                    digits[position] = -(magnitude as u8).cast_signed();
-                    k.add_small(magnitude);
-                }
-            }
-            k.halve();
-            position += 1;
-        }
-        digits
+        // The recoding works on the canonical integer.
+        self.to_uint().wnaf_vartime(width)
     }
 
     /// The Montgomery product a b R^-1 mod n, for inputs below n.

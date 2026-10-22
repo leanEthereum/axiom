@@ -23,4 +23,5 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+axiom-json.workspace = true
 proptest.workspace = true

@@ -2,8 +2,7 @@
 
 use std::array;
 
-use super::uint::U256;
-use crate::ct::Mask;
+use crate::{ct::Mask, uint::U256};
 
 /// The prime p in four little-endian 64-bit limbs, per SEC 2, section 2.4.1.
 const P: U256 = U256([
