@@ -134,7 +134,9 @@ More rules:
 - Never enumerate a struct's fields or an enum's variants in its header.
 - Constants document the constraint that produced the value, not the value.
 - Cite the spec, the EIP, or the paper for every non-obvious rule or constant.
-- Section names: `# Overview`, `# Algorithm`, `# Invariants`, `# Performance`, `# Arguments`, `# Returns`, `# Errors`, `# Panics`, `# Safety`, `# Examples`.
+- Section names: `# Overview`, `# Algorithm`, `# Invariants`, `# Performance`, `# Arguments`, `# Returns`, `# Errors`, `# Panics`, `# Safety`.
+- No code examples in docs: tests show usage, and examples only go stale and bury the explanation.
+  Diagrams fenced as `text` stay.
 - Diagrams in `///` docs are fenced as `text`. In `//` comments they are indented four spaces.
 - Inline comments explain the reasoning and teach the domain, glued to the line they explain.
 - Useful labels: `// Invariant:`, `// Threshold:`, `// Timing:`, `// Phase N:`, `// Fixture state:`, `// Mutation:`.
