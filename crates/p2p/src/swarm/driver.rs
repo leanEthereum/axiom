@@ -667,11 +667,61 @@ impl Swarm {
         peer: PeerId,
         commands: mpsc::Sender<ConnectionInput>,
     ) {
-        // One connection per peer: the later one is closed.
-        // Its queue is fresh and empty, so the close always fits.
-        if self.peers.contains_key(&peer) {
-            let _ = commands.try_send(ConnectionInput::Close);
-            self.connections.remove(&id);
+        // One connection per peer.
+        // When both sides dial at once, each would keep its first connection and close the other's.
+        // Both would end up with none, so both keep the connection the smaller identity dialed.
+        if let Some(&existing) = self.peers.get(&peer) {
+            let outbound =
+                |id: &ConnectionId| self.connections.get(id).is_some_and(|entry| entry.outbound);
+            let local = self.config.identity.peer_id();
+            let dialer = |outbound: bool| {
+                if outbound {
+                    local.clone()
+                } else {
+                    peer.clone()
+                }
+            };
+            let keep_new = outbound(&existing) != outbound(&id)
+                && dialer(outbound(&id)) < dialer(outbound(&existing));
+            if !keep_new {
+                // The new queue is fresh and empty, so the close always fits.
+                let _ = commands.try_send(ConnectionInput::Close);
+                self.connections.remove(&id);
+                return;
+            }
+            // Retire the existing connection quietly: the peer stays connected through the new one.
+            if let Some(mut old) = self.connections.remove(&existing) {
+                old.peer = None;
+                if old.deliver(ConnectionInput::Close) != Delivery::Sent
+                    && let Some(task) = &old.task
+                {
+                    task.abort();
+                }
+            }
+            self.inbound
+                .retain(|_, (connection, _)| *connection != existing);
+            // Requests in flight rode the retired connection, the only one until now.
+            let failed: Vec<RequestId> = self
+                .requests
+                .iter()
+                .filter(|(_, known)| **known == peer)
+                .map(|(request, _)| *request)
+                .collect();
+            for request in failed {
+                self.requests.remove(&request);
+                self.emit(NetworkEvent::RequestFailed {
+                    request,
+                    peer: peer.clone(),
+                    error: RequestError::StreamClosed,
+                });
+            }
+            let Some(entry) = self.connections.get_mut(&id) else {
+                let _ = commands.try_send(ConnectionInput::Close);
+                return;
+            };
+            entry.peer = Some(peer.clone());
+            entry.commands = Some(commands);
+            self.peers.insert(peer, id);
             return;
         }
         let Some(entry) = self.connections.get_mut(&id) else {
