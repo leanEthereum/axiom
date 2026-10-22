@@ -26,3 +26,8 @@ axiom-ssz.workspace = true
 axiom-state-transition.workspace = true
 axiom-types.workspace = true
 axiom-yaml.workspace = true
+
+[dev-dependencies]
+axiom-http.workspace = true
+axiom-json.workspace = true
+tokio.workspace = true
