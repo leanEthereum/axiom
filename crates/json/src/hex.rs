@@ -84,7 +84,9 @@ impl<'a> HexDigits<'a> {
     pub(crate) fn bytes_into(self, out: &mut [u8]) -> Result<(), HexError> {
         // Two digits per byte, so an odd count leaves half a byte.
         if !self.0.len().is_multiple_of(2) {
-            return Err(HexError::OddLength);
+            return Err(HexError::OddLength {
+                digits: self.0.len(),
+            });
         }
         // The length check precedes the digit scan, so a wrong-sized hash fails fast.
         if self.0.len() / 2 != out.len() {
@@ -121,8 +123,11 @@ pub enum HexError {
     LeadingZero,
 
     /// A DATA has an odd number of digits, so its last byte is half missing.
-    #[error("data has an odd number of hex digits")]
-    OddLength,
+    #[error("data has an odd number of hex digits: {digits}")]
+    OddLength {
+        /// Number of digits after the prefix.
+        digits: usize,
+    },
 
     /// A byte that is not a hex digit.
     #[error("invalid hex digit at byte {offset}")]
@@ -132,8 +137,13 @@ pub enum HexError {
     },
 
     /// A QUANTITY exceeds the width of its integer type.
-    #[error("quantity overflows its integer type")]
-    Overflow,
+    #[error("quantity of {digits} digits exceeds the {limit} its integer type holds")]
+    Overflow {
+        /// Number of digits after the prefix.
+        digits: usize,
+        /// Most digits the integer type holds.
+        limit: usize,
+    },
 
     /// A DATA decodes to a different number of bytes than its type holds.
     #[error("data holds {actual} bytes, expected {expected}")]

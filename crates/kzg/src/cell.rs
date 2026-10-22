@@ -61,8 +61,10 @@ impl Cell {
         // The length check above leaves exactly 64 chunks of 32 bytes, one per element.
         let (chunks, _) = bytes.as_chunks::<SCALAR_BYTES>();
         let mut evaluations = [Scalar::ZERO; FIELD_ELEMENTS_PER_CELL];
-        for (evaluation, chunk) in evaluations.iter_mut().zip(chunks) {
-            *evaluation = Bytes32(*chunk).to_scalar()?;
+        for (index, (evaluation, chunk)) in evaluations.iter_mut().zip(chunks).enumerate() {
+            *evaluation = Bytes32(*chunk)
+                .to_scalar()
+                .ok_or(KzgError::NonCanonicalCellElement { index })?;
         }
         Ok(Self(evaluations))
     }
@@ -144,6 +146,17 @@ pub(crate) mod tests {
         assert_eq!(
             Cell::from_bytes(&[0; BYTES_PER_CELL + 1]),
             Err(KzgError::InvalidCellLength(2049))
+        );
+    }
+
+    #[test]
+    fn non_canonical_cell_element_is_named() {
+        // Fixture state: element 7 is all 0xff bytes, far above the modulus.
+        let mut bytes = vec![0; BYTES_PER_CELL];
+        bytes[7 * 32..8 * 32].fill(0xff);
+        assert_eq!(
+            Cell::from_bytes(&bytes),
+            Err(KzgError::NonCanonicalCellElement { index: 7 })
         );
     }
 

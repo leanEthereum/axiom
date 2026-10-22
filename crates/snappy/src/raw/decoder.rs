@@ -104,13 +104,15 @@ impl<'a, 'o> BlockDecoder<'a, 'o> {
             len = self.input.le(len - 59)?;
         }
         // The stored value is len - 1, up to 2^32 - 1.
-        // On a 32-bit target the sum can overflow, and no input is that long anyway.
-        let len = len.checked_add(1).ok_or(SnappyError::UnexpectedEnd)?;
-        if len > self.end() - self.out.len() {
+        // Comparing it before adding one keeps the sum from overflowing on a 32-bit target.
+        let produced = self.out.len() - self.base;
+        if len >= self.declared - produced {
             return Err(SnappyError::ExceedsDeclaredLength {
                 declared: self.declared,
+                reached: produced.saturating_add(len).saturating_add(1),
             });
         }
+        let len = len + 1;
         let literal = self.input.take(len)?;
         self.out.extend_from_slice(literal);
         Ok(())
@@ -138,6 +140,7 @@ impl<'a, 'o> BlockDecoder<'a, 'o> {
         if out.len() + len > end {
             return Err(SnappyError::ExceedsDeclaredLength {
                 declared: self.declared,
+                reached: position + len,
             });
         }
 
@@ -229,7 +232,10 @@ mod tests {
         let block = [0x02, 0x08, b'a', b'b', b'c'];
         assert_eq!(
             decompress(&block, 10),
-            Err(SnappyError::ExceedsDeclaredLength { declared: 2 })
+            Err(SnappyError::ExceedsDeclaredLength {
+                declared: 2,
+                reached: 3
+            })
         );
 
         // Declares 4, literal writes 1.
@@ -246,7 +252,10 @@ mod tests {
         let block = [0x05, 0x00, b'a', 0x05, 0x01];
         assert_eq!(
             decompress(&block, 10),
-            Err(SnappyError::ExceedsDeclaredLength { declared: 5 })
+            Err(SnappyError::ExceedsDeclaredLength {
+                declared: 5,
+                reached: 6
+            })
         );
     }
 
@@ -255,25 +264,40 @@ mod tests {
         // Literal promising 3 bytes, 2 present.
         assert_eq!(
             decompress(&[0x03, 0x08, b'a', b'b'], 3),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 3,
+                available: 2
+            })
         );
         // Literal length byte missing.
         assert_eq!(
             decompress(&[0x40, 0xf0], 64),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 1,
+                available: 0
+            })
         );
         // Copy offsets cut short, for each width.
         assert_eq!(
             decompress(&[0x05, 0x00, b'a', 0x01], 5),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 1,
+                available: 0
+            })
         );
         assert_eq!(
             decompress(&[0x05, 0x00, b'a', 0x02, 0x01], 5),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 2,
+                available: 1
+            })
         );
         assert_eq!(
             decompress(&[0x05, 0x00, b'a', 0x03, 0x01, 0x00, 0x00], 5),
-            Err(SnappyError::UnexpectedEnd)
+            Err(SnappyError::UnexpectedEnd {
+                needed: 4,
+                available: 3
+            })
         );
     }
 

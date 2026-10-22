@@ -19,6 +19,8 @@ const RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN: &[u8; 16] = b"RCKZGCBATCH__V1_";
 pub(super) struct CellBatch<'a> {
     /// The distinct commitments, in order of first appearance.
     commitments: Vec<&'a Bytes48>,
+    /// For each distinct commitment, the first cell that names it.
+    first_cells: Vec<usize>,
     /// For each cell, the position of its commitment in the distinct list.
     commitment_indices: Vec<usize>,
     /// For each cell, its position in the extended blob.
@@ -47,23 +49,35 @@ impl<'a> CellBatch<'a> {
         cells: &'a [Cell],
         proofs: &'a [Bytes48],
     ) -> Result<Self, KzgError> {
-        KzgError::check_paired(
-            commitments.len(),
-            &[cell_indices.len(), cells.len(), proofs.len()],
-        )?;
+        let cell_count = cells.len();
+        if commitments.len() != cell_count
+            || cell_indices.len() != cell_count
+            || proofs.len() != cell_count
+        {
+            return Err(KzgError::CellBatchLengthMismatch {
+                commitments: commitments.len(),
+                cell_indices: cell_indices.len(),
+                cells: cell_count,
+                proofs: proofs.len(),
+            });
+        }
         let mut distinct: Vec<&Bytes48> = Vec::new();
+        let mut first_cells = Vec::new();
         let mut positions: HashMap<&Bytes48, usize> = HashMap::new();
         let commitment_indices = commitments
             .iter()
-            .map(|commitment| {
+            .enumerate()
+            .map(|(cell, commitment)| {
                 *positions.entry(commitment).or_insert_with(|| {
                     distinct.push(commitment);
+                    first_cells.push(cell);
                     distinct.len() - 1
                 })
             })
             .collect();
         Ok(Self {
             commitments: distinct,
+            first_cells,
             commitment_indices,
             cell_indices,
             cells,
@@ -79,6 +93,13 @@ impl<'a> CellBatch<'a> {
     /// The distinct commitments, in order of first appearance.
     pub(super) fn commitments(&self) -> &[&'a Bytes48] {
         &self.commitments
+    }
+
+    /// For each distinct commitment, the first cell that names it.
+    ///
+    /// An invalid commitment is reported at this position in the input list.
+    pub(super) fn first_cells(&self) -> &[usize] {
+        &self.first_cells
     }
 
     /// The cell positions, one per cell.
@@ -195,8 +216,17 @@ mod tests {
             let proofs = points(sequence("proofs"));
 
             // The vectors give the distinct list and the indices directly, so the batch is built as is.
+            let first_cells = (0..commitments.len())
+                .map(|distinct| {
+                    commitment_indices
+                        .iter()
+                        .position(|index| *index == distinct)
+                        .unwrap()
+                })
+                .collect();
             let batch = CellBatch {
                 commitments: commitments.iter().collect(),
+                first_cells,
                 commitment_indices,
                 cell_indices: &cell_indices,
                 cells: &cells,
@@ -220,6 +250,7 @@ mod tests {
 
         // A collects 1 + 4 = 5 and B collects 2.
         assert_eq!(batch.commitments(), [&a, &b]);
+        assert_eq!(batch.first_cells(), [0, 1]);
         let powers = [1, 2, 4].map(Scalar::from_u64);
         assert_eq!(
             batch.commitment_weights(&powers),
@@ -229,9 +260,11 @@ mod tests {
         // Four proofs for three cells do not pair up.
         assert_eq!(
             CellBatch::new(&commitments, &indices, &cells, &[a; 4]).unwrap_err(),
-            KzgError::LengthMismatch {
-                expected: 3,
-                actual: 4
+            KzgError::CellBatchLengthMismatch {
+                commitments: 3,
+                cell_indices: 3,
+                cells: 3,
+                proofs: 4
             }
         );
     }

@@ -186,7 +186,7 @@ impl PublicKey {
         if let Ok(uncompressed) = bytes.try_into() {
             return Self::from_uncompressed(uncompressed);
         }
-        Err(Secp256k1Error::InvalidPublicKey)
+        Err(Secp256k1Error::InvalidPublicKeyLength(bytes.len()))
     }
 
     /// Decodes the 33-byte compressed form, prefix 0x02 or 0x03 then x.

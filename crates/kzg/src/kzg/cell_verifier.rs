@@ -6,8 +6,8 @@ use axiom_bls12_381::{G1Affine, G1Projective, G2Affine, Gt, Scalar};
 
 use super::{cell_batch::CellBatch, cosets::Cosets};
 use crate::{
-    CellIndex, FIELD_ELEMENTS_PER_CELL, KzgError, basis::Basis, fft::Domain, parallel::Threads,
-    powers::Powers,
+    Bytes48, CellIndex, FIELD_ELEMENTS_PER_CELL, KzgError, basis::Basis, fft::Domain,
+    parallel::Threads, powers::Powers,
 };
 
 /// The EIP-7594 cell verifier: one pairing check for any number of cells.
@@ -62,12 +62,20 @@ impl CellVerifier {
         // Phase 1: validate every point, commitments first, as the spec does.
         // Each decoding runs a subgroup check of about 40 microseconds, worth spreading over cores.
         // An empty batch has nothing left to check: every sum below would be the identity.
+        // Each point travels with its input position, so a failure names the entry at fault.
         let threads = Threads::available();
+        let commitments: Vec<(usize, &Bytes48)> = batch
+            .first_cells()
+            .iter()
+            .copied()
+            .zip(batch.commitments().iter().copied())
+            .collect();
         let commitment_points: Result<Vec<G1Affine>, KzgError> =
-            threads.map(batch.commitments(), |bytes| bytes.to_commitment());
+            threads.map(&commitments, |(index, bytes)| bytes.to_commitment(*index));
         let commitment_points = commitment_points?;
+        let proofs: Vec<(usize, &Bytes48)> = batch.proofs().iter().enumerate().collect();
         let proof_points: Result<Vec<G1Affine>, KzgError> =
-            threads.map(batch.proofs(), |bytes| bytes.to_proof());
+            threads.map(&proofs, |(index, bytes)| bytes.to_proof(*index));
         let proof_points = proof_points?;
         if batch.len() == 0 {
             return Ok(true);
@@ -158,5 +166,40 @@ impl CellVerifier {
 
         // Phase 3: commit with the first 64 powers of s.
         self.monomial.commit(&interpolant)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_bls12_381::{G1Projective, PointDecodeError, Scalar};
+
+    use crate::{Bytes48, Cell, CellIndex, FIELD_ELEMENTS_PER_CELL, Kzg, KzgError};
+
+    #[test]
+    fn invalid_commitment_is_named_by_its_first_cell() {
+        // Fixture state: three zero cells, the identity as every proof.
+        let identity = Bytes48::from_point(&G1Projective::IDENTITY);
+        let cells = vec![Cell::from_evaluations(&[Scalar::ZERO; FIELD_ELEMENTS_PER_CELL]); 3];
+        let indices = [0, 1, 2].map(|index| CellIndex::new(index).unwrap());
+
+        // Mutation: the infinity flags over a stray payload bit, named by cells 1 and 2.
+        let mut stray = identity.0;
+        stray[47] = 1;
+        let bad = Bytes48(stray);
+        let commitments = [identity, bad, bad];
+
+        // The repeated commitment is decoded once and reported at cell 1, where it first appears.
+        assert_eq!(
+            Kzg::mainnet().verify_cell_kzg_proof_batch(
+                &commitments,
+                &indices,
+                &cells,
+                &[identity; 3]
+            ),
+            Err(KzgError::InvalidCommitment {
+                index: 1,
+                source: PointDecodeError::InvalidInfinityEncoding
+            })
+        );
     }
 }

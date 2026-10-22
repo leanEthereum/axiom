@@ -63,7 +63,12 @@ impl CellRecovery {
         cells: &[Cell],
     ) -> Result<Vec<Scalar>, KzgError> {
         // Phase 1: the spec's input checks, in its order.
-        KzgError::check_paired(cell_indices.len(), &[cells.len()])?;
+        if cell_indices.len() != cells.len() {
+            return Err(KzgError::RecoveryLengthMismatch {
+                cell_indices: cell_indices.len(),
+                cells: cells.len(),
+            });
+        }
         if !(CELLS_PER_EXT_BLOB / 2..=CELLS_PER_EXT_BLOB).contains(&cells.len()) {
             return Err(KzgError::InvalidCellCount(cells.len()));
         }
@@ -73,8 +78,11 @@ impl CellRecovery {
                 return Err(KzgError::DuplicateCellIndex(index.get()));
             }
         }
-        if !cell_indices.is_sorted() {
-            return Err(KzgError::UnsortedCellIndices);
+        if let Some(pair) = cell_indices.windows(2).find(|pair| pair[0] > pair[1]) {
+            return Err(KzgError::UnsortedCellIndices {
+                previous: pair[0].get(),
+                next: pair[1].get(),
+            });
         }
 
         // Phase 2: the coefficients, recover_polynomialcoeff in the Fulu spec.
@@ -185,9 +193,9 @@ mod tests {
         assert_eq!(
             kzg.recover_cells_and_kzg_proofs(&indices(0..64), &cells)
                 .unwrap_err(),
-            KzgError::LengthMismatch {
-                expected: 64,
-                actual: 63
+            KzgError::RecoveryLengthMismatch {
+                cell_indices: 64,
+                cells: 63
             }
         );
 
@@ -212,7 +220,10 @@ mod tests {
         assert_eq!(
             kzg.recover_cells_and_kzg_proofs(&swapped, &cells)
                 .unwrap_err(),
-            KzgError::UnsortedCellIndices
+            KzgError::UnsortedCellIndices {
+                previous: 1,
+                next: 0
+            }
         );
     }
 

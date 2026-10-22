@@ -52,7 +52,7 @@ impl BlobScheme {
         blob: &Blob,
         z: &Bytes32,
     ) -> Result<(Bytes48, Bytes32), KzgError> {
-        let z = z.to_scalar()?;
+        let z = z.to_scalar().ok_or(KzgError::NonCanonicalEvaluationPoint)?;
         let (proof, y) = self.open(blob, &z);
         Ok((Bytes48::from_point(&proof), Bytes32::from_scalar(&y)))
     }
@@ -63,7 +63,7 @@ impl BlobScheme {
         blob: &Blob,
         commitment: &Bytes48,
     ) -> Result<Bytes48, KzgError> {
-        commitment.to_commitment()?;
+        commitment.to_commitment(0)?;
         let z = blob.challenge(commitment);
         let (proof, _) = self.open(blob, &z);
         Ok(Bytes48::from_point(&proof))
@@ -77,10 +77,10 @@ impl BlobScheme {
         y: &Bytes32,
         proof: &Bytes48,
     ) -> Result<bool, KzgError> {
-        let commitment = commitment.to_commitment()?;
-        let z = z.to_scalar()?;
-        let y = y.to_scalar()?;
-        let proof = proof.to_proof()?;
+        let commitment = commitment.to_commitment(0)?;
+        let z = z.to_scalar().ok_or(KzgError::NonCanonicalEvaluationPoint)?;
+        let y = y.to_scalar().ok_or(KzgError::NonCanonicalEvaluation)?;
+        let proof = proof.to_proof(0)?;
         Ok(self.check_opening(&commitment, &z, &y, &proof))
     }
 
@@ -91,7 +91,7 @@ impl BlobScheme {
         commitment: &Bytes48,
         proof: &Bytes48,
     ) -> Result<bool, KzgError> {
-        let opening = self.blob_opening(blob, commitment, proof)?;
+        let opening = self.blob_opening(0, blob, commitment, proof)?;
         Ok(self.check_opening(&opening.commitment, &opening.z, &opening.y, &opening.proof))
     }
 
@@ -102,34 +102,45 @@ impl BlobScheme {
         commitments: &[Bytes48],
         proofs: &[Bytes48],
     ) -> Result<bool, KzgError> {
-        KzgError::check_paired(blobs.len(), &[commitments.len(), proofs.len()])?;
+        if commitments.len() != blobs.len() || proofs.len() != blobs.len() {
+            return Err(KzgError::BlobBatchLengthMismatch {
+                blobs: blobs.len(),
+                commitments: commitments.len(),
+                proofs: proofs.len(),
+            });
+        }
 
         // Each blob needs a challenge hash and a barycentric evaluation, independent of the others.
-        let triples: Vec<(&Blob, &Bytes48, &Bytes48)> = blobs
+        // The position rides along, so an invalid point names its place in the batch.
+        let triples: Vec<(usize, &Blob, &Bytes48, &Bytes48)> = blobs
             .iter()
             .zip(commitments)
             .zip(proofs)
-            .map(|((blob, commitment), proof)| (blob, commitment, proof))
+            .enumerate()
+            .map(|(index, ((blob, commitment), proof))| (index, blob, commitment, proof))
             .collect();
         let openings: Result<Vec<Opening<'_>>, KzgError> = Threads::available()
-            .map(&triples, |(blob, commitment, proof)| {
-                self.blob_opening(blob, commitment, proof)
+            .map(&triples, |(index, blob, commitment, proof)| {
+                self.blob_opening(*index, blob, commitment, proof)
             });
         Ok(self.check_openings(&openings?))
     }
 
     /// Decodes a blob opening and computes its challenge and evaluation.
+    ///
+    /// The index is the opening's position in its batch, which errors report.
     fn blob_opening<'a>(
         &self,
+        index: usize,
         blob: &Blob,
         commitment: &'a Bytes48,
         proof: &'a Bytes48,
     ) -> Result<Opening<'a>, KzgError> {
         // The spec validates the commitment, derives z and y, then validates the proof.
-        let commitment_point = commitment.to_commitment()?;
+        let commitment_point = commitment.to_commitment(index)?;
         let z = blob.challenge(commitment);
         let y = self.evaluate(blob, &z);
-        let proof_point = proof.to_proof()?;
+        let proof_point = proof.to_proof(index)?;
         Ok(Opening {
             commitment_bytes: commitment,
             proof_bytes: proof,
@@ -311,6 +322,7 @@ impl BlobScheme {
 
 #[cfg(test)]
 mod tests {
+    use axiom_bls12_381::PointDecodeError;
     use proptest::{collection::vec, prelude::*};
 
     use super::*;
@@ -362,6 +374,55 @@ mod tests {
         let s = TrustedSetup::mainnet().g1_monomial.points()[1];
         let expected = G1Projective::from(s) + G1Projective::GENERATOR.mul_vartime(&z);
         assert_eq!(proof, expected);
+    }
+
+    #[test]
+    fn malformed_inputs_name_the_entry_at_fault() {
+        let kzg = Kzg::mainnet();
+        let blobs = [blob_from_seed(1), blob_from_seed(2)];
+        let commitments = blobs
+            .each_ref()
+            .map(|blob| kzg.blob_to_kzg_commitment(blob));
+        let good = kzg
+            .compute_blob_kzg_proof(&blobs[0], &commitments[0])
+            .unwrap();
+
+        // Fixture state: the infinity flags over a payload whose last bit is set.
+        let mut stray = [0_u8; 48];
+        stray[0] = 0xc0;
+        stray[47] = 1;
+        let bad = Bytes48(stray);
+
+        // Two blobs, two commitments, one proof.
+        assert_eq!(
+            kzg.verify_blob_kzg_proof_batch(&blobs, &commitments, &[good]),
+            Err(KzgError::BlobBatchLengthMismatch {
+                blobs: 2,
+                commitments: 2,
+                proofs: 1
+            })
+        );
+
+        // The proof at position 1 does not decode, so the batch names position 1.
+        assert_eq!(
+            kzg.verify_blob_kzg_proof_batch(&blobs, &commitments, &[good, bad]),
+            Err(KzgError::InvalidProof {
+                index: 1,
+                source: PointDecodeError::InvalidInfinityEncoding
+            })
+        );
+
+        // All 0xff bytes exceed the modulus, as z and then as y.
+        let zero = Bytes32([0; 32]);
+        let over = Bytes32([0xff; 32]);
+        assert_eq!(
+            kzg.verify_kzg_proof(&commitments[0], &over, &zero, &good),
+            Err(KzgError::NonCanonicalEvaluationPoint)
+        );
+        assert_eq!(
+            kzg.verify_kzg_proof(&commitments[0], &zero, &over, &good),
+            Err(KzgError::NonCanonicalEvaluation)
+        );
     }
 
     /// A field element below 2^254, as 32 big-endian bytes.

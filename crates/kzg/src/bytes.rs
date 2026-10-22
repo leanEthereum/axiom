@@ -18,11 +18,12 @@ pub struct Bytes32(pub [u8; SCALAR_BYTES]);
 impl Bytes32 {
     /// Decodes the canonical field element these bytes encode.
     ///
-    /// # Errors
+    /// # Returns
     ///
-    /// Fails when the integer is not below the scalar field modulus.
-    pub(crate) fn to_scalar(self) -> Result<Scalar, KzgError> {
-        Scalar::from_bytes_be(&self.0).ok_or(KzgError::NonCanonicalFieldElement)
+    /// The element, or none when the integer is not below the scalar field modulus.
+    /// Callers name the element in their own error.
+    pub(crate) fn to_scalar(self) -> Option<Scalar> {
+        Scalar::from_bytes_be(&self.0)
     }
 
     /// Encodes a field element canonically.
@@ -58,22 +59,32 @@ pub struct Bytes48(pub [u8; G1_COMPRESSED_BYTES]);
 impl Bytes48 {
     /// Decodes a commitment, as in the spec's KeyValidate check that admits the identity.
     ///
+    /// # Arguments
+    ///
+    /// The index is the commitment's position in its input list, which the error reports.
+    ///
     /// # Errors
     ///
     /// Fails unless the bytes encode a point of the prime-order subgroup.
-    pub(crate) fn to_commitment(self) -> Result<G1Affine, KzgError> {
+    pub(crate) fn to_commitment(self, index: usize) -> Result<G1Affine, KzgError> {
         // The checked decoder accepts exactly one encoding of the identity.
         // It rejects points off the curve and points outside the subgroup.
-        G1Affine::from_compressed(&self.0).map_err(KzgError::InvalidCommitment)
+        G1Affine::from_compressed(&self.0)
+            .map_err(|source| KzgError::InvalidCommitment { index, source })
     }
 
     /// Decodes a proof, under the same rules as a commitment.
     ///
+    /// # Arguments
+    ///
+    /// The index is the proof's position in its input list, which the error reports.
+    ///
     /// # Errors
     ///
     /// Fails unless the bytes encode a point of the prime-order subgroup.
-    pub(crate) fn to_proof(self) -> Result<G1Affine, KzgError> {
-        G1Affine::from_compressed(&self.0).map_err(KzgError::InvalidProof)
+    pub(crate) fn to_proof(self, index: usize) -> Result<G1Affine, KzgError> {
+        G1Affine::from_compressed(&self.0)
+            .map_err(|source| KzgError::InvalidProof { index, source })
     }
 
     /// Compresses a point into its 48-byte encoding.
@@ -130,10 +141,7 @@ mod tests {
         modulus[8..16].copy_from_slice(&0x3339_d808_09a1_d805_u64.to_be_bytes());
         modulus[16..24].copy_from_slice(&0x53bd_a402_fffe_5bfe_u64.to_be_bytes());
         modulus[24..].copy_from_slice(&0xffff_ffff_0000_0001_u64.to_be_bytes());
-        assert_eq!(
-            Bytes32(modulus).to_scalar(),
-            Err(KzgError::NonCanonicalFieldElement)
-        );
+        assert_eq!(Bytes32(modulus).to_scalar(), None);
 
         // r - 1 is the largest canonical element and round-trips.
         modulus[31] = 0;
@@ -147,19 +155,20 @@ mod tests {
         // The identity encodes as the compression and infinity flags over zero bits: 0xc0 00 .. 00.
         let mut identity = [0_u8; 48];
         identity[0] = 0xc0;
-        assert_eq!(Bytes48(identity).to_commitment(), Ok(G1Affine::IDENTITY));
+        assert_eq!(Bytes48(identity).to_commitment(0), Ok(G1Affine::IDENTITY));
         assert_eq!(
             Bytes48::from_point(&G1Projective::IDENTITY),
             Bytes48(identity)
         );
 
-        // The same flags with a stray payload bit are rejected, with the curve-level reason kept.
+        // The same flags with a stray payload bit are rejected as proof 3, with the curve-level reason kept.
         identity[47] = 1;
         assert_eq!(
-            Bytes48(identity).to_proof(),
-            Err(KzgError::InvalidProof(
-                PointDecodeError::InvalidInfinityEncoding
-            ))
+            Bytes48(identity).to_proof(3),
+            Err(KzgError::InvalidProof {
+                index: 3,
+                source: PointDecodeError::InvalidInfinityEncoding
+            })
         );
     }
 

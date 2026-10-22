@@ -61,7 +61,13 @@ impl<R: Read> FrameDecoder<R> {
             0 if self.chunks.started() => return Ok(false),
             0 => return Err(SnappyError::MissingStreamIdentifier.into()),
             ChunkHeader::LEN => {}
-            _ => return Err(SnappyError::UnexpectedEnd.into()),
+            read => {
+                return Err(SnappyError::UnexpectedEnd {
+                    needed: ChunkHeader::LEN,
+                    available: read,
+                }
+                .into());
+            }
         }
         let header = self.chunks.header(header)?;
         let len = header.len;
@@ -70,15 +76,25 @@ impl<R: Read> FrameDecoder<R> {
         if header.chunk_type == ChunkType::Skippable {
             let skipped = io::copy(&mut (&mut self.inner).take(len as u64), &mut io::sink())?;
             if skipped != len as u64 {
-                return Err(SnappyError::UnexpectedEnd.into());
+                // Invariant: the reader stops at len bytes, so the count fits a usize.
+                return Err(SnappyError::UnexpectedEnd {
+                    needed: len,
+                    available: skipped as usize,
+                }
+                .into());
             }
             return Ok(true);
         }
 
         // Data and identifier bodies are bounded by the header check above.
         self.body.resize(len, 0);
-        if read_full(&mut self.inner, &mut self.body)? != len {
-            return Err(SnappyError::UnexpectedEnd.into());
+        let read = read_full(&mut self.inner, &mut self.body)?;
+        if read != len {
+            return Err(SnappyError::UnexpectedEnd {
+                needed: len,
+                available: read,
+            }
+            .into());
         }
         self.chunk.clear();
         self.position = 0;
@@ -189,7 +205,13 @@ mod tests {
             .read_to_end(&mut Vec::new())
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        assert_eq!(inner_error(&err), Some(&SnappyError::UnexpectedEnd));
+        assert_eq!(
+            inner_error(&err),
+            Some(&SnappyError::UnexpectedEnd {
+                needed: 7,
+                available: 6
+            })
+        );
 
         // The total bound is invalid data.
         let err = FrameDecoder::new(&framed[..], 2)

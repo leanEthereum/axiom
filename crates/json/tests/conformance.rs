@@ -250,12 +250,24 @@ fn limits_bound_depth_and_size() {
     };
     assert!(Json::parse_with(b"[[[]]]", limits).is_ok());
     let error = Json::parse_with(b"[[[[]]]]", limits).unwrap_err();
-    assert_eq!((error.offset(), error.kind()), (3, &ErrorKind::TooDeep));
+    assert_eq!(
+        (error.offset(), error.kind()),
+        (3, &ErrorKind::TooDeep { limit: 3 })
+    );
 
     // A 101-byte text breaks a 100-byte limit, reported at the limit.
     let long = format!("\"{}\"", "a".repeat(99));
     let error = Json::parse_with(&long, limits).unwrap_err();
-    assert_eq!((error.offset(), error.kind()), (100, &ErrorKind::TooLarge));
+    assert_eq!(
+        (error.offset(), error.kind()),
+        (
+            100,
+            &ErrorKind::TooLarge {
+                length: 101,
+                limit: 100
+            }
+        )
+    );
 
     // A million nested brackets under a generous limit still return an error, not a crash.
     // The parser's own stack holds the open arrays, so the thread stack never grows.

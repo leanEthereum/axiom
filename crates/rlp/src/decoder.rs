@@ -167,7 +167,9 @@ impl<'a> Decoder<'a> {
         if self.rest.is_empty() {
             Ok(())
         } else {
-            Err(RlpError::TrailingBytes)
+            Err(RlpError::TrailingBytes {
+                remaining: self.rest.len(),
+            })
         }
     }
 }
@@ -226,7 +228,10 @@ mod tests {
         // Trailing bytes after the only item.
         let mut decoder = Decoder::new(&[0x01, 0x02]);
         assert_eq!(decoder.uint(), Ok(1));
-        assert_eq!(decoder.finish(), Err(RlpError::TrailingBytes));
+        assert_eq!(
+            decoder.finish(),
+            Err(RlpError::TrailingBytes { remaining: 1 })
+        );
     }
 
     #[test]

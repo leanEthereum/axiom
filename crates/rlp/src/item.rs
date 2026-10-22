@@ -76,7 +76,7 @@ impl Item {
     fn decode_next(decoder: &mut Decoder<'_>, depth: usize) -> Result<Self, RlpError> {
         // Threshold: refuse before recursing, so the stack stays bounded.
         if depth > MAX_DEPTH {
-            return Err(RlpError::TooDeep);
+            return Err(RlpError::TooDeep { limit: MAX_DEPTH });
         }
         match decoder.peek_kind()? {
             Kind::String => Ok(Self::String(decoder.bytes()?.to_vec())),
@@ -116,13 +116,19 @@ mod tests {
         }
         assert!(Item::decode(&deep).is_ok());
         // One more level crosses the bound.
-        assert_eq!(Item::decode(&wrap(&deep)), Err(RlpError::TooDeep));
+        assert_eq!(
+            Item::decode(&wrap(&deep)),
+            Err(RlpError::TooDeep { limit: 64 })
+        );
     }
 
     #[test]
     fn trailing_bytes_are_refused() {
         // 0x01 is a whole item; 0x02 after it is left over.
-        assert_eq!(Item::decode(&[0x01, 0x02]), Err(RlpError::TrailingBytes));
+        assert_eq!(
+            Item::decode(&[0x01, 0x02]),
+            Err(RlpError::TrailingBytes { remaining: 1 })
+        );
     }
 
     /// Arbitrary items: strings up to 80 bytes, lists up to 6 items, 4 levels deep.

@@ -34,7 +34,12 @@ impl Blob {
         let (chunks, _) = bytes.as_chunks::<SCALAR_BYTES>();
         let elements = chunks
             .iter()
-            .map(|chunk| Bytes32(*chunk).to_scalar())
+            .enumerate()
+            .map(|(index, chunk)| {
+                Bytes32(*chunk)
+                    .to_scalar()
+                    .ok_or(KzgError::NonCanonicalBlobElement { index })
+            })
             .collect::<Result<Box<[Scalar]>, _>>()?;
         // Invariant: the length check above leaves exactly 4096 chunks.
         let Ok(elements) = elements.try_into() else {
@@ -113,7 +118,7 @@ pub(crate) mod tests {
         bytes[BYTES_PER_BLOB - 32..].fill(0xff);
         assert_eq!(
             Blob::from_bytes(&bytes),
-            Err(KzgError::NonCanonicalFieldElement)
+            Err(KzgError::NonCanonicalBlobElement { index: 4095 })
         );
     }
 
