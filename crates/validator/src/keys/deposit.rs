@@ -270,6 +270,32 @@ mod tests {
     }
 
     #[test]
+    fn the_message_root_matches_an_independent_merkleization() {
+        // Fixture state: the first deposit of the deposit CLI's documentation example.
+        // The expected root was computed separately, with SHA-256 over the SSZ chunks:
+        //
+        //     pubkey_root = H(pubkey[0..32], pubkey[32..48] || 16 zero bytes)
+        //     root        = H(H(pubkey_root, credentials), H(amount_le || 24 zeros, 32 zeros))
+        //
+        // The example's own stored root differs: its fields were edited after signing.
+        let entry = DepositEntry {
+            data: DepositData {
+                pubkey: BlsPubkey(BareHex::decode_array("962195958e742b8dc5b2a25adede82fc5cd661827cb1e1237025e3d7847801aa5584d5bfdc6893413264cccfbff54128").unwrap()),
+                withdrawal_credentials: Bytes32(BareHex::decode_array("02000000000000000000000000000000219ab540356cBB839Cbe05303d7705Fa").unwrap()),
+                amount: Gwei(64_000_000_000),
+                signature: BlsSignature([0; 96]),
+            },
+            fork_version: Version([0; 4]),
+            network_name: String::new(),
+            cli_version: String::new(),
+        };
+        assert_eq!(
+            BareHex::encode(&entry.message().hash_tree_root().0),
+            "e3723860b843008a87ec102c6c7bc731ff9b79a4a0e6033b1f800c3618ca8ca0"
+        );
+    }
+
+    #[test]
     fn credentials_follow_each_prefix() {
         let address = ExecutionAddress([0xaa; 20]);
         let mut execution = [0; 32];

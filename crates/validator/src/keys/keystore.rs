@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn eip_2335_scrypt_vector() {
-        // The one production-cost scrypt derivation of this suite: 256 MiB, about 0.3 s.
+        // The one production-cost scrypt derivation of this suite, which needs 256 MiB.
         let keystore = Keystore::parse(SCRYPT_VECTOR).unwrap();
         assert_eq!(keystore.kdf(), Kdf::default());
         assert_eq!(

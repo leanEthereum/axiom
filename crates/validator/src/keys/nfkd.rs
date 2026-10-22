@@ -290,6 +290,10 @@ mod tests {
         // U+1E9B LATIN SMALL LETTER LONG S WITH DOT ABOVE maps to U+017F U+0307.
         // U+017F LATIN SMALL LETTER LONG S then maps to s under compatibility.
         assert_eq!(nfkd("\u{1E9B}"), "s\u{0307}");
+
+        // Three steps: U+1F82 maps to U+1F02 U+0345, U+1F02 to U+1F00 U+0300.
+        // U+1F00 then maps to alpha and a smooth breathing, U+03B1 U+0313.
+        assert_eq!(nfkd("\u{1F82}"), "\u{03B1}\u{0313}\u{0300}\u{0345}");
     }
 
     #[test]
