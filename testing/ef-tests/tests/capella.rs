@@ -3,7 +3,11 @@
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 
-use axiom_ef_tests::{Fork, LightClient, Networking, SszStatic, Suite, forks::Capella};
+use axiom_ef_tests::{
+    Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic, Suite,
+    Transition,
+    forks::{Bellatrix, Capella},
+};
 use axiom_types::{Mainnet, Minimal};
 
 #[test]
@@ -68,4 +72,114 @@ fn light_client_mainnet() {
         // Cases: merkle proofs 4.
         assert_eq!((report.passed, report.skipped.len()), (4, 0));
     }
+}
+
+#[test]
+fn operations_minimal() {
+    Suite::run(
+        &Operations::<Minimal, Capella>::default(),
+        "minimal",
+        "capella",
+    );
+}
+
+#[test]
+fn operations_mainnet() {
+    Suite::run(
+        &Operations::<Mainnet, Capella>::default(),
+        "mainnet",
+        "capella",
+    );
+}
+
+#[test]
+fn epoch_processing_minimal() {
+    Suite::run(
+        &EpochProcessing::<Minimal, Capella>::default(),
+        "minimal",
+        "capella",
+    );
+}
+
+#[test]
+fn epoch_processing_mainnet() {
+    Suite::run(
+        &EpochProcessing::<Mainnet, Capella>::default(),
+        "mainnet",
+        "capella",
+    );
+}
+
+#[test]
+fn sanity_minimal() {
+    Suite::run(&Blocks::<Minimal, Capella>::sanity(), "minimal", "capella");
+}
+
+#[test]
+fn sanity_mainnet() {
+    Suite::run(&Blocks::<Mainnet, Capella>::sanity(), "mainnet", "capella");
+}
+
+#[test]
+fn finality_minimal() {
+    Suite::run(
+        &Blocks::<Minimal, Capella>::finality(),
+        "minimal",
+        "capella",
+    );
+}
+
+#[test]
+fn finality_mainnet() {
+    Suite::run(
+        &Blocks::<Mainnet, Capella>::finality(),
+        "mainnet",
+        "capella",
+    );
+}
+
+#[test]
+fn random_minimal() {
+    Suite::run(&Blocks::<Minimal, Capella>::random(), "minimal", "capella");
+}
+
+#[test]
+fn random_mainnet() {
+    Suite::run(&Blocks::<Mainnet, Capella>::random(), "mainnet", "capella");
+}
+
+#[test]
+fn rewards_minimal() {
+    Suite::run(
+        &Rewards::<Minimal, Capella>::default(),
+        "minimal",
+        "capella",
+    );
+}
+
+#[test]
+fn rewards_mainnet() {
+    Suite::run(
+        &Rewards::<Mainnet, Capella>::default(),
+        "mainnet",
+        "capella",
+    );
+}
+
+#[test]
+fn transition_minimal() {
+    Suite::run(
+        &Transition::<Minimal, Bellatrix, Capella>::default(),
+        "minimal",
+        "capella",
+    );
+}
+
+#[test]
+fn transition_mainnet() {
+    Suite::run(
+        &Transition::<Mainnet, Bellatrix, Capella>::default(),
+        "mainnet",
+        "capella",
+    );
 }

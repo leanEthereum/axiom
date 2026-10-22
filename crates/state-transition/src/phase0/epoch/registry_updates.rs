@@ -41,6 +41,19 @@ impl RegistryUpdates {
         }
     }
 
+    /// The same updates, with activations capped at a fixed count per epoch.
+    ///
+    /// Deneb caps the activation churn, so the validator set grows at most linearly.
+    /// Exits keep the uncapped churn.
+    /// See `get_validator_activation_churn_limit` in the Deneb beacon chain spec, and EIP-7514.
+    #[must_use]
+    pub fn with_activation_cap(self, cap: u64) -> Self {
+        Self {
+            churn_limit: self.churn_limit.min(cap),
+            ..self
+        }
+    }
+
     /// Queues full validators, ejects drained ones, then activates the head of the queue.
     ///
     /// # Algorithm

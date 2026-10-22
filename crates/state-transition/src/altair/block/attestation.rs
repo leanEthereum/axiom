@@ -18,17 +18,37 @@ use crate::{BlockError, BlockProcessor, Fork, Operation, altair::flags::Inclusio
 pub struct FlaggedAttestation<'a, P: Preset>(pub &'a Attestation<P>);
 
 impl<S: Fork + ParticipationState> Operation<S> for FlaggedAttestation<'_, S::Preset> {
+    /// Records an aggregate's votes within one epoch of inclusion delay.
+    ///
+    /// See `process_attestation` in the Altair beacon chain spec.
+    fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
+        self.apply_within(processor, Some(S::Preset::SLOTS_PER_EPOCH))
+    }
+}
+
+impl<P: Preset> FlaggedAttestation<'_, P> {
     /// Records an aggregate's votes in the participation flags, and pays the proposer.
+    ///
+    /// The window bounds the inclusion delay, and the delay that still earns the target flag.
+    /// Altair sets it to one epoch, and Deneb removes it, see EIP-7045.
     ///
     /// # Algorithm
     ///
-    /// 1. Check the vote's epochs, and that it lands within one epoch of inclusion delay.
+    /// 1. Check the vote's epochs, and that it lands within the window, if any.
     /// 2. Check that the committee exists and the bits cover it exactly.
     /// 3. Decide which flags the vote earns, and check the aggregate signature.
     /// 4. Set the flags each attester did not have yet, and pay the proposer for them.
     ///
-    /// See `process_attestation` in the Altair beacon chain spec.
-    fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
+    /// See `process_attestation` in the Altair and Deneb beacon chain specs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attestation is invalid, which invalidates the whole block.
+    pub fn apply_within<S: Fork<Preset = P> + ParticipationState>(
+        self,
+        processor: &mut BlockProcessor<'_, S>,
+        window: Option<u64>,
+    ) -> Result<(), BlockError> {
         let attestation = self.0;
         let data = &attestation.data;
         let state = processor.state.beacon();
@@ -58,7 +78,7 @@ impl<S: Fork + ParticipationState> Operation<S> for FlaggedAttestation<'_, S::Pr
                 state_slot,
             });
         }
-        let latest = data.slot.checked_add(S::Preset::SLOTS_PER_EPOCH);
+        let latest = window.and_then(|window| data.slot.checked_add(window));
         if latest.is_some_and(|latest| state_slot > latest) {
             return Err(BlockError::AttestationTooLate {
                 slot: data.slot,
@@ -85,8 +105,7 @@ impl<S: Fork + ParticipationState> Operation<S> for FlaggedAttestation<'_, S::Pr
         // Phase 3: flags earned, and the signature.
         // Timing: the window above already keeps the delay within Altair's target deadline.
         let delay = state_slot - data.slot;
-        let flags = Inclusion::new(processor.state.beacon(), data, delay)
-            .flags(Some(S::Preset::SLOTS_PER_EPOCH))?;
+        let flags = Inclusion::new(processor.state.beacon(), data, delay).flags(window)?;
         let attesters: Vec<ValidatorIndex> = committees
             .attesters(data.slot, [data.index], attestation.aggregation_bits.iter())?
             .into_iter()

@@ -3,7 +3,11 @@
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 
-use axiom_ef_tests::{Fork, LightClient, MerkleProofs, Networking, SszStatic, Suite, forks::Deneb};
+use axiom_ef_tests::{
+    Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
+    SszStatic, Suite, Transition,
+    forks::{Capella, Deneb},
+};
 use axiom_types::{Mainnet, Minimal};
 
 #[test]
@@ -70,4 +74,90 @@ fn merkle_proof_mainnet() {
         // Cases: four blob commitment proofs into the block body.
         assert_eq!((report.passed, report.skipped.len()), (4, 0));
     }
+}
+
+#[test]
+fn operations_minimal() {
+    Suite::run(&Operations::<Minimal, Deneb>::default(), "minimal", "deneb");
+}
+
+#[test]
+fn operations_mainnet() {
+    Suite::run(&Operations::<Mainnet, Deneb>::default(), "mainnet", "deneb");
+}
+
+#[test]
+fn epoch_processing_minimal() {
+    Suite::run(
+        &EpochProcessing::<Minimal, Deneb>::default(),
+        "minimal",
+        "deneb",
+    );
+}
+
+#[test]
+fn epoch_processing_mainnet() {
+    Suite::run(
+        &EpochProcessing::<Mainnet, Deneb>::default(),
+        "mainnet",
+        "deneb",
+    );
+}
+
+#[test]
+fn sanity_minimal() {
+    Suite::run(&Blocks::<Minimal, Deneb>::sanity(), "minimal", "deneb");
+}
+
+#[test]
+fn sanity_mainnet() {
+    Suite::run(&Blocks::<Mainnet, Deneb>::sanity(), "mainnet", "deneb");
+}
+
+#[test]
+fn finality_minimal() {
+    Suite::run(&Blocks::<Minimal, Deneb>::finality(), "minimal", "deneb");
+}
+
+#[test]
+fn finality_mainnet() {
+    Suite::run(&Blocks::<Mainnet, Deneb>::finality(), "mainnet", "deneb");
+}
+
+#[test]
+fn random_minimal() {
+    Suite::run(&Blocks::<Minimal, Deneb>::random(), "minimal", "deneb");
+}
+
+#[test]
+fn random_mainnet() {
+    Suite::run(&Blocks::<Mainnet, Deneb>::random(), "mainnet", "deneb");
+}
+
+#[test]
+fn rewards_minimal() {
+    Suite::run(&Rewards::<Minimal, Deneb>::default(), "minimal", "deneb");
+}
+
+#[test]
+fn rewards_mainnet() {
+    Suite::run(&Rewards::<Mainnet, Deneb>::default(), "mainnet", "deneb");
+}
+
+#[test]
+fn transition_minimal() {
+    Suite::run(
+        &Transition::<Minimal, Capella, Deneb>::default(),
+        "minimal",
+        "deneb",
+    );
+}
+
+#[test]
+fn transition_mainnet() {
+    Suite::run(
+        &Transition::<Mainnet, Capella, Deneb>::default(),
+        "mainnet",
+        "deneb",
+    );
 }

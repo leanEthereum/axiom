@@ -14,3 +14,4 @@ pub use attestation::AttestationRecord;
 pub use deposit::{ContractDeposit, DepositQuota};
 pub use deposit_inclusion::DepositInclusion;
 pub use randao::RandaoReveal;
+pub use voluntary_exit::SignedExit;

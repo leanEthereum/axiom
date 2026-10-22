@@ -1,19 +1,27 @@
 //! Voluntary exits: a validator asking to stop validating.
 
-use axiom_types::{Epoch, constants::DOMAIN_VOLUNTARY_EXIT, phase0::SignedVoluntaryExit};
+use axiom_types::{Domain, Epoch, constants::DOMAIN_VOLUNTARY_EXIT, phase0::SignedVoluntaryExit};
 
 use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
 
-impl<S: Fork> Operation<S> for SignedVoluntaryExit {
-    /// Starts the exit of an active, seasoned validator that signed its request.
-    ///
-    /// The signature domain follows the fork version at the exit's epoch.
-    /// Altair, Bellatrix, and Capella kept this rule.
-    /// Deneb pinned the domain to Capella's version, and Electra added a check on withdrawals.
+/// A voluntary exit, with the domain its signature is checked in.
+///
+/// Phase0 signs in the domain of the exit's epoch, and Deneb pins it to Capella.
+/// The other rules stayed the same until Electra added its own.
+#[derive(Clone, Copy, Debug)]
+pub struct SignedExit<'a> {
+    /// The signed exit.
+    pub exit: &'a SignedVoluntaryExit,
+    /// The domain the signature covers.
+    pub domain: Domain,
+}
+
+impl<S: Fork> Operation<S> for SignedExit<'_> {
+    /// Starts the exit of an active, seasoned validator.
     ///
     /// See `process_voluntary_exit` in the phase0 beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
-        let exit = &self.message;
+        let exit = &self.exit.message;
         let state = processor.state.beacon();
         let epoch = state.current_epoch();
         let validators = state.validators();
@@ -45,10 +53,30 @@ impl<S: Fork> Operation<S> for SignedVoluntaryExit {
             return Err(invalid("validator is too recent"));
         }
 
-        let domain = state.domain(DOMAIN_VOLUNTARY_EXIT, exit.epoch);
-        processor.verify_signature(exit.validator_index, exit, domain, &self.signature)?;
-
+        processor.verify_signature(
+            exit.validator_index,
+            exit,
+            self.domain,
+            &self.exit.signature,
+        )?;
         processor.registry().initiate_exit(exit.validator_index)?;
         Ok(())
+    }
+}
+
+impl<S: Fork> Operation<S> for SignedVoluntaryExit {
+    /// Starts the exit of an active, seasoned validator that signed its request.
+    ///
+    /// The signature domain follows the fork version at the exit's epoch.
+    /// Altair, Bellatrix, and Capella kept this rule.
+    /// Deneb pinned the domain to Capella's version, and Electra added a check on withdrawals.
+    ///
+    /// See `process_voluntary_exit` in the phase0 beacon chain spec.
+    fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
+        let domain = processor
+            .state
+            .beacon()
+            .domain(DOMAIN_VOLUNTARY_EXIT, self.message.epoch);
+        processor.apply(&SignedExit { exit: self, domain })
     }
 }

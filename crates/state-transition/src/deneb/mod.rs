@@ -1,12 +1,14 @@
 //! Deneb: blobs, see EIP-4844.
 //!
-//! Deneb's change to the participation flags lives with them, as a deadline Altair sets and Deneb lifts.
+//! Deneb also widens the attestation inclusion window, see EIP-7045.
+//! It caps activations per epoch, see EIP-7514.
+//! It pins the voluntary exit domain to Capella, see EIP-7044.
 
+pub mod block;
 mod upgrade;
 
 use axiom_types::{
     Preset, ValidatorIndex,
-    accessors::ForkState,
     deneb::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
@@ -14,9 +16,14 @@ use axiom_types::{
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
     StateError,
-    altair::AltairEpoch,
-    capella::epoch::HistoricalSummaryUpdate,
-    phase0::{ExitQueue, Slashing, SlotRoots},
+    altair::{AltairEpoch, block::ParticipantDeposit},
+    capella::{block::PayloadWithdrawals, epoch::HistoricalSummaryUpdate},
+    deneb::block::{Exit, PayloadExecution, UnboundedAttestation},
+    phase0::{
+        ExitQueue, Slashing, SlotRoots,
+        block::{DepositQuota, RandaoReveal},
+        epoch::RegistryUpdates,
+    },
     sampling::WeightedSampler,
 };
 
@@ -74,6 +81,13 @@ impl<P: Preset> Fork for BeaconState<P> {
         step: EpochStep,
     ) -> Result<(), StateError> {
         match step {
+            EpochStep::RegistryUpdates => {
+                // Deneb caps activations, see EIP-7514.
+                let cap = processor.config.max_per_epoch_activation_churn_limit;
+                RegistryUpdates::new(&*processor.state.beacon, processor.config)
+                    .with_activation_cap(cap)
+                    .apply(&mut processor.registry())
+            }
             EpochStep::HistoricalSummariesUpdate => {
                 HistoricalSummaryUpdate::new(processor.current_epoch)
                     .apply(&mut *processor.state.beacon)
@@ -82,16 +96,42 @@ impl<P: Preset> Fork for BeaconState<P> {
         }
     }
 
+    /// Runs Deneb's block processing.
+    ///
+    /// 1. The header.
+    /// 2. The withdrawals by Capella's rule, then the execution payload by Deneb's.
+    /// 3. The RANDAO reveal and the eth1 vote, by phase0's rules.
+    /// 4. The operations, with Deneb's attestations and exits, and Altair's deposits.
+    /// 5. The sync aggregate, by Altair's rule.
+    ///
+    /// See `process_block` and `process_operations` in the Deneb beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
-        _engine: &E,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
+        engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        processor.apply(header)?;
+        processor.apply(&PayloadWithdrawals(&body.execution_payload.withdrawals))?;
+        processor.apply(&PayloadExecution::new(body, engine))?;
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&UnboundedAttestation(attestation))?;
         }
-        .into())
+        for deposit in &body.deposits {
+            processor.apply(&ParticipantDeposit(deposit))?;
+        }
+        for exit in &body.voluntary_exits {
+            processor.apply(&Exit(exit))?;
+        }
+        processor.apply_all(&body.bls_to_execution_changes)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }

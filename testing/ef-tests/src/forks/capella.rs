@@ -1,10 +1,15 @@
 //! The vectors of Capella, which adds withdrawals.
 
 use axiom_gossip::GossipValidator;
+use axiom_state_transition::{
+    KnownVerdict,
+    altair::block::{FlaggedAttestation, ParticipantDeposit},
+    capella::block::{PayloadExecution, PayloadWithdrawals},
+};
 use axiom_types::{ForkName, Preset, capella};
 
 use super::{Bellatrix, SpecFork};
-use crate::{Case, Failure, FieldNames, GossipMessage, Verdict};
+use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
 
 /// The Capella fork.
 ///
@@ -91,6 +96,43 @@ impl SpecFork for Capella {
             "SignedBeaconBlock" => case.round_trip::<capella::SignedBeaconBlock<P>>(),
             "Withdrawal" => case.round_trip::<capella::Withdrawal>(),
             _ => Bellatrix::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, capella::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input
+                .apply_with::<capella::Attestation<P>>("attestation", |attestation, processor| {
+                    processor.apply(&FlaggedAttestation(attestation))
+                }),
+            "attester_slashing" => input.apply::<capella::AttesterSlashing<P>>("attester_slashing"),
+            "proposer_slashing" => input.apply::<capella::ProposerSlashing>("proposer_slashing"),
+            "deposit" => input.apply_with::<capella::Deposit>("deposit", |deposit, processor| {
+                processor.apply(&ParticipantDeposit(deposit))
+            }),
+            "voluntary_exit" => input.apply::<capella::SignedVoluntaryExit>("voluntary_exit"),
+            "bls_to_execution_change" => {
+                input.apply::<capella::SignedBlsToExecutionChange>("address_change")
+            }
+            "block_header" => input
+                .apply_with::<capella::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "sync_aggregate" => input.apply::<capella::SyncAggregate<P>>("sync_aggregate"),
+            "withdrawals" => input.apply_with::<capella::ExecutionPayload<P>>(
+                "execution_payload",
+                |payload, processor| processor.apply(&PayloadWithdrawals(&payload.withdrawals)),
+            ),
+            "execution_payload" => {
+                let engine = KnownVerdict(input.execution_verdict()?);
+                input.apply_with::<capella::BeaconBlockBody<P>>("body", |body, processor| {
+                    processor.apply(&PayloadExecution::new(&body.execution_payload, &engine))
+                })
+            }
+            other => Err(Failure(format!("unsupported operation {other} in capella"))),
         }
     }
 }
