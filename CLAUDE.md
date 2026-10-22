@@ -8,9 +8,30 @@ These rules are binding for every crate, every file, and every contributor, huma
 
 ## Targets
 
-- Fork: Fulu, the fork live on mainnet.
+- Forks: phase0, Altair, Bellatrix, Capella, Deneb, Electra, Fulu, and Gloas.
+  Fulu is the fork live on mainnet.
 - Specification: `ethereum/consensus-specs` at the version pinned in `testing/ef-tests/Makefile`.
 - Presets: `mainnet` and `minimal`, both compiled in.
+
+## Forks
+
+Supporting every fork is smooth, never a burden.
+Fork N+1 is one new folder per crate that changes, plus one variant per combined enum.
+
+- Data shapes vary: every container version is its own struct, in the fork that introduced it.
+  `axiom_types::<fork>` re-exports the fork before it and shadows what its spec changed.
+- Rules vary: a fork writes out the spec functions it changed and calls the earlier ones it kept.
+- Constants vary: one table per constant family, as a method on the fork name.
+- The fork in force varies by slot: dispatch happens once, at the boundary.
+  Below it, code works on one concrete fork type.
+
+Forbidden, because each makes forks a burden:
+
+- Runtime fork comparisons scattered through shared code.
+- The same eight-arm match repeated across consumers.
+  Combined enums carry a small fixed set of methods; other consumers use accessor traits.
+- A superset struct with optional fields, which makes illegal states representable.
+- Generated code.
 
 ## Dependency policy
 

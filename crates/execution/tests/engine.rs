@@ -15,9 +15,12 @@ use axiom_http::StatusCode;
 use axiom_json::{Data, Json};
 use axiom_ssz::{ByteList, List, U256};
 use axiom_types::{
-    Bytes32, ConsolidationRequest, DepositRequest, ExecutionAddress, ExecutionPayload,
-    ExecutionRequests, Gwei, Hash32, Minimal, NewPayloadRequest, Root, ValidatorIndex,
-    VersionedHash, Withdrawal, WithdrawalIndex,
+    Bytes32, ExecutionAddress, Gwei, Hash32, Minimal, Root, ValidatorIndex, VersionedHash,
+    WithdrawalIndex,
+    fulu::{
+        ConsolidationRequest, DepositRequest, ExecutionPayload, ExecutionRequests,
+        NewPayloadRequest, Withdrawal,
+    },
 };
 
 /// Runs a test body on a single-threaded runtime with timers and sockets.

@@ -1,6 +1,6 @@
 //! The participation of the ending epoch, as rewards and finality read it.
 
-use axiom_types::{BeaconState, Epoch, Gwei, Preset};
+use axiom_types::{Epoch, Gwei, Preset, fulu::BeaconState};
 
 use crate::ActiveBalance;
 

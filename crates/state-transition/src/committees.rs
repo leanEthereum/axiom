@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use axiom_types::{
-    Attestation, BeaconState, CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
+    CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
     constants::DOMAIN_BEACON_ATTESTER,
+    fulu::{Attestation, BeaconState},
 };
 
 use crate::{BlockError, SwapOrNot};

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axiom_fork_choice::{BlockNode, ExecutionStatus, ForkChoiceError, Store};
 use axiom_state_transition::State;
-use axiom_types::{ChainConfig, Checkpoint, Epoch, Preset, Root, Slot};
+use axiom_types::{ChainConfig, Epoch, Preset, Root, Slot, fulu::Checkpoint};
 
 /// Everything gossip validation reads about the chain.
 ///

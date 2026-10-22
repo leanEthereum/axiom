@@ -16,8 +16,9 @@
 use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
 use axiom_types::{
-    ExecutionRequests, Preset,
+    Preset,
     constants::{CONSOLIDATION_REQUEST_TYPE, DEPOSIT_REQUEST_TYPE, WITHDRAWAL_REQUEST_TYPE},
+    fulu::ExecutionRequests,
 };
 
 use super::{JsonCodec, Reader};
@@ -169,8 +170,8 @@ impl<P: Preset> JsonCodec for ExecutionRequests<P> {
 mod tests {
     use axiom_ssz::List;
     use axiom_types::{
-        BlsPubkey, BlsSignature, Bytes32, ConsolidationRequest, DepositRequest, ExecutionAddress,
-        Gwei, Minimal, WithdrawalRequest,
+        BlsPubkey, BlsSignature, Bytes32, ExecutionAddress, Gwei, Minimal,
+        fulu::{ConsolidationRequest, DepositRequest, WithdrawalRequest},
     };
     use proptest::prelude::*;
 

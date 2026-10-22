@@ -81,7 +81,16 @@ impl Preset for Minimal {
     const FIELD_ELEMENTS_PER_EXT_BLOB: u64 = 8192;
     const CELLS_PER_EXT_BLOB: u64 = 128;
     const NUMBER_OF_COLUMNS: u64 = 128;
+    const PTC_SIZE: u64 = 16;
+    const MAX_PAYLOAD_ATTESTATIONS: u64 = 4;
+    const MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD: u64 = 64;
+    const MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD: u64 = 16;
+    const MAX_BUILDERS_PER_WITHDRAWALS_SWEEP: u64 = 16;
+    const MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE: u64 = 1462;
+    const MAX_ATTESTER_SLASHING_SIZE: u64 = 131_536;
+    const MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE: u64 = 196_932;
 
+    type MaxValidatorsPerCommittee = Const<2048>;
     type MaxValidatorsPerSlot = Const<8192>;
     type MaxCommitteesPerSlot = Const<4>;
     type SlotsPerEpoch = Const<8>;
@@ -93,8 +102,11 @@ impl Preset for Minimal {
     type EpochsPerSlashingsVector = Const<64>;
     type Eth1DataVotesLimit = Const<32>;
     type MaxProposerSlashings = Const<16>;
-    type MaxAttesterSlashings = Const<1>;
-    type MaxAttestations = Const<8>;
+    type MaxAttesterSlashings = Const<2>;
+    type MaxAttestations = Const<128>;
+    type MaxPendingAttestations = Const<1024>;
+    type MaxAttesterSlashingsElectra = Const<1>;
+    type MaxAttestationsElectra = Const<8>;
     type MaxDeposits = Const<16>;
     type MaxVoluntaryExits = Const<16>;
     type MaxBlsToExecutionChanges = Const<16>;
@@ -119,4 +131,7 @@ impl Preset for Minimal {
     type MaxDepositRequestsPerPayload = Const<8192>;
     type MaxWithdrawalRequestsPerPayload = Const<16>;
     type MaxConsolidationRequestsPerPayload = Const<2>;
+    type PtcSize = Const<16>;
+    type PtcWindowSlots = Const<24>;
+    type BuilderPendingPaymentsSlots = Const<16>;
 }

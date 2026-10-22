@@ -5,9 +5,12 @@ use std::mem;
 use axiom_bls::{PublicKey, Signature};
 use axiom_ssz::{Root, Ssz, Vector};
 use axiom_types::{
-    ChainConfig, Domain, LightClientBootstrap, LightClientFinalityUpdate, LightClientHeader,
-    LightClientOptimisticUpdate, LightClientUpdate, Preset, SigningData, Slot, SyncCommittee,
+    ChainConfig, Domain, Preset, Slot,
     constants::DOMAIN_SYNC_COMMITTEE,
+    fulu::{
+        LightClientBootstrap, LightClientFinalityUpdate, LightClientHeader,
+        LightClientOptimisticUpdate, LightClientUpdate, SigningData, SyncCommittee,
+    },
 };
 
 use crate::{LightClientError, UpdateQuality, branch::Branch};

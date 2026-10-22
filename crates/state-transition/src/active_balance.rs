@@ -1,6 +1,6 @@
 //! The total active balance, and the rates it sets for one epoch.
 
-use axiom_types::{BeaconState, ChainConfig, Gwei, Preset};
+use axiom_types::{ChainConfig, Gwei, Preset, fulu::BeaconState};
 
 /// Total effective balance of the active validators in one epoch.
 ///

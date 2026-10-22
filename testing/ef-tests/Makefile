@@ -7,8 +7,9 @@
 CONSENSUS_SPECS_VERSION ?= v1.7.0-beta.4
 BLS_TESTS_VERSION ?= v0.1.2
 CKZG_VERSION ?= v2.1.8
-# The general suite of this release still ships ssz_generic, dropped from later releases.
-GENERAL_SPECS_VERSION ?= v1.6.0
+# The general suite of this release is the last to ship ssz_generic.
+# It merkleizes progressive types with the subtrees on the left, as EIP-7916 now specifies.
+GENERAL_SPECS_VERSION ?= v1.7.0-alpha.13
 WYCHEPROOF_COMMIT ?= 7a325932231bd7a724c791c8b0d65ea4d6d2f435
 JSON_SUITE_COMMIT ?= 1ef36fa01286573e846ac449e8683f8833c5b26a
 MULTIBASE_COMMIT ?= d7406cdea189b82a0b3937f5737b440f5fa92f92

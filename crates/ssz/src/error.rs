@@ -82,6 +82,15 @@ pub enum DecodeError {
     #[error("boolean byte {0:#04x} is not 0 or 1")]
     InvalidBoolean(u8),
 
+    /// A compatible union's selector names none of its options.
+    ///
+    /// Reserved selectors, zero and those with the high bit set, never name an option.
+    #[error("selector {selector} names no option of the union")]
+    UnknownSelector {
+        /// The selector byte found.
+        selector: u8,
+    },
+
     /// A bitlist lacks its length-marking sentinel bit.
     ///
     /// The input is empty or ends in a zero byte.

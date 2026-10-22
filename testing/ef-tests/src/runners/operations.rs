@@ -7,9 +7,12 @@ use axiom_state_transition::{
     BlockError, BlockProcessor, KnownVerdict, Operation, PayloadExecution, State, Verification,
 };
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, ChainConfig,
-    ConsolidationRequest, DepositRequest, ExecutionPayload, Preset, ProposerSlashing,
-    SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
+    ChainConfig, Preset,
+    fulu::{
+        Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
+        ConsolidationRequest, DepositRequest, ExecutionPayload, ProposerSlashing,
+        SignedBlsToExecutionChange, SignedVoluntaryExit, SyncAggregate, WithdrawalRequest,
+    },
 };
 use axiom_yaml::Yaml;
 use thiserror::Error;

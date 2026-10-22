@@ -13,7 +13,10 @@
 
 use axiom_json::Json;
 use axiom_ssz::{Length, List, Vector};
-use axiom_types::{Blob, BlobKzgCommitments, KzgProof, Preset};
+use axiom_types::{
+    KzgProof, Preset,
+    fulu::{Blob, BlobKzgCommitments},
+};
 
 use super::{Fields, JsonCodec};
 use crate::{WireError, WireErrorKind};

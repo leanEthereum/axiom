@@ -6,7 +6,7 @@ use std::{
 };
 
 use axiom_snappy::raw;
-use axiom_ssz::Ssz;
+use axiom_ssz::{Root, Ssz};
 use axiom_types::{ChainConfig, Preset};
 use axiom_yaml::Yaml;
 use thiserror::Error;
@@ -101,6 +101,32 @@ impl Case {
         } else {
             Ok(None)
         }
+    }
+
+    /// Checks an SSZ static case: the value decodes, hashes to its root, and re-encodes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the value does not decode, its root differs, or its encoding differs.
+    pub fn round_trip<T: Ssz>(&self) -> Result<(), Failure> {
+        let bytes = self.ssz_bytes("serialized")?;
+        let value =
+            T::decode(&bytes).map_err(|error| Failure(format!("decode failed: {error}")))?;
+
+        let expected = self
+            .yaml("roots.yaml")?
+            .get("root")
+            .and_then(Yaml::as_hex_array::<32>)
+            .map(Root)
+            .ok_or_else(|| Failure::new("roots.yaml has no root"))?;
+        let root = value.hash_tree_root();
+        if root != expected {
+            return Err(Failure(format!("root {root} is not {expected}")));
+        }
+        if value.encode() != bytes {
+            return Err(Failure::new("re-encoding differs from the vector"));
+        }
+        Ok(())
     }
 
     /// The raw bytes of a snappy-compressed SSZ file.

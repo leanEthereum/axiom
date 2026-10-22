@@ -2,7 +2,7 @@
 
 use std::cmp::Reverse;
 
-use axiom_types::{LightClientUpdate, Preset, Slot};
+use axiom_types::{Preset, Slot, fulu::LightClientUpdate};
 
 /// How good an update is, as a key whose natural order is the spec's preference.
 ///

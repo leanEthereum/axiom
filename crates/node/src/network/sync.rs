@@ -11,7 +11,10 @@ use axiom_p2p::{
     swarm::{NetworkError, NetworkHandle, RequestId},
 };
 use axiom_ssz::{List, Ssz};
-use axiom_types::{ChainConfig, ColumnIndex, DataColumnSidecar, Preset, SignedBeaconBlock, Slot};
+use axiom_types::{
+    ChainConfig, ColumnIndex, Preset, Slot,
+    fulu::{DataColumnSidecar, SignedBeaconBlock},
+};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     task,

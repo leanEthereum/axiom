@@ -25,7 +25,10 @@
 //! ```
 
 use axiom_json::Json;
-use axiom_types::{ExecutionPayload, Preset, Withdrawal};
+use axiom_types::{
+    Preset,
+    fulu::{ExecutionPayload, Withdrawal},
+};
 
 use super::{Fields, JsonCodec};
 use crate::WireError;

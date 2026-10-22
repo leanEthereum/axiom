@@ -3,8 +3,10 @@
 use axiom_kzg::{Blob as KzgBlob, Bytes48, CELLS_PER_EXT_BLOB, Cell as KzgCell, CellIndex, Kzg};
 use axiom_ssz::{Container, Ssz, Vector};
 use axiom_types::{
-    BeaconBlockBody, Blob, Bytes32, Cell, ColumnIndex, DataColumnSidecar, KzgProof, Preset,
-    SignedBeaconBlock, SignedBeaconBlockHeader,
+    Bytes32, ColumnIndex, KzgProof, Preset,
+    fulu::{
+        BeaconBlockBody, Blob, Cell, DataColumnSidecar, SignedBeaconBlock, SignedBeaconBlockHeader,
+    },
 };
 
 use crate::ColumnError;

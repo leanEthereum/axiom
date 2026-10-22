@@ -4,7 +4,7 @@ use std::fmt;
 
 use axiom_ssz::{DecodeError, Root, Ssz};
 
-use crate::{ForkData, Hex};
+use crate::{Hex, phase0::ForkData};
 
 /// Thirty-two opaque bytes, such as a randao mix or withdrawal credentials.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

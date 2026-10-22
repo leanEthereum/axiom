@@ -4,7 +4,10 @@ use std::marker::PhantomData;
 
 use axiom_light_client::{LightClientStore, UpdateQuality};
 use axiom_ssz::{Root, Ssz};
-use axiom_types::{LightClientBootstrap, LightClientHeader, LightClientUpdate, Preset, Slot};
+use axiom_types::{
+    Preset, Slot,
+    fulu::{LightClientBootstrap, LightClientHeader, LightClientUpdate},
+};
 use axiom_yaml::Yaml;
 
 use super::MerkleProofs;

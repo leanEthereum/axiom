@@ -2,7 +2,10 @@
 
 use axiom_kzg::{Bytes48, Cell, CellIndex, Kzg, KzgError};
 use axiom_ssz::{CapacityError, Container, GeneralizedIndex, MerkleProof, Root, Ssz};
-use axiom_types::{BeaconBlockBody, ChainConfig, ColumnIndex, DataColumnSidecar, Preset};
+use axiom_types::{
+    ChainConfig, ColumnIndex, Preset,
+    fulu::{BeaconBlockBody, DataColumnSidecar},
+};
 use thiserror::Error;
 
 /// Index of the commitment list among the fields of a block body.

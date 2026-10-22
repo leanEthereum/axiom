@@ -4,8 +4,8 @@
 //! Field names there are single capital letters, lowered here.
 
 use axiom_ssz::{
-    BitList, BitVector, Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
-    Vector,
+    BitList, BitVector, Const, Container, DecodeError, FieldDecoder, FieldVisitor, List,
+    ProgressiveBitList, ProgressiveList, Ssz, Vector,
 };
 
 /// A container of one byte.
@@ -167,6 +167,44 @@ impl Container for ComplexTestStruct {
     }
 }
 
+/// A binary container whose fields are all progressive lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProgressiveTestStruct {
+    /// Any number of bytes.
+    a: ProgressiveList<u8>,
+    /// Any number of 64-bit integers.
+    b: ProgressiveList<u64>,
+    /// Any number of nested fixed-size containers.
+    c: ProgressiveList<SmallTestStruct>,
+    /// Any number of lists of nested variable-size containers.
+    d: ProgressiveList<ProgressiveList<VarTestStruct>>,
+}
+
+impl Container for ProgressiveTestStruct {
+    const FIELDS: &'static [Option<usize>] = &[
+        <ProgressiveList<u8>>::FIXED_SIZE,
+        <ProgressiveList<u64>>::FIXED_SIZE,
+        <ProgressiveList<SmallTestStruct>>::FIXED_SIZE,
+        <ProgressiveList<ProgressiveList<VarTestStruct>>>::FIXED_SIZE,
+    ];
+
+    fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
+        visitor.field(&self.a);
+        visitor.field(&self.b);
+        visitor.field(&self.c);
+        visitor.field(&self.d);
+    }
+
+    fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            a: fields.field()?,
+            b: fields.field()?,
+            c: fields.field()?,
+            d: fields.field()?,
+        })
+    }
+}
+
 /// A container of bitlists and bitvectors, interleaved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BitsStruct {
@@ -206,6 +244,87 @@ impl Container for BitsStruct {
             c: fields.field()?,
             d: fields.field()?,
             e: fields.field()?,
+        })
+    }
+}
+
+/// A container of bitfields on either side of the chunk boundaries at 256 and 1280 bits.
+///
+/// Each group of three holds a bitvector, a bitlist, and a progressive bitlist.
+/// A chunk holds 256 bits, and the first two progressive subtrees hold five chunks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProgressiveBitsStruct {
+    /// Exactly 256 bits.
+    a: BitVector<Const<256>>,
+    /// Up to 256 bits.
+    b: BitList<Const<256>>,
+    /// Any number of bits.
+    c: ProgressiveBitList,
+    /// Exactly 257 bits.
+    d: BitVector<Const<257>>,
+    /// Up to 257 bits.
+    e: BitList<Const<257>>,
+    /// Any number of bits.
+    f: ProgressiveBitList,
+    /// Exactly 1280 bits.
+    g: BitVector<Const<1280>>,
+    /// Up to 1280 bits.
+    h: BitList<Const<1280>>,
+    /// Any number of bits.
+    i: ProgressiveBitList,
+    /// Exactly 1281 bits.
+    j: BitVector<Const<1281>>,
+    /// Up to 1281 bits.
+    k: BitList<Const<1281>>,
+    /// Any number of bits.
+    l: ProgressiveBitList,
+}
+
+impl Container for ProgressiveBitsStruct {
+    const FIELDS: &'static [Option<usize>] = &[
+        <BitVector<Const<256>>>::FIXED_SIZE,
+        <BitList<Const<256>>>::FIXED_SIZE,
+        ProgressiveBitList::FIXED_SIZE,
+        <BitVector<Const<257>>>::FIXED_SIZE,
+        <BitList<Const<257>>>::FIXED_SIZE,
+        ProgressiveBitList::FIXED_SIZE,
+        <BitVector<Const<1280>>>::FIXED_SIZE,
+        <BitList<Const<1280>>>::FIXED_SIZE,
+        ProgressiveBitList::FIXED_SIZE,
+        <BitVector<Const<1281>>>::FIXED_SIZE,
+        <BitList<Const<1281>>>::FIXED_SIZE,
+        ProgressiveBitList::FIXED_SIZE,
+    ];
+
+    fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
+        visitor.field(&self.a);
+        visitor.field(&self.b);
+        visitor.field(&self.c);
+        visitor.field(&self.d);
+        visitor.field(&self.e);
+        visitor.field(&self.f);
+        visitor.field(&self.g);
+        visitor.field(&self.h);
+        visitor.field(&self.i);
+        visitor.field(&self.j);
+        visitor.field(&self.k);
+        visitor.field(&self.l);
+    }
+
+    fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            a: fields.field()?,
+            b: fields.field()?,
+            c: fields.field()?,
+            d: fields.field()?,
+            e: fields.field()?,
+            f: fields.field()?,
+            g: fields.field()?,
+            h: fields.field()?,
+            i: fields.field()?,
+            j: fields.field()?,
+            k: fields.field()?,
+            l: fields.field()?,
         })
     }
 }

@@ -7,7 +7,7 @@ use std::{
 
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
 use axiom_json::{Json, Limits as JsonLimits};
-use axiom_types::{NewPayloadRequest, Preset, VersionedHash};
+use axiom_types::{Preset, VersionedHash, fulu::NewPayloadRequest};
 
 use crate::{
     Claims, EngineError, ForkchoiceState, ForkchoiceUpdated, GetPayloadResponse, JsonCodec,

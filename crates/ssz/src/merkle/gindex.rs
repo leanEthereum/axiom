@@ -81,6 +81,23 @@ impl GeneralizedIndex {
         );
         Self((self.0 << inner_depth) | inner.position())
     }
+
+    /// The path from an ancestor down to this node, as an index within the ancestor's subtree.
+    ///
+    /// Returns nothing when the other node is not this node or one of its ancestors.
+    /// This undoes a concatenation: the outer index of a concatenation gives back the inner one.
+    #[must_use]
+    pub const fn relative_to(self, ancestor: Self) -> Option<Self> {
+        let (depth, ancestor_depth) = (self.depth(), ancestor.depth());
+        if depth < ancestor_depth {
+            return None;
+        }
+        let steps = depth - ancestor_depth;
+        if self.0 >> steps != ancestor.0 {
+            return None;
+        }
+        Some(Self((1 << steps) | (self.0 & ((1 << steps) - 1))))
+    }
 }
 
 impl fmt::Debug for GeneralizedIndex {
@@ -113,6 +130,23 @@ mod tests {
         let inner = GeneralizedIndex::new(3);
 
         assert_eq!(outer.concat(inner), GeneralizedIndex::new(15));
+    }
+
+    #[test]
+    fn relative_to_undoes_concat() {
+        // Node 6 = 0b110, then node 0b1_01 below it: 0b110_01 = 25.
+        let outer = GeneralizedIndex::new(6);
+        let inner = GeneralizedIndex::new(0b101);
+
+        assert_eq!(outer.concat(inner).relative_to(outer), Some(inner));
+        assert_eq!(outer.relative_to(outer), Some(GeneralizedIndex::ROOT));
+        // Node 7 is a sibling of 6, not an ancestor of 25.
+        assert_eq!(
+            GeneralizedIndex::new(25).relative_to(GeneralizedIndex::new(7)),
+            None
+        );
+        // Node 25 sits below 6, so 6 is not relative to it.
+        assert_eq!(outer.relative_to(GeneralizedIndex::new(25)), None);
     }
 
     #[test]

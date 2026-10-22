@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use axiom_p2p::eth::reqresp::{ResponseChunk, ResponseCode, Status};
 use axiom_ssz::Ssz;
-use axiom_types::{ColumnIndex, Epoch, Preset, Root, SignedBeaconBlock, Slot};
+use axiom_types::{ColumnIndex, Epoch, Preset, Root, Slot, fulu::SignedBeaconBlock};
 
 use super::requests::{
     BlocksByHeadRequest, BlocksByRangeRequest, BlocksByRootRequest, ColumnsByRangeRequest,

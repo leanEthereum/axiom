@@ -4,7 +4,10 @@ use std::future::Future;
 
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
-use axiom_types::{BeaconBlockHeader, Checkpoint, ForkName};
+use axiom_types::{
+    ForkName,
+    fulu::{BeaconBlockHeader, Checkpoint},
+};
 
 use crate::{ChainError, ChainStopped};
 

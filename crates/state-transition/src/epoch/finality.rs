@@ -1,7 +1,9 @@
 //! Casper FFG justification and finalization.
 
 use axiom_types::{
-    BeaconState, Checkpoint, Epoch, Gwei, Preset, constants::TIMELY_TARGET_FLAG_INDEX,
+    Epoch, Gwei, Preset,
+    constants::TIMELY_TARGET_FLAG_INDEX,
+    fulu::{BeaconState, Checkpoint},
 };
 
 use super::Participation;

@@ -1,7 +1,9 @@
 //! Withdrawal requests: exits and partial withdrawals triggered from the execution layer.
 
 use axiom_types::{
-    Epoch, PendingPartialWithdrawal, Preset, WithdrawalRequest, constants::FULL_EXIT_REQUEST_AMOUNT,
+    Epoch, Preset,
+    constants::FULL_EXIT_REQUEST_AMOUNT,
+    fulu::{PendingPartialWithdrawal, WithdrawalRequest},
 };
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};

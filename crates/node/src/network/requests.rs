@@ -1,7 +1,7 @@
 //! Request bodies of the req/resp methods that fetch blocks and columns.
 
 use axiom_ssz::{Const, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz};
-use axiom_types::{ColumnIndex, DataColumnsByRootIdentifier, Preset, Root, Slot};
+use axiom_types::{ColumnIndex, Preset, Root, Slot, fulu::DataColumnsByRootIdentifier};
 
 /// Most blocks one request may ask for: MAX_REQUEST_BLOCKS_DENEB.
 ///

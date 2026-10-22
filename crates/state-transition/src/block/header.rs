@@ -1,7 +1,7 @@
 //! The block header step.
 
 use axiom_ssz::Ssz;
-use axiom_types::{BeaconBlockHeader, Preset, Root};
+use axiom_types::{Preset, Root, fulu::BeaconBlockHeader};
 
 use super::{BlockProcessor, Operation};
 use crate::{BlockError, StateError};

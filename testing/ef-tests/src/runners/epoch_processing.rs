@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::{EpochProcessor, EpochStep, State, Verification};
-use axiom_types::{BeaconState, ChainConfig, Preset};
+use axiom_types::{ChainConfig, Preset, fulu::BeaconState};
 
 use super::BEACON_STATE_FIELDS;
 use crate::{Case, Failure, Runner};

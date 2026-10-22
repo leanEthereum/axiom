@@ -1,6 +1,6 @@
 //! The Casper FFG checkpoints the store tracks, realized and pulled up.
 
-use axiom_types::Checkpoint;
+use axiom_types::fulu::Checkpoint;
 
 /// The store's justified and finalized checkpoints, and the unrealized ones ahead of them.
 ///

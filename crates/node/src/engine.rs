@@ -5,7 +5,7 @@ use axiom_execution::{
 };
 use axiom_fork_choice::PayloadStatus;
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{BeaconBlock, Preset};
+use axiom_types::{Preset, fulu::BeaconBlock};
 use tracing::{debug, warn};
 
 use crate::ExecutionHead;

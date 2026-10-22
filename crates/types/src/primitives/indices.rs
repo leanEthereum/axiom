@@ -64,6 +64,67 @@ impl Ssz for ValidatorIndex {
     }
 }
 
+/// Position of a builder in the builder registry.
+///
+/// Builders live in their own registry since Gloas, apart from validators.
+/// See EIP-7732.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BuilderIndex(pub u64);
+
+impl BuilderIndex {
+    /// The index as a vector position.
+    ///
+    /// Axiom targets 64-bit platforms only, so the conversion is lossless.
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "axiom targets 64-bit platforms only"
+    )]
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u64> for BuilderIndex {
+    fn from(index: u64) -> Self {
+        Self(index)
+    }
+}
+
+impl From<usize> for BuilderIndex {
+    /// Axiom targets 64-bit platforms only, so the conversion is lossless.
+    fn from(index: usize) -> Self {
+        Self(index as u64)
+    }
+}
+
+impl fmt::Display for BuilderIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl Ssz for BuilderIndex {
+    const FIXED_SIZE: Option<usize> = u64::FIXED_SIZE;
+    const PACKED_SIZE: Option<usize> = u64::PACKED_SIZE;
+
+    fn encoded_len(&self) -> usize {
+        self.0.encoded_len()
+    }
+
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        self.0.encode_to(out);
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        u64::decode(bytes).map(Self)
+    }
+
+    fn hash_tree_root(&self) -> Root {
+        self.0.hash_tree_root()
+    }
+}
+
 /// Position of a committee among the committees of one slot.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CommitteeIndex(pub u64);

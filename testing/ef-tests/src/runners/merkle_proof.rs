@@ -3,7 +3,10 @@
 use std::marker::PhantomData;
 
 use axiom_ssz::{GeneralizedIndex, Root, Ssz};
-use axiom_types::{BeaconBlockBody, BeaconState, Preset};
+use axiom_types::{
+    Preset,
+    fulu::{BeaconBlockBody, BeaconState},
+};
 use axiom_yaml::Yaml;
 
 use crate::{Case, Failure, Runner};

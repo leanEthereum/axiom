@@ -6,7 +6,10 @@ use std::{
 };
 
 use axiom_fork_choice::PayloadStatus;
-use axiom_types::{ColumnIndex, DataColumnSidecar, Preset, Root, SignedBeaconBlock, Slot};
+use axiom_types::{
+    ColumnIndex, Preset, Root, Slot,
+    fulu::{DataColumnSidecar, SignedBeaconBlock},
+};
 
 /// What became of a block handed to the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

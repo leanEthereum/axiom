@@ -6,16 +6,18 @@ use axiom_kzg::Kzg;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
 use axiom_types::{
-    Attestation, AttestationData, AttesterSlashing, BeaconState, BlsPubkey, CommitteeIndex,
-    DataColumnSidecar, Domain, Epoch, Preset, ProposerSlashing, Root, SignedAggregateAndProof,
-    SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof, SignedVoluntaryExit,
-    SingleAttestation, Slot, SubnetId, SyncCommitteeContribution, SyncCommitteeMessage, Validator,
-    ValidatorIndex,
+    BlsPubkey, CommitteeIndex, Domain, Epoch, Preset, Root, Slot, SubnetId, ValidatorIndex,
     constants::{
         BLS_WITHDRAWAL_PREFIX, DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER,
         DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_SYNC_COMMITTEE, DOMAIN_VOLUNTARY_EXIT,
         SYNC_COMMITTEE_SUBNET_COUNT, TARGET_AGGREGATORS_PER_COMMITTEE,
         TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE,
+    },
+    fulu::{
+        Attestation, AttestationData, AttesterSlashing, BeaconState, DataColumnSidecar,
+        ProposerSlashing, SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
+        SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation,
+        SyncCommitteeContribution, SyncCommitteeMessage, Validator,
     },
 };
 

@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use axiom_types::{
-    BeaconState, ExecutionAddress, Gwei, Preset, ValidatorIndex, Withdrawal, WithdrawalIndex,
+    ExecutionAddress, Gwei, Preset, ValidatorIndex, WithdrawalIndex,
+    fulu::{BeaconState, Withdrawal},
 };
 
 use super::{BlockProcessor, Operation};

@@ -19,6 +19,25 @@ impl Slot {
     /// The first slot of the chain.
     pub const GENESIS: Self = Self(0);
 
+    /// The slot encoded at a byte position of a larger encoding.
+    ///
+    /// Blocks and states put their slot at a place every fork shares.
+    /// Reading it first tells which fork's type the rest of the bytes decode as.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bytes end before the slot does.
+    pub fn decode_at(bytes: &[u8], position: usize) -> Result<Self, DecodeError> {
+        let end = position + 8;
+        bytes
+            .get(position..end)
+            .ok_or(DecodeError::TooShort {
+                minimum: end,
+                actual: bytes.len(),
+            })
+            .and_then(Self::decode)
+    }
+
     /// Epoch containing this slot.
     ///
     /// See `compute_epoch_at_slot` in the phase0 beacon chain spec.

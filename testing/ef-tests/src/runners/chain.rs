@@ -13,8 +13,11 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, BlsSignature, ChainConfig,
-    CommitteeIndex, Hash32, Preset, SignedBeaconBlock, SingleAttestation,
+    BlsSignature, ChainConfig, CommitteeIndex, Hash32, Preset,
+    fulu::{
+        Attestation, AttesterSlashing, BeaconBlock, BeaconState, SignedBeaconBlock,
+        SingleAttestation,
+    },
 };
 use axiom_yaml::Yaml;
 

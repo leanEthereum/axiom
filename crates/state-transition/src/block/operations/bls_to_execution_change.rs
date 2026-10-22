@@ -2,10 +2,11 @@
 
 use axiom_bls::PublicKey;
 use axiom_types::{
-    Domain, Preset, Root, SignedBlsToExecutionChange, SigningData,
+    Domain, Preset, Root,
     constants::{
         BLS_WITHDRAWAL_PREFIX, DOMAIN_BLS_TO_EXECUTION_CHANGE, ETH1_ADDRESS_WITHDRAWAL_PREFIX,
     },
+    fulu::{SignedBlsToExecutionChange, SigningData},
 };
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};

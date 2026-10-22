@@ -19,7 +19,10 @@ use axiom_node::{
 use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
 use axiom_state_transition::{KnownVerdict, State, Verification};
-use axiom_types::{BeaconState, ChainConfig, Minimal, SignedBeaconBlock, SignedBlockContents};
+use axiom_types::{
+    ChainConfig, Minimal,
+    fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
+};
 use tokio::{
     runtime::Builder,
     sync::oneshot,

@@ -15,7 +15,7 @@ pub use fork_name::ForkName;
 use yaml::ConfigEntry;
 pub use yaml::ConfigError;
 
-use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Preset, Root, Version};
+use crate::{Epoch, ExecutionAddress, ForkDigest, Gwei, Preset, Root, Version, phase0::ForkData};
 
 /// Every runtime parameter of a beacon chain network.
 ///

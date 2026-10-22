@@ -10,7 +10,10 @@ use axiom_p2p::{
     swarm::NetworkHandle,
 };
 use axiom_ssz::Ssz;
-use axiom_types::{DataColumnSidecar, Preset, Root, SignedBeaconBlock, SignedBlockContents};
+use axiom_types::{
+    Preset, Root,
+    fulu::{DataColumnSidecar, SignedBeaconBlock, SignedBlockContents},
+};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 

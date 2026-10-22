@@ -5,8 +5,9 @@ use std::marker::PhantomData;
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, List};
 use axiom_state_transition::{Deltas, EpochProcessor, State};
 use axiom_types::{
-    BeaconState, ChainConfig, Gwei, Preset,
+    ChainConfig, Gwei, Preset,
     constants::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX},
+    fulu::BeaconState,
 };
 
 use crate::{Case, Failure, Runner};

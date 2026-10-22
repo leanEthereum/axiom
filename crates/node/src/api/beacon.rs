@@ -4,7 +4,10 @@ use axiom_http::{Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_state_transition::State;
-use axiom_types::{BeaconState, Preset, Root, SignedBlockContents};
+use axiom_types::{
+    Preset, Root,
+    fulu::{BeaconState, SignedBlockContents},
+};
 use tracing::warn;
 
 use super::{

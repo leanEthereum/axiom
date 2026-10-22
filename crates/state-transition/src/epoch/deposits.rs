@@ -1,6 +1,6 @@
 //! The deposit queue, drained under the churn.
 
-use axiom_types::{BeaconState, ChainConfig, Epoch, Gwei, Preset, Slot};
+use axiom_types::{ChainConfig, Epoch, Gwei, Preset, Slot, fulu::BeaconState};
 
 use crate::{ActiveBalance, StateError, registry::Registry};
 

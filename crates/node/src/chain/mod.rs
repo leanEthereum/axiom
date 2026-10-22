@@ -19,9 +19,11 @@ use axiom_ssz::Ssz;
 use axiom_state_transition::{EpochCommittees, State, Verification};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
-    BlsSignature, ChainConfig, Checkpoint, ColumnIndex, CommitteeBits, DataColumnSidecar, Epoch,
-    ForkDigest, Hash32, Preset, Root, SignedBeaconBlock, SingleAttestation, Slot,
+    BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root, Slot,
+    fulu::{
+        AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
+        Checkpoint, CommitteeBits, DataColumnSidecar, SignedBeaconBlock, SingleAttestation,
+    },
 };
 pub use database::ChainDatabase;
 use gossip::GossipMemory;

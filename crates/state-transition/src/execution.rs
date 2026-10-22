@@ -1,6 +1,6 @@
 //! The boundary between consensus and the execution engine.
 
-use axiom_types::{NewPayloadRequest, Preset};
+use axiom_types::{Preset, fulu::NewPayloadRequest};
 
 /// The execution engine's verdict on a payload.
 ///

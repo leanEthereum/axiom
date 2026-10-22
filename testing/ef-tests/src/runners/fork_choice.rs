@@ -7,8 +7,11 @@ use axiom_fork_choice::{DataAvailability, FastConfirmation, PayloadStatus, Store
 use axiom_kzg::Kzg;
 use axiom_state_transition::Verification;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, ChainConfig, Checkpoint,
-    DataColumnSidecar, Epoch, Hash32, Preset, Root, SignedBeaconBlock, Slot,
+    ChainConfig, Epoch, Hash32, Preset, Root, Slot,
+    fulu::{
+        Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar,
+        SignedBeaconBlock,
+    },
 };
 use axiom_yaml::Yaml;
 

@@ -1,6 +1,6 @@
 //! Attester slashings: punishing validators that cast slashable votes.
 
-use axiom_types::{AttesterSlashing, Preset};
+use axiom_types::{Preset, fulu::AttesterSlashing};
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};
 

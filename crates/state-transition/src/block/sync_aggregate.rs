@@ -2,8 +2,9 @@
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_types::{
-    Preset, Root, SigningData, SyncAggregate, ValidatorIndex,
+    Preset, Root, ValidatorIndex,
     constants::{DOMAIN_SYNC_COMMITTEE, PROPOSER_WEIGHT, SYNC_REWARD_WEIGHT, WEIGHT_DENOMINATOR},
+    fulu::{SigningData, SyncAggregate},
 };
 
 use super::{BlockProcessor, Operation};

@@ -1,6 +1,6 @@
 //! Proposer slashings: punishing a proposer that signed two blocks for one slot.
 
-use axiom_types::{Preset, ProposerSlashing, constants::DOMAIN_BEACON_PROPOSER};
+use axiom_types::{Preset, constants::DOMAIN_BEACON_PROPOSER, fulu::ProposerSlashing};
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};
 

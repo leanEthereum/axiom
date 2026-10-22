@@ -8,10 +8,12 @@ use axiom_kzg::Kzg;
 use axiom_ssz::{Root, Ssz};
 use axiom_state_transition::{KnownVerdict, Verification};
 use axiom_types::{
-    AttesterSlashing, BeaconState, Checkpoint, DataColumnSidecar, Epoch, Preset, ProposerSlashing,
-    SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
-    SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation, SubnetId,
-    SyncCommitteeMessage,
+    Epoch, Preset, SubnetId,
+    fulu::{
+        AttesterSlashing, BeaconState, Checkpoint, DataColumnSidecar, ProposerSlashing,
+        SignedAggregateAndProof, SignedBeaconBlock, SignedBlsToExecutionChange,
+        SignedContributionAndProof, SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
+    },
 };
 use axiom_yaml::Yaml;
 

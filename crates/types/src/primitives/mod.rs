@@ -19,7 +19,7 @@ pub use epoch::Epoch;
 pub use gwei::Gwei;
 pub use hex::Hex;
 pub use indices::{
-    BlobIndex, ColumnIndex, CommitteeIndex, SubnetId, ValidatorIndex, WithdrawalIndex,
+    BlobIndex, BuilderIndex, ColumnIndex, CommitteeIndex, SubnetId, ValidatorIndex, WithdrawalIndex,
 };
 pub use kzg::{KzgCommitment, KzgProof};
 pub use participation::ParticipationFlags;

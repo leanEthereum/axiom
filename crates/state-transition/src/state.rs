@@ -5,8 +5,9 @@ use std::{collections::BTreeSet, sync::Arc};
 use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    Attestation, BeaconState, BlsPubkey, ChainConfig, CommitteeIndex, Epoch, Gwei, Preset, Root,
-    SignedBeaconBlock, Slot, ValidatorIndex, electra,
+    BlsPubkey, ChainConfig, CommitteeIndex, Epoch, Gwei, Preset, Root, Slot, ValidatorIndex,
+    electra,
+    fulu::{Attestation, BeaconState, SignedBeaconBlock},
 };
 
 use crate::{
@@ -79,7 +80,7 @@ impl<P: Preset> State<P> {
         pre: electra::BeaconState<P>,
         config: &ChainConfig,
     ) -> Result<Self, StateError> {
-        let mut state = Self::new(pre.upgrade_to_fulu(config.fulu_fork_version));
+        let mut state = Self::new(BeaconState::upgrade_from(pre, config.fulu_fork_version));
         let epoch = state.beacon.current_epoch();
         // The lookahead spans the current epoch and the next MIN_SEED_LOOKAHEAD epochs.
         let mut lookahead = Vec::with_capacity(state.beacon.proposer_lookahead.len());
