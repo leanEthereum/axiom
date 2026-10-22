@@ -84,7 +84,7 @@ Allowed, and already declared in the root `Cargo.toml`:
 Everything else is written here:
 
 - Encodings: SSZ and merkleization, snappy, YAML, JSON, RLP.
-- Cryptography: BLS12-381, KZG, secp256k1, X25519, Keccak, the AEADs.
+- Cryptography: BLS12-381, KZG, hash-based signatures, secp256k1, X25519, Keccak and SHA-3, the AEADs.
 - Systems: the database, HTTP, the engine API, Prometheus metrics.
 - Networking: libp2p, Noise, yamux, gossipsub, discv5.
 
@@ -98,7 +98,7 @@ Dependencies point one way only.
 
 ```text
 L0  ssz, yaml, snappy, json, rlp               encodings                            pure
-L0  bls12-381, bls, kzg, crypto                curves, signatures, commitments      pure
+L0  bls12-381, bls, kzg, crypto, hashsig       curves, signatures, commitments      pure
 L0  types                                      newtypes, presets, containers        pure
 L1  state-transition                           per-slot, per-block, per-epoch       pure
 L1  beacon-json                                the API's JSON form of containers    pure
@@ -316,7 +316,7 @@ A comment in the house style:
 - Benchmarks are criterion benches under `benches/`, never ignored tests.
   Each bench target sets `harness = false` and drives criterion from a plain `main`, without its macros.
 - The tree keeps only the benchmarks that guard the client's critical paths:
-  - signing and verification, the baseline for signature scheme work
+  - signing and verification, for BLS and the hash-based scheme side by side
   - block and epoch processing, and the state root
 - A performance change measures with a throwaway harness or a local bench.
   Its numbers go in the pull request, and the bench code stays out of the tree.
