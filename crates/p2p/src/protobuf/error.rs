@@ -52,6 +52,15 @@ pub enum ProtobufError {
     #[error("required field {0} is missing")]
     MissingField(u32),
 
+    /// A field is present but its bytes are not a valid value of its type.
+    #[error("field {field} does not hold a valid {expected}")]
+    InvalidValue {
+        /// Number of the field.
+        field: u32,
+        /// What the field should hold, such as a peer id.
+        expected: &'static str,
+    },
+
     /// A string field holds bytes that are not UTF-8.
     #[error("field {field} is not UTF-8 after byte {valid_up_to}")]
     InvalidUtf8 {

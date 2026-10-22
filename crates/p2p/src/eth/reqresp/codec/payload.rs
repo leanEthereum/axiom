@@ -185,3 +185,33 @@ impl PayloadDecoder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chunk_past_the_compressed_bound_is_refused_before_it_arrives() {
+        // Fixture state: a payload declared one byte long.
+        //
+        //     bound = max_compressed_len(1) = 32 + 1 + 1/6 = 33 framed bytes
+        let mut decoder = PayloadDecoder::new(1..=100);
+
+        // Mutation: after the stream identifier, a chunk header claims a 1000-byte body.
+        //
+        //     length prefix   0x01
+        //     identifier      0xff 0x06 0x00 0x00 "sNaPpY"
+        //     chunk header    0x00 0xe8 0x03 0x00   (1000 bytes, never sent)
+        let mut bytes = vec![0x01];
+        bytes.extend_from_slice(&[0xff, 0x06, 0x00, 0x00]);
+        bytes.extend_from_slice(b"sNaPpY");
+        bytes.extend_from_slice(&[0x00, 0xe8, 0x03, 0x00]);
+
+        // The header alone is enough to refuse: 4 + 1000 framed bytes exceed the bound of 33.
+        let mut input = bytes.as_slice();
+        assert_eq!(
+            decoder.advance(&mut input),
+            Err(ReqRespError::CompressedTooLarge { len: 1004, max: 33 })
+        );
+    }
+}

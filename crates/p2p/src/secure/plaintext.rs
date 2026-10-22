@@ -60,7 +60,10 @@ impl ProtoMessage for Exchange {
         }
         // The schema marks both optional, but the protocol is meaningless without them.
         let id = id.ok_or(ProtobufError::MissingField(1))?;
-        let id = PeerId::from_bytes(id).map_err(|_| ProtobufError::MissingField(1))?;
+        let id = PeerId::from_bytes(id).map_err(|_| ProtobufError::InvalidValue {
+            field: 1,
+            expected: "peer id",
+        })?;
         Ok(Self {
             id,
             pubkey: pubkey.ok_or(ProtobufError::MissingField(2))?,
@@ -251,6 +254,27 @@ mod tests {
                 claimed: PeerId::from_public_key(&PublicKey::secp256k1([4; 33])),
                 derived: PeerId::from_public_key(&PublicKey::secp256k1([3; 33])),
             }
+        );
+    }
+
+    #[test]
+    fn an_identifier_that_is_not_a_peer_id_is_named_as_such() {
+        // Mutation: field 1 holds two bytes that are no multihash, beside a valid key.
+        //
+        //     field 1 = 0xff 0xff     (truncated varint, not a peer id)
+        //     field 2 = a secp256k1 public key
+        let mut bytes = Vec::new();
+        let mut fields = FieldWriter::new(&mut bytes);
+        fields.bytes(1, &[0xff, 0xff]);
+        fields.message(2, &PublicKey::secp256k1([3; 33]));
+
+        // The error points at the field and what it should hold, not at a missing field.
+        assert_eq!(
+            Exchange::decode(&bytes),
+            Err(ProtobufError::InvalidValue {
+                field: 1,
+                expected: "peer id",
+            })
         );
     }
 
