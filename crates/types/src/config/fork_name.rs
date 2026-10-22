@@ -208,6 +208,41 @@ impl ForkName {
             Self::Electra | Self::Fulu | Self::Gloas => P::MAX_EFFECTIVE_BALANCE_ELECTRA,
         }
     }
+
+    /// Whether fork choice weighs a block's payload apart from the block itself.
+    ///
+    /// Gloas blocks commit to a builder's bid, and the payload follows in an envelope.
+    /// Fork choice then decides between each block's full and empty variants, see EIP-7732.
+    #[must_use]
+    pub const fn separates_payloads(self) -> bool {
+        match self {
+            Self::Phase0
+            | Self::Altair
+            | Self::Bellatrix
+            | Self::Capella
+            | Self::Deneb
+            | Self::Electra
+            | Self::Fulu => false,
+            Self::Gloas => true,
+        }
+    }
+
+    /// Whether the state fixes each epoch's proposers one epoch ahead.
+    ///
+    /// A reorg at an epoch boundary then cannot change who proposes, see EIP-7917.
+    /// Fork choice allows late block reorgs at boundaries from then on.
+    #[must_use]
+    pub const fn fixes_proposers_ahead(self) -> bool {
+        match self {
+            Self::Phase0
+            | Self::Altair
+            | Self::Bellatrix
+            | Self::Capella
+            | Self::Deneb
+            | Self::Electra => false,
+            Self::Fulu | Self::Gloas => true,
+        }
+    }
 }
 
 impl fmt::Display for ForkName {

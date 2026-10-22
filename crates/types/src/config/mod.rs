@@ -15,7 +15,22 @@ pub use fork_name::ForkName;
 use yaml::ConfigEntry;
 pub use yaml::ConfigError;
 
-use crate::{Epoch, ExecutionAddress, ForkDigest, Gwei, Preset, Root, Version, phase0::ForkData};
+use axiom_ssz::U256;
+
+use crate::{
+    Epoch, ExecutionAddress, ForkDigest, Gwei, Hash32, Preset, Root, Version, phase0::ForkData,
+};
+
+/// The minimal configuration's terminal total difficulty, 2^256 - 2^10.
+///
+/// It is out of reach, so a test network never merges by difficulty.
+/// In little-endian bytes, subtracting 1023 from 2^256 - 1 leaves 0x00 then 0xfc at the bottom.
+const MINIMAL_TERMINAL_TOTAL_DIFFICULTY: U256 = {
+    let mut bytes = [0xff; 32];
+    bytes[0] = 0x00;
+    bytes[1] = 0xfc;
+    U256(bytes)
+};
 
 /// Every runtime parameter of a beacon chain network.
 ///
@@ -31,6 +46,13 @@ pub struct ChainConfig {
     pub min_genesis_time: u64,
     /// Delay between the genesis trigger and genesis, in seconds.
     pub genesis_delay: u64,
+
+    /// Total difficulty at which proof of work ends, see EIP-3675.
+    pub terminal_total_difficulty: U256,
+    /// Terminal proof-of-work block fixed by hand, or zero to use the total difficulty.
+    pub terminal_block_hash: Hash32,
+    /// Epoch from which a hand-fixed terminal block may be built on.
+    pub terminal_block_hash_activation_epoch: Epoch,
 
     /// Fork version at genesis.
     pub genesis_fork_version: Version,
@@ -223,6 +245,10 @@ impl ChainConfig {
             min_genesis_active_validator_count: 16_384,
             min_genesis_time: 1_606_824_000,
             genesis_delay: 604_800,
+            // 58750000000000000000000, the total difficulty the merge happened at.
+            terminal_total_difficulty: U256::from_u128(58_750_000_000_000_000_000_000),
+            terminal_block_hash: Hash32::ZERO,
+            terminal_block_hash_activation_epoch: Epoch::FAR_FUTURE,
             genesis_fork_version: Version([0x00, 0, 0, 0]),
             altair_fork_version: Version([0x01, 0, 0, 0]),
             altair_fork_epoch: Epoch(74_240),
@@ -362,6 +388,9 @@ impl ChainConfig {
             min_genesis_active_validator_count: 64,
             min_genesis_time: 1_578_009_600,
             genesis_delay: 300,
+            terminal_total_difficulty: MINIMAL_TERMINAL_TOTAL_DIFFICULTY,
+            terminal_block_hash: Hash32::ZERO,
+            terminal_block_hash_activation_epoch: Epoch::FAR_FUTURE,
             genesis_fork_version: Version([0x00, 0, 0, 0x01]),
             altair_fork_version: Version([0x01, 0, 0, 0x01]),
             altair_fork_epoch: Epoch::FAR_FUTURE,
@@ -632,6 +661,24 @@ mod tests {
         let config = ChainConfig::from_yaml(&yaml).unwrap();
         assert_eq!(config.churn_limit_quotient_gloas, 8);
         assert_eq!(config.max_request_payloads, 64);
+    }
+
+    #[test]
+    fn terminal_difficulties_follow_the_published_configurations() {
+        // The minimal value is the decimal the spec's configuration file writes.
+        let minimal = "TERMINAL_TOTAL_DIFFICULTY: 115792089237316195423570985008687907853269984665640564039457584007913129638912\nPRESET_BASE: minimal\n";
+        let parsed = ChainConfig::from_yaml(&Yaml::parse(minimal).unwrap()).unwrap();
+        assert_eq!(
+            parsed.terminal_total_difficulty,
+            ChainConfig::minimal().terminal_total_difficulty
+        );
+
+        // Mainnet merged at 58750000000000000000000.
+        let mainnet = Yaml::parse("TERMINAL_TOTAL_DIFFICULTY: 58750000000000000000000\n").unwrap();
+        assert_eq!(
+            ChainConfig::from_yaml(&mainnet).unwrap(),
+            ChainConfig::mainnet()
+        );
     }
 
     #[test]
