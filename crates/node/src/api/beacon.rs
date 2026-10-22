@@ -350,3 +350,141 @@ impl BeaconRoutes {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_http::Method;
+    use axiom_types::Minimal;
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    /// An error reply's body.
+    fn error(code: u16, message: &str) -> Json {
+        Json::from([
+            ("code", Json::from(u64::from(code))),
+            ("message", Json::from(message)),
+        ])
+    }
+
+    /// A request to publish an envelope, with some headers.
+    fn publish(path: &str, headers: &[(&str, &str)], body: Vec<u8>) -> Request {
+        headers.iter().fold(
+            Request::new(Method::Post, path).with_body("application/octet-stream", body),
+            |request, (name, value)| request.with_header(name, *value),
+        )
+    }
+
+    #[test]
+    fn envelopes_publish_at_the_plural_route_with_both_headers() {
+        let api = TestApi::gloas(8);
+        let route = "/eth/v1/beacon/execution_payload_envelopes";
+        let both = [
+            ("eth-consensus-version", "gloas"),
+            ("eth-blob-data-included", "false"),
+        ];
+        let cases = [
+            // The consensus version is required.
+            (
+                publish(route, &both[1..], vec![1, 2, 3]),
+                error(400, "missing consensus version header"),
+            ),
+            // Fulu blocks carry their payload, so no envelope travels in Fulu.
+            (
+                publish(
+                    route,
+                    &[
+                        ("eth-consensus-version", "fulu"),
+                        ("eth-blob-data-included", "false"),
+                    ],
+                    vec![1, 2, 3],
+                ),
+                error(400, "fulu blocks carry their payload"),
+            ),
+            // The blob data header is required, and this node takes the envelope alone.
+            (
+                publish(route, &both[..1], vec![1, 2, 3]),
+                error(400, "missing blob data included header"),
+            ),
+            (
+                publish(
+                    route,
+                    &[
+                        ("eth-consensus-version", "gloas"),
+                        ("eth-blob-data-included", "true"),
+                    ],
+                    vec![1, 2, 3],
+                ),
+                error(
+                    400,
+                    "this node takes the signed envelope alone, without blob data",
+                ),
+            ),
+            // Only gossip validation runs before the broadcast.
+            (
+                publish(
+                    &format!("{route}?broadcast_validation=consensus"),
+                    &both,
+                    vec![1, 2, 3],
+                ),
+                error(
+                    400,
+                    "broadcast validation consensus is not supported; gossip is",
+                ),
+            ),
+            // Three bytes are no envelope.
+            (
+                publish(route, &both, vec![1, 2, 3]),
+                error(
+                    400,
+                    &format!(
+                        "malformed envelope: {}",
+                        SignedExecutionPayloadEnvelope::<Minimal>::decode(&[1, 2, 3]).unwrap_err()
+                    ),
+                ),
+            ),
+        ];
+        for (request, expected) in cases {
+            let target = request.target();
+            assert_eq!(
+                TestApi::parsed(&api.send(request)),
+                (StatusCode::BAD_REQUEST, expected),
+                "{target}"
+            );
+        }
+
+        // The singular route is gone.
+        let response = api.send(publish(
+            "/eth/v1/beacon/execution_payload_envelope",
+            &both,
+            vec![1, 2, 3],
+        ));
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn an_envelope_is_found_by_its_block_or_named_missing() {
+        let api = TestApi::gloas(8);
+        let route = "/eth/v1/beacon/execution_payload_envelopes";
+        // The genesis block has no envelope.
+        assert_eq!(
+            api.get(&format!("{route}/head")),
+            (
+                StatusCode::NOT_FOUND,
+                error(404, "execution payload envelope not found")
+            )
+        );
+        // A root the node never saw names no block.
+        assert_eq!(
+            api.get(&format!("{route}/0x{}", "11".repeat(32))),
+            (StatusCode::NOT_FOUND, error(404, "block not found"))
+        );
+        assert_eq!(
+            api.get(&format!("{route}/current")),
+            (
+                StatusCode::BAD_REQUEST,
+                error(400, "invalid block id: current")
+            )
+        );
+    }
+}

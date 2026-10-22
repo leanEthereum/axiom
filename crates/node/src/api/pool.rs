@@ -707,3 +707,257 @@ impl PoolRoutes {
         ApiError::bad_request(error.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use axiom_beacon_json::ApiJsonError;
+    use axiom_http::Method;
+    use axiom_operation_pool::{Aggregate, Bits, CommitteeAggregate};
+    use axiom_types::{
+        BlsSignature, CommitteeIndex, Epoch, Minimal, Root, Slot, ValidatorIndex,
+        capella::BlsToExecutionChange,
+        phase0::{AttestationData, Checkpoint, VoluntaryExit},
+    };
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    /// An error reply's body.
+    fn error(message: &str) -> Json {
+        Json::from([
+            ("code", Json::from(400_u64)),
+            ("message", Json::from(message)),
+        ])
+    }
+
+    /// The reply to a list whose items were all refused, for these reasons.
+    fn indexed(reasons: &[String]) -> Json {
+        let failures = reasons
+            .iter()
+            .enumerate()
+            .map(|(index, message)| {
+                Json::from([
+                    ("index", Json::from(index as u64)),
+                    ("message", Json::from(message.as_str())),
+                ])
+            })
+            .collect::<Vec<_>>();
+        Json::from([
+            ("code", Json::from(400_u64)),
+            (
+                "message",
+                Json::from(format!(
+                    "{} of the submitted items were refused",
+                    reasons.len()
+                )),
+            ),
+            ("failures", Json::Array(failures)),
+        ])
+    }
+
+    /// Why a JSON value does not decode as a type, as the routes report it.
+    fn undecodable<T: ApiJson>(value: &Json) -> String {
+        T::from_json(value)
+            .err()
+            .as_ref()
+            .map(ApiJsonError::to_string)
+            .unwrap()
+    }
+
+    #[test]
+    fn slashings_and_exits_come_one_per_request() {
+        let api = TestApi::phase0(8);
+        // A list where one object is expected is refused before any check.
+        let list = Json::Array(Vec::new());
+        let routes = [
+            (
+                "/eth/v1/beacon/pool/voluntary_exits",
+                undecodable::<SignedVoluntaryExit>(&list),
+            ),
+            (
+                "/eth/v1/beacon/pool/proposer_slashings",
+                undecodable::<ProposerSlashing>(&list),
+            ),
+            (
+                "/eth/v2/beacon/pool/attester_slashings",
+                undecodable::<phase0::AttesterSlashing<Minimal>>(&list),
+            ),
+        ];
+        for (route, reason) in routes {
+            assert_eq!(
+                api.post(route, "[]"),
+                (StatusCode::BAD_REQUEST, error(&reason)),
+                "{route}"
+            );
+        }
+
+        // One exit of validator 99, which does not exist, fails the gossip rules alone.
+        // The refusal is a plain error, not an indexed one.
+        let exit = SignedVoluntaryExit {
+            message: VoluntaryExit {
+                epoch: Epoch(0),
+                validator_index: ValidatorIndex(99),
+            },
+            signature: BlsSignature::default(),
+        };
+        let now = api.now_ms();
+        let checked = exit.clone();
+        let reason = api.run(move |chain| {
+            chain
+                .validate_gossip(|validator| {
+                    validator.voluntary_exit::<phase0::BeaconState<Minimal>>(&checked, now)
+                })
+                .unwrap_err()
+                .to_string()
+        });
+        assert_eq!(
+            api.post(
+                "/eth/v1/beacon/pool/voluntary_exits",
+                &exit.to_json().to_string()
+            ),
+            (StatusCode::BAD_REQUEST, error(&reason))
+        );
+    }
+
+    #[test]
+    fn refused_list_items_are_reported_by_index() {
+        let api = TestApi::phase0(8);
+        // Two credential changes before Capella: the gossip rules refuse each one.
+        let changes: Vec<SignedBlsToExecutionChange> = [0, 99]
+            .into_iter()
+            .map(|index| SignedBlsToExecutionChange {
+                message: BlsToExecutionChange {
+                    validator_index: ValidatorIndex(index),
+                    ..BlsToExecutionChange::default()
+                },
+                signature: BlsSignature::default(),
+            })
+            .collect();
+        let now = api.now_ms();
+        let checked = changes.clone();
+        let reasons = api.run(move |chain| {
+            checked
+                .iter()
+                .map(|change| {
+                    chain
+                        .validate_gossip(|validator| validator.bls_to_execution_change(change, now))
+                        .unwrap_err()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        });
+        let body = Json::Array(changes.iter().map(ApiJson::to_json).collect());
+        assert_eq!(
+            api.post(
+                "/eth/v1/beacon/pool/bls_to_execution_changes",
+                &body.to_string()
+            ),
+            (StatusCode::BAD_REQUEST, indexed(&reasons))
+        );
+    }
+
+    #[test]
+    fn payload_attestations_arrive_as_an_ssz_list() {
+        let api = TestApi::gloas(8);
+        // Two votes of validators 0 and 1 on a block the node never saw.
+        let messages: Vec<PayloadAttestationMessage> = [0, 1]
+            .into_iter()
+            .map(|index| PayloadAttestationMessage {
+                validator_index: ValidatorIndex(index),
+                ..PayloadAttestationMessage::default()
+            })
+            .collect();
+        let now = api.now_ms();
+        let checked = messages.clone();
+        let reasons = api.run(move |chain| {
+            checked
+                .iter()
+                .map(|message| {
+                    chain
+                        .validate_gossip(|validator| {
+                            validator.payload_attestation_message(message, now)
+                        })
+                        .unwrap_err()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        });
+        // The SSZ list of two fixed-size messages is their encodings end to end.
+        let body = messages.iter().flat_map(Ssz::encode).collect();
+        let request = Request::new(Method::Post, "/eth/v1/beacon/pool/payload_attestations")
+            .with_header("eth-consensus-version", "gloas")
+            .with_body("application/octet-stream", body);
+        assert_eq!(
+            TestApi::parsed(&api.send(request)),
+            (StatusCode::BAD_REQUEST, indexed(&reasons))
+        );
+    }
+
+    #[test]
+    fn pooled_attestations_are_filtered_by_slot_and_committee() {
+        let api = TestApi::phase0(64);
+        // One signer in each of three committee votes: slot 1 committees 0 and 1, slot 2 committee 0.
+        let votes = [(1, 0), (1, 1), (2, 0)];
+        let vote = |slot: u64, committee: u64| AttestationData {
+            slot: Slot(slot),
+            index: CommitteeIndex(committee),
+            beacon_block_root: Root([7; 32]),
+            source: Checkpoint::default(),
+            target: Checkpoint::default(),
+        };
+        api.run(move |chain| {
+            for (slot, committee) in votes {
+                chain
+                    .pool_mut()
+                    .attestations_mut()
+                    .insert(CommitteeAggregate {
+                        data: vote(slot, committee),
+                        committee: CommitteeIndex(committee),
+                        aggregate: Aggregate {
+                            bits: Bits::single(4, 1),
+                            signature: BlsSignature::default(),
+                        },
+                    })
+                    .unwrap();
+            }
+        });
+        let attestation = |slot, committee| {
+            let mut bits = phase0::AggregationBits::<Minimal>::with_len(4).unwrap();
+            bits.set(1, true);
+            phase0::Attestation::<Minimal> {
+                aggregation_bits: bits,
+                data: vote(slot, committee),
+                signature: BlsSignature::default(),
+            }
+            .to_json()
+            .to_string()
+        };
+        // The pool keeps no order, so the items compare as a set.
+        let listed = |query: &str| {
+            let (status, body) = api.get(&format!("/eth/v2/beacon/pool/attestations{query}"));
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.get("version"), Some(&Json::from("phase0")));
+            body.get("data")
+                .and_then(Json::as_array)
+                .unwrap()
+                .iter()
+                .map(Json::to_string)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            listed("?slot=1&committee_index=1"),
+            BTreeSet::from([attestation(1, 1)])
+        );
+        assert_eq!(
+            listed("?committee_index=0"),
+            BTreeSet::from([attestation(1, 0), attestation(2, 0)])
+        );
+        assert_eq!(
+            listed("?slot=1"),
+            BTreeSet::from([attestation(1, 0), attestation(1, 1)])
+        );
+        assert_eq!(listed("").len(), 3);
+    }
+}

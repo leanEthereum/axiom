@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use axiom_bls::SecretKey;
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::Json;
 use axiom_types::{
@@ -113,6 +114,11 @@ impl TestApi {
         self.run(move |chain| chain.on_tick(now).unwrap());
     }
 
+    /// The wall clock the gossip rules read, in milliseconds.
+    pub(crate) fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
+    }
+
     /// Runs a job on the chain thread.
     pub(crate) fn run<R: Send + 'static>(
         &self,
@@ -149,9 +155,16 @@ impl TestApi {
     }
 }
 
-/// The key of fixture validator i: the byte i + 1, repeated.
+/// The secret key of fixture validator i: the scalar i + 1.
+pub(crate) fn secret(index: u64) -> SecretKey {
+    let mut bytes = [0; 32];
+    bytes[24..].copy_from_slice(&(index + 1).to_be_bytes());
+    SecretKey::from_bytes(&bytes).unwrap()
+}
+
+/// The public key of fixture validator i.
 pub(crate) fn pubkey(index: u64) -> BlsPubkey {
-    BlsPubkey([index as u8 + 1; 48])
+    BlsPubkey(secret(index).public_key().to_bytes())
 }
 
 /// An active fixture validator of one full deposit.

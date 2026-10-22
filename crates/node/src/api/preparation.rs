@@ -194,3 +194,158 @@ impl PreparationRoutes {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_beacon_json::ApiJson;
+    use axiom_gossip::GossipError;
+    use axiom_http::Method;
+    use axiom_json::Json;
+    use axiom_types::{
+        BlsSignature, Domain, Epoch, ExecutionAddress, Slot, ValidatorIndex,
+        constants::DOMAIN_PROPOSER_PREFERENCES, gloas::ProposerPreferences,
+    };
+
+    use super::*;
+    use crate::api::fixture::{TestApi, secret};
+
+    #[test]
+    fn fee_recipients_of_unknown_validators_are_accepted() {
+        // Validator 99 is not in the registry of 4, yet it may join and propose later.
+        let api = TestApi::phase0(4);
+        let body = format!(
+            r#"[{{"validator_index":"99","fee_recipient":"0x{}"}}]"#,
+            "ab".repeat(20)
+        );
+        assert_eq!(
+            api.post("/eth/v1/validator/prepare_beacon_proposer", &body),
+            (StatusCode::OK, Json::Null)
+        );
+    }
+
+    #[test]
+    fn subscriptions_decode_as_the_api_defines_them() {
+        let api = TestApi::phase0(4);
+        let committee = r#"[{"validator_index":"1","committee_index":"0","committees_at_slot":"1","slot":"3","is_aggregator":true}]"#;
+        assert_eq!(
+            api.post(
+                "/eth/v1/validator/beacon_committee_subscriptions",
+                committee
+            ),
+            (StatusCode::OK, Json::Null)
+        );
+        let sync =
+            r#"[{"validator_index":"1","sync_committee_indices":["0","5"],"until_epoch":"256"}]"#;
+        assert_eq!(
+            api.post("/eth/v1/validator/sync_committee_subscriptions", sync),
+            (StatusCode::OK, Json::Null)
+        );
+        // A subscription without its aggregator flag is no subscription.
+        let missing = r#"[{"validator_index":"1","committee_index":"0","committees_at_slot":"1","slot":"3"}]"#;
+        let value = Json::parse(missing).unwrap();
+        let items = value.as_array().unwrap();
+        let reason = BeaconCommitteeSubscription::from_json(&items[0])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            api.post("/eth/v1/validator/beacon_committee_subscriptions", missing),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::from([
+                    ("code", Json::from(400_u64)),
+                    ("message", Json::from(format!("item 0: {reason}"))),
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn selections_belong_to_distributed_validator_middleware() {
+        let api = TestApi::phase0(4);
+        let expected = Json::parse(
+            r#"{"code":501,"message":"selection proofs are combined by distributed validator middleware, not a beacon node"}"#,
+        )
+        .unwrap();
+        for route in [
+            "/eth/v1/validator/beacon_committee_selections",
+            "/eth/v1/validator/sync_committee_selections",
+        ] {
+            assert_eq!(
+                api.post(route, "[]"),
+                (StatusCode::NOT_IMPLEMENTED, expected.clone()),
+                "{route}"
+            );
+        }
+    }
+
+    #[test]
+    fn proposer_preferences_pass_the_gossip_rules_once() {
+        // Fixture state: a Gloas genesis whose zero lookahead makes validator 0 every proposer.
+        // The clock is at slot 1, and the preferences are for slot 9, in epoch 1.
+        let api = TestApi::gloas(8);
+        api.at_slot(Slot(1));
+        let (genesis, domain) = api.run(|chain| {
+            let domain = Domain::compute(
+                DOMAIN_PROPOSER_PREFERENCES,
+                chain.config().fork_version_at(Epoch(1)),
+                chain.genesis_validators_root(),
+            );
+            (chain.head().root, domain)
+        });
+        let message = ProposerPreferences {
+            dependent_root: genesis,
+            proposal_slot: Slot(9),
+            validator_index: ValidatorIndex(0),
+            fee_recipient: ExecutionAddress([0xfe; 20]),
+            target_gas_limit: 60_000_000,
+        };
+        let root = phase0::SigningData::signing_root(&message, domain);
+        let signed = SignedProposerPreferences {
+            message,
+            signature: BlsSignature(secret(0).sign(&root.0).to_bytes()),
+        };
+        let route = "/eth/v1/validator/proposer_preferences";
+        let post = |items: &[&SignedProposerPreferences]| {
+            let body = Json::Array(items.iter().map(|item| item.to_json()).collect());
+            let request = Request::new(Method::Post, route)
+                .with_header("eth-consensus-version", "gloas")
+                .with_body("application/json", body.to_string().into_bytes());
+            TestApi::parsed(&api.send(request))
+        };
+
+        // Sent twice in one list: the first passes, the second was already seen.
+        let seen = GossipError::ignore(
+            "already seen preferences for this dependent root and proposal slot",
+        );
+        let expected = Json::from([
+            ("code", Json::from(400_u64)),
+            (
+                "message",
+                Json::from("1 of the submitted items were refused"),
+            ),
+            (
+                "failures",
+                Json::Array(vec![Json::from([
+                    ("index", Json::from(1_u64)),
+                    ("message", Json::from(seen.to_string())),
+                ])]),
+            ),
+        ]);
+        assert_eq!(
+            post(&[&signed, &signed]),
+            (StatusCode::BAD_REQUEST, expected)
+        );
+
+        // The version header is required.
+        let request =
+            Request::new(Method::Post, route).with_body("application/json", b"[]".to_vec());
+        assert_eq!(
+            TestApi::parsed(&api.send(request)),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(r#"{"code":400,"message":"missing consensus version header"}"#)
+                    .unwrap()
+            )
+        );
+    }
+}

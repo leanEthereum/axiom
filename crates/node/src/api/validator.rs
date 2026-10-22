@@ -608,3 +608,120 @@ impl From<ProposerError> for ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axiom_http::Method;
+    use axiom_types::Epoch;
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    #[test]
+    fn payload_attestation_data_takes_its_slot_from_the_query() {
+        let api = TestApi::gloas(8);
+        let genesis = api.run(|chain| chain.head().root);
+
+        // Slot 0 holds the genesis block, whose payload no envelope revealed.
+        let response = api.send(Request::new(
+            Method::Get,
+            "/eth/v1/validator/payload_attestation_data?slot=0",
+        ));
+        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
+        let data = gloas::PayloadAttestationData {
+            beacon_block_root: genesis,
+            slot: Slot(0),
+            payload_present: false,
+            blob_data_available: false,
+        };
+        let expected = Json::from([("version", Json::from("gloas")), ("data", data.to_json())]);
+        assert_eq!(TestApi::parsed(&response), (StatusCode::OK, expected));
+
+        // No block was seen at slot 1, so there is nothing to attest.
+        api.at_slot(Slot(1));
+        let response = api.send(Request::new(
+            Method::Get,
+            "/eth/v1/validator/payload_attestation_data?slot=1",
+        ));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        assert_eq!(response.body, Vec::<u8>::new());
+
+        // The slot is required, and the path no longer carries it.
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(r#"{"code":400,"message":"missing query parameter slot"}"#).unwrap()
+            )
+        );
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data/0").0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn payload_attestation_data_exists_from_gloas_on() {
+        let api = TestApi::phase0(8);
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data?slot=0"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(
+                    r#"{"code":400,"message":"phase0 blocks carry their payload, so no payload is attested"}"#
+                )
+                .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn attestation_data_needs_a_committee_only_where_votes_name_one() {
+        // Phase0 votes name their committee, so leaving it out is an error.
+        let api = TestApi::phase0(64);
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(
+                    r#"{"code":400,"message":"phase0 votes name their committee, so committee_index is required"}"#
+                )
+                .unwrap()
+            )
+        );
+
+        // Committee 1 at genesis: source and target both rest on the genesis block.
+        let genesis = api.run(|chain| chain.head().root);
+        let vote = AttestationData {
+            slot: Slot(0),
+            index: CommitteeIndex(1),
+            beacon_block_root: genesis,
+            source: phase0::Checkpoint::default(),
+            target: phase0::Checkpoint {
+                epoch: Epoch(0),
+                root: genesis,
+            },
+        };
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0&committee_index=1"),
+            (StatusCode::OK, Json::from([("data", vote.to_json())]))
+        );
+
+        // A Gloas vote signals the payload in its index, so no committee is asked for.
+        let api = TestApi::gloas(64);
+        let genesis = api.run(|chain| chain.head().root);
+        let vote = AttestationData {
+            index: CommitteeIndex(0),
+            beacon_block_root: genesis,
+            target: phase0::Checkpoint {
+                epoch: Epoch(0),
+                root: genesis,
+            },
+            ..vote
+        };
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0"),
+            (StatusCode::OK, Json::from([("data", vote.to_json())]))
+        );
+    }
+}
