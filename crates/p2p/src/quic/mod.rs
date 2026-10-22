@@ -16,6 +16,7 @@
 mod cid;
 mod crypto;
 mod error;
+mod event;
 mod frame;
 mod packet;
 mod range_set;
@@ -28,7 +29,8 @@ mod varint;
 
 pub use cid::ConnectionId;
 pub use error::{ConnectionError, DecodeError, QuicError, TransportError, TransportErrorCode};
-pub use stream::{Side, StreamId};
+pub use event::Event;
+pub use stream::{Side, StreamId, StreamLimits};
 pub use varint::VarInt;
 
 /// The QUIC version this stack speaks: version 1, RFC 9000.
