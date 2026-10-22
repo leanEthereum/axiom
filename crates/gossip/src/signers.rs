@@ -1,9 +1,8 @@
 //! The validators a state expects to sign gossip, and the checks of their signatures.
 
 use axiom_types::{
-    Attestation, BeaconState, BlsPubkey, Epoch, IndexedAttestation, Preset,
-    SignedAggregateAndProof, SignedContributionAndProof, SyncAggregatorSelectionData,
-    ValidatorIndex,
+    Attestation, BeaconState, BlsPubkey, IndexedAttestation, Preset, SignedAggregateAndProof,
+    SignedContributionAndProof, SyncAggregatorSelectionData, ValidatorIndex,
     constants::{
         DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER, DOMAIN_CONTRIBUTION_AND_PROOF,
         DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, SYNC_COMMITTEE_SUBNET_COUNT,
@@ -102,8 +101,9 @@ impl<'a, P: Preset> Signers<'a, P> {
     /// At a period boundary that is the next committee.
     pub(crate) fn sync_committee_for_next_slot(self) -> Vec<BlsPubkey> {
         let state = self.state;
-        let period = |epoch: Epoch| epoch.0 / P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD;
-        let committee = if period(state.current_epoch()) == period((state.slot + 1).epoch::<P>()) {
+        let committee = if state.slot.sync_committee_period::<P>()
+            == (state.slot + 1).sync_committee_period::<P>()
+        {
             &state.current_sync_committee
         } else {
             &state.next_sync_committee

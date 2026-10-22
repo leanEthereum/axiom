@@ -27,6 +27,14 @@ impl Slot {
         Epoch(self.0 / P::SLOTS_PER_EPOCH)
     }
 
+    /// Sync committee period containing this slot.
+    ///
+    /// See `compute_sync_committee_period_at_slot` in the Altair light client sync protocol.
+    #[must_use]
+    pub const fn sync_committee_period<P: Preset>(self) -> u64 {
+        self.epoch::<P>().0 / P::EPOCHS_PER_SYNC_COMMITTEE_PERIOD
+    }
+
     /// Whether this slot opens an epoch.
     #[must_use]
     pub const fn is_epoch_start<P: Preset>(self) -> bool {
