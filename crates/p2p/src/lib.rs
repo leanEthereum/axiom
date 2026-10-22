@@ -34,10 +34,15 @@
 //! ```
 
 pub mod base58;
+pub mod eth;
+pub mod gossipsub;
+pub mod identify;
 pub mod identity;
 pub mod multiaddr;
 pub mod multistream;
+pub mod ping;
 pub mod protobuf;
+mod rng;
 pub mod secure;
 pub mod varint;
 pub mod yamux;
