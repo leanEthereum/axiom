@@ -1,63 +1,32 @@
-//! The per-validator proposal settings: fee recipient, gas limit, and graffiti.
+//! The per-validator proposal settings: fee recipient, gas limit, graffiti, and builders.
 //!
 //! See the keymanager API repository, in its apis folder:
 //!
 //! - `fee_recipient.yaml`
 //! - `gas_limit.yaml`
 //! - `graffiti.yaml`
+//! - `builder_config.yaml`
 
 use std::sync::Arc;
 
 use axiom_beacon_json::{ApiJson, Fields};
 use axiom_http::{Method, Request, StatusCode};
 use axiom_json::Json;
-use axiom_types::{BlsPubkey, Bytes32, ExecutionAddress};
+use axiom_types::{BlsPubkey, ExecutionAddress};
 
 use crate::{
-    keymanager::reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
-    validators::ValidatorStore,
+    keymanager::{
+        registry::KeyRegistry,
+        reply::{ApiError, ApiRequest, ApiResult, Reply, Routes},
+    },
+    validators::{BuilderConfig, Graffiti, ValidatorSettings},
 };
-
-/// Graffiti as the keymanager API writes it: up to 32 bytes of UTF-8 text.
-///
-/// The block carries 32 bytes, so shorter text is padded with zero bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Graffiti(Bytes32);
-
-impl Graffiti {
-    /// Reads text that fits the block's 32 bytes.
-    fn parse(text: &str) -> Result<Self, ApiError> {
-        let mut bytes = [0; 32];
-        let Some(prefix) = bytes.get_mut(..text.len()) else {
-            return Err(ApiError::bad_request(format!(
-                "graffiti of {} bytes exceeds the {} a block holds",
-                text.len(),
-                bytes.len()
-            )));
-        };
-        prefix.copy_from_slice(text.as_bytes());
-        Ok(Self(Bytes32(bytes)))
-    }
-
-    /// The text, without its zero padding.
-    ///
-    /// Only a configured default can hold bytes that are not UTF-8.
-    /// They read as replacement characters.
-    fn text(self) -> String {
-        let bytes = &self.0.0;
-        let end = bytes
-            .iter()
-            .rposition(|&byte| byte != 0)
-            .map_or(0, |last| last + 1);
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
-    }
-}
 
 /// The routes over each validator's proposal settings.
 #[derive(Debug)]
 pub(crate) struct ProposerOverrides {
-    /// The validators and their settings.
-    store: Arc<ValidatorStore>,
+    /// The running keys and their definitions.
+    registry: Arc<KeyRegistry>,
 }
 
 impl ProposerOverrides {
@@ -70,9 +39,12 @@ impl ProposerOverrides {
     /// Path of the graffiti routes.
     const GRAFFITI: &'static str = "/eth/v1/validator/{pubkey}/graffiti";
 
-    /// The group over a store.
-    pub(crate) const fn new(store: Arc<ValidatorStore>) -> Self {
-        Self { store }
+    /// Path of the builder configuration routes.
+    const BUILDER_CONFIG: &'static str = "/eth/v1/validator/{pubkey}/builder_config";
+
+    /// The group over a registry.
+    pub(crate) const fn new(registry: Arc<KeyRegistry>) -> Self {
+        Self { registry }
     }
 
     /// Adds the group's routes.
@@ -96,9 +68,7 @@ impl ProposerOverrides {
                 Self::FEE_RECIPIENT,
                 &settings,
                 |s, request| async move {
-                    s.clear(&request, |store, pubkey| {
-                        store.set_fee_recipient(pubkey, None)
-                    })
+                    s.clear(&request, |settings| settings.fee_recipient = None)
                 },
             )
             .route(
@@ -117,9 +87,7 @@ impl ProposerOverrides {
                 Method::Delete,
                 Self::GAS_LIMIT,
                 &settings,
-                |s, request| async move {
-                    s.clear(&request, |store, pubkey| store.set_gas_limit(pubkey, None))
-                },
+                |s, request| async move { s.clear(&request, |settings| settings.gas_limit = None) },
             )
             .route(
                 Method::Get,
@@ -137,8 +105,26 @@ impl ProposerOverrides {
                 Method::Delete,
                 Self::GRAFFITI,
                 &settings,
+                |s, request| async move { s.clear(&request, |settings| settings.graffiti = None) },
+            )
+            .route(
+                Method::Get,
+                Self::BUILDER_CONFIG,
+                &settings,
+                |s, request| async move { s.builder_config(&request) },
+            )
+            .route(
+                Method::Post,
+                Self::BUILDER_CONFIG,
+                &settings,
+                |s, request| async move { s.set_builder_config(&request) },
+            )
+            .route(
+                Method::Delete,
+                Self::BUILDER_CONFIG,
+                &settings,
                 |s, request| async move {
-                    s.clear(&request, |store, pubkey| store.set_graffiti(pubkey, None))
+                    s.clear(&request, |settings| settings.builder_config = None)
                 },
             )
     }
@@ -146,7 +132,7 @@ impl ProposerOverrides {
     /// The fee recipient a validator's proposals pay, the default unless overridden.
     fn fee_recipient(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
-        let address = self.store.settings(&pubkey).fee_recipient;
+        let address = self.registry.store().settings(&pubkey).fee_recipient;
         Ok(Reply::data(Json::from([
             ("pubkey", pubkey.to_json()),
             ("ethaddress", address.to_json()),
@@ -165,17 +151,14 @@ impl ProposerOverrides {
                 "the zero address cannot be a fee recipient",
             ));
         }
-        Self::applied(
-            self.store.set_fee_recipient(&pubkey, Some(address)),
-            &pubkey,
-        )?;
+        self.apply(&pubkey, |settings| settings.fee_recipient = Some(address))?;
         Ok(Reply::empty(StatusCode::ACCEPTED))
     }
 
     /// The gas limit a validator asks for, the default unless overridden.
     fn gas_limit(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
-        let gas_limit = self.store.settings(&pubkey).gas_limit;
+        let gas_limit = self.registry.store().settings(&pubkey).gas_limit;
         Ok(Reply::data(Json::from([
             ("pubkey", pubkey.to_json()),
             ("gas_limit", gas_limit.to_json()),
@@ -187,14 +170,14 @@ impl ProposerOverrides {
         let pubkey = self.known(request)?;
         let body = ApiRequest::new(request).json()?;
         let gas_limit: u64 = Fields::of(&body)?.required("gas_limit")?;
-        Self::applied(self.store.set_gas_limit(&pubkey, Some(gas_limit)), &pubkey)?;
+        self.apply(&pubkey, |settings| settings.gas_limit = Some(gas_limit))?;
         Ok(Reply::empty(StatusCode::ACCEPTED))
     }
 
     /// The graffiti a validator's blocks carry, the default unless overridden.
     fn graffiti(&self, request: &Request) -> ApiResult {
         let pubkey = self.known(request)?;
-        let graffiti = Graffiti(self.store.settings(&pubkey).graffiti);
+        let graffiti = self.registry.store().graffiti(&pubkey);
         Ok(Reply::data(Json::from([
             ("pubkey", pubkey.to_json()),
             ("graffiti", Json::from(graffiti.text())),
@@ -206,74 +189,64 @@ impl ProposerOverrides {
         let pubkey = self.known(request)?;
         let body = ApiRequest::new(request).json()?;
         let text: String = Fields::of(&body)?.required("graffiti")?;
-        let graffiti = Graffiti::parse(&text)?;
-        Self::applied(self.store.set_graffiti(&pubkey, Some(graffiti.0)), &pubkey)?;
+        let graffiti =
+            Graffiti::parse(&text).map_err(|error| ApiError::bad_request(error.to_string()))?;
+        self.apply(&pubkey, |settings| settings.graffiti = Some(graffiti))?;
+        Ok(Reply::empty(StatusCode::ACCEPTED))
+    }
+
+    /// The builder configuration in effect, with every omitted value resolved.
+    fn builder_config(&self, request: &Request) -> ApiResult {
+        let pubkey = self.known(request)?;
+        let resolved = self.registry.store().builder_config(&pubkey);
+        Ok(Reply::data(resolved.to_json()))
+    }
+
+    /// Replaces a validator's builder configuration in full, never merging it with the stored one.
+    fn set_builder_config(&self, request: &Request) -> ApiResult {
+        let pubkey = self.known(request)?;
+        let body = ApiRequest::new(request).json()?;
+        let config = BuilderConfig::from_json(&body)
+            .map_err(|error| ApiError::bad_request(format!("invalid builder config: {error}")))?;
+        self.apply(&pubkey, |settings| {
+            settings.builder_config = Some(config.clone());
+        })?;
         Ok(Reply::empty(StatusCode::ACCEPTED))
     }
 
     /// Clears one override, so the default applies again.
-    fn clear(
-        &self,
-        request: &Request,
-        reset: impl FnOnce(&ValidatorStore, &BlsPubkey) -> bool,
-    ) -> ApiResult {
+    fn clear(&self, request: &Request, reset: impl Fn(&mut ValidatorSettings)) -> ApiResult {
         let pubkey = self.known(request)?;
-        Self::applied(reset(&self.store, &pubkey), &pubkey)?;
+        self.apply(&pubkey, reset)?;
         Ok(Reply::empty(StatusCode::NO_CONTENT))
     }
 
     /// The key in the path, which the store must run.
     fn known(&self, request: &Request) -> Result<BlsPubkey, ApiError> {
         let pubkey = ApiRequest::new(request).pubkey()?;
-        if !self.store.contains(&pubkey) {
+        if !self.registry.store().contains(&pubkey) {
             return Err(Self::unknown(&pubkey));
         }
         Ok(pubkey)
     }
 
-    /// Whether a change reached the key, which a concurrent delete may have removed.
-    fn applied(changed: bool, pubkey: &BlsPubkey) -> Result<(), ApiError> {
-        if changed {
-            Ok(())
-        } else {
-            Err(Self::unknown(pubkey))
+    /// Changes a key's overrides durably, failing when a concurrent delete removed the key.
+    fn apply(
+        &self,
+        pubkey: &BlsPubkey,
+        change: impl Fn(&mut ValidatorSettings),
+    ) -> Result<(), ApiError> {
+        match self.registry.edit_settings(pubkey, change) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Self::unknown(pubkey)),
+            Err(error) => Err(ApiError::internal(format!(
+                "cannot store the setting: {error}"
+            ))),
         }
     }
 
     /// The reply for a key the store does not run.
     fn unknown(pubkey: &BlsPubkey) -> ApiError {
         ApiError::not_found(format!("validator {pubkey} is not managed by this client"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn graffiti_round_trips_through_its_zero_padding() {
-        // "axiom" takes 5 bytes; the other 27 are zero.
-        let graffiti = Graffiti::parse("axiom").unwrap();
-        let mut bytes = [0; 32];
-        bytes[..5].copy_from_slice(b"axiom");
-        assert_eq!(graffiti, Graffiti(Bytes32(bytes)));
-        assert_eq!(graffiti.text(), "axiom");
-
-        // Exactly 32 bytes fit with no padding; the empty text is all padding.
-        let full = "x".repeat(32);
-        assert_eq!(Graffiti::parse(&full).unwrap().text(), full);
-        assert_eq!(Graffiti::parse("").unwrap(), Graffiti(Bytes32::default()));
-    }
-
-    #[test]
-    fn graffiti_longer_than_a_block_holds_is_refused() {
-        // Eleven 3-byte characters are 33 bytes, one more than a block holds.
-        let text = "\u{20ac}".repeat(11);
-        assert_eq!(
-            Graffiti::parse(&text),
-            Err(ApiError::bad_request(
-                "graffiti of 33 bytes exceeds the 32 a block holds"
-            ))
-        );
     }
 }

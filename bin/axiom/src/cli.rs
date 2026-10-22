@@ -131,6 +131,22 @@ pub(crate) enum CliError {
         /// The value given.
         value: String,
     },
+    /// A flag was given without another it needs.
+    #[error("{flag} needs {needs}")]
+    Requires {
+        /// The flag given.
+        flag: &'static str,
+        /// The flag it needs.
+        needs: &'static str,
+    },
+    /// Two flags that exclude each other were both given.
+    #[error("{flag} and {other} cannot be given together")]
+    Conflicts {
+        /// The first flag.
+        flag: &'static str,
+        /// The other flag.
+        other: &'static str,
+    },
     /// A slasher setting was given without the slasher.
     #[error("{0} needs --slasher")]
     SlasherDisabled(&'static str),

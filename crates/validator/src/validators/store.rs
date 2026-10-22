@@ -1,47 +1,23 @@
-//! The validators this client runs: their signers, settings, and registry indices.
+//! The store of running validators: their signers, overrides, and registry indices.
 
 use std::{
     collections::BTreeMap,
+    future::Future,
     sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    time::Instant,
 };
 
-use axiom_types::{
-    BlsPubkey, BlsSignature, Bytes32, ExecutionAddress, Preset, ValidatorIndex,
-    phase0::AttestationData,
+use axiom_types::{BlsPubkey, BlsSignature, Preset, ValidatorIndex, phase0::AttestationData};
+use tracing::warn;
+
+use crate::{
+    metrics::ValidatorMetrics,
+    signing::{SignError, SigningGuard, SigningRequest, ValidatorSigner},
+    validators::{
+        BuilderConfig, Graffiti, GraffitiFile, NEUTRAL_BOOST_FACTOR, ProposerDefaults,
+        ProposerSettings, ResolvedBuilderConfig, ValidatorSettings,
+    },
 };
-
-use crate::signing::{SignError, SigningGuard, SigningRequest, ValidatorSigner};
-
-/// Gas limit a proposer asks for when none is configured.
-///
-/// It matches the execution layer's default target at the time of writing.
-pub const DEFAULT_GAS_LIMIT: u64 = 60_000_000;
-
-/// Proposal settings that apply to every validator unless overridden.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ProposerDefaults {
-    /// Where execution fees go.
-    pub fee_recipient: ExecutionAddress,
-    /// The gas limit to ask builders and the engine for.
-    pub gas_limit: u64,
-    /// Bytes written into each block.
-    pub graffiti: Bytes32,
-    /// Whether the validator registers with external builders.
-    pub builder: bool,
-}
-
-/// What a validator's proposals use, after overrides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProposerSettings {
-    /// Where execution fees go.
-    pub fee_recipient: ExecutionAddress,
-    /// The gas limit to ask for.
-    pub gas_limit: u64,
-    /// Bytes written into each block.
-    pub graffiti: Bytes32,
-    /// Whether the validator registers with external builders.
-    pub builder: bool,
-}
 
 /// One validator this client runs.
 #[derive(Debug)]
@@ -50,12 +26,8 @@ struct Entry {
     signer: Arc<ValidatorSigner>,
     /// Its registry index, once a beacon node has reported it.
     index: Option<ValidatorIndex>,
-    /// A fee recipient overriding the default.
-    fee_recipient: Option<ExecutionAddress>,
-    /// A gas limit overriding the default.
-    gas_limit: Option<u64>,
-    /// Graffiti overriding the default.
-    graffiti: Option<Bytes32>,
+    /// Its overrides of the client's defaults.
+    overrides: ValidatorSettings,
     /// Whether it may sign; doppelganger detection holds new keys back.
     enabled: bool,
 }
@@ -73,18 +45,44 @@ pub struct ValidatorStore {
     /// The validators, by key.
     entries: RwLock<BTreeMap<BlsPubkey, Entry>>,
     /// Settings for validators without overrides.
-    defaults: RwLock<ProposerDefaults>,
+    defaults: ProposerDefaults,
+    /// A graffiti file, which overrides every other graffiti setting.
+    graffiti_file: Option<GraffitiFile>,
+    /// Signature counts and latencies.
+    metrics: ValidatorMetrics,
 }
 
 impl ValidatorStore {
     /// An empty store signing through a guard.
     #[must_use]
-    pub const fn new(guard: SigningGuard, defaults: ProposerDefaults) -> Self {
+    pub fn new(guard: SigningGuard, defaults: ProposerDefaults) -> Self {
         Self {
             guard,
             entries: RwLock::new(BTreeMap::new()),
-            defaults: RwLock::new(defaults),
+            defaults,
+            graffiti_file: None,
+            metrics: ValidatorMetrics::detached(),
         }
+    }
+
+    /// Reads graffiti from a file before every other setting.
+    #[must_use]
+    pub fn with_graffiti_file(mut self, file: GraffitiFile) -> Self {
+        self.graffiti_file = Some(file);
+        self
+    }
+
+    /// Records signatures in exported metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ValidatorMetrics) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// The settings for validators without overrides.
+    #[must_use]
+    pub const fn defaults(&self) -> &ProposerDefaults {
+        &self.defaults
     }
 
     /// The signing context and slashing protection.
@@ -106,9 +104,7 @@ impl ValidatorStore {
         let entry = Entry {
             signer: Arc::new(signer),
             index: None,
-            fee_recipient: None,
-            gas_limit: None,
-            graffiti: None,
+            overrides: ValidatorSettings::default(),
             enabled,
         };
         self.write().insert(pubkey, entry);
@@ -202,57 +198,60 @@ impl ValidatorStore {
     /// The proposal settings of a validator, overrides applied.
     #[must_use]
     pub fn settings(&self, pubkey: &BlsPubkey) -> ProposerSettings {
-        let defaults = *self.defaults.read().unwrap_or_else(PoisonError::into_inner);
-        let overrides = self
-            .read()
-            .get(pubkey)
-            .map(|entry| (entry.fee_recipient, entry.gas_limit, entry.graffiti));
-        let (fee_recipient, gas_limit, graffiti) = overrides.unwrap_or_default();
-        ProposerSettings {
-            fee_recipient: fee_recipient.unwrap_or(defaults.fee_recipient),
-            gas_limit: gas_limit.unwrap_or(defaults.gas_limit),
-            graffiti: graffiti.unwrap_or(defaults.graffiti),
-            builder: defaults.builder,
-        }
+        let overrides = self.overrides(pubkey).unwrap_or_default();
+        ProposerSettings::resolve(&self.defaults, &overrides)
     }
 
-    /// Overrides a validator's fee recipient, or clears the override.
+    /// The graffiti of a validator's blocks.
     ///
-    /// # Returns
-    ///
-    /// Whether the store holds the key.
-    pub fn set_fee_recipient(&self, pubkey: &BlsPubkey, value: Option<ExecutionAddress>) -> bool {
-        self.update(pubkey, |entry| entry.fee_recipient = value)
-    }
-
-    /// Overrides a validator's gas limit, or clears the override.
-    ///
-    /// # Returns
-    ///
-    /// Whether the store holds the key.
-    pub fn set_gas_limit(&self, pubkey: &BlsPubkey, value: Option<u64>) -> bool {
-        self.update(pubkey, |entry| entry.gas_limit = value)
-    }
-
-    /// Overrides a validator's graffiti, or clears the override.
-    ///
-    /// # Returns
-    ///
-    /// Whether the store holds the key.
-    pub fn set_graffiti(&self, pubkey: &BlsPubkey, value: Option<Bytes32>) -> bool {
-        self.update(pubkey, |entry| entry.graffiti = value)
-    }
-
-    /// Whether a validator overrides each setting.
+    /// A graffiti file comes first, then the validator's override, then the default.
+    /// A file that cannot be read is skipped with a warning, so a proposal never fails on it.
     #[must_use]
-    pub fn overrides(&self, pubkey: &BlsPubkey) -> Option<(bool, bool, bool)> {
-        self.read().get(pubkey).map(|entry| {
-            (
-                entry.fee_recipient.is_some(),
-                entry.gas_limit.is_some(),
-                entry.graffiti.is_some(),
-            )
-        })
+    pub fn graffiti(&self, pubkey: &BlsPubkey) -> Graffiti {
+        let from_file = self.graffiti_file.as_ref().and_then(|file| {
+            file.lookup(pubkey)
+                .inspect_err(|error| warn!(%error, "graffiti file unreadable"))
+                .ok()
+                .flatten()
+        });
+        from_file
+            .or_else(|| {
+                self.overrides(pubkey)
+                    .and_then(|overrides| overrides.graffiti)
+            })
+            .unwrap_or(self.defaults.graffiti)
+    }
+
+    /// The builder configuration of a validator's Gloas proposals, every value resolved.
+    #[must_use]
+    pub fn builder_config(&self, pubkey: &BlsPubkey) -> ResolvedBuilderConfig {
+        let overrides = self.overrides(pubkey).unwrap_or_default();
+        let boost_factor = ProposerSettings::resolve(&self.defaults, &overrides)
+            .builder_boost_factor
+            .unwrap_or(NEUTRAL_BOOST_FACTOR);
+        BuilderConfig::resolve(overrides.builder_config.as_ref(), boost_factor)
+    }
+
+    /// A validator's overrides, when the store holds it.
+    #[must_use]
+    pub fn overrides(&self, pubkey: &BlsPubkey) -> Option<ValidatorSettings> {
+        self.read().get(pubkey).map(|entry| entry.overrides.clone())
+    }
+
+    /// Changes a validator's overrides.
+    ///
+    /// # Returns
+    ///
+    /// Whether the store holds the key.
+    pub fn edit_overrides(
+        &self,
+        pubkey: &BlsPubkey,
+        change: impl FnOnce(&mut ValidatorSettings),
+    ) -> bool {
+        self.write()
+            .get_mut(pubkey)
+            .map(|entry| change(&mut entry.overrides))
+            .is_some()
     }
 
     /// Signs a message for a validator, through slashing protection.
@@ -266,12 +265,21 @@ impl ValidatorStore {
         request: SigningRequest<'_, P>,
     ) -> Result<BlsSignature, SignError> {
         let signer = self.enabled_signer(pubkey)?;
-        let cleared = self.guard.clear(pubkey, request)?;
+        let cleared = match self.guard.clear(pubkey, request) {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                let error = SignError::from(error);
+                self.metrics.record(&request, Err(&error));
+                return Err(error);
+            }
+        };
+        self.metrics.record(&request, Ok(cleared.safety()));
         // Invariant: a key removed before this point never signs.
         // Removal then exports the key's history, which holds every record cleared before it.
         // A record cleared after the export belongs to a message this check now refuses.
         self.enabled_signer(pubkey)?;
-        signer.sign(&cleared, self.guard.context()).await
+        self.timed(&signer, signer.sign(&cleared, self.guard.context()))
+            .await
     }
 
     /// Signs many votes, clearing all of them in one durable write first.
@@ -313,16 +321,27 @@ impl ValidatorStore {
         // Phase 3: sign each cleared vote with its own key.
         let mut cleared = cleared.into_iter();
         let mut signatures = Vec::with_capacity(votes.len());
-        for (signer, (pubkey, _)) in signers.into_iter().zip(votes) {
+        for (signer, (pubkey, data)) in signers.into_iter().zip(votes) {
+            let request = SigningRequest::<P>::Attestation(data);
             let signature = match signer {
                 Err(error) => Err(error),
                 Ok(signer) => match cleared.next() {
                     // Invariant: a key removed while its vote was cleared never signs it.
-                    Some(Ok(cleared)) => match self.enabled_signer(pubkey) {
-                        Ok(_) => signer.sign(&cleared, self.guard.context()).await,
-                        Err(error) => Err(error),
-                    },
-                    Some(Err(refusal)) => Err(refusal.into()),
+                    Some(Ok(cleared)) => {
+                        self.metrics.record(&request, Ok(cleared.safety()));
+                        match self.enabled_signer(pubkey) {
+                            Ok(_) => {
+                                self.timed(&signer, signer.sign(&cleared, self.guard.context()))
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Some(Err(refusal)) => {
+                        let error = SignError::from(refusal);
+                        self.metrics.record(&request, Err(&error));
+                        Err(error)
+                    }
                     // Invariant: one clearing per allowed vote, in order.
                     None => Err(SignError::Unavailable("vote not cleared".to_owned())),
                 },
@@ -345,9 +364,17 @@ impl ValidatorStore {
         Ok(signer)
     }
 
-    /// Applies a change to one validator.
-    fn update(&self, pubkey: &BlsPubkey, change: impl FnOnce(&mut Entry)) -> bool {
-        self.write().get_mut(pubkey).map(change).is_some()
+    /// Runs one signature, recording how long the signer took.
+    async fn timed(
+        &self,
+        signer: &ValidatorSigner,
+        signing: impl Future<Output = Result<BlsSignature, SignError>>,
+    ) -> Result<BlsSignature, SignError> {
+        let start = Instant::now();
+        let signature = signing.await;
+        self.metrics
+            .observe_signing(signer, start.elapsed().as_secs_f64());
+        signature
     }
 
     /// The validators, for reading.
@@ -364,6 +391,8 @@ impl ValidatorStore {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs, process};
+
     use axiom_bls::{PublicKey, SecretKey, Signature};
     use axiom_types::{ChainConfig, Epoch, Minimal, Root, Slot, phase0::Checkpoint};
     use tokio::runtime::Builder;
@@ -372,6 +401,7 @@ mod tests {
     use crate::{
         protection::SlashingDatabase,
         signing::{LocalKey, SigningContext},
+        validators::DEFAULT_GAS_LIMIT,
     };
 
     /// A store on the minimal chain, with one local key of secret 5, enabled or not.
@@ -460,22 +490,38 @@ mod tests {
     }
 
     #[test]
-    fn overrides_replace_the_defaults() {
+    fn overrides_replace_the_defaults_until_cleared() {
         let (store, pubkey) = store(true);
         assert_eq!(store.settings(&pubkey).gas_limit, DEFAULT_GAS_LIMIT);
-        assert!(store.set_gas_limit(&pubkey, Some(30_000_000)));
-        assert!(store.set_fee_recipient(&pubkey, Some(ExecutionAddress([7; 20]))));
-        assert_eq!(
-            store.settings(&pubkey),
-            ProposerSettings {
-                fee_recipient: ExecutionAddress([7; 20]),
-                gas_limit: 30_000_000,
-                graffiti: Bytes32::default(),
-                builder: false,
-            }
-        );
-        // Clearing the override restores the default.
-        assert!(store.set_gas_limit(&pubkey, None));
+        assert!(store.edit_overrides(&pubkey, |overrides| {
+            overrides.gas_limit = Some(30_000_000);
+        }));
+        assert_eq!(store.settings(&pubkey).gas_limit, 30_000_000);
+
+        // Clearing the override restores the default; an unknown key changes nothing.
+        assert!(store.edit_overrides(&pubkey, |overrides| overrides.gas_limit = None));
         assert_eq!(store.settings(&pubkey).gas_limit, DEFAULT_GAS_LIMIT);
+        assert!(!store.edit_overrides(&BlsPubkey([9; 48]), |_| {}));
+    }
+
+    #[test]
+    fn a_graffiti_file_beats_the_override_and_the_default() {
+        let (store, pubkey) = store(true);
+        let own = Graffiti::parse("override").unwrap();
+        store.edit_overrides(&pubkey, |overrides| overrides.graffiti = Some(own));
+        assert_eq!(store.graffiti(&pubkey), own);
+
+        // Fixture state: a graffiti file with a default line only.
+        let path = env::temp_dir().join(format!("axiom-store-graffiti-{}", process::id()));
+        fs::write(&path, "default: from the file\n").unwrap();
+        let store = store.with_graffiti_file(GraffitiFile::new(path.clone()));
+        assert_eq!(
+            store.graffiti(&pubkey),
+            Graffiti::parse("from the file").unwrap()
+        );
+
+        // An unreadable file falls back to the override rather than failing the proposal.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(store.graffiti(&pubkey), own);
     }
 }

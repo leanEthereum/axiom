@@ -33,7 +33,10 @@ use axiom_validator::{
         ValidatorHistory, VoteCheck,
     },
     signing::{LocalKey, SigningContext, SigningGuard, ValidatorSigner},
-    validators::{DEFAULT_GAS_LIMIT, ProposerDefaults, ValidatorStore},
+    validators::{
+        BuilderConfig, BuilderEntry, DEFAULT_GAS_LIMIT, Graffiti, ProposerDefaults,
+        ValidatorSettings, ValidatorStore,
+    },
 };
 use tokio::runtime::Builder;
 
@@ -81,8 +84,7 @@ impl Fixture {
             ProposerDefaults {
                 fee_recipient: DEFAULT_FEE_RECIPIENT,
                 gas_limit: DEFAULT_GAS_LIMIT,
-                graffiti: Bytes32::default(),
-                builder: false,
+                ..ProposerDefaults::default()
             },
         ));
         let directory =
@@ -514,7 +516,7 @@ fn gas_limit_and_graffiti_overrides_round_trip() {
     );
     let mut padded = [0; 32];
     padded[..5].copy_from_slice(b"axiom");
-    assert_eq!(fixture.store.settings(&five).graffiti, Bytes32(padded));
+    assert_eq!(fixture.store.graffiti(&five), Graffiti(Bytes32(padded)));
     assert_eq!(
         fixture.call(Method::Get, &graffiti, None),
         (StatusCode::OK, reply("graffiti", Json::from("axiom")))
@@ -648,5 +650,134 @@ fn remote_keys_import_list_and_delete() {
     assert_eq!(
         fixture.call(Method::Delete, "/eth/v1/remotekeys", Some(&request)),
         (StatusCode::OK, statuses(&[status("not_found")]))
+    );
+}
+
+#[test]
+fn settings_of_an_imported_key_persist_in_its_definition() {
+    let fixture = Fixture::new(false);
+    let five = secret(5).public_key();
+    let body = Json::from([
+        ("keystores", strings(&[&keystore(5, "pw")])),
+        ("passwords", strings(&["pw"])),
+    ]);
+    fixture.call(Method::Post, "/eth/v1/keystores", Some(&body));
+
+    // A gas limit set through the API lands in the key's definition, which a restart reads.
+    let gas = Json::from([("gas_limit", 30_000_000_u64.to_json())]);
+    assert_eq!(
+        fixture.call(
+            Method::Post,
+            &format!("/eth/v1/validator/{five}/gas_limit"),
+            Some(&gas)
+        ),
+        (StatusCode::ACCEPTED, Json::Null)
+    );
+    let definitions = fixture.directory.definitions().unwrap();
+    assert_eq!(
+        definitions.get(&five).unwrap().settings,
+        ValidatorSettings {
+            gas_limit: Some(30_000_000),
+            ..ValidatorSettings::default()
+        }
+    );
+    let reloaded = KeyDirectory::open(fixture.directory.path())
+        .unwrap()
+        .load()
+        .unwrap();
+    assert_eq!(reloaded[0].settings.gas_limit, Some(30_000_000));
+
+    // Deleting the key forgets its definition with its keystore.
+    fixture.call(Method::Delete, "/eth/v1/keystores", Some(&pubkeys(&[five])));
+    assert!(
+        fixture
+            .directory
+            .definitions()
+            .unwrap()
+            .get(&five)
+            .is_none()
+    );
+}
+
+#[test]
+fn a_builder_config_replaces_in_full_and_reads_back_resolved() {
+    let fixture = Fixture::new(false);
+    let five = fixture.run(5);
+    let target = format!("/eth/v1/validator/{five}/builder_config");
+
+    // With no configuration, the client's own resolves: no floor, local preferred, no builders.
+    let resolved = |min_bid: &str, factor: &str, builders: Vec<Json>| {
+        Json::from([(
+            "data",
+            Json::from([
+                ("min_bid", Json::from(min_bid)),
+                ("builder_boost_factor", Json::from(factor)),
+                ("builders", Json::from(builders)),
+            ]),
+        )])
+    };
+    assert_eq!(
+        fixture.call(Method::Get, &target, None),
+        (StatusCode::OK, resolved("0", "0", Vec::new()))
+    );
+
+    // One builder with a floor of 10; its factor and data resolve from the key and the URL.
+    let body = Json::parse(
+        r#"{"min_bid":"10","builder_boost_factor":"120",
+            "builders":[{"url":"https://builder.example.com/bids"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.call(Method::Post, &target, Some(&body)),
+        (StatusCode::ACCEPTED, Json::Null)
+    );
+    let entry = Json::parse(
+        r#"{"url":"https://builder.example.com/bids",
+            "auth_data":"0x6275696c6465722e6578616d706c652e636f6d","builder_pubkeys":[],
+            "max_execution_payment":"0","min_bid":"10","builder_boost_factor":"120"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.call(Method::Get, &target, None),
+        (StatusCode::OK, resolved("10", "120", vec![entry]))
+    );
+    assert_eq!(
+        fixture.store.overrides(&five).unwrap().builder_config,
+        Some(BuilderConfig {
+            min_bid: Some(10),
+            builder_boost_factor: Some(120),
+            builders: Some(vec![BuilderEntry {
+                url: "https://builder.example.com/bids".to_owned(),
+                auth_data: None,
+                builder_pubkeys: None,
+                max_execution_payment: None,
+                min_bid: None,
+                builder_boost_factor: None,
+            }]),
+        })
+    );
+
+    // Two entries with one URL and one implied data are refused, and the stored one stays.
+    let twice =
+        Json::parse(r#"{"builders":[{"url":"https://b.example"},{"url":"https://b.example"}]}"#)
+            .unwrap();
+    assert_eq!(
+        fixture.call(Method::Post, &target, Some(&twice)),
+        (
+            StatusCode::BAD_REQUEST,
+            message(
+                "invalid builder config: builders 0 and 1 share URL \"https://b.example\" and auth_data"
+            )
+        )
+    );
+
+    // Deleting returns the key to the client's configuration.
+    assert_eq!(
+        fixture.call(Method::Delete, &target, None),
+        (StatusCode::NO_CONTENT, Json::Null)
+    );
+    assert_eq!(
+        fixture.call(Method::Get, &target, None),
+        (StatusCode::OK, resolved("0", "0", Vec::new()))
     );
 }

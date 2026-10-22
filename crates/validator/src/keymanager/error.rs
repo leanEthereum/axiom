@@ -2,12 +2,12 @@
 
 use std::{io, path::PathBuf};
 
-use axiom_beacon_json::ApiJsonError;
 use axiom_http::HttpError;
-use axiom_json::ParseError;
+use axiom_types::BlsPubkey;
+use axiom_yaml::ParseError;
 use thiserror::Error;
 
-use crate::keys::KeystoreError;
+use crate::{keys::KeystoreError, validators::FieldError};
 
 /// Why the key directory could not be read or written.
 #[derive(Debug, Error)]
@@ -47,23 +47,22 @@ pub enum DirectoryError {
         #[source]
         source: Box<KeystoreError>,
     },
-    /// The remote key list is not JSON.
-    #[error("remote keys {}: {source}", path.display())]
-    RemoteText {
-        /// The remote key list.
+    /// The validator definitions file is malformed.
+    #[error("validator definitions {}: {source}", path.display())]
+    Definitions {
+        /// The definitions file.
         path: PathBuf,
-        /// Where the text stops being JSON.
+        /// What is wrong with it.
         #[source]
-        source: ParseError,
+        source: DefinitionsError,
     },
-    /// The remote key list is JSON of the wrong shape.
-    #[error("remote keys {}: {source}", path.display())]
-    RemoteShape {
-        /// The remote key list.
+    /// An enabled local key has no keystore in the directory.
+    #[error("validator {pubkey} is defined, but {} does not exist", path.display())]
+    MissingKeystore {
+        /// The key.
+        pubkey: BlsPubkey,
+        /// Where its keystore should be.
         path: PathBuf,
-        /// What is wrong with its shape.
-        #[source]
-        source: ApiJsonError,
     },
     /// A remote signer URL is not a plain http URL.
     #[error("remote signer URL {url:?}: {source}")]
@@ -73,5 +72,33 @@ pub enum DirectoryError {
         /// Why it does not parse.
         #[source]
         source: HttpError,
+    },
+}
+
+/// Why the definitions file cannot be read.
+#[derive(Debug, Error)]
+pub enum DefinitionsError {
+    /// The text is not YAML of the supported subset.
+    #[error("{0}")]
+    Text(#[source] ParseError),
+    /// The document is not a sequence of definitions.
+    #[error("the document is not a sequence of definitions")]
+    NotASequence,
+    /// An entry is malformed.
+    #[error("entry {index}: {source}")]
+    Entry {
+        /// The entry's position, counting from zero.
+        index: usize,
+        /// What is wrong with it.
+        #[source]
+        source: FieldError,
+    },
+    /// Two entries name one key.
+    #[error("entry {index} defines validator {pubkey} again")]
+    Duplicate {
+        /// The later entry's position.
+        index: usize,
+        /// The key.
+        pubkey: BlsPubkey,
     },
 }

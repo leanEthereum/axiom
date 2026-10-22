@@ -1,8 +1,11 @@
 //! Sync committee duties: a vote for the head each slot, and contributions from aggregators.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use axiom_beacon_json::api::SyncDuty;
+use axiom_beacon_json::api::{SyncCommitteeSelection, SyncDuty};
 use axiom_types::{
     BlsPubkey, BlsSignature, Preset, Root, Slot, ValidatorIndex,
     altair::{
@@ -14,11 +17,12 @@ use axiom_types::{
 use tracing::{debug, info, warn};
 
 use crate::{
+    beacon::ApiTopic,
     duties::{AggregatorSelection, DutyContext, DutyError},
     signing::SigningRequest,
 };
 
-/// A sync committee member's seat in one subcommittee, selected to aggregate it.
+/// A sync committee member's seat in one subcommittee, with the proof that may select it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SubcommitteeAggregator {
     /// The member's key.
@@ -27,7 +31,7 @@ struct SubcommitteeAggregator {
     validator_index: ValidatorIndex,
     /// The subcommittee.
     subcommittee_index: u64,
-    /// The proof that selects the member.
+    /// The proof that decides whether the member aggregates.
     selection_proof: BlsSignature,
 }
 
@@ -123,7 +127,7 @@ impl<P: Preset> SyncCommittee<P> {
         let messages = Arc::new(messages);
         context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::SyncCommittee, |client| {
                 let messages = Arc::clone(&messages);
                 async move { client.beacon().submit_sync_messages(&messages).await }
             })
@@ -134,11 +138,11 @@ impl<P: Preset> SyncCommittee<P> {
 
     /// The members selected to aggregate each of their subcommittees.
     ///
+    /// A distributed validator's shares sign partial proofs, which its middleware combines.
     /// See `is_sync_committee_aggregator` in the Altair validator spec.
     async fn aggregators(&self, slot: Slot, members: &[SyncDuty]) -> Vec<SubcommitteeAggregator> {
         let seats_per_subcommittee = P::SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
-        let selection = AggregatorSelection::sync_subcommittee::<P>();
-        let mut aggregators = Vec::new();
+        let mut candidates = Vec::new();
         for member in members {
             // A member with several seats in one subcommittee aggregates it once.
             let subcommittees: BTreeSet<u64> = member
@@ -157,20 +161,84 @@ impl<P: Preset> SyncCommittee<P> {
                     .sign::<P>(&member.pubkey, SigningRequest::SyncSelectionProof(&data))
                     .await;
                 match proof {
-                    Ok(proof) if selection.selects(&proof) => {
-                        aggregators.push(SubcommitteeAggregator {
-                            pubkey: member.pubkey,
-                            validator_index: member.validator_index,
-                            subcommittee_index,
-                            selection_proof: proof,
-                        });
-                    }
-                    Ok(_) => {}
+                    Ok(selection_proof) => candidates.push(SubcommitteeAggregator {
+                        pubkey: member.pubkey,
+                        validator_index: member.validator_index,
+                        subcommittee_index,
+                        selection_proof,
+                    }),
                     Err(error) => debug!(slot = slot.0, %error, "no sync selection proof"),
                 }
             }
         }
-        aggregators
+        if self.context.settings.distributed {
+            candidates = self.combine(slot, candidates).await;
+        }
+        let selection = AggregatorSelection::sync_subcommittee::<P>();
+        candidates
+            .into_iter()
+            .filter(|candidate| selection.selects(&candidate.selection_proof))
+            .collect()
+    }
+
+    /// Exchanges each share's partial selection proof for the cluster's combined one.
+    ///
+    /// A seat the middleware does not answer for is dropped, so it does not aggregate.
+    /// See `submitSyncCommitteeSelections` in the beacon API.
+    async fn combine(
+        &self,
+        slot: Slot,
+        partial: Vec<SubcommitteeAggregator>,
+    ) -> Vec<SubcommitteeAggregator> {
+        if partial.is_empty() {
+            return partial;
+        }
+        let selections: Vec<SyncCommitteeSelection> = partial
+            .iter()
+            .map(|candidate| SyncCommitteeSelection {
+                validator_index: candidate.validator_index,
+                slot,
+                subcommittee_index: candidate.subcommittee_index,
+                selection_proof: candidate.selection_proof,
+            })
+            .collect();
+        let selections = &selections;
+        let combined = self
+            .context
+            .nodes
+            .first(|client| async move {
+                client
+                    .validator()
+                    .sync_committee_selections(selections)
+                    .await
+            })
+            .await;
+        let combined: BTreeMap<(ValidatorIndex, u64), BlsSignature> = match combined {
+            Ok(combined) => combined
+                .into_iter()
+                .filter(|selection| selection.slot == slot)
+                .map(|selection| {
+                    (
+                        (selection.validator_index, selection.subcommittee_index),
+                        selection.selection_proof,
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                warn!(slot = slot.0, %error, "distributed sync selection proofs unavailable");
+                BTreeMap::new()
+            }
+        };
+        partial
+            .into_iter()
+            .filter_map(|candidate| {
+                let key = (candidate.validator_index, candidate.subcommittee_index);
+                Some(SubcommitteeAggregator {
+                    selection_proof: *combined.get(&key)?,
+                    ..candidate
+                })
+            })
+            .collect()
     }
 
     /// Signs and publishes each aggregator's contribution.
@@ -232,7 +300,7 @@ impl<P: Preset> SyncCommittee<P> {
         let signed = Arc::new(signed);
         context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::SyncCommittee, |client| {
                 let signed = Arc::clone(&signed);
                 async move { client.validator().publish_contributions(&signed).await }
             })

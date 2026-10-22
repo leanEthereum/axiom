@@ -19,7 +19,7 @@ use axiom_types::{
 };
 use axiom_validator::{
     beacon::{BeaconClient, BeaconError},
-    keymanager::{DirectoryError, KeyDirectory},
+    keymanager::{DirectoryError, KeyDirectory, SignerKind},
     keys::{
         DepositEntry, DerivationPath, EncryptionParams, Kdf, KeyError, Keystore, KeystoreError,
         Mnemonic, MnemonicError, Password, WithdrawalTarget, WordCount,
@@ -49,6 +49,8 @@ COMMANDS:
     import-slashing-protection   merge an EIP-3076 interchange into a slashing protection database
     bls-change                   move a validator's withdrawals to an execution address
     import                       copy keystores into a validator data directory
+    list                         list the validators a data directory defines
+    modify enable|disable        start or stop running validators on the next start
     exit                         sign and submit a validator's voluntary exit
 
 OPTIONS (key generation):
@@ -70,10 +72,11 @@ OPTIONS (slashing protection):
     --file <FILE>                the interchange file to read or write
     --genesis-validators-root <ROOT>  the chain, when importing into a new database
 
-OPTIONS (import, exit):
+OPTIONS (import, list, modify, exit):
     --datadir <DIR>              the validator data directory [default: validator]
     --keystore <FILE>            a keystore to import, repeatable
-    --validator <PUBKEY>         the validator to exit
+    --validator <PUBKEY>         the validator to modify or exit
+    --all                        modify every validator
     --epoch <EPOCH>              the exit epoch [default: the current epoch]
 
 OPTIONS (bls-change):
@@ -119,16 +122,44 @@ pub(crate) enum Account {
     /// Signs and submits a withdrawal credential change.
     BlsChange(BlsChange),
     /// Copies keystores into a data directory, with their password.
-    Import {
-        /// The data directory.
-        datadir: PathBuf,
-        /// The keystores.
-        keystores: Vec<PathBuf>,
-        /// Their password.
-        password_file: PathBuf,
-    },
+    Import(Import),
+    /// Lists the validators a data directory defines.
+    List(PathBuf),
+    /// Enables or disables validators in a data directory.
+    Modify(Modify),
     /// Signs and submits a voluntary exit.
     Exit(Exit),
+}
+
+/// Keystores to copy into a data directory.
+#[derive(Debug)]
+pub(crate) struct Import {
+    /// The data directory.
+    datadir: PathBuf,
+    /// The keystores.
+    keystores: Vec<PathBuf>,
+    /// Their password.
+    password_file: PathBuf,
+}
+
+/// Which validators a command acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// One validator.
+    One(BlsPubkey),
+    /// Every validator the data directory defines.
+    All,
+}
+
+/// Validators to enable or disable.
+#[derive(Debug)]
+pub(crate) struct Modify {
+    /// The data directory.
+    datadir: PathBuf,
+    /// The validators.
+    target: Target,
+    /// Whether they run on the next start.
+    enabled: bool,
 }
 
 /// A voluntary exit to sign and submit.
@@ -232,6 +263,9 @@ pub(crate) enum AccountError {
     /// No local key, or no registry entry, for the validator.
     #[error("no local key or registry entry for validator {0}")]
     UnknownKey(BlsPubkey),
+    /// The data directory defines no such validator.
+    #[error("the data directory defines no validator {0}")]
+    Undefined(BlsPubkey),
 }
 
 impl Account {
@@ -241,8 +275,14 @@ impl Account {
     ///
     /// Fails on an unknown command or flag, a missing value, or a value that does not parse.
     pub(crate) fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
-        let mut arguments = arguments.into_iter();
+        let mut arguments = arguments.into_iter().peekable();
         let command = arguments.next().unwrap_or_else(|| "--help".to_owned());
+        // Modify names its action before its flags.
+        let action = if command == "modify" {
+            arguments.next_if(|word| !word.starts_with('-'))
+        } else {
+            None
+        };
         let flags = AccountFlags::parse(arguments)?;
         if flags.help {
             return Ok(Self::Help);
@@ -285,16 +325,34 @@ impl Account {
                     chain,
                 }))
             }
-            "import" => Ok(Self::Import {
+            "import" => Ok(Self::Import(Import {
                 datadir: flags.datadir.clone(),
                 keystores: flags.keystores.clone(),
                 password_file: AccountFlags::required(flags.password_file, "--password-file")?,
-            }),
+            })),
+            "list" => Ok(Self::List(flags.datadir)),
+            "modify" => {
+                let enabled = match action.as_deref() {
+                    Some("enable") => true,
+                    Some("disable") => false,
+                    Some(other) => return Err(CliError::UnknownFlag(other.to_owned())),
+                    None => return Err(CliError::MissingValue("modify enable|disable")),
+                };
+                Ok(Self::Modify(Modify {
+                    // Exactly one of a key and every key, so a typo never changes them all.
+                    target: AccountFlags::required(flags.target, "--validator or --all")?,
+                    datadir: flags.datadir,
+                    enabled,
+                }))
+            }
             "exit" => {
                 let (preset, chain) = flags.chain()?;
                 Ok(Self::Exit(Exit {
                     datadir: flags.datadir.clone(),
-                    pubkey: AccountFlags::required(flags.validator, "--validator")?,
+                    pubkey: match flags.target {
+                        Some(Target::One(pubkey)) => pubkey,
+                        _ => return Err(CliError::MissingValue("--validator")),
+                    },
                     epoch: flags.epoch,
                     beacon_node: flags
                         .beacon_node
@@ -361,31 +419,88 @@ impl Account {
                 Ok(())
             }
             Self::BlsChange(change) => change.execute(),
-            Self::Import {
-                datadir,
-                keystores,
-                password_file,
-            } => {
-                let password = read_file(&password_file)?;
-                let password = password.trim_end_matches(['\n', '\r']);
-                let directory =
-                    KeyDirectory::open(&datadir).map_err(|source| AccountError::File {
-                        path: datadir.clone(),
-                        source,
-                    })?;
-                for path in keystores {
-                    let keystore = Keystore::parse(&read_file(&path)?)?;
-                    // A keystore the password does not open is refused before it is saved.
-                    keystore.decrypt(&Password::new(password))?;
-                    directory
-                        .save_keystore(&keystore, password)
-                        .map_err(|source| AccountError::File { path, source })?;
-                    let _unwritable = writeln!(io::stdout(), "imported {}", keystore.pubkey());
-                }
-                Ok(())
-            }
+            Self::Import(import) => import.execute(),
+            Self::List(datadir) => Self::list(&datadir),
+            Self::Modify(modify) => modify.execute(),
             Self::Exit(exit) => exit.execute(),
         }
+    }
+}
+
+impl Account {
+    /// Prints each validator the data directory defines, with its state and its signer.
+    fn list(datadir: &Path) -> Result<(), AccountError> {
+        let definitions = open_directory(datadir)?.definitions()?;
+        let mut out = io::stdout().lock();
+        for definition in definitions.iter() {
+            let state = if definition.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            let signer = match &definition.signer {
+                SignerKind::LocalKeystore => "local keystore".to_owned(),
+                SignerKind::Remote { url } => format!("remote signer {url}"),
+            };
+            let _unwritable = writeln!(out, "{} {state} {signer}", definition.pubkey);
+        }
+        Ok(())
+    }
+}
+
+impl Import {
+    /// Copies each keystore in, refusing any the password does not open.
+    ///
+    /// An existing slashing protection database learns each key, so the client starts with it.
+    fn execute(self) -> Result<(), AccountError> {
+        let password = read_file(&self.password_file)?;
+        let password = password.trim_end_matches(['\n', '\r']);
+        let directory = open_directory(&self.datadir)?;
+        let protection =
+            match SlashingDatabase::open_existing(&self.datadir.join("slashing_protection")) {
+                Ok(protection) => Some(protection),
+                Err(ProtectionError::Uninitialized) => None,
+                Err(error) => return Err(error.into()),
+            };
+        for path in self.keystores {
+            let keystore = Keystore::parse(&read_file(&path)?)?;
+            // A keystore the password does not open is refused before it is saved.
+            keystore.decrypt(&Password::new(password))?;
+            directory.save_keystore(&keystore, password)?;
+            if let Some(protection) = &protection {
+                protection.register([keystore.pubkey()])?;
+            }
+            let _unwritable = writeln!(io::stdout(), "imported {}", keystore.pubkey());
+        }
+        Ok(())
+    }
+}
+
+impl Modify {
+    /// Sets whether the chosen validators run, which a running client applies on restart.
+    fn execute(self) -> Result<(), AccountError> {
+        let directory = open_directory(&self.datadir)?;
+        let enabled = self.enabled;
+        let changed = match self.target {
+            Target::One(pubkey) => {
+                if !directory.set_enabled(&pubkey, enabled)? {
+                    return Err(AccountError::Undefined(pubkey));
+                }
+                1
+            }
+            Target::All => directory.edit_definitions(|definitions| {
+                definitions
+                    .iter_mut()
+                    .map(|definition| definition.enabled = enabled)
+                    .count()
+            })?,
+        };
+        let state = if enabled { "enabled" } else { "disabled" };
+        let _unwritable = writeln!(
+            io::stdout(),
+            "{changed} validators {state}; a running client applies this on restart"
+        );
+        Ok(())
     }
 }
 
@@ -457,10 +572,7 @@ impl Exit {
     ///
     /// From Deneb on, the exit signs under the Capella version, so it never expires (EIP-7044).
     fn execute(self) -> Result<(), AccountError> {
-        let directory = KeyDirectory::open(&self.datadir).map_err(|source| AccountError::File {
-            path: self.datadir.clone(),
-            source,
-        })?;
+        let directory = open_directory(&self.datadir)?;
         let key = directory
             .load()?
             .into_iter()
@@ -609,8 +721,8 @@ struct AccountFlags {
     datadir: PathBuf,
     /// Keystores to import.
     keystores: Vec<PathBuf>,
-    /// Validator to exit.
-    validator: Option<BlsPubkey>,
+    /// The validator to exit or modify, or every one.
+    target: Option<Target>,
     /// Exit epoch.
     epoch: Option<Epoch>,
 }
@@ -676,9 +788,10 @@ impl AccountFlags {
                             flag: "--validator",
                             value: text,
                         })?;
-                    flags.validator = Some(BlsPubkey(bytes));
+                    flags.target = Some(Self::target(flags.target, Target::One(BlsPubkey(bytes)))?);
                 }
                 "--epoch" => flags.epoch = Some(Epoch(parsed("--epoch", value("--epoch")?)?)),
+                "--all" => flags.target = Some(Self::target(flags.target, Target::All)?),
                 _ => return Err(CliError::UnknownFlag(flag)),
             }
         }
@@ -720,6 +833,19 @@ impl AccountFlags {
         })
     }
 
+    /// A target, refused when another kind of target was given before.
+    const fn target(given: Option<Target>, target: Target) -> Result<Target, CliError> {
+        match (given, target) {
+            (Some(Target::All), Target::One(_)) | (Some(Target::One(_)), Target::All) => {
+                Err(CliError::Conflicts {
+                    flag: "--validator",
+                    other: "--all",
+                })
+            }
+            _ => Ok(target),
+        }
+    }
+
     /// A flag the command needs.
     fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, CliError> {
         value.ok_or(CliError::MissingValue(flag))
@@ -756,6 +882,14 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), AccountError> {
     })
 }
 
+/// Opens a validator data directory.
+fn open_directory(datadir: &Path) -> Result<KeyDirectory, AccountError> {
+    KeyDirectory::open(datadir).map_err(|source| AccountError::File {
+        path: datadir.to_owned(),
+        source,
+    })
+}
+
 /// Reads a mnemonic from a file.
 fn read_mnemonic(path: &Path) -> Result<Mnemonic, AccountError> {
     Ok(Mnemonic::parse(read_file(path)?.trim())?)
@@ -763,6 +897,10 @@ fn read_mnemonic(path: &Path) -> Result<Mnemonic, AccountError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, process};
+
+    use axiom_validator::keys::SecretKeyBytes;
+
     use super::*;
 
     fn parse(arguments: &[&str]) -> Result<Account, CliError> {
@@ -845,6 +983,115 @@ mod tests {
             parse(&["frobnicate"]),
             Err(CliError::UnknownFlag(command)) if command == "frobnicate"
         ));
+    }
+
+    #[test]
+    fn modify_names_its_action_and_its_validators() {
+        let key = format!("0x{}", "a".repeat(96));
+        let Account::Modify(modify) =
+            parse(&["modify", "disable", "--validator", &key, "--datadir", "vc"]).unwrap()
+        else {
+            panic!("modify parses to a modification");
+        };
+        assert_eq!(
+            (modify.datadir, modify.target, modify.enabled),
+            (
+                PathBuf::from("vc"),
+                Target::One(BlsPubkey([0xaa; 48])),
+                false
+            )
+        );
+        assert!(matches!(
+            parse(&["modify", "enable", "--all"]),
+            Ok(Account::Modify(Modify {
+                target: Target::All,
+                enabled: true,
+                ..
+            }))
+        ));
+
+        // No target, both targets, or an unknown action are refused.
+        assert!(matches!(
+            parse(&["modify", "enable"]),
+            Err(CliError::MissingValue("--validator or --all"))
+        ));
+        assert!(matches!(
+            parse(&["modify", "enable", "--all", "--validator", &key]),
+            Err(CliError::Conflicts {
+                flag: "--validator",
+                other: "--all"
+            })
+        ));
+        assert!(matches!(
+            parse(&["modify", "pause", "--all"]),
+            Err(CliError::UnknownFlag(action)) if action == "pause"
+        ));
+    }
+
+    #[test]
+    fn list_modify_and_import_edit_the_directory() {
+        let datadir = env::temp_dir().join(format!("axiom-account-{}", process::id()));
+        let _stale = fs::remove_dir_all(&datadir);
+        let directory = KeyDirectory::open(&datadir).unwrap();
+        let mut secret = [0; 32];
+        secret[31] = 3;
+        let secret = SecretKeyBytes::from_bytes(&secret).unwrap();
+        let params = EncryptionParams::random(Kdf::pbkdf2(1).unwrap()).unwrap();
+        let keystore = Keystore::encrypt(&secret, &Password::new("pw"), &params);
+        let pubkey = keystore.pubkey();
+
+        // Fixture state: a keystore file and its password, and an existing protection database.
+        let file = datadir.join("in.json");
+        fs::write(&file, keystore.to_json().to_string()).unwrap();
+        let password = datadir.join("pw.txt");
+        fs::write(&password, "pw\n").unwrap();
+        SlashingDatabase::open(&datadir.join("slashing_protection"), Root([1; 32])).unwrap();
+        Account::Import(Import {
+            datadir: datadir.clone(),
+            keystores: vec![file],
+            password_file: password,
+        })
+        .execute()
+        .unwrap();
+
+        // The import defines the key enabled and registers it with slashing protection.
+        let definitions = directory.definitions().unwrap();
+        assert!(definitions.get(&pubkey).unwrap().enabled);
+        let protection =
+            SlashingDatabase::open_existing(&datadir.join("slashing_protection")).unwrap();
+        assert!(protection.is_registered(&pubkey));
+        drop(protection);
+
+        // Disabling every key keeps it defined, but no longer loaded.
+        Account::Modify(Modify {
+            datadir: datadir.clone(),
+            target: Target::All,
+            enabled: false,
+        })
+        .execute()
+        .unwrap();
+        assert!(
+            !directory
+                .definitions()
+                .unwrap()
+                .get(&pubkey)
+                .unwrap()
+                .enabled
+        );
+        assert!(directory.load().unwrap().is_empty());
+
+        // A key the directory does not define cannot be modified.
+        let other = BlsPubkey([0xaa; 48]);
+        assert!(matches!(
+            Account::Modify(Modify {
+                datadir: datadir.clone(),
+                target: Target::One(other),
+                enabled: true,
+            })
+            .execute(),
+            Err(AccountError::Undefined(key)) if key == other
+        ));
+        fs::remove_dir_all(&datadir).unwrap();
     }
 
     #[test]

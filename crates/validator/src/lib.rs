@@ -19,6 +19,7 @@ pub mod beacon;
 pub mod duties;
 pub mod keymanager;
 pub mod keys;
+pub mod metrics;
 pub mod protection;
 pub mod signing;
 pub mod validators;
