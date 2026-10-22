@@ -37,7 +37,7 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Where and how often the node pushes its stats.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientStatsSettings {
-    /// The collector's URL, its key in the query, such as `http://host/api/v1/client/metrics?apikey=K`.
+    /// The collector's URL, its key in the query, such as `https://host/api/v1/client/metrics?apikey=K`.
     pub endpoint: String,
     /// Time between pushes.
     pub period: Duration,
@@ -69,7 +69,7 @@ impl<P: Preset> ClientStats<P> {
     ///
     /// # Errors
     ///
-    /// Fails when the endpoint is not a plain http URL.
+    /// Fails when the endpoint is not an http or https URL.
     pub(crate) fn new(
         settings: &ClientStatsSettings,
         chain: ChainHandle<P>,
@@ -287,6 +287,25 @@ mod tests {
                 endpoint: format!("http://{address}/api/v1/client/metrics?apikey=secret"),
                 period: DEFAULT_PUSH_PERIOD,
             };
+            // A public collector over https keeps its path and key, on port 443.
+            let public = ClientStatsSettings {
+                endpoint: "https://collector.example/api/v1/client/metrics?apikey=k".to_owned(),
+                period: DEFAULT_PUSH_PERIOD,
+            };
+            let remote = ClientStats::new(
+                &public,
+                chain.clone(),
+                Arc::new(ManualClock::at(0)),
+                NodeMetrics::detached(),
+                None,
+            )
+            .unwrap();
+            let endpoint = remote.client.endpoint();
+            assert_eq!(
+                (endpoint.is_tls(), endpoint.port(), remote.target.as_str()),
+                (true, 443, "/api/v1/client/metrics?apikey=k")
+            );
+
             let stats = ClientStats::new(
                 &settings,
                 chain,
