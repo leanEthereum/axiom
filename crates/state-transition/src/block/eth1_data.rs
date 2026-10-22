@@ -1,6 +1,6 @@
 //! The eth1 data step: voting on the deposit contract snapshot.
 
-use axiom_types::{Eth1Data, Preset};
+use axiom_types::{Preset, fulu::Eth1Data};
 
 use super::{BlockProcessor, Operation};
 use crate::{BlockError, StateError};

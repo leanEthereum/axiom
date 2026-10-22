@@ -16,7 +16,7 @@
 use std::fmt;
 
 use axiom_json::{Data, Json};
-use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, Withdrawals};
+use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, fulu::Withdrawals};
 
 use super::{Fields, JsonCodec, PayloadStatus, Reader};
 use crate::WireError;

@@ -1,6 +1,9 @@
 //! Deposit requests: deposits relayed by the execution layer.
 
-use axiom_types::{DepositRequest, PendingDeposit, Preset};
+use axiom_types::{
+    Preset,
+    fulu::{DepositRequest, PendingDeposit},
+};
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};
 

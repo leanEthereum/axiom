@@ -1,8 +1,9 @@
 //! Balance-weighted sampling of validators, for proposers and sync committees.
 
 use axiom_types::{
-    BeaconState, Bytes32, Epoch, Gwei, Preset, Root, ValidatorIndex,
+    Bytes32, Epoch, Gwei, Preset, Root, ValidatorIndex,
     constants::{DOMAIN_BEACON_PROPOSER, DOMAIN_SYNC_COMMITTEE},
+    fulu::BeaconState,
 };
 
 use crate::{StateError, SwapOrNot};

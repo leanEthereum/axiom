@@ -1,11 +1,12 @@
 //! Attestations: crediting the votes a block includes.
 
 use axiom_types::{
-    Attestation, AttestationData, BeaconState, Gwei, IndexedAttestation, Preset,
+    Gwei, Preset,
     constants::{
         PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, TIMELY_HEAD_FLAG_INDEX,
         TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
     },
+    fulu::{Attestation, AttestationData, BeaconState, IndexedAttestation},
 };
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};

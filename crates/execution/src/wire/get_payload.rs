@@ -12,7 +12,10 @@
 
 use axiom_json::Json;
 use axiom_ssz::U256;
-use axiom_types::{ExecutionPayload, ExecutionRequests, Preset};
+use axiom_types::{
+    Preset,
+    fulu::{ExecutionPayload, ExecutionRequests},
+};
 
 use super::{BlobsBundle, Fields, JsonCodec};
 use crate::WireError;

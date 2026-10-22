@@ -1,6 +1,8 @@
 //! Voluntary exits: a validator asking to stop validating.
 
-use axiom_types::{Domain, Epoch, Preset, SignedVoluntaryExit, constants::DOMAIN_VOLUNTARY_EXIT};
+use axiom_types::{
+    Domain, Epoch, Preset, constants::DOMAIN_VOLUNTARY_EXIT, fulu::SignedVoluntaryExit,
+};
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};
 

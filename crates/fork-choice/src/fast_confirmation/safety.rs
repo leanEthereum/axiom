@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use axiom_state_transition::EpochCommittees;
-use axiom_types::{BeaconState, CommitteeIndex, Gwei, Preset, Root, ValidatorIndex};
+use axiom_types::{CommitteeIndex, Gwei, Preset, Root, ValidatorIndex, fulu::BeaconState};
 
 use super::slot_range::SlotRange;
 use crate::{ForkChoiceError, Ghost, Store, committee_weight::CommitteeWeight};

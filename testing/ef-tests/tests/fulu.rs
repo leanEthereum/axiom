@@ -5,18 +5,18 @@
 
 use axiom_ef_tests::{
     Blocks, ChainReplay, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations,
-    Rewards, Shuffling, SszStatic, StoreReplay, Suite, Transition,
+    Rewards, Shuffling, SszStatic, StoreReplay, Suite, Transition, forks::Fulu,
 };
 use axiom_types::{Mainnet, Minimal};
 
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(&SszStatic::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&SszStatic::<Minimal, Fulu>::default(), "minimal", "fulu");
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(&SszStatic::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&SszStatic::<Mainnet, Fulu>::default(), "mainnet", "fulu");
 }
 
 #[test]

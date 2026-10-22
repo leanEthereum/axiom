@@ -1,6 +1,6 @@
 //! The correlation penalty charged to slashed validators.
 
-use axiom_types::{BeaconState, Epoch, Gwei, Preset, ValidatorIndex};
+use axiom_types::{Epoch, Gwei, Preset, ValidatorIndex, fulu::BeaconState};
 
 use crate::{ActiveBalance, State, StateError};
 

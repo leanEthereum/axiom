@@ -21,11 +21,14 @@ mod root;
 mod ssz;
 mod uint256;
 
-pub use collections::{BitList, BitVector, ByteList, ByteVector, CapacityError, List, Vector};
-pub use container::{Container, FieldDecoder, FieldVisitor};
+pub use collections::{
+    BitList, BitVector, ByteList, ByteVector, CapacityError, List, ProgressiveBitList,
+    ProgressiveList, Vector,
+};
+pub use container::{Container, FieldDecoder, FieldVisitor, Merkleization};
 pub use error::DecodeError;
 pub use length::{Const, Length};
-pub use merkle::{GeneralizedIndex, MerkleProof, Merkleizer, ZeroHashes};
+pub use merkle::{GeneralizedIndex, MerkleProof, Merkleizer, ProgressiveMerkleizer, ZeroHashes};
 pub use root::Root;
 pub use ssz::{BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, Ssz};
 pub use uint256::U256;

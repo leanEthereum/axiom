@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use axiom_fork_choice::{BlockNode, ExecutionStatus};
 use axiom_gossip::Seen;
-use axiom_types::{Preset, Root, SignedBeaconBlock, Slot};
+use axiom_types::{Preset, Root, Slot, fulu::SignedBeaconBlock};
 
 /// Memory of gossip validation that outlives a single message.
 ///

@@ -2,10 +2,12 @@
 
 mod gindex;
 mod merkleizer;
+mod progressive;
 mod proof;
 mod zero;
 
 pub use gindex::GeneralizedIndex;
 pub use merkleizer::Merkleizer;
+pub use progressive::ProgressiveMerkleizer;
 pub use proof::MerkleProof;
 pub use zero::ZeroHashes;

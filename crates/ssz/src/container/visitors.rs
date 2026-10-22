@@ -1,9 +1,8 @@
 //! The visitors that turn a field walk into each SSZ operation.
 
-use super::Layout;
+use super::{FieldTree, Layout};
 use crate::{
-    BYTES_PER_LENGTH_OFFSET, FieldVisitor, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz,
-    offset::Offset,
+    BYTES_PER_LENGTH_OFFSET, FieldVisitor, GeneralizedIndex, MerkleProof, Root, Ssz, offset::Offset,
 };
 
 /// Keeps the visitor trait closed to this crate.
@@ -120,23 +119,23 @@ pub(super) struct RootMerkleizer {
     /// Fields seen so far.
     index: usize,
     /// The tree over the field roots.
-    merkleizer: Merkleizer,
+    tree: FieldTree,
 }
 
 impl RootMerkleizer {
-    /// Merkleizer with one leaf slot per declared field.
-    pub(super) fn new(layout: Layout) -> Self {
+    /// Merkleizer feeding each declared field into the container's tree.
+    pub(super) const fn new(layout: Layout, tree: FieldTree) -> Self {
         Self {
             layout,
             index: 0,
-            merkleizer: Merkleizer::with_limit(layout.len()),
+            tree,
         }
     }
 
     /// The container's root.
     pub(super) fn finish(self) -> Root {
         debug_assert_eq!(self.index, self.layout.len(), "container skipped a field");
-        self.merkleizer.finish()
+        self.tree.finish()
     }
 }
 
@@ -145,7 +144,7 @@ impl Sealed for RootMerkleizer {}
 impl FieldVisitor for RootMerkleizer {
     fn field<T: Ssz>(&mut self, value: &T) {
         self.layout.check::<T>(self.index);
-        self.merkleizer.push(value.hash_tree_root());
+        self.tree.push(value.hash_tree_root());
         self.index += 1;
     }
 }

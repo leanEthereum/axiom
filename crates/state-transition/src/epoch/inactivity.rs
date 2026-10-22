@@ -1,6 +1,8 @@
 //! Inactivity scores: the memory of missed targets that drives the inactivity leak.
 
-use axiom_types::{BeaconState, ChainConfig, Epoch, Preset, constants::TIMELY_TARGET_FLAG_INDEX};
+use axiom_types::{
+    ChainConfig, Epoch, Preset, constants::TIMELY_TARGET_FLAG_INDEX, fulu::BeaconState,
+};
 
 use super::Participation;
 

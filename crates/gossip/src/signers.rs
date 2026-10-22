@@ -1,11 +1,14 @@
 //! The validators a state expects to sign gossip, and the checks of their signatures.
 
 use axiom_types::{
-    Attestation, BeaconState, BlsPubkey, IndexedAttestation, Preset, SignedAggregateAndProof,
-    SignedContributionAndProof, SyncAggregatorSelectionData, ValidatorIndex,
+    BlsPubkey, Preset, ValidatorIndex,
     constants::{
         DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER, DOMAIN_CONTRIBUTION_AND_PROOF,
         DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, SYNC_COMMITTEE_SUBNET_COUNT,
+    },
+    fulu::{
+        Attestation, BeaconState, IndexedAttestation, SignedAggregateAndProof,
+        SignedContributionAndProof, SyncAggregatorSelectionData,
     },
 };
 

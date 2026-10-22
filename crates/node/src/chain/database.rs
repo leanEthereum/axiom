@@ -5,7 +5,8 @@ use std::{marker::PhantomData, path::Path, sync::Arc};
 use axiom_ssz::{DecodeError, Ssz};
 use axiom_store::{Batch, Options, Store, Table};
 use axiom_types::{
-    BeaconState, Checkpoint, ColumnIndex, DataColumnSidecar, Preset, Root, SignedBeaconBlock, Slot,
+    ColumnIndex, Preset, Root, Slot,
+    fulu::{BeaconState, Checkpoint, DataColumnSidecar, SignedBeaconBlock},
 };
 
 use crate::ChainError;

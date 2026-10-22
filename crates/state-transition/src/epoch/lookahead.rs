@@ -3,7 +3,10 @@
 use std::mem;
 
 use axiom_bls::PublicKey;
-use axiom_types::{BeaconState, BlsPubkey, Epoch, Preset, SyncCommittee, ValidatorIndex};
+use axiom_types::{
+    BlsPubkey, Epoch, Preset, ValidatorIndex,
+    fulu::{BeaconState, SyncCommittee},
+};
 
 use crate::{State, StateError, sampling::WeightedSampler};
 

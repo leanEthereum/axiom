@@ -6,7 +6,7 @@ use std::{
 };
 
 use axiom_bls::PublicKey;
-use axiom_types::{BlsPubkey, Validator, ValidatorIndex};
+use axiom_types::{BlsPubkey, ValidatorIndex, fulu::Validator};
 
 /// Decompressed public keys and a key-to-index map, grown with the registry.
 ///

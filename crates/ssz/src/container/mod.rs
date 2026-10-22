@@ -13,15 +13,18 @@
 
 mod decoder;
 mod layout;
+mod merkleization;
 mod visitors;
 
 pub use decoder::FieldDecoder;
 use layout::Layout;
+use merkleization::FieldTree;
+pub use merkleization::Merkleization;
 use visitors::{
     FieldProver, FieldRoots, FixedPartWriter, LengthCounter, RootMerkleizer, VariablePartWriter,
 };
 
-use crate::{DecodeError, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz};
+use crate::{DecodeError, GeneralizedIndex, MerkleProof, Root, Ssz};
 
 /// A record of named fields, serialized and merkleized in declaration order.
 ///
@@ -34,6 +37,9 @@ use crate::{DecodeError, GeneralizedIndex, MerkleProof, Merkleizer, Root, Ssz};
 pub trait Container: Sized {
     /// Fixed size of each field in order, empty for a variable-size field.
     const FIELDS: &'static [Option<usize>];
+
+    /// Shape of the hash tree over the field roots, binary unless the spec says progressive.
+    const MERKLEIZATION: Merkleization = Merkleization::Binary;
 
     /// Shows every field to the visitor, in declaration order.
     fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V);
@@ -60,8 +66,7 @@ pub trait Container: Sized {
     ///
     /// Panics when the container has no field at that index.
     fn field_proof(&self, index: usize) -> MerkleProof {
-        assert!(index < Self::FIELDS.len(), "field {index} does not exist");
-        MerkleProof::generate(&self.field_roots(), Self::depth(), index)
+        Self::MERKLEIZATION.field_proof(&self.field_roots(), index)
     }
 
     /// Generalized index of a field within the container's tree.
@@ -71,14 +76,7 @@ pub trait Container: Sized {
     /// Panics when the container has no field at that index.
     #[must_use]
     fn field_index(index: usize) -> GeneralizedIndex {
-        assert!(index < Self::FIELDS.len(), "field {index} does not exist");
-        GeneralizedIndex::at(Self::depth(), index as u64)
-    }
-
-    /// Depth of the container's tree, with one leaf per field.
-    #[must_use]
-    fn depth() -> usize {
-        Merkleizer::depth_for(Self::FIELDS.len())
+        Self::MERKLEIZATION.field_index(Self::FIELDS.len(), index)
     }
 }
 
@@ -121,16 +119,21 @@ impl<C: Container> Ssz for C {
     }
 
     fn hash_tree_root(&self) -> Root {
-        let mut merkleizer = RootMerkleizer::new(Layout::new(C::FIELDS));
+        let mut merkleizer = RootMerkleizer::new(
+            Layout::new(C::FIELDS),
+            FieldTree::new(C::MERKLEIZATION, C::FIELDS.len()),
+        );
         self.visit_fields(&mut merkleizer);
         merkleizer.finish()
     }
 
     /// Proves a node of the container's tree, descending into a field when the index is deeper.
     ///
+    /// The field whose leaf lies on the path to the node proves the rest.
+    /// Its proof inside the field comes first, then the siblings above the field's leaf.
+    ///
     /// ```text
     /// index 169 in a 64-leaf container = 0b1_010100_1
-    /// branch = [siblings inside the field] ++ [siblings of field 20 in the container]
     /// ```
     ///
     /// The six bits 010100 pick field 20, then the last bit picks node 1 inside it.
@@ -138,21 +141,18 @@ impl<C: Container> Ssz for C {
         if index == GeneralizedIndex::ROOT {
             return Some((self.hash_tree_root(), MerkleProof::default()));
         }
-        let depth = Self::depth();
-        if (index.depth() as usize) < depth {
-            return None;
-        }
 
-        // Split the path: the top bits pick the field, the rest address a node inside it.
-        let inner_depth = index.depth() as usize - depth;
-        let field = (index.get() >> inner_depth) - (1 << depth);
-        let inner =
-            GeneralizedIndex::new((1 << inner_depth) | (index.get() & ((1 << inner_depth) - 1)));
+        // Find the field on the path, and the node's index within that field's own tree.
+        let (field, inner) = (0..C::FIELDS.len()).find_map(|field| {
+            index
+                .relative_to(C::field_index(field))
+                .map(|inner| (field, inner))
+        })?;
 
-        let mut prover = FieldProver::new(field as usize, inner);
+        let mut prover = FieldProver::new(field, inner);
         self.visit_fields(&mut prover);
         let (leaf, mut proof) = prover.into_result()?;
-        proof.branch.extend(self.field_proof(field as usize).branch);
+        proof.branch.extend(self.field_proof(field).branch);
         Some((leaf, proof))
     }
 }

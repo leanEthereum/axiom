@@ -1,6 +1,6 @@
 //! One slot's committee weight, the unit of proposer boost and reorg thresholds.
 
-use axiom_types::{BeaconState, Gwei, Preset};
+use axiom_types::{Gwei, Preset, fulu::BeaconState};
 
 /// The stake of one slot's committees in a state.
 ///

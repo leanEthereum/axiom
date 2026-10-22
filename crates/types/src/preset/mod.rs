@@ -240,7 +240,36 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// Columns of the extended blob matrix, one cell per blob each.
     const NUMBER_OF_COLUMNS: u64;
 
-    /// Validators across every committee of a slot, which bounds an attestation.
+    /// Members of a payload timeliness committee, large enough to resist a minority of withholders.
+    const PTC_SIZE: u64;
+
+    /// Payload attestations per block.
+    const MAX_PAYLOAD_ATTESTATIONS: u64;
+
+    /// Builder deposit requests per execution payload.
+    const MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD: u64;
+
+    /// Builder exit requests per execution payload.
+    const MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD: u64;
+
+    /// Builders the withdrawal sweep inspects per block, bounding its cost.
+    const MAX_BUILDERS_PER_WITHDRAWALS_SWEEP: u64;
+
+    /// Largest encoded signed aggregate accepted on the wire, now that its lists are unbounded.
+    const MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE: u64;
+
+    /// Largest encoded attester slashing accepted on the wire.
+    const MAX_ATTESTER_SLASHING_SIZE: u64;
+
+    /// Largest encoded signed payload bid accepted on the wire.
+    const MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE: u64;
+
+    /// Validators in one committee, which bounds an attestation before Electra.
+    ///
+    /// Equals MAX_VALIDATORS_PER_COMMITTEE.
+    type MaxValidatorsPerCommittee: Length;
+
+    /// Validators across every committee of a slot, which bounds an attestation from Electra on.
     ///
     /// Equals MAX_VALIDATORS_PER_COMMITTEE * MAX_COMMITTEES_PER_SLOT.
     type MaxValidatorsPerSlot: Length;
@@ -295,15 +324,30 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// Equals MAX_PROPOSER_SLASHINGS.
     type MaxProposerSlashings: Length;
 
-    /// Attester slashings in a block.
+    /// Attester slashings in a block before Electra.
     ///
-    /// Equals MAX_ATTESTER_SLASHINGS_ELECTRA.
+    /// Equals MAX_ATTESTER_SLASHINGS.
     type MaxAttesterSlashings: Length;
 
-    /// Attestations in a block.
+    /// Attestations in a block before Electra.
+    ///
+    /// Equals MAX_ATTESTATIONS.
+    type MaxAttestations: Length;
+
+    /// Attestations a phase0 state keeps per epoch.
+    ///
+    /// Equals MAX_ATTESTATIONS * SLOTS_PER_EPOCH.
+    type MaxPendingAttestations: Length;
+
+    /// Attester slashings in a block from Electra on.
+    ///
+    /// Equals MAX_ATTESTER_SLASHINGS_ELECTRA.
+    type MaxAttesterSlashingsElectra: Length;
+
+    /// Attestations in a block from Electra on.
     ///
     /// Equals MAX_ATTESTATIONS_ELECTRA.
-    type MaxAttestations: Length;
+    type MaxAttestationsElectra: Length;
 
     /// Deposits in a block.
     ///
@@ -424,6 +468,21 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
     ///
     /// Equals MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD.
     type MaxConsolidationRequestsPerPayload: Length;
+
+    /// Members of a payload timeliness committee.
+    ///
+    /// Equals PTC_SIZE.
+    type PtcSize: Length;
+
+    /// Payload timeliness committees the state keeps: previous, current, and lookahead epochs.
+    ///
+    /// Equals (MIN_SEED_LOOKAHEAD + 2) * SLOTS_PER_EPOCH.
+    type PtcWindowSlots: Length;
+
+    /// Pending builder payments of the previous and current epochs.
+    ///
+    /// Equals 2 * SLOTS_PER_EPOCH.
+    type BuilderPendingPaymentsSlots: Length;
 }
 
 #[cfg(test)]
@@ -440,6 +499,11 @@ mod tests {
     )]
     fn length_table<P: Preset>() -> Vec<(&'static str, usize, u64)> {
         vec![
+            (
+                "MaxValidatorsPerCommittee",
+                P::MaxValidatorsPerCommittee::LEN,
+                P::MAX_VALIDATORS_PER_COMMITTEE,
+            ),
             (
                 "MaxValidatorsPerSlot",
                 P::MaxValidatorsPerSlot::LEN,
@@ -494,11 +558,26 @@ mod tests {
             (
                 "MaxAttesterSlashings",
                 P::MaxAttesterSlashings::LEN,
-                P::MAX_ATTESTER_SLASHINGS_ELECTRA,
+                P::MAX_ATTESTER_SLASHINGS,
             ),
             (
                 "MaxAttestations",
                 P::MaxAttestations::LEN,
+                P::MAX_ATTESTATIONS,
+            ),
+            (
+                "MaxPendingAttestations",
+                P::MaxPendingAttestations::LEN,
+                P::MAX_ATTESTATIONS * P::SLOTS_PER_EPOCH,
+            ),
+            (
+                "MaxAttesterSlashingsElectra",
+                P::MaxAttesterSlashingsElectra::LEN,
+                P::MAX_ATTESTER_SLASHINGS_ELECTRA,
+            ),
+            (
+                "MaxAttestationsElectra",
+                P::MaxAttestationsElectra::LEN,
                 P::MAX_ATTESTATIONS_ELECTRA,
             ),
             ("MaxDeposits", P::MaxDeposits::LEN, P::MAX_DEPOSITS),
@@ -616,6 +695,17 @@ mod tests {
                 "MaxConsolidationRequestsPerPayload",
                 P::MaxConsolidationRequestsPerPayload::LEN,
                 P::MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD,
+            ),
+            ("PtcSize", P::PtcSize::LEN, P::PTC_SIZE),
+            (
+                "PtcWindowSlots",
+                P::PtcWindowSlots::LEN,
+                (P::MIN_SEED_LOOKAHEAD + 2) * P::SLOTS_PER_EPOCH,
+            ),
+            (
+                "BuilderPendingPaymentsSlots",
+                P::BuilderPendingPaymentsSlots::LEN,
+                2 * P::SLOTS_PER_EPOCH,
             ),
         ]
     }

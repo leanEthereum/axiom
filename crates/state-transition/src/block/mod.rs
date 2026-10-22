@@ -11,9 +11,9 @@ mod withdrawals;
 use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BeaconBlock, BeaconBlockBody, BlsSignature, ChainConfig, Domain, IndexedAttestation, Preset,
-    Root, SignedBeaconBlock, SigningData, ValidatorIndex,
+    BlsSignature, ChainConfig, Domain, Preset, Root, ValidatorIndex,
     constants::{DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER},
+    fulu::{BeaconBlock, BeaconBlockBody, IndexedAttestation, SignedBeaconBlock, SigningData},
 };
 pub use execution_payload::PayloadExecution;
 use randao::RandaoReveal;

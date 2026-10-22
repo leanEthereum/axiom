@@ -12,9 +12,12 @@ use axiom_p2p::{
 use axiom_ssz::Ssz;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    AttesterSlashing, DataColumnSidecar, Preset, ProposerSlashing, SignedAggregateAndProof,
-    SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof, SignedVoluntaryExit,
-    SingleAttestation, SubnetId, SyncCommitteeMessage,
+    Preset, SubnetId,
+    fulu::{
+        AttesterSlashing, DataColumnSidecar, ProposerSlashing, SignedAggregateAndProof,
+        SignedBeaconBlock, SignedBlsToExecutionChange, SignedContributionAndProof,
+        SignedVoluntaryExit, SingleAttestation, SyncCommitteeMessage,
+    },
 };
 use tokio::time;
 use tracing::{debug, warn};

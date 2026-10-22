@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::State;
-use axiom_types::{BeaconState, ChainConfig, Preset, electra};
+use axiom_types::{ChainConfig, Preset, electra, fulu::BeaconState};
 use axiom_yaml::Yaml;
 
 use super::BEACON_STATE_FIELDS;

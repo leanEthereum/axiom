@@ -1,7 +1,10 @@
 //! The current epoch's target on the head's chain, and whether it will be justified.
 
 use axiom_state_transition::State;
-use axiom_types::{BeaconState, Checkpoint, Gwei, Preset, Root, ValidatorIndex};
+use axiom_types::{
+    Gwei, Preset, Root, ValidatorIndex,
+    fulu::{BeaconState, Checkpoint},
+};
 
 use super::{safety::Safety, slot_range::SlotRange};
 use crate::{ForkChoiceError, Store};

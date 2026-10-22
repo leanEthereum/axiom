@@ -15,7 +15,10 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, Registry};
-use axiom_types::{BeaconState, ChainConfig, Preset, SignedBeaconBlock};
+use axiom_types::{
+    ChainConfig, Preset,
+    fulu::{BeaconState, SignedBeaconBlock},
+};
 use tokio::{
     sync::watch,
     task::{self, JoinHandle},

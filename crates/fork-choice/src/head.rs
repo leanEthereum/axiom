@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axiom_types::{BeaconState, Epoch, Gwei, Preset, Root};
+use axiom_types::{Epoch, Gwei, Preset, Root, fulu::BeaconState};
 
 use crate::{ExecutionStatus, Store, committee_weight::CommitteeWeight};
 

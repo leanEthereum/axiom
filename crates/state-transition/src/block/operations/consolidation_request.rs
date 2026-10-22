@@ -1,6 +1,9 @@
 //! Consolidation requests: merging one validator's stake into another.
 
-use axiom_types::{ConsolidationRequest, Epoch, PendingConsolidation, Preset};
+use axiom_types::{
+    Epoch, Preset,
+    fulu::{ConsolidationRequest, PendingConsolidation},
+};
 
 use crate::{BlockError, BlockProcessor, Operation, StateError};
 

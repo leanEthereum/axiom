@@ -3,7 +3,10 @@
 use std::marker::PhantomData;
 
 use axiom_state_transition::{KnownVerdict, State, Verification};
-use axiom_types::{BeaconState, ChainConfig, Preset, SignedBeaconBlock, Slot};
+use axiom_types::{
+    ChainConfig, Preset, Slot,
+    fulu::{BeaconState, SignedBeaconBlock},
+};
 
 use super::BEACON_STATE_FIELDS;
 use crate::{Case, Failure, Runner};

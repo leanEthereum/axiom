@@ -2,7 +2,7 @@
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_ssz::Ssz;
-use axiom_types::{BlsPubkey, BlsSignature, Domain, SigningData};
+use axiom_types::{BlsPubkey, BlsSignature, Domain, fulu::SigningData};
 
 /// An object, the domain it is signed in, and the signature a message claims over it.
 ///

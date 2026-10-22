@@ -3,7 +3,10 @@
 use std::mem;
 
 use axiom_ssz::{List, Ssz};
-use axiom_types::{BeaconState, Epoch, Gwei, HistoricalSummary, ParticipationFlags, Preset};
+use axiom_types::{
+    Epoch, Gwei, ParticipationFlags, Preset,
+    fulu::{BeaconState, HistoricalSummary},
+};
 
 use crate::StateError;
 

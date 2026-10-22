@@ -1,6 +1,6 @@
 //! Effective balance updates, with hysteresis.
 
-use axiom_types::{BeaconState, Gwei, Preset};
+use axiom_types::{Gwei, Preset, fulu::BeaconState};
 
 /// The band around an effective balance inside which it does not move.
 ///

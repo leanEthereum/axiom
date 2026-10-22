@@ -3,7 +3,8 @@
 use std::marker::PhantomData;
 
 use crate::{
-    BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, DecodeError, Merkleizer, Root, Ssz, offset::Offset,
+    BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, DecodeError, Merkleizer, ProgressiveMerkleizer, Root,
+    Ssz, offset::Offset,
 };
 
 /// The rules for a run of same-typed elements, which vectors and lists share.
@@ -88,6 +89,28 @@ impl<T: Ssz> Elements<T> {
                 merkleizer.finish()
             }
         }
+    }
+
+    /// Root of a run of elements, in a progressive tree that grows with the length.
+    ///
+    /// Basic elements pack into chunks, while composite elements contribute one root each.
+    /// See EIP-7916.
+    pub(crate) fn progressive_root(items: &[T]) -> Root {
+        let mut merkleizer = ProgressiveMerkleizer::new();
+        match T::PACKED_SIZE {
+            Some(_) => {
+                // Packed values are their own encoding, laid end to end.
+                let mut packed = Vec::with_capacity(Self::encoded_len(items));
+                Self::encode_to(items, &mut packed);
+                merkleizer.push_bytes(&packed);
+            }
+            None => {
+                for item in items {
+                    merkleizer.push(item.hash_tree_root());
+                }
+            }
+        }
+        merkleizer.finish()
     }
 
     /// Decodes a run of fixed-size elements.

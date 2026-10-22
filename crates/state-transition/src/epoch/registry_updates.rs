@@ -1,6 +1,6 @@
 //! Registry updates: queueing, ejecting, and activating validators.
 
-use axiom_types::{BeaconState, ChainConfig, Epoch, Gwei, Preset, ValidatorIndex};
+use axiom_types::{ChainConfig, Epoch, Gwei, Preset, ValidatorIndex, fulu::BeaconState};
 
 use crate::{StateError, registry::Registry};
 

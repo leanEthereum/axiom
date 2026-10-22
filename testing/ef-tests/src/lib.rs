@@ -10,6 +10,7 @@
 
 mod case;
 mod fields;
+pub mod forks;
 mod runners;
 mod suite;
 

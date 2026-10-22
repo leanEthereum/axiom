@@ -7,8 +7,11 @@ use axiom_state_transition::{
     BlockProcessor, EpochProcessor, EpochStep, State, StateError, Verification,
 };
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, ChainConfig, Checkpoint, Epoch,
-    Hash32, IndexedAttestation, Preset, Root, SignedBeaconBlock, Slot, SlotClock,
+    ChainConfig, Epoch, Hash32, Preset, Root, Slot, SlotClock,
+    fulu::{
+        Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, IndexedAttestation,
+        SignedBeaconBlock,
+    },
 };
 
 use crate::{

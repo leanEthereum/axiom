@@ -2,11 +2,12 @@
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_types::{
-    BlsSignature, ChainConfig, DepositMessage, Domain, Epoch, Gwei, ParticipationFlags,
-    PendingDeposit, Preset, Root, SigningData, Slot, Validator, ValidatorIndex,
+    BlsSignature, ChainConfig, Domain, Epoch, Gwei, ParticipationFlags, Preset, Root, Slot,
+    ValidatorIndex,
     constants::{
         COMPOUNDING_WITHDRAWAL_PREFIX, DOMAIN_DEPOSIT, PROPOSER_WEIGHT, WEIGHT_DENOMINATOR,
     },
+    fulu::{DepositMessage, PendingDeposit, SigningData, Validator},
 };
 
 use crate::{ActiveBalance, State, StateError, Verification, churn::ChurnQueue};

@@ -4,7 +4,7 @@ mod safety;
 mod slot_range;
 mod target;
 
-use axiom_types::{Checkpoint, Epoch, Hash32, Preset, Root};
+use axiom_types::{Epoch, Hash32, Preset, Root, fulu::Checkpoint};
 use safety::Safety;
 use target::CurrentTarget;
 

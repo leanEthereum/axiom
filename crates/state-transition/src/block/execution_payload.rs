@@ -2,7 +2,8 @@
 
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BeaconBlockBody, ExecutionPayloadHeader, KzgCommitment, NewPayloadRequest, Preset,
+    KzgCommitment, Preset,
+    fulu::{BeaconBlockBody, ExecutionPayloadHeader, NewPayloadRequest},
 };
 
 use super::{BlockProcessor, Operation};
