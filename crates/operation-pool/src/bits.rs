@@ -1,5 +1,11 @@
 //! A fixed-length bit set over the members of one committee.
 
+use std::iter;
+
+use axiom_ssz::{BitList, Length, ProgressiveBitList};
+
+use crate::PoolError;
+
 /// Bits of a fixed length, packed into 64-bit words.
 ///
 /// Packing compares whole words: a committee of 512 members is eight words per operation.
@@ -74,7 +80,10 @@ impl Bits {
     /// Number of set bits.
     #[must_use]
     pub fn count_ones(&self) -> usize {
-        self.words.iter().map(|word| word.count_ones() as usize).sum()
+        self.words
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 
     /// Whether no bit is set.
@@ -120,7 +129,7 @@ impl Bits {
         let words = self
             .words
             .iter()
-            .zip(other.words.iter().chain(std::iter::repeat(&0)))
+            .zip(other.words.iter().chain(iter::repeat(&0)))
             .map(|(mine, theirs)| mine & !theirs);
         words.enumerate().flat_map(|(index, word)| WordOnes {
             base: index * 64,
@@ -133,20 +142,43 @@ impl Bits {
         (0..self.len).map(|position| self.get(position))
     }
 
+    /// The bits as a bounded SSZ bit list.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the length exceeds the list's bound.
+    pub fn to_bit_list<N: Length>(&self) -> Result<BitList<N>, PoolError> {
+        let mut list = BitList::with_len(self.len).map_err(|_| PoolError::TooManySigners {
+            count: self.len,
+            limit: N::LEN,
+        })?;
+        for position in self.ones() {
+            list.set(position, true);
+        }
+        Ok(list)
+    }
+
+    /// The bits as an unbounded SSZ bit list.
+    #[must_use]
+    pub fn to_progressive_bit_list(&self) -> ProgressiveBitList {
+        let mut list = ProgressiveBitList::with_len(self.len);
+        for position in self.ones() {
+            list.set(position, true);
+        }
+        list
+    }
+
     /// Set positions of a slice of words.
     fn ones_of(words: &[u64]) -> impl Iterator<Item = usize> + '_ {
-        words
-            .iter()
-            .enumerate()
-            .flat_map(|(index, word)| WordOnes {
-                base: index * 64,
-                word: *word,
-            })
+        words.iter().enumerate().flat_map(|(index, word)| WordOnes {
+            base: index * 64,
+            word: *word,
+        })
     }
 }
 
 /// The set positions of one word, lowest first.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct WordOnes {
     /// Position of the word's lowest bit.
     base: usize,

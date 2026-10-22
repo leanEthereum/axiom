@@ -85,7 +85,12 @@ mod tests {
     fn signed(secret: u8, message: &[u8]) -> BlsSignature {
         let mut bytes = [0; 32];
         bytes[31] = secret;
-        BlsSignature(SecretKey::from_bytes(&bytes).unwrap().sign(message).to_bytes())
+        BlsSignature(
+            SecretKey::from_bytes(&bytes)
+                .unwrap()
+                .sign(message)
+                .to_bytes(),
+        )
     }
 
     #[test]
