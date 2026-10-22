@@ -267,8 +267,8 @@ fn an_archive_rebuilds_the_state_at_every_slot_through_every_fork() {
         .map(|(root, bootstrap)| (*root, bootstrap.clone()))
         .collect();
     bootstraps.sort_by_key(|(root, _)| *root);
-    assert!(!settled.is_empty());
-    assert!(!bootstraps.is_empty());
+    assert_ne!(settled, []);
+    assert_ne!(bootstraps, []);
     drop(chain);
 
     // A restart resumes at the finalized block, and replay still reaches every finalized slot.
@@ -506,15 +506,21 @@ impl TestNode {
         Some(Root(bytes))
     }
 
-    /// Waits until the node serves a block at a slot, polling every 20 milliseconds.
-    async fn wait_for(&self, slot: u64, attempts: u32) -> Option<Root> {
-        for _ in 0..attempts {
-            if let Some(root) = self.root_at(slot).await {
-                return Some(root);
+    /// Waits up to a minute for the genesis block, then checks every block up to the anchor at 48.
+    async fn serves_up_to_anchor(&self, built: &BuiltChain) {
+        for _ in 0..3000 {
+            if self.root_at(0).await.is_some() {
+                break;
             }
             time::sleep(Duration::from_millis(20)).await;
         }
-        None
+        for slot in 0..=48 {
+            assert_eq!(
+                self.root_at(slot).await,
+                Some(built.root_at(slot)),
+                "slot {slot}"
+            );
+        }
     }
 
     /// Stops the node and checks it shut down cleanly.
@@ -574,6 +580,39 @@ async fn valid_engine(terminal: Hash32, secret_file: &Path) -> (MockEngine, Engi
     (mock, config)
 }
 
+/// A database checkpoint-synced at block 48 and backfilled down to block 41, then closed.
+fn interrupt_backfill(directory: &Path, config: &ChainConfig, built: &BuiltChain) {
+    let database = ChainDatabase::open(&directory.join("chain"), config.clone())
+        .expect("a fresh directory opens");
+    let mut chain = Chain::from_anchor(
+        config.clone(),
+        built.states[48].beacon().clone(),
+        built.block_at(48),
+        database,
+    )
+    .expect("block 48 commits to its state");
+    let blocks = (41..=47).map(|slot| built.block_at(slot).clone()).collect();
+    let segment = HistorySegment::new(blocks, Vec::new(), Vec::new(), Vec::new());
+    let keys = chain.proposer_keys(segment.proposers());
+    let start = chain
+        .database()
+        .history_start()
+        .expect("the database reads")
+        .expect("the anchor starts the history");
+    let context = SegmentContext {
+        config,
+        genesis_validators_root: chain.genesis_validators_root(),
+        keys: &keys,
+        sampled: &[],
+        retained: false,
+    };
+    let verified = segment
+        .verify(start, &context)
+        .expect("blocks 41 to 47 link to block 48");
+    let start = chain.import_history(&verified).expect("the segment stores");
+    assert_eq!(start.slot, Slot(41));
+}
+
 #[test]
 fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
     let Some(vectors) = Vectors::locate() else {
@@ -595,29 +634,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
     // Phase 0: node C's database, checkpoint-synced at block 48 and backfilled down to 41.
     // Then the process stops, as if killed in the middle of backfill.
     let c_directory = scratch.0.join("c");
-    {
-        let database = ChainDatabase::open(&c_directory.join("chain"), config.clone()).unwrap();
-        let mut chain = Chain::from_anchor(
-            config.clone(),
-            built.states[48].beacon().clone(),
-            built.block_at(48),
-            database,
-        )
-        .unwrap();
-        let blocks = (41..=47).map(|slot| built.block_at(slot).clone()).collect();
-        let segment = HistorySegment::new(blocks, Vec::new(), Vec::new(), Vec::new());
-        let keys = chain.proposer_keys(segment.proposers());
-        let start = chain.database().history_start().unwrap().unwrap();
-        let context = SegmentContext {
-            config: &config,
-            genesis_validators_root: chain.genesis_validators_root(),
-            keys: &keys,
-            sampled: &[],
-            retained: false,
-        };
-        let verified = segment.verify(start, &context).unwrap();
-        assert_eq!(chain.import_history(&verified).unwrap().slot, Slot(41));
-    }
+    interrupt_backfill(&c_directory, &config, &built);
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -671,18 +688,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
         )
         .await;
         // Backfill verifies 48 signatures, so it gets a minute rather than seconds.
-        assert_eq!(
-            b.wait_for(0, 3000).await,
-            a.root_at(0).await,
-            "B never reached genesis"
-        );
-        for slot in 0..=48 {
-            assert_eq!(
-                b.root_at(slot).await,
-                Some(built.root_at(slot)),
-                "B slot {slot}"
-            );
-        }
+        b.serves_up_to_anchor(&built).await;
 
         // Node C resumes its interrupted backfill from block 41, in the default pruned mode.
         // The serving window of 272 epochs reaches back past genesis, so it too goes all the way.
@@ -699,17 +705,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             c_api,
         )
         .await;
-        assert!(
-            c.wait_for(0, 3000).await.is_some(),
-            "C never reached genesis"
-        );
-        for slot in 0..=48 {
-            assert_eq!(
-                c.root_at(slot).await,
-                Some(built.root_at(slot)),
-                "C slot {slot}"
-            );
-        }
+        c.serves_up_to_anchor(&built).await;
 
         // Rebuilding runs in short steps after backfill; give it a few seconds to finish.
         time::sleep(Duration::from_secs(3)).await;
@@ -719,23 +715,30 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
         engine.stop().await;
     });
 
-    // B's archive, reopened: the rebuild reached the anchor, and every state below it replays.
-    let database =
-        ChainDatabase::<Minimal>::open(&scratch.0.join("b").join("chain"), config.clone())
-            .unwrap()
-            .with_mode(StorageMode::Archive(SnapshotInterval::new(8).unwrap()));
+    rebuilt_archive_replays(&scratch.0.join("b"), &config, &built);
+}
+
+/// Checks a reopened archive: the rebuild reached the anchor, and every state below it replays.
+fn rebuilt_archive_replays(directory: &Path, config: &ChainConfig, built: &BuiltChain) {
+    let interval = SnapshotInterval::new(8).expect("eight slots");
+    let database = ChainDatabase::<Minimal>::open(&directory.join("chain"), config.clone())
+        .expect("the stopped node released its database")
+        .with_mode(StorageMode::Archive(interval));
     let cursor = database
         .reconstruction()
-        .unwrap()
+        .expect("the database reads")
         .expect("a rebuild was due");
     assert_eq!(cursor.reached, cursor.target);
     assert_eq!(cursor.target, Slot(48));
-    let mut chain = Chain::resume(config, database).unwrap();
-    assert_eq!(chain.reconstruct_history(8).unwrap(), Reconstruction::Done);
+    let mut chain = Chain::resume(config.clone(), database).expect("the archive resumes");
+    let step = chain
+        .reconstruct_history(8)
+        .expect("a finished rebuild steps cleanly");
+    assert_eq!(step, Reconstruction::Done);
     for slot in 0..=48 {
         let state = chain
             .state_at_slot(Slot(slot))
-            .unwrap()
+            .expect("replay succeeds")
             .expect("archived slot");
         assert_eq!(
             state.hash_tree_root(),
