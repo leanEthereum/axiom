@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use axiom_das::NodeId;
 use axiom_gossip::BlobSubnets;
 use axiom_p2p::eth::{GossipKind, GossipTopic};
-use axiom_types::{ChainConfig, ColumnIndex, Epoch, ForkName, Preset, Root};
+use axiom_types::{
+    ChainConfig, ColumnIndex, Epoch, ForkName, Preset, Root, constants::SYNC_COMMITTEE_SUBNET_COUNT,
+};
 
 use super::{peers::Subnet, subnets::AttestationSubnets};
 
@@ -58,6 +60,8 @@ pub(crate) struct Subscriptions {
     column_subnets: BTreeSet<u64>,
     /// Topics currently joined.
     joined: BTreeSet<GossipTopic>,
+    /// Whether every attestation and sync committee subnet is joined.
+    all_subnets: bool,
 }
 
 impl Subscriptions {
@@ -79,7 +83,15 @@ impl Subscriptions {
             genesis_validators_root,
             column_subnets,
             joined: BTreeSet::new(),
+            all_subnets: false,
         }
+    }
+
+    /// Joins every attestation and sync committee subnet when asked, as aggregating services need.
+    #[must_use]
+    pub(crate) const fn subscribing_all(mut self, all: bool) -> Self {
+        self.all_subnets = all;
+        self
     }
 
     /// Moves to the set for an epoch, returning what to join and leave.
@@ -94,7 +106,11 @@ impl Subscriptions {
         let change = TopicChange {
             join: wanted.difference(&self.joined).copied().collect(),
             leave: self.joined.difference(&wanted).copied().collect(),
-            attnets: self.subnets.bits::<P>(epoch, &self.config),
+            attnets: if self.all_subnets {
+                AttestationSubnets::all(&self.config)
+            } else {
+                self.subnets.bits::<P>(epoch, &self.config)
+            },
         };
         self.joined = wanted;
         change
@@ -113,12 +129,22 @@ impl Subscriptions {
         let fork = self.config.fork_at(epoch);
         let fork_digest = self.config.fork_digest(self.genesis_validators_root, epoch);
         let mut kinds = Self::global_kinds(fork);
-        kinds.extend(
-            self.subnets
-                .at::<P>(epoch, &self.config)
-                .iter()
-                .map(|subnet| GossipKind::BeaconAttestation(subnet.0)),
-        );
+        if self.all_subnets {
+            kinds.extend(
+                (0..self.config.attestation_subnet_count).map(GossipKind::BeaconAttestation),
+            );
+            // Sync committee subnets exist from the fork that brought sync contributions.
+            if kinds.contains(&GossipKind::SyncCommitteeContributionAndProof) {
+                kinds.extend((0..SYNC_COMMITTEE_SUBNET_COUNT).map(GossipKind::SyncCommittee));
+            }
+        } else {
+            kinds.extend(
+                self.subnets
+                    .at::<P>(epoch, &self.config)
+                    .iter()
+                    .map(|subnet| GossipKind::BeaconAttestation(subnet.0)),
+            );
+        }
         // Sidecars carry no custody before Fulu: a node takes every blob of every block.
         if let Some(blobs) = BlobSubnets::of(fork, &self.config) {
             kinds.extend((0..blobs.subnet_count).map(GossipKind::BlobSidecar));
@@ -199,6 +225,42 @@ mod tests {
                 ..TopicChange::default()
             }
         );
+    }
+
+    #[test]
+    fn subscribing_to_all_joins_every_vote_subnet() {
+        // Fixture state: mainnet with Fulu from genesis, node zero, no custody columns.
+        let config = ChainConfig::mainnet().with_forks_at_genesis(ForkName::Fulu);
+        let mut subscriptions =
+            Subscriptions::new(NodeId(U256::ZERO), config, Root::ZERO, &BTreeSet::new())
+                .subscribing_all(true);
+
+        // 9 global topics, all 64 attestation subnets, and all 4 sync committee subnets.
+        let change = subscriptions.update::<Mainnet>(Epoch(10));
+        assert_eq!(change.join.len(), 9 + 64 + 4);
+        assert_eq!(change.attnets, u64::MAX);
+        let sync = change
+            .join
+            .iter()
+            .filter(|topic| matches!(topic.kind, GossipKind::SyncCommittee(_)))
+            .count();
+        assert_eq!(sync, 4);
+    }
+
+    #[test]
+    fn phase0_has_no_sync_subnets_to_join() {
+        // Fixture state: minimal phase0, where sync committees do not exist yet.
+        let mut subscriptions = Subscriptions::new(
+            NodeId(U256::ZERO),
+            ChainConfig::minimal(),
+            Root::ZERO,
+            &BTreeSet::new(),
+        )
+        .subscribing_all(true);
+
+        // 5 global topics and all 64 attestation subnets.
+        let change = subscriptions.update::<Minimal>(Epoch(0));
+        assert_eq!(change.join.len(), 5 + 64);
     }
 
     #[test]

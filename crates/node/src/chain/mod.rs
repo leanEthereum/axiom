@@ -6,6 +6,7 @@ mod gossip;
 mod handle;
 mod head;
 mod history;
+mod settings;
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -18,8 +19,8 @@ use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelop
 use axiom_beacon_json::ForkedJson;
 use axiom_bls::PublicKey;
 use axiom_fork_choice::{
-    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, NodePayload,
-    PayloadArrival, PayloadStatus, Store,
+    DataAvailability, ExecutionStatus, FastConfirmation, ForkChoiceError, ForkChoiceNode,
+    NodePayload, PayloadArrival, PayloadStatus, Store,
 };
 use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
 use axiom_json::Json;
@@ -45,8 +46,8 @@ use axiom_types::{
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
 pub use database::{
-    ChainDatabase, Finality, HistoryStart, InvalidInterval, ReconstructionCursor, SchemaVersion,
-    SnapshotInterval, StorageMode,
+    ChainDatabase, Finality, HistoryStart, InvalidInterval, RawRecord, ReconstructionCursor,
+    SchemaVersion, SidecarPass, SnapshotInterval, StorageMode, TableUsage,
 };
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
@@ -56,6 +57,7 @@ pub use history::{
     HistorySegment, ProposerKeys, Reconstruction, SegmentContext, SegmentError, StateReplay,
     VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
+pub use settings::{ChainSettings, SidecarPruning};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -63,6 +65,9 @@ use crate::{ApiEvent, ChainError, EventSender, EventTopic, slasher::SlasherFeed}
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
 const EVENT_BACKLOG: usize = 256;
+
+/// A head this many slots behind the clock or more means the node is syncing.
+pub(crate) const SYNCING_DISTANCE: u64 = 2;
 
 /// The node's view of the beacon chain.
 ///
@@ -110,6 +115,12 @@ pub struct Chain<P: Preset> {
     slasher: Option<SlasherFeed<P>>,
     /// Past states, backfill, and the trusted checkpoint.
     history: History<P>,
+    /// The operator's choices.
+    settings: ChainSettings,
+    /// The fast confirmation rule's state, when it names the safe block.
+    fast_confirmation: Option<FastConfirmation>,
+    /// The epoch the last sidecar pruning round ended, if one has since the node started.
+    sidecars_pruned: Option<Epoch>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -216,7 +227,22 @@ impl<P: Preset> Chain<P> {
             pool: OperationPool::default(),
             slasher: None,
             history,
+            settings: ChainSettings::default(),
+            fast_confirmation: None,
+            sidecars_pruned: None,
         })
+    }
+
+    /// Applies the operator's choices.
+    ///
+    /// The fast confirmation rule starts conservatively, at the finalized checkpoint.
+    #[must_use]
+    pub fn with_settings(mut self, settings: ChainSettings) -> Self {
+        self.fast_confirmation = settings
+            .fast_confirmation
+            .then(|| FastConfirmation::new(&self.store));
+        self.settings = settings;
+        self
     }
 
     /// Samples only the given columns, as this node's custody assigns.
@@ -522,9 +548,16 @@ impl<P: Preset> Chain<P> {
         if self.store.current_slot() != slot {
             // Votes and signatures too old for any coming block leave the pool.
             self.pool.on_slot(self.store.current_slot());
+            // The fast confirmation rule reads the previous slots' votes once a slot.
+            if let Some(confirmation) = &mut self.fast_confirmation
+                && let Err(error) = confirmation.on_fast_confirmation(&mut self.store)
+            {
+                debug!(%error, "fast confirmation skipped this slot");
+            }
             // The slasher checks what it gathered once a slot, and returns what it found.
-            let found = self.slasher.as_ref().map(|slasher| {
-                slasher.pass(self.store.current_epoch());
+            let epoch = self.store.current_epoch();
+            let found = self.slasher.as_mut().map(|slasher| {
+                slasher.tick(time_ms, epoch);
                 slasher.found()
             });
             for slashing in found.into_iter().flatten() {
@@ -805,6 +838,9 @@ impl<P: Preset> Chain<P> {
     /// So a failure is logged and never stops the import.
     /// See `create_light_client_update` in the Altair light client full node spec.
     fn offer_update(&mut self, root: Root, block: &combined::SignedBeaconBlock<P>) {
+        if !self.settings.light_client_server {
+            return;
+        }
         let parent_root = block.parent_root();
         let (Some(signature_state), Some(attested_state)) = (
             self.store.block_state(&root),
@@ -835,6 +871,9 @@ impl<P: Preset> Chain<P> {
     ///
     /// See `create_light_client_bootstrap` in the Altair light client full node spec.
     fn offer_bootstrap(&mut self, root: Root, block: &combined::SignedBeaconBlock<P>) {
+        if !self.settings.light_client_server {
+            return;
+        }
         let Some(state) = self.store.block_state(&root) else {
             return;
         };
@@ -1059,6 +1098,7 @@ impl<P: Preset> Chain<P> {
     ///
     /// Fails when the fork choice refuses the vote.
     pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
+        self.check_skips(vote.data.slot, vote.data.beacon_block_root)?;
         self.pool_vote(vote);
         // Gossip rules verified the signature, and a vote of the current slot still testifies.
         // So the slasher sees it even when the fork choice does not count it yet.
@@ -1068,6 +1108,12 @@ impl<P: Preset> Chain<P> {
         self.store
             .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
+    }
+
+    /// Refuses a vote that would make the node advance a state through too many empty slots.
+    fn check_skips(&self, vote_slot: Slot, block: Root) -> Result<(), ChainError> {
+        let block_slot = self.store.blocks().get(&block).map(|node| node.slot);
+        self.settings.check_skips(vote_slot, block_slot)
     }
 
     /// Keeps a vote for this node's blocks, whatever the fork choice makes of it.
@@ -1098,6 +1144,7 @@ impl<P: Preset> Chain<P> {
         claim: PayloadClaim,
     ) -> Result<(), ChainError> {
         let data = vote.data();
+        self.check_skips(data.slot, data.beacon_block_root)?;
         let committee_index = vote.committee_index();
         let invalid = |reason| ChainError::InvalidVote {
             slot: data.slot,
@@ -1362,6 +1409,20 @@ impl<P: Preset> Chain<P> {
         self.update_head()
     }
 
+    /// Slots the head lags behind the clock.
+    #[must_use]
+    pub const fn sync_distance(&self) -> u64 {
+        self.store.current_slot().0.saturating_sub(self.head.slot.0)
+    }
+
+    /// Whether the head keeps up with the clock.
+    ///
+    /// One slot of lag is normal: the current slot's block may not have arrived yet.
+    #[must_use]
+    pub const fn is_synced(&self) -> bool {
+        self.sync_distance() < SYNCING_DISTANCE
+    }
+
     /// Recomputes the head and announces what changed.
     ///
     /// # Errors
@@ -1370,8 +1431,12 @@ impl<P: Preset> Chain<P> {
     pub fn update_head(&mut self) -> Result<(), ChainError> {
         let previous = self.head;
         let timer = self.metrics.fork_choice_seconds.start_timer();
-        let head = Self::read_head(&mut self.store)?;
+        let mut head = Self::read_head(&mut self.store)?;
         drop(timer);
+        // The confirmed block stays canonical under synchrony, so it can stand for justification.
+        if let Some(confirmation) = &self.fast_confirmation {
+            head.execution.safe = confirmation.safe_execution_block_hash(&self.store);
+        }
         if head == previous {
             return Ok(());
         }
@@ -1497,9 +1562,19 @@ impl<P: Preset> Chain<P> {
         self.persist_light_client(previous_slot)?;
 
         // Sidecars past their retention window are no longer served, so they leave the disk.
-        let pruned = self.database.prune_sidecars(self.store.current_epoch())?;
-        if pruned > 0 {
-            debug!(blocks = pruned, "pruned expired sidecars");
+        let current = self.store.current_epoch();
+        let pruning = self.settings.sidecar_pruning;
+        if pruning.is_due(current, self.sidecars_pruned) {
+            let pass = self
+                .database
+                .prune_sidecars(current, pruning.margin_epochs)?;
+            if pass.blocks > 0 {
+                debug!(blocks = pass.blocks, "pruned expired sidecars");
+            }
+            // A pass that caught up ends the round; otherwise the next finality continues it.
+            if pass.complete {
+                self.sidecars_pruned = Some(current);
+            }
         }
 
         // Only now that the disk agrees, drop the excluded blocks from memory.

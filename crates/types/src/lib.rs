@@ -38,5 +38,5 @@ const _: () = assert!(usize::BITS == 64, "axiom targets 64-bit platforms only");
 pub use config::{
     BlobData, BlobParameters, BlobSchedule, ChainConfig, ConfigError, ConfigValue, ForkName,
 };
-pub use preset::{Mainnet, Minimal, Preset};
+pub use preset::{Gnosis, Mainnet, Minimal, Preset};
 pub use primitives::*;

@@ -1,0 +1,140 @@
+//! The gnosis preset.
+//!
+//! Values come from `consensus/preset/gnosis/*.yaml` in the gnosis chain specs, at commit 045d46d6.
+//! Those files stop at Fulu, so the Gloas values are mainnet's.
+
+use axiom_ssz::Const;
+
+use crate::{Gwei, Preset};
+
+/// The preset of the gnosis chain and its chiado test network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Gnosis;
+
+impl Preset for Gnosis {
+    const NAME: &'static str = "gnosis";
+    const MAX_COMMITTEES_PER_SLOT: u64 = 64;
+    const TARGET_COMMITTEE_SIZE: u64 = 128;
+    const MAX_VALIDATORS_PER_COMMITTEE: u64 = 2048;
+    const SHUFFLE_ROUND_COUNT: u64 = 90;
+    const HYSTERESIS_QUOTIENT: u64 = 4;
+    const HYSTERESIS_DOWNWARD_MULTIPLIER: u64 = 1;
+    const HYSTERESIS_UPWARD_MULTIPLIER: u64 = 5;
+    const MIN_DEPOSIT_AMOUNT: Gwei = Gwei(1_000_000_000);
+    const MAX_EFFECTIVE_BALANCE: Gwei = Gwei(32_000_000_000);
+    const EFFECTIVE_BALANCE_INCREMENT: Gwei = Gwei(1_000_000_000);
+    const MIN_ATTESTATION_INCLUSION_DELAY: u64 = 1;
+    const SLOTS_PER_EPOCH: u64 = 16;
+    const MIN_SEED_LOOKAHEAD: u64 = 1;
+    const MAX_SEED_LOOKAHEAD: u64 = 4;
+    const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 64;
+    const MIN_EPOCHS_TO_INACTIVITY_PENALTY: u64 = 4;
+    const SLOTS_PER_HISTORICAL_ROOT: u64 = 8192;
+    const EPOCHS_PER_HISTORICAL_VECTOR: u64 = 65_536;
+    const EPOCHS_PER_SLASHINGS_VECTOR: u64 = 8192;
+    const HISTORICAL_ROOTS_LIMIT: u64 = 16_777_216;
+    const VALIDATOR_REGISTRY_LIMIT: u64 = 1_099_511_627_776;
+    const BASE_REWARD_FACTOR: u64 = 25;
+    const WHISTLEBLOWER_REWARD_QUOTIENT: u64 = 512;
+    const PROPOSER_REWARD_QUOTIENT: u64 = 8;
+    const INACTIVITY_PENALTY_QUOTIENT: u64 = 67_108_864;
+    const MIN_SLASHING_PENALTY_QUOTIENT: u64 = 128;
+    const PROPORTIONAL_SLASHING_MULTIPLIER: u64 = 1;
+    const MAX_PROPOSER_SLASHINGS: u64 = 16;
+    const MAX_ATTESTER_SLASHINGS: u64 = 2;
+    const MAX_ATTESTATIONS: u64 = 128;
+    const MAX_DEPOSITS: u64 = 16;
+    const MAX_VOLUNTARY_EXITS: u64 = 16;
+    const INACTIVITY_PENALTY_QUOTIENT_ALTAIR: u64 = 50_331_648;
+    const MIN_SLASHING_PENALTY_QUOTIENT_ALTAIR: u64 = 64;
+    const PROPORTIONAL_SLASHING_MULTIPLIER_ALTAIR: u64 = 2;
+    const SYNC_COMMITTEE_SIZE: u64 = 512;
+    const EPOCHS_PER_SYNC_COMMITTEE_PERIOD: u64 = 512;
+    const MIN_SYNC_COMMITTEE_PARTICIPANTS: u64 = 1;
+    const UPDATE_TIMEOUT: u64 = 8192;
+    const INACTIVITY_PENALTY_QUOTIENT_BELLATRIX: u64 = 16_777_216;
+    const MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX: u64 = 32;
+    const PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX: u64 = 3;
+    const MAX_BYTES_PER_TRANSACTION: u64 = 1_073_741_824;
+    const MAX_TRANSACTIONS_PER_PAYLOAD: u64 = 1_048_576;
+    const BYTES_PER_LOGS_BLOOM: u64 = 256;
+    const MAX_EXTRA_DATA_BYTES: u64 = 32;
+    const MAX_BLS_TO_EXECUTION_CHANGES: u64 = 16;
+    const MAX_WITHDRAWALS_PER_PAYLOAD: u64 = 8;
+    const MAX_VALIDATORS_PER_WITHDRAWALS_SWEEP: u64 = 8192;
+    const MAX_BLOB_COMMITMENTS_PER_BLOCK: u64 = 4096;
+    const KZG_COMMITMENT_INCLUSION_PROOF_DEPTH: u64 = 17;
+    const FIELD_ELEMENTS_PER_BLOB: u64 = 4096;
+    const MIN_ACTIVATION_BALANCE: Gwei = Gwei(32_000_000_000);
+    const MAX_EFFECTIVE_BALANCE_ELECTRA: Gwei = Gwei(2_048_000_000_000);
+    const MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA: u64 = 4096;
+    const WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA: u64 = 4096;
+    const PENDING_DEPOSITS_LIMIT: u64 = 134_217_728;
+    const PENDING_PARTIAL_WITHDRAWALS_LIMIT: u64 = 134_217_728;
+    const PENDING_CONSOLIDATIONS_LIMIT: u64 = 262_144;
+    const MAX_ATTESTER_SLASHINGS_ELECTRA: u64 = 1;
+    const MAX_ATTESTATIONS_ELECTRA: u64 = 8;
+    const MAX_DEPOSIT_REQUESTS_PER_PAYLOAD: u64 = 8192;
+    const MAX_WITHDRAWAL_REQUESTS_PER_PAYLOAD: u64 = 16;
+    const MAX_CONSOLIDATION_REQUESTS_PER_PAYLOAD: u64 = 2;
+    const MAX_PENDING_PARTIALS_PER_WITHDRAWALS_SWEEP: u64 = 6;
+    const MAX_PENDING_DEPOSITS_PER_EPOCH: u64 = 16;
+    const KZG_COMMITMENTS_INCLUSION_PROOF_DEPTH: u64 = 4;
+    const FIELD_ELEMENTS_PER_CELL: u64 = 64;
+    const FIELD_ELEMENTS_PER_EXT_BLOB: u64 = 8192;
+    const CELLS_PER_EXT_BLOB: u64 = 128;
+    const NUMBER_OF_COLUMNS: u64 = 128;
+    const PTC_SIZE: u64 = 512;
+    const MAX_PAYLOAD_ATTESTATIONS: u64 = 4;
+    const MAX_BUILDER_DEPOSIT_REQUESTS_PER_PAYLOAD: u64 = 64;
+    const MAX_BUILDER_EXIT_REQUESTS_PER_PAYLOAD: u64 = 16;
+    const MAX_BUILDERS_PER_WITHDRAWALS_SWEEP: u64 = 16_384;
+    const MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE: u64 = 16_829;
+    const MAX_ATTESTER_SLASHING_SIZE: u64 = 2_097_616;
+    const MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE: u64 = 196_932;
+
+    type MaxValidatorsPerCommittee = Const<2048>;
+    type MaxValidatorsPerSlot = Const<131_072>;
+    type MaxCommitteesPerSlot = Const<64>;
+    type SlotsPerEpoch = Const<16>;
+    type ProposerLookaheadSlots = Const<32>;
+    type SlotsPerHistoricalRoot = Const<8192>;
+    type HistoricalRootsLimit = Const<16_777_216>;
+    type ValidatorRegistryLimit = Const<1_099_511_627_776>;
+    type EpochsPerHistoricalVector = Const<65_536>;
+    type EpochsPerSlashingsVector = Const<8192>;
+    type Eth1DataVotesLimit = Const<1024>;
+    type MaxProposerSlashings = Const<16>;
+    type MaxAttesterSlashings = Const<2>;
+    type MaxAttestations = Const<128>;
+    type MaxPendingAttestations = Const<2048>;
+    type MaxAttesterSlashingsElectra = Const<1>;
+    type MaxAttestationsElectra = Const<8>;
+    type MaxDeposits = Const<16>;
+    type MaxVoluntaryExits = Const<16>;
+    type MaxBlsToExecutionChanges = Const<16>;
+    type SyncCommitteeSize = Const<512>;
+    type SyncSubcommitteeSize = Const<128>;
+    type MaxBytesPerTransaction = Const<1_073_741_824>;
+    type MaxTransactionsPerPayload = Const<1_048_576>;
+    type BytesPerLogsBloom = Const<256>;
+    type MaxExtraDataBytes = Const<32>;
+    type MaxWithdrawalsPerPayload = Const<8>;
+    type MaxBlobCommitmentsPerBlock = Const<4096>;
+    type KzgCommitmentInclusionProofDepth = Const<17>;
+    type KzgCommitmentsInclusionProofDepth = Const<4>;
+    type BytesPerBlob = Const<131_072>;
+    type BytesPerCell = Const<2048>;
+    type CellsPerExtBlob = Const<128>;
+    type NumberOfColumns = Const<128>;
+    type MaxCellProofsPerBlock = Const<33_554_432>;
+    type PendingDepositsLimit = Const<134_217_728>;
+    type PendingPartialWithdrawalsLimit = Const<134_217_728>;
+    type PendingConsolidationsLimit = Const<262_144>;
+    type MaxDepositRequestsPerPayload = Const<8192>;
+    type MaxWithdrawalRequestsPerPayload = Const<16>;
+    type MaxConsolidationRequestsPerPayload = Const<2>;
+    type PtcSize = Const<512>;
+    type PtcWindowSlots = Const<48>;
+    type BuilderPendingPaymentsSlots = Const<32>;
+}

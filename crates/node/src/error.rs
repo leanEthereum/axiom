@@ -10,6 +10,7 @@ use axiom_light_client::LightClientError;
 use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
 use axiom_slasher::SlasherError;
+use axiom_snappy::SnappyError;
 use axiom_ssz::DecodeError;
 use axiom_state_transition::{StateError, TransitionError};
 use axiom_store::Error as StoreError;
@@ -43,6 +44,9 @@ pub enum ChainError {
     /// A record the database must hold is missing.
     #[error("database has no {0}")]
     Missing(&'static str),
+    /// No table of the database has the name.
+    #[error("database has no table {0}")]
+    UnknownTable(String),
     /// The operation pool refused an operation.
     #[error("operation pool: {0}")]
     Pool(#[from] PoolError),
@@ -112,6 +116,16 @@ pub enum ChainError {
     /// The chain conflicts with the operator's weak subjectivity checkpoint.
     #[error("weak subjectivity: {0}")]
     WeakSubjectivity(#[from] WeakSubjectivityError),
+    /// A vote lies too many slots past the block it votes for.
+    #[error("vote at slot {vote_slot} skips past block at slot {block_slot}, beyond {max} slots")]
+    TooManySkippedSlots {
+        /// The vote's slot.
+        vote_slot: Slot,
+        /// The slot of the block it votes for.
+        block_slot: Slot,
+        /// The most slots the operator allows.
+        max: u64,
+    },
     /// A genesis state is not the one this chain started from.
     #[error("genesis state root is {actual}, but the chain names {expected}")]
     GenesisMismatch {
@@ -176,6 +190,35 @@ pub enum NodeError {
         /// The decoder's complaint.
         #[source]
         source: DecodeError,
+    },
+    /// A genesis state from the binary or a server does not decode.
+    #[error("genesis state from {origin} does not decode: {source}")]
+    GenesisState {
+        /// Where the state came from: a path, a network name, or a URL.
+        origin: String,
+        /// The decoder's complaint.
+        #[source]
+        source: DecodeError,
+    },
+    /// A genesis state compiled into the binary is corrupt.
+    #[error("embedded {network} genesis state: {source}")]
+    EmbeddedGenesis {
+        /// The network the state starts.
+        network: &'static str,
+        /// The decompressor's complaint.
+        #[source]
+        source: SnappyError,
+    },
+    /// The blob window closed since Deneb, so a genesis sync cannot check availability.
+    #[error(
+        "syncing from genesis is insecure: blobs from Deneb left the peer window at {closed_ms} ms, \
+         now is {now_ms} ms; checkpoint sync, or accept the risk with --allow-insecure-genesis-sync"
+    )]
+    InsecureGenesisSync {
+        /// When the earliest Deneb blobs aged out, in Unix milliseconds.
+        closed_ms: u64,
+        /// The wall clock, in Unix milliseconds.
+        now_ms: u64,
     },
     /// Neither a database to resume nor a genesis state was given.
     #[error("no database to resume and no genesis or checkpoint given")]

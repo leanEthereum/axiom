@@ -4,10 +4,12 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
+use axiom_builder_client::{CircuitBreaker, RelayClient, RelayTimeouts};
 use axiom_execution::{EngineClient, JwtSecret};
-use axiom_http::{Server, ServerConfig};
+use axiom_http::{Cors, Server, ServerConfig};
 use axiom_p2p::{
     Multiaddr,
     eth::MessageIds,
@@ -15,9 +17,10 @@ use axiom_p2p::{
 };
 use axiom_slasher::SlasherConfig;
 use axiom_ssz::DecodeError;
+use axiom_store::Options;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
 use axiom_types::{
-    ChainConfig, ExecutionAddress, Preset, SlotClock,
+    Bytes32, ChainConfig, ExecutionAddress, Preset, SlotClock,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
 };
@@ -28,10 +31,10 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, CheckpointServer, Clock,
-    DiscoverySettings, EventSender, ExecutionLayer, NodeError, NodeKey, PortMappingSettings,
-    StorageMode, WeakSubjectivity, WeakSubjectivityError, api::ApiServices,
-    network::NetworkIdentity, slasher::SlasherFeed,
+    BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, ChainSettings, CheckpointServer,
+    Clock, DiscoverySettings, EventSender, ExecutionLayer, GenesisState, NodeError, NodeKey,
+    PortMappingSettings, StorageMode, WeakSubjectivity, WeakSubjectivityError, api::ApiServices,
+    genesis::GenesisSync, network::NetworkIdentity, slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -41,6 +44,8 @@ pub struct EngineConfig {
     pub url: String,
     /// File holding the hex JWT secret shared with the engine.
     pub jwt_secret: PathBuf,
+    /// Factor the spec's call timeouts are multiplied by, for a slow engine.
+    pub timeout_multiplier: u32,
 }
 
 impl EngineConfig {
@@ -55,10 +60,12 @@ impl EngineConfig {
             path: self.jwt_secret.clone(),
             source,
         })?;
-        let client = EngineClient::new(&self.url, secret).map_err(|source| NodeError::Engine {
-            url: self.url.clone(),
-            source,
-        })?;
+        let client = EngineClient::new(&self.url, secret)
+            .map_err(|source| NodeError::Engine {
+                url: self.url.clone(),
+                source,
+            })?
+            .with_timeout_multiplier(self.timeout_multiplier);
         info!(url = %self.url, "execution engine configured");
         Ok(ExecutionLayer::new(client))
     }
@@ -81,6 +88,8 @@ pub struct NetworkSettings {
     pub custody_group_count: u64,
     /// Peer discovery; none relies on boot nodes alone.
     pub discovery: Option<DiscoverySettings>,
+    /// Whether every attestation and sync committee subnet is joined, not only the node's own.
+    pub subscribe_all_subnets: bool,
 }
 
 impl NetworkSettings {
@@ -104,8 +113,8 @@ impl NetworkSettings {
 /// Where a node with an empty database starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnchorSource {
-    /// An SSZ genesis state.
-    Genesis(PathBuf),
+    /// The network's genesis state.
+    Genesis(GenesisState),
     /// A trusted block and its post-state, both SSZ, as a checkpoint sync obtains them.
     Checkpoint {
         /// The block's post-state.
@@ -114,13 +123,18 @@ pub enum AnchorSource {
         block: PathBuf,
     },
     /// A trusted beacon API to download the finalized block and its post-state from.
-    Url(String),
+    Url {
+        /// The beacon API, such as `http://127.0.0.1:5052`.
+        url: String,
+        /// Longest wait for one download.
+        timeout: Duration,
+    },
 }
 
 impl AnchorSource {
     /// Builds a chain on an empty database from this anchor.
     ///
-    /// A checkpoint must be recent: a stale one may hide a long-range attack.
+    /// The anchor must be recent: a stale one may hide a long-range attack.
     /// See `is_within_weak_subjectivity_period` in the phase0 weak subjectivity guide.
     async fn open<P: Preset>(
         &self,
@@ -130,7 +144,9 @@ impl AnchorSource {
         now_ms: u64,
     ) -> Result<Chain<P>, NodeError> {
         let (state, block, genesis) = match self {
-            Self::Genesis(path) => return Self::genesis(path, chain_config, database),
+            Self::Genesis(source) => {
+                return Self::genesis(source, chain_config, database, history, now_ms).await;
+            }
             Self::Checkpoint { state, block } => {
                 let state = SszFile::new(state, "reading the checkpoint state")
                     .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
@@ -138,9 +154,9 @@ impl AnchorSource {
                     .decode(|bytes| SignedBeaconBlock::<P>::decode_at(bytes, &chain_config))?;
                 (state, block, None)
             }
-            Self::Url(url) => {
+            Self::Url { url, timeout } => {
                 info!(%url, "downloading the finalized checkpoint");
-                let server = CheckpointServer::new(url)?;
+                let server = CheckpointServer::new(url, *timeout)?;
                 let (state, block) = server.finalized::<P>(&chain_config).await?;
                 // An archive rebuilds the states below the anchor from genesis, if the server has it.
                 let genesis = match (database.mode(), &history.genesis) {
@@ -158,15 +174,12 @@ impl AnchorSource {
                 (state, block, genesis)
             }
         };
-        Self::check_recent(&state, &chain_config, now_ms)?;
+        history.check_recent(&state, &chain_config, now_ms)?;
         // The store refuses a block whose state root is not this state's.
         info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
         let chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
         let genesis = match (&history.genesis, genesis) {
-            (Some(path), _) => Some(
-                SszFile::new(path, "reading the genesis state")
-                    .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?,
-            ),
+            (Some(source), _) => Some(source.load::<P>(&chain_config).await?),
             (None, downloaded) => downloaded,
         };
         Ok(match genesis {
@@ -175,36 +188,20 @@ impl AnchorSource {
         })
     }
 
-    /// Refuses a checkpoint state older than its weak subjectivity period.
-    fn check_recent<P: Preset>(
-        state: &BeaconState<P>,
-        chain_config: &ChainConfig,
-        now_ms: u64,
-    ) -> Result<(), NodeError> {
-        let clock = SlotClock::new(
-            state.genesis_time().saturating_mul(1000),
-            chain_config.slot_duration_ms.max(1),
-        );
-        let current = clock.slot_at(now_ms).epoch::<P>();
-        if WeakSubjectivity::is_within_period(state, chain_config, current) {
-            return Ok(());
-        }
-        let stale = WeakSubjectivityError::Stale {
-            state_epoch: state.current_epoch(),
-            period: WeakSubjectivity::period(state, chain_config),
-            current,
-        };
-        Err(ChainError::WeakSubjectivity(stale).into())
-    }
-
-    /// Builds a chain from a genesis state file.
-    fn genesis<P: Preset>(
-        path: &Path,
+    /// Builds a chain from the genesis state, if the chain is young enough to sync from it.
+    async fn genesis<P: Preset>(
+        source: &GenesisState,
         chain_config: ChainConfig,
         database: ChainDatabase<P>,
+        history: &HistorySettings,
+        now_ms: u64,
     ) -> Result<Chain<P>, NodeError> {
-        let genesis = SszFile::new(path, "reading the genesis state")
-            .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
+        let genesis = source.load::<P>(&chain_config).await?;
+        let sync = GenesisSync {
+            allow_insecure: history.allow_insecure_genesis_sync,
+        };
+        sync.check(&genesis, &chain_config, now_ms)?;
+        history.check_recent(&genesis, &chain_config, now_ms)?;
         info!(
             validators = genesis.validators().len(),
             fork = %genesis.fork_name(),
@@ -222,7 +219,43 @@ pub struct HistorySettings {
     /// A checkpoint the operator trusts, which the chain must pass through.
     pub weak_subjectivity: Option<WeakSubjectivity>,
     /// The genesis state, which lets an archive anchored later rebuild the states below its anchor.
-    pub genesis: Option<PathBuf>,
+    pub genesis: Option<GenesisState>,
+    /// Whether to sync from genesis even after the blob window closed.
+    pub allow_insecure_genesis_sync: bool,
+    /// Whether a head older than its weak subjectivity period only warns instead of stopping.
+    pub ignore_ws_check: bool,
+}
+
+impl HistorySettings {
+    /// Refuses a state older than its weak subjectivity period, unless the operator ignores it.
+    ///
+    /// A node anchored on such a state may follow a long-range attacker's chain.
+    /// See `is_within_weak_subjectivity_period` in the phase0 weak subjectivity guide.
+    fn check_recent<P: Preset>(
+        &self,
+        state: &BeaconState<P>,
+        chain_config: &ChainConfig,
+        now_ms: u64,
+    ) -> Result<(), NodeError> {
+        let clock = SlotClock::new(
+            state.genesis_time().saturating_mul(1000),
+            chain_config.slot_duration_ms.max(1),
+        );
+        let current = clock.slot_at(now_ms).epoch::<P>();
+        if WeakSubjectivity::is_within_period(state, chain_config, current) {
+            return Ok(());
+        }
+        let stale = WeakSubjectivityError::Stale {
+            state_epoch: state.current_epoch(),
+            period: WeakSubjectivity::period(state, chain_config),
+            current,
+        };
+        if self.ignore_ws_check {
+            warn!(error = %stale, "running outside the weak subjectivity period, exposed to long-range attacks");
+            return Ok(());
+        }
+        Err(ChainError::WeakSubjectivity(stale).into())
+    }
 }
 
 /// An SSZ file, with what reading it is for.
@@ -278,6 +311,18 @@ pub struct NodeConfig {
     pub proposer: ProposerSettings,
     /// The slasher's history and layout; none runs no slasher.
     pub slasher: Option<SlasherConfig>,
+    /// Where the slasher keeps its history, and how often it looks.
+    pub slasher_setup: SlasherSetup,
+    /// How the chain thread runs: vote bounds, fast confirmation, light clients, and pruning.
+    pub chain: ChainSettings,
+    /// Database upkeep at startup and while running.
+    pub database: DatabaseSettings,
+    /// The browser origins the beacon API admits; none admits pages from its own address only.
+    pub http_allow_origin: Option<Cors>,
+    /// The browser origins the metrics endpoint admits; none admits its own address only.
+    pub metrics_allow_origin: Option<Cors>,
+    /// Whether the node stops once its head reaches the wall clock.
+    pub shutdown_after_sync: bool,
 }
 
 /// How the node builds blocks for the validators it serves.
@@ -287,6 +332,117 @@ pub struct ProposerSettings {
     pub default_fee_recipient: ExecutionAddress,
     /// Builder API endpoints that sell payloads, such as a local relay multiplexer.
     pub builders: Vec<String>,
+    /// How long builders get to answer, and what the node calls itself.
+    pub builder_client: BuilderClientSettings,
+    /// When the chain is too unhealthy to ask builders.
+    pub builder_fallback: BuilderFallback,
+    /// Graffiti of blocks whose request names none.
+    pub graffiti: Bytes32,
+    /// How long before a slot its payload is prepared; none prepares a third of a slot ahead.
+    pub prepare_lookahead: Option<Duration>,
+    /// Whether payloads are prepared for every slot, not only for prepared proposers.
+    pub always_prepare_payload: bool,
+}
+
+/// How the node talks to builders.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BuilderClientSettings {
+    /// Deadline of a bid request; none keeps the spec's one second.
+    pub header_timeout: Option<Duration>,
+    /// The user agent each builder request names, when any.
+    pub user_agent: Option<String>,
+}
+
+impl BuilderClientSettings {
+    /// Opens a client for each builder endpoint.
+    pub(crate) fn connect(&self, urls: &[String]) -> Result<Vec<RelayClient>, NodeError> {
+        let timeouts = RelayTimeouts {
+            header: self.header_timeout.unwrap_or(RelayTimeouts::BID_DEADLINE),
+            ..RelayTimeouts::DEFAULT
+        };
+        urls.iter()
+            .map(|url| {
+                let client = RelayClient::with_timeouts(url, timeouts).map_err(|error| {
+                    NodeError::Builder {
+                        url: url.clone(),
+                        error: Box::new(error),
+                    }
+                })?;
+                Ok(match &self.user_agent {
+                    Some(agent) => client.with_user_agent(agent.clone()),
+                    None => client,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Thresholds past which the node stops asking builders, each overriding the preset default.
+///
+/// See the liveness failsafe section of the Bellatrix builder validator spec.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BuilderFallback {
+    /// Most missed slots tolerated in a row.
+    pub skips: Option<u64>,
+    /// Most missed slots tolerated over the last epoch.
+    pub skips_per_epoch: Option<u64>,
+    /// Most epochs tolerated since finality.
+    pub epochs_since_finalization: Option<u64>,
+    /// Whether builders are asked whatever the chain's health.
+    pub disable_checks: bool,
+}
+
+impl BuilderFallback {
+    /// The circuit breaker these thresholds describe for a preset.
+    #[must_use]
+    pub const fn breaker<P: Preset>(&self) -> CircuitBreaker {
+        if self.disable_checks {
+            return CircuitBreaker::NEVER;
+        }
+        let defaults = CircuitBreaker::for_preset::<P>();
+        CircuitBreaker {
+            max_consecutive_missed: match self.skips {
+                Some(skips) => skips,
+                None => defaults.max_consecutive_missed,
+            },
+            max_missed_per_epoch: match self.skips_per_epoch {
+                Some(skips) => skips,
+                None => defaults.max_missed_per_epoch,
+            },
+            max_finality_delay: match self.epochs_since_finalization {
+                Some(epochs) => epochs,
+                None => defaults.max_finality_delay,
+            },
+        }
+    }
+}
+
+/// Where the slasher keeps its history, and how often it looks for slashings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SlasherSetup {
+    /// The history's directory; none keeps it beside the chain's, or in memory without one.
+    pub directory: Option<PathBuf>,
+    /// Time between two passes; none runs one each slot.
+    pub update_period: Option<Duration>,
+}
+
+/// Database upkeep at startup and while running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DatabaseSettings {
+    /// Whether the store rewrites mostly dead segments as it goes.
+    pub auto_compact: bool,
+    /// Whether every eligible segment is rewritten once at startup.
+    pub compact_on_start: bool,
+}
+
+impl Default for DatabaseSettings {
+    fn default() -> Self {
+        // Space is reclaimed as it goes, and startup does no extra work.
+        Self {
+            auto_compact: true,
+            compact_on_start: false,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -299,19 +455,34 @@ impl NodeConfig {
         clock: &dyn Clock,
     ) -> Result<Chain<P>, NodeError> {
         let database = match &self.data_dir {
-            Some(directory) => ChainDatabase::open(&directory.join("chain"), chain_config.clone())?,
+            Some(directory) => {
+                let options = Options {
+                    auto_compact: self.database.auto_compact,
+                    ..Options::default()
+                };
+                ChainDatabase::open_with(&directory.join("chain"), chain_config.clone(), options)?
+            }
             None => ChainDatabase::in_memory(chain_config.clone())?,
         }
         .with_mode(self.history.mode);
+        if self.database.compact_on_start {
+            info!("compacting the database");
+            database.compact()?;
+        }
         let chain = if database.has_anchor()? {
             info!("resuming from the database");
-            Chain::resume(chain_config, database)?
+            let chain = Chain::resume(chain_config, database)?;
+            // A node left off for months may resume past its weak subjectivity period.
+            self.history.check_recent(
+                chain.head_state()?.beacon(),
+                chain.config(),
+                clock.now_ms(),
+            )?;
+            chain
         } else {
-            self.anchor
-                .as_ref()
-                .ok_or(NodeError::NoAnchor)?
-                .open(chain_config, database, &self.history, clock.now_ms())
-                .await?
+            let anchor = self.anchor.as_ref().ok_or(NodeError::NoAnchor)?;
+            // A downloaded anchor holds a whole state; boxing keeps this future small.
+            Box::pin(anchor.open(chain_config, database, &self.history, clock.now_ms())).await?
         };
         Ok(match self.history.weak_subjectivity {
             Some(checkpoint) => {
@@ -327,8 +498,13 @@ impl NodeConfig {
         let Some(settings) = self.slasher else {
             return Ok(chain);
         };
-        let directory = self.data_dir.as_ref().map(|data| data.join("slasher"));
-        Ok(chain.with_slasher(SlasherFeed::start(settings, directory.as_deref())?))
+        let directory = match &self.slasher_setup.directory {
+            Some(directory) => Some(directory.clone()),
+            None => self.data_dir.as_ref().map(|data| data.join("slasher")),
+        };
+        let feed = SlasherFeed::start(settings, directory.as_deref())?
+            .with_update_period(self.slasher_setup.update_period);
+        Ok(chain.with_slasher(feed))
     }
 
     /// The chain the node runs: opened, with its slasher, telemetry, event feed, and custody.
@@ -349,6 +525,7 @@ impl NodeConfig {
         let chain = Box::pin(self.open_chain::<P>(chain_config, clock)).await?;
         let chain = self
             .attach_slasher(chain)?
+            .with_settings(self.chain)
             .with_metrics(metrics)
             .with_events(events);
         let Some(settings) = &self.network else {
@@ -404,7 +581,13 @@ impl NodeConfig {
     ) -> Result<Vec<JoinHandle<()>>, NodeError> {
         let mut servers = Vec::new();
         if let Some(address) = self.http_address {
-            let router = BeaconApi::router(handle.clone(), api);
+            // Block submissions name their fork in a header, which pages must be allowed to send.
+            let cors = self
+                .http_allow_origin
+                .clone()
+                .unwrap_or_else(|| Cors::local(address))
+                .with_header("eth-consensus-version");
+            let router = BeaconApi::router(handle.clone(), api).with_cors(cors);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Bind {
@@ -417,7 +600,11 @@ impl NodeConfig {
             servers.push(task::spawn(server.serve(signal.wait())));
         }
         if let Some(address) = self.metrics_address {
-            let server = MetricsServer::bind(address, registry)
+            let cors = self
+                .metrics_allow_origin
+                .clone()
+                .unwrap_or_else(|| Cors::local(address));
+            let server = MetricsServer::bind_with_cors(address, registry, cors)
                 .await
                 .map_err(|error| NodeError::Bind {
                     context: "binding the metrics endpoint",

@@ -41,6 +41,16 @@ impl AttestationSubnets {
     }
 
     /// The subnets of an epoch as a bitfield, one bit per subnet, as metadata and records carry them.
+    /// The bitfield naming every attestation subnet, as a node joined to all of them states it.
+    pub(crate) const fn all(config: &ChainConfig) -> u64 {
+        // Subnets past 63 cannot occur with 64 subnets; the bitfield holds the first 64.
+        match config.attestation_subnet_count {
+            0 => 0,
+            count if count >= 64 => u64::MAX,
+            count => (1 << count) - 1,
+        }
+    }
+
     pub(crate) fn bits<P: Preset>(&self, epoch: Epoch, config: &ChainConfig) -> u64 {
         // Subnets past 63 cannot occur with 64 subnets; the guard keeps the shift in range.
         self.at::<P>(epoch, config)
@@ -103,6 +113,18 @@ mod tests {
         let mut little = big_endian;
         little.reverse();
         NodeId(U256(little))
+    }
+
+    #[test]
+    fn every_subnet_sets_one_bit() {
+        // 64 subnets fill the field; 16 fill its low half; none leaves it empty.
+        let with = |count| ChainConfig {
+            attestation_subnet_count: count,
+            ..ChainConfig::mainnet()
+        };
+        assert_eq!(AttestationSubnets::all(&with(64)), u64::MAX);
+        assert_eq!(AttestationSubnets::all(&with(16)), 0xffff);
+        assert_eq!(AttestationSubnets::all(&with(0)), 0);
     }
 
     #[test]

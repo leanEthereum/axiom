@@ -66,7 +66,7 @@ OPTIONS (create):
     --eth1-withdrawal-address <ADDR> 0x01 credentials to an execution address
     --compounding                    0x02 credentials, with --eth1-withdrawal-address
     --pbkdf2                         encrypt with PBKDF2 instead of scrypt
-    --network <NAME>                 mainnet or minimal [default: mainnet]
+    --network <NAME>                 a built-in network, as for the beacon node [default: mainnet]
     --config <FILE>                  chain config YAML
 
 OPTIONS (settings, for create and for import of one keystore):

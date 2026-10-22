@@ -1,13 +1,13 @@
-//! The node's background loops: the fork choice clock and the engine follower.
+//! The node's background loops: the clock, payload preparation, sync watching, and the engine.
 
-use std::{sync::Arc, time::Duration};
+use std::{future, sync::Arc, time::Duration};
 
-use axiom_types::{ChainConfig, Preset, SlotClock};
+use axiom_types::{ChainConfig, Preset, Slot, SlotClock};
 use tokio::{
     sync::broadcast::{self, error::RecvError},
     time,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{ChainEvent, ChainHandle, Clock, ExecutionLayer, ProposerService};
 
@@ -92,14 +92,51 @@ impl<P: Preset> Ticker<P> {
 }
 
 /// Tells the engine about every new head and feeds its verdicts back.
-/// When, as a fraction of a slot, the engine starts building the next slot's payload.
+/// Default lead of payload preparation, as a fraction of a slot: one third.
 ///
 /// Two thirds in, the slot's block and votes have arrived, so the head is settled.
 /// Proposers that build ahead give the engine the last third to fill the payload.
-const PREPARE_AT_NUMERATOR: u64 = 2;
+const DEFAULT_LEAD_DENOMINATOR: u64 = 3;
 
-/// The denominator of the fraction above.
-const PREPARE_AT_DENOMINATOR: u64 = 3;
+/// When each slot's payload is prepared: a fixed lead before the slot starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreparationSchedule {
+    /// Genesis and the slot length.
+    slots: SlotClock,
+    /// How long before each slot its payload is prepared, at most a slot.
+    lead_ms: u64,
+}
+
+impl PreparationSchedule {
+    /// A schedule leading each slot by a lookahead, or by a third of a slot without one.
+    fn new(slots: SlotClock, lookahead: Option<Duration>) -> Self {
+        let slot_ms = slots.slot_duration_ms();
+        let lead_ms = lookahead.map_or(slot_ms / DEFAULT_LEAD_DENOMINATOR, |lookahead| {
+            u64::try_from(lookahead.as_millis()).unwrap_or(u64::MAX)
+        });
+        Self {
+            slots,
+            // A lead past one slot would aim at the slot after next.
+            lead_ms: lead_ms.min(slot_ms),
+        }
+    }
+
+    /// The next moment to prepare at, after a time, and the slot it prepares.
+    fn next(self, now_ms: u64) -> (u64, Slot) {
+        let next = self.slots.slot_at(now_ms) + 1;
+        let at = self.slots.slot_start_ms(next).saturating_sub(self.lead_ms);
+        // Past this slot's moment, aim at the following slot's.
+        if now_ms < at {
+            (at, next)
+        } else {
+            let after = next + 1;
+            (
+                self.slots.slot_start_ms(after).saturating_sub(self.lead_ms),
+                after,
+            )
+        }
+    }
+}
 
 /// Starts the engine building each prepared proposer's payload before its slot.
 #[derive(Debug)]
@@ -108,40 +145,69 @@ pub(crate) struct PayloadPreparer<P: Preset> {
     proposer: Arc<ProposerService<P>>,
     /// The wall clock.
     clock: Arc<dyn Clock>,
-    /// Genesis and the slot length.
-    slots: SlotClock,
+    /// When to prepare.
+    schedule: PreparationSchedule,
 }
 
 impl<P: Preset> PayloadPreparer<P> {
+    /// A preparer leading each slot by a lookahead, or by a third of a slot without one.
     pub(crate) fn new(
         proposer: Arc<ProposerService<P>>,
         clock: Arc<dyn Clock>,
         slots: SlotClock,
+        lookahead: Option<Duration>,
     ) -> Self {
         Self {
             proposer,
             clock,
-            slots,
+            schedule: PreparationSchedule::new(slots, lookahead),
         }
     }
 
-    /// Each slot, two thirds in, prepares the next slot's payload.
+    /// Before each slot, by the lead, prepares that slot's payload.
     pub(crate) async fn run(self) {
         loop {
             let now = self.clock.now_ms();
-            let slot = self.slots.slot_at(now);
-            let start = self.slots.slot_start_ms(slot);
-            let at = start
-                + self.slots.slot_duration_ms() * PREPARE_AT_NUMERATOR / PREPARE_AT_DENOMINATOR;
-            // Past this slot's moment, aim at the next slot's.
-            let at = if now < at {
-                at
-            } else {
-                at + self.slots.slot_duration_ms()
-            };
+            let (at, slot) = self.schedule.next(now);
             time::sleep(Duration::from_millis(at.saturating_sub(now))).await;
-            let next = self.slots.slot_at(self.clock.now_ms()) + 1;
-            self.proposer.prepare_next(next).await;
+            self.proposer.prepare_next(slot).await;
+        }
+    }
+}
+
+/// Completes once the head is within a slot of the wall clock, for a node that stops when synced.
+#[derive(Debug)]
+pub(crate) struct SyncWatcher<P: Preset> {
+    /// The chain thread.
+    chain: ChainHandle<P>,
+    /// Genesis and the slot length.
+    slots: SlotClock,
+}
+
+impl<P: Preset> SyncWatcher<P> {
+    /// A watcher of a chain.
+    pub(crate) const fn new(chain: ChainHandle<P>, slots: SlotClock) -> Self {
+        Self { chain, slots }
+    }
+
+    /// Completes once synced when asked to stop then, and never otherwise.
+    pub(crate) async fn stop(self, when_synced: bool) {
+        if when_synced {
+            self.synced().await;
+            info!("synced; stopping as asked");
+        } else {
+            future::pending::<()>().await;
+        }
+    }
+
+    /// Waits, checking twice a slot, until the head is synced or the chain thread stops.
+    async fn synced(self) {
+        let period = Duration::from_millis((self.slots.slot_duration_ms() / 2).max(1));
+        loop {
+            match self.chain.run(|chain| chain.is_synced()).await {
+                Ok(true) | Err(_) => return,
+                Ok(false) => time::sleep(period).await,
+            }
         }
     }
 }
@@ -233,5 +299,25 @@ mod tests {
         assert_eq!(schedule.next(2_900), 2_992);
         assert_eq!(schedule.next(2_992), 3_000);
         assert_eq!(schedule.next(3_000), 3_166);
+    }
+
+    #[test]
+    fn payloads_are_prepared_a_lead_before_their_slot() {
+        // Fixture state: genesis at 0 and slots of 12_000 ms, so slot 1 starts at 12_000.
+        let slots = SlotClock::new(0, 12_000);
+
+        // The default lead is a third of a slot: slot 1 is prepared at 8_000.
+        let default = PreparationSchedule::new(slots, None);
+        assert_eq!(default.next(0), (8_000, Slot(1)));
+        // At or past that moment, the next aim is slot 2, at 20_000.
+        assert_eq!(default.next(8_000), (20_000, Slot(2)));
+
+        // A 2 second lookahead prepares slot 1 at 10_000.
+        let short = PreparationSchedule::new(slots, Some(Duration::from_secs(2)));
+        assert_eq!(short.next(9_999), (10_000, Slot(1)));
+
+        // A lead longer than a slot is cut to one slot: slot 2 is prepared at slot 1's start.
+        let long = PreparationSchedule::new(slots, Some(Duration::from_secs(30)));
+        assert_eq!(long.next(5_000), (12_000, Slot(2)));
     }
 }

@@ -126,7 +126,7 @@ impl Harness {
         fs::write(&path, genesis.encode()).expect("temporary directory is writable");
         let address = free_address();
         let config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(path)),
+            anchor: Some(AnchorSource::Genesis(path.into())),
             http_address: Some(address),
             slasher: Some(SlasherConfig {
                 history_length: 64,

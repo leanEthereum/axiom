@@ -2,7 +2,7 @@
 //!
 //! See the CORS protocol in the WHATWG Fetch standard, section 3.2.
 
-use std::net::SocketAddr;
+use std::{fmt, net::SocketAddr};
 
 use crate::{HttpError, Method, Request, Response, StatusCode};
 
@@ -172,6 +172,16 @@ impl Cors {
     }
 }
 
+impl fmt::Display for Cors {
+    /// Writes the allowed origin as an operator gives it: the wildcard or the origin.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.origin {
+            AllowedOrigin::Any => f.write_str("*"),
+            AllowedOrigin::Exact(origin) => f.write_str(origin),
+        }
+    }
+}
+
 /// What a policy decides about a request before routing.
 #[derive(Debug)]
 pub(crate) enum Admission {
@@ -214,6 +224,20 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_policy_prints_the_origin_it_allows() {
+        // The text round-trips, lowercased, so configuration dumps read back.
+        assert_eq!(Cors::parse("*").unwrap().to_string(), "*");
+        assert_eq!(
+            Cors::parse("HTTP://Localhost:3000").unwrap().to_string(),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            Cors::local("127.0.0.1:5052".parse().unwrap()).to_string(),
+            "http://127.0.0.1:5052"
+        );
     }
 
     #[test]

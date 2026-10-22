@@ -54,6 +54,8 @@ pub struct EngineClient {
     secret: JwtSecret,
     /// The next JSON-RPC id; ids only need to be unique per connection, so a counter suffices.
     next_id: AtomicU64,
+    /// Factor every call's spec timeout is multiplied by, for engines slower than the spec assumes.
+    timeout_multiplier: u32,
 }
 
 impl EngineClient {
@@ -82,7 +84,22 @@ impl EngineClient {
             http: Client::new(endpoint, config),
             secret,
             next_id: AtomicU64::new(1),
+            timeout_multiplier: 1,
         }
+    }
+
+    /// Multiplies every call's timeout, for an engine on slow hardware.
+    ///
+    /// A factor of zero is taken as one, so no call times out at once.
+    #[must_use]
+    pub const fn with_timeout_multiplier(mut self, multiplier: u32) -> Self {
+        self.timeout_multiplier = if multiplier == 0 { 1 } else { multiplier };
+        self
+    }
+
+    /// A spec timeout, scaled by the configured multiplier.
+    const fn scaled(&self, timeout: Duration) -> Duration {
+        timeout.saturating_mul(self.timeout_multiplier)
     }
 
     /// Calls any method and returns its raw result.
@@ -108,7 +125,10 @@ impl EngineClient {
             .with_body("application/json", call.to_bytes());
 
         // Phase 3: the exchange; the engine answers 200 even for JSON-RPC errors.
-        let response = self.http.send_with_timeout(&request, timeout).await?;
+        let response = self
+            .http
+            .send_with_timeout(&request, self.scaled(timeout))
+            .await?;
         if response.status != StatusCode::OK {
             return Err(EngineError::Status(response.status));
         }
@@ -326,5 +346,30 @@ impl EngineClient {
     pub async fn syncing(&self) -> Result<SyncStatus, EngineError> {
         self.call_typed("eth_syncing", Vec::new(), LOOKUP_TIMEOUT)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_multiplier_scales_every_spec_timeout() {
+        let client =
+            EngineClient::new("http://127.0.0.1:8551", JwtSecret::new([0x11; 32])).unwrap();
+
+        // Unscaled by default: the spec's eight seconds stay eight.
+        assert_eq!(
+            client.scaled(Duration::from_secs(8)),
+            Duration::from_secs(8)
+        );
+
+        // A factor of three gives a slow engine 24 seconds for a new payload.
+        let slow = client.with_timeout_multiplier(3);
+        assert_eq!(slow.scaled(Duration::from_secs(8)), Duration::from_secs(24));
+
+        // Zero would time every call out at once, so it counts as one.
+        let zero = slow.with_timeout_multiplier(0);
+        assert_eq!(zero.scaled(LOOKUP_TIMEOUT), LOOKUP_TIMEOUT);
     }
 }

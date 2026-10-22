@@ -40,6 +40,8 @@ pub struct RelayClient {
     pubkey: Option<BlsPubkey>,
     /// Deadline of each call.
     timeouts: RelayTimeouts,
+    /// The user agent each request names, when configured.
+    user_agent: Option<String>,
 }
 
 impl RelayClient {
@@ -94,7 +96,15 @@ impl RelayClient {
             base,
             pubkey,
             timeouts,
+            user_agent: None,
         })
+    }
+
+    /// Names a user agent on every request, so relay operators can tell clients apart.
+    #[must_use]
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
+        self
     }
 
     /// The URL as configured.
@@ -115,7 +125,7 @@ impl RelayClient {
     ///
     /// Fails on a transport error, or any status other than 200.
     pub async fn status(&self) -> Result<(), BuilderError> {
-        let request = Request::new(Method::Get, &self.target("/eth/v1/builder/status"));
+        let request = self.request(Method::Get, "/eth/v1/builder/status");
         let response = self.send(&request, self.timeouts.status).await?;
         Self::expect(&response, StatusCode::OK)
     }
@@ -133,7 +143,8 @@ impl RelayClient {
         registrations: &[SignedValidatorRegistrationV1],
     ) -> Result<(), BuilderError> {
         let body = Json::Array(registrations.iter().map(ApiJson::to_json).collect());
-        let request = Request::new(Method::Post, &self.target("/eth/v1/builder/validators"))
+        let request = self
+            .request(Method::Post, "/eth/v1/builder/validators")
             .with_body("application/json", body.to_string().into_bytes());
         let response = self.send(&request, self.timeouts.register).await?;
         Self::expect(&response, StatusCode::OK)
@@ -163,11 +174,10 @@ impl RelayClient {
         if !fork.has_builder_api() {
             return Err(BuilderError::NoBuilderApi { fork });
         }
-        let target = self.target(&format!(
-            "/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey}"
-        ));
+        let path = format!("/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey}");
         let timeout = self.timeouts.header;
-        let request = Request::new(Method::Get, &target)
+        let request = self
+            .request(Method::Get, &path)
             .with_header("accept", "application/json")
             .with_header("date-milliseconds", Self::now_millis().to_string())
             .with_header("x-timeout-ms", timeout.as_millis().to_string());
@@ -204,7 +214,8 @@ impl RelayClient {
         block: &SignedBlindedBeaconBlock<P>,
     ) -> Result<RevealedPayload<P>, BuilderError> {
         let fork = block.fork_name();
-        let request = Request::new(Method::Post, &self.target("/eth/v1/builder/blinded_blocks"))
+        let request = self
+            .request(Method::Post, "/eth/v1/builder/blinded_blocks")
             .with_header("accept", "application/json")
             .with_header("eth-consensus-version", fork.as_str())
             .with_body("application/json", block.to_json().to_string().into_bytes());
@@ -220,6 +231,15 @@ impl RelayClient {
     /// An API path under the relay's path prefix.
     fn target(&self, path: &str) -> String {
         format!("{}{path}", self.base)
+    }
+
+    /// A request for an API path, naming the user agent when one is configured.
+    fn request(&self, method: Method, path: &str) -> Request {
+        let request = Request::new(method, &self.target(path));
+        match &self.user_agent {
+            Some(agent) => request.with_header("user-agent", agent.clone()),
+            None => request,
+        }
     }
 
     /// Sends a request under a deadline.
@@ -269,6 +289,19 @@ mod tests {
             client.target("/eth/v1/builder/status"),
             "/eth/v1/builder/status"
         );
+    }
+
+    #[test]
+    fn requests_name_the_configured_user_agent() {
+        // No agent by default; once set, every request carries it.
+        let client = RelayClient::new("http://127.0.0.1:18550").unwrap();
+        let plain = client.request(Method::Get, "/eth/v1/builder/status");
+        assert_eq!(plain.headers.get("user-agent"), None);
+
+        let named = client.with_user_agent("axiom/0.1.0");
+        let request = named.request(Method::Get, "/eth/v1/builder/status");
+        assert_eq!(request.headers.get("user-agent"), Some("axiom/0.1.0"));
+        assert_eq!(request.path, "/eth/v1/builder/status");
     }
 
     #[test]

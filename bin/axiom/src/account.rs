@@ -12,8 +12,8 @@ use axiom_http::{ClientConfig, HttpError};
 use axiom_json::{Data, Json};
 use axiom_node::{Clock, SystemClock};
 use axiom_types::{
-    BlsPubkey, BlsSignature, ChainConfig, Epoch, ExecutionAddress, Gwei, Mainnet, Minimal, Root,
-    SlotClock, ValidatorIndex,
+    BlsPubkey, BlsSignature, ChainConfig, Epoch, ExecutionAddress, Gnosis, Gwei, Mainnet, Minimal,
+    Root, SlotClock, ValidatorIndex,
     capella::{BlsToExecutionChange, SignedBlsToExecutionChange},
     phase0::{SignedVoluntaryExit, VoluntaryExit},
 };
@@ -64,7 +64,7 @@ OPTIONS (key generation):
     --compounding                0x02 credentials, with --withdrawal-address
     --amount <GWEI>              deposit amount [default: 32000000000]
     --pbkdf2                     encrypt with PBKDF2 instead of scrypt
-    --network <NAME>             mainnet or minimal [default: mainnet]
+    --network <NAME>             a built-in network, as for the beacon node [default: mainnet]
     --config <FILE>              chain config YAML
 
 OPTIONS (slashing protection):
@@ -662,6 +662,17 @@ impl Exit {
                     (
                         epoch,
                         context.signing_root::<Minimal>(&SigningRequest::VoluntaryExit(&message)),
+                    )
+                }
+                PresetName::Gnosis => {
+                    let epoch = self.epoch.unwrap_or_else(|| slot.epoch::<Gnosis>());
+                    let message = VoluntaryExit {
+                        epoch,
+                        validator_index: summary.index,
+                    };
+                    (
+                        epoch,
+                        context.signing_root::<Gnosis>(&SigningRequest::VoluntaryExit(&message)),
                     )
                 }
             };

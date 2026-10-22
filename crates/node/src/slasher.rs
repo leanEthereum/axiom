@@ -6,6 +6,7 @@ use std::{
     path::Path,
     sync::{Arc, mpsc as std_mpsc},
     thread,
+    time::Duration,
 };
 
 use axiom_fork_choice::Store;
@@ -66,6 +67,10 @@ pub(crate) struct SlasherFeed<P: Preset> {
     evidence: std_mpsc::Receiver<Slashing>,
     /// Committees by target checkpoint, the most recent last.
     committees: Vec<(Checkpoint, Arc<EpochCommittees>)>,
+    /// Least time between two passes, in milliseconds; zero passes at every tick.
+    period_ms: u64,
+    /// When the last pass was asked for, in Unix milliseconds.
+    last_pass_ms: Option<u64>,
     /// The preset of the states committees come from.
     preset: PhantomData<P>,
 }
@@ -102,8 +107,21 @@ impl<P: Preset> SlasherFeed<P> {
             queue,
             evidence,
             committees: Vec::new(),
+            period_ms: 0,
+            last_pass_ms: None,
             preset: PhantomData,
         })
+    }
+
+    /// Passes at most once per period instead of once per slot; none keeps once per slot.
+    ///
+    /// A longer period batches more votes per pass, trading detection delay for disk reads.
+    #[must_use]
+    pub(crate) fn with_update_period(mut self, period: Option<Duration>) -> Self {
+        self.period_ms = period.map_or(0, |period| {
+            u64::try_from(period.as_millis()).unwrap_or(u64::MAX)
+        });
+        self
     }
 
     /// Queues an aggregate vote, once its signers are known.
@@ -153,9 +171,18 @@ impl<P: Preset> SlasherFeed<P> {
         }
     }
 
-    /// Asks for a pass at an epoch.
-    pub(crate) fn pass(&self, epoch: Epoch) {
-        self.send(Observation::Pass(epoch));
+    /// Asks for a pass at an epoch, if the update period has run since the last one.
+    pub(crate) fn tick(&mut self, now_ms: u64, epoch: Epoch) {
+        if self.pass_due(now_ms) {
+            self.last_pass_ms = Some(now_ms);
+            self.send(Observation::Pass(epoch));
+        }
+    }
+
+    /// Whether the update period has run since the last pass.
+    fn pass_due(&self, now_ms: u64) -> bool {
+        self.last_pass_ms
+            .is_none_or(|last| now_ms.saturating_sub(last) >= self.period_ms)
     }
 
     /// Evidence found since the last call.
@@ -245,5 +272,31 @@ impl<P: Preset> SlasherWorker<P> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_types::Minimal;
+
+    use super::*;
+
+    #[test]
+    fn passes_wait_for_the_update_period() {
+        // Fixture state: a 12 second period, first ticked at 1000 ms.
+        let mut feed = SlasherFeed::<Minimal>::start(SlasherConfig::default(), None)
+            .unwrap()
+            .with_update_period(Some(Duration::from_secs(12)));
+        assert!(feed.pass_due(1000));
+        feed.tick(1000, Epoch(0));
+
+        // The next pass waits until 1000 + 12000 = 13000 ms.
+        assert!(!feed.pass_due(12_999));
+        assert!(feed.pass_due(13_000));
+
+        // Without a period, every tick passes, even at the same instant.
+        let mut every = SlasherFeed::<Minimal>::start(SlasherConfig::default(), None).unwrap();
+        every.tick(1000, Epoch(0));
+        assert!(every.pass_due(1000));
     }
 }
