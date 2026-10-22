@@ -123,7 +123,7 @@ pub enum PublishError {
 /// The gossipsub router state machine.
 #[derive(Debug)]
 pub struct Router {
-    /// Parameters, randomness, peers, scores, and outbox, shared by every part.
+    /// The state every part of the router shares.
     cx: Context,
     /// Topics this node subscribes to.
     subscriptions: BTreeSet<Topic>,
