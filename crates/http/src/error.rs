@@ -147,6 +147,13 @@ pub enum HttpError {
     #[error("not an http URL with a host")]
     InvalidUrl,
 
+    /// A cross-origin policy names neither the wildcard nor an origin.
+    #[error("{origin:?} is neither * nor an origin such as http://localhost:5062")]
+    InvalidOrigin {
+        /// The text given.
+        origin: String,
+    },
+
     /// A field name or value cannot be written without corrupting the message.
     ///
     /// The value stays out of the error, as it may carry a credential.

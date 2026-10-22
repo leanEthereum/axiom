@@ -7,7 +7,7 @@ use axiom_types::{BlsPubkey, CommitteeIndex, Preset, Slot, phase0::AttestationDa
 use tracing::{debug, info, warn};
 
 use crate::{
-    beacon::{PoolAttestation, SignedAggregate},
+    beacon::{ApiTopic, PoolAttestation, SignedAggregate},
     duties::{AttesterSeat, DutyContext, DutyError},
     signing::SigningRequest,
 };
@@ -135,7 +135,7 @@ impl<P: Preset> Attester<P> {
         let attestations = Arc::new(attestations);
         context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Attestations, |client| {
                 let attestations = Arc::clone(&attestations);
                 async move {
                     client
@@ -207,7 +207,7 @@ impl<P: Preset> Attester<P> {
         let signed: Arc<Vec<SignedAggregate<P>>> = Arc::new(signed);
         context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Attestations, |client| {
                 let signed = Arc::clone(&signed);
                 async move { client.validator().publish_aggregates(fork, &signed).await }
             })

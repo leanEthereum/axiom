@@ -13,7 +13,7 @@ use axiom_types::{
 };
 use tracing::{debug, info, warn};
 
-use crate::{duties::DutyContext, signing::SigningRequest};
+use crate::{beacon::ApiTopic, duties::DutyContext, signing::SigningRequest};
 
 /// Tells beacon nodes and builders, once an epoch, how this client's validators want to be paid.
 ///
@@ -26,6 +26,7 @@ use crate::{duties::DutyContext, signing::SigningRequest};
 /// 3. From Gloas on, signed preferences for each coming proposal, which bidding builders follow.
 ///
 /// A registration is signed again only when its settings change, so builders see a stable timestamp.
+/// An operator may fix the timestamp, and registrations go out in batches of a configured size.
 /// See `prepareBeaconProposer`, `registerValidator`, and `get_signed_proposer_preferences`.
 #[derive(Debug)]
 pub struct Preparation<P: Preset> {
@@ -69,7 +70,7 @@ impl<P: Preset> Preparation<P> {
         let prepared = self
             .context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Subscriptions, |client| {
                 let preparations = Arc::clone(&preparations);
                 async move {
                     client
@@ -87,7 +88,10 @@ impl<P: Preset> Preparation<P> {
     /// Signs and sends builder registrations for validators that use builders.
     async fn register(&self) {
         let store = &self.context.store;
-        let now_s = self.context.timer.now_ms() / 1000;
+        let settings = self.context.settings;
+        let timestamp = settings
+            .registration_timestamp
+            .unwrap_or_else(|| self.context.timer.now_ms() / 1000);
         let mut registrations = Vec::new();
         for (_, pubkey) in store.indices() {
             let settings = store.settings(&pubkey);
@@ -111,7 +115,7 @@ impl<P: Preset> Preparation<P> {
             let message = ValidatorRegistrationV1 {
                 fee_recipient: settings.fee_recipient,
                 gas_limit: settings.gas_limit,
-                timestamp: now_s,
+                timestamp,
                 pubkey,
             };
             match store
@@ -129,20 +133,20 @@ impl<P: Preset> Preparation<P> {
                 Err(error) => debug!(%error, "registration not signed"),
             }
         }
-        if registrations.is_empty() {
-            return;
-        }
-        let registrations = Arc::new(registrations);
-        let registered = self
-            .context
-            .nodes
-            .broadcast(|client| {
-                let registrations = Arc::clone(&registrations);
-                async move { client.validator().register_validators(&registrations).await }
-            })
-            .await;
-        if let Err(error) = registered {
-            warn!(%error, "builder registrations refused");
+        // Invariant: a batch holds at least one registration, whatever the configured size.
+        for batch in registrations.chunks(settings.registration_batch_size.max(1)) {
+            let batch: Arc<[SignedValidatorRegistrationV1]> = batch.into();
+            let registered = self
+                .context
+                .nodes
+                .publish(ApiTopic::Subscriptions, |client| {
+                    let batch = Arc::clone(&batch);
+                    async move { client.validator().register_validators(&batch).await }
+                })
+                .await;
+            if let Err(error) = registered {
+                warn!(%error, count = batch.len(), "builder registrations refused");
+            }
         }
     }
 
@@ -198,7 +202,7 @@ impl<P: Preset> Preparation<P> {
         let published = self
             .context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Subscriptions, |client| {
                 let signed = Arc::clone(&signed);
                 async move {
                     client

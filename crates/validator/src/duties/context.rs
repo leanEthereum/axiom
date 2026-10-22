@@ -10,30 +10,48 @@ use axiom_types::{ChainConfig, Epoch, ForkName, Preset, Slot};
 use crate::{
     beacon::BeaconNodes,
     duties::{DutyBook, SlotTimer},
+    metrics::ValidatorMetrics,
     validators::ValidatorStore,
 };
 
 /// How the client behaves, beyond what each validator configures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientSettings {
-    /// The boost factor sent with block requests; zero asks for a local payload.
-    ///
-    /// See `produceBlockV3` in the beacon API.
-    pub builder_boost_factor: Option<u64>,
     /// Epochs a new key waits, watching for another instance of itself, before it signs.
     ///
     /// Zero turns doppelganger detection off.
     pub doppelganger_epochs: u64,
     /// Slots a beacon node may lag before it counts as syncing.
     pub sync_tolerance: u64,
+    /// Whether attestation and sync committee duties are skipped, leaving proposals only.
+    pub disable_attesting: bool,
+    /// Whether keys are shares of a distributed validator, whose selection proofs a middleware combines.
+    ///
+    /// See `submitBeaconCommitteeSelections` and `submitSyncCommitteeSelections` in the beacon API.
+    pub distributed: bool,
+    /// Whether the node must use the graffiti as given, without appending client versions.
+    pub preserve_graffiti: bool,
+    /// The timestamp every builder registration carries, instead of the time it is signed.
+    pub registration_timestamp: Option<u64>,
+    /// Registrations sent per request to the beacon node.
+    pub registration_batch_size: usize,
+}
+
+impl ClientSettings {
+    /// Registrations per request when none is configured, small enough for slow builders.
+    pub const DEFAULT_REGISTRATION_BATCH_SIZE: usize = 500;
 }
 
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
-            builder_boost_factor: None,
             doppelganger_epochs: 2,
             sync_tolerance: 8,
+            disable_attesting: false,
+            distributed: false,
+            preserve_graffiti: false,
+            registration_timestamp: None,
+            registration_batch_size: Self::DEFAULT_REGISTRATION_BATCH_SIZE,
         }
     }
 }
@@ -45,6 +63,8 @@ pub struct DutyContext<P: Preset> {
     pub(crate) store: Arc<ValidatorStore>,
     /// The beacon nodes.
     pub(crate) nodes: Arc<BeaconNodes>,
+    /// Nodes that build and publish blocks first, before the others are tried.
+    pub(crate) proposer_nodes: Option<Arc<BeaconNodes>>,
     /// The fork schedule and timing.
     pub(crate) config: Arc<ChainConfig>,
     /// The wall clock, through the slot schedule.
@@ -53,6 +73,8 @@ pub struct DutyContext<P: Preset> {
     pub(crate) book: Arc<Mutex<DutyBook>>,
     /// The client's behaviour.
     pub(crate) settings: ClientSettings,
+    /// The exported metrics.
+    pub(crate) metrics: ValidatorMetrics,
     /// The preset the chain uses.
     pub(crate) preset: PhantomData<P>,
 }
@@ -62,10 +84,12 @@ impl<P: Preset> Clone for DutyContext<P> {
         Self {
             store: Arc::clone(&self.store),
             nodes: Arc::clone(&self.nodes),
+            proposer_nodes: self.proposer_nodes.clone(),
             config: Arc::clone(&self.config),
             timer: self.timer.clone(),
             book: Arc::clone(&self.book),
             settings: self.settings,
+            metrics: self.metrics.clone(),
             preset: PhantomData,
         }
     }
@@ -84,12 +108,28 @@ impl<P: Preset> DutyContext<P> {
         Self {
             store,
             nodes,
+            proposer_nodes: None,
             config,
             timer,
             book: Arc::new(Mutex::new(DutyBook::default())),
             settings,
+            metrics: ValidatorMetrics::detached(),
             preset: PhantomData,
         }
+    }
+
+    /// Builds and publishes blocks through these nodes first.
+    #[must_use]
+    pub fn with_proposer_nodes(mut self, nodes: Arc<BeaconNodes>) -> Self {
+        self.proposer_nodes = Some(nodes);
+        self
+    }
+
+    /// Records duty and node gauges in exported metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ValidatorMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// The validators.

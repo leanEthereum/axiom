@@ -1,12 +1,15 @@
 //! Fetching duties from the beacon nodes, and preparing the subnets they need.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use axiom_beacon_json::api::{BeaconCommitteeSubscription, SyncCommitteeSubscription};
-use axiom_types::{Epoch, Preset, ValidatorIndex};
+use axiom_beacon_json::api::{
+    AttesterDuty, BeaconCommitteeSelection, BeaconCommitteeSubscription, SyncCommitteeSubscription,
+};
+use axiom_types::{BlsSignature, Epoch, Preset, Slot, ValidatorIndex};
 use tracing::{debug, info, warn};
 
 use crate::{
+    beacon::ApiTopic,
     duties::{AggregatorSelection, AttesterSeat, DutyContext},
     signing::SigningRequest,
 };
@@ -18,6 +21,9 @@ use crate::{
 /// Each refresh asks for duties again, which costs a few small requests a slot.
 /// A changed dependent root means a reorg moved the shuffling, and the seats are rebuilt.
 /// Unchanged seats keep their selection proofs, so no key signs a slot twice for nothing.
+///
+/// With attesting disabled, only proposers are fetched.
+/// A distributed validator's shares sign partial proofs, which its middleware combines.
 #[derive(Clone, Debug)]
 pub struct DutyScheduler<P: Preset> {
     /// What the scheduler reaches.
@@ -44,12 +50,17 @@ impl<P: Preset> DutyScheduler<P> {
         if indices.is_empty() {
             return;
         }
+        let attesting = !self.context.settings.disable_attesting;
         for epoch in [epoch, epoch + 1] {
             self.proposers(epoch).await;
-            self.attesters(epoch, &indices).await;
-            self.ptc(epoch, &indices).await;
+            if attesting {
+                self.attesters(epoch, &indices).await;
+                self.ptc(epoch, &indices).await;
+            }
         }
-        self.sync(epoch, &indices).await;
+        if attesting {
+            self.sync(epoch, &indices).await;
+        }
         self.context.book().prune::<P>(epoch.saturating_sub(1));
     }
 
@@ -116,30 +127,35 @@ impl<P: Preset> DutyScheduler<P> {
         }
 
         // A seat aggregates when its slot signature selects it, see is_aggregator in the phase0 spec.
-        let mut seats = Vec::with_capacity(duties.data.len());
-        for duty in duties.data {
+        let mut proofs = Vec::with_capacity(duties.data.len());
+        for duty in &duties.data {
             let proof = self
                 .context
                 .store
                 .sign::<P>(&duty.pubkey, SigningRequest::AggregationSlot(duty.slot))
                 .await;
-            let selection_proof = match proof {
-                Ok(proof)
-                    if AggregatorSelection::committee(duty.committee_length).selects(&proof) =>
-                {
-                    Some(proof)
-                }
-                Ok(_) => None,
-                Err(error) => {
-                    debug!(slot = duty.slot.0, %error, "no selection proof");
-                    None
-                }
-            };
-            seats.push(AttesterSeat {
-                duty,
-                selection_proof,
-            });
+            proofs.push(
+                proof
+                    .inspect_err(|error| {
+                        debug!(slot = duty.slot.0, %error, "no selection proof");
+                    })
+                    .ok(),
+            );
         }
+        if self.context.settings.distributed {
+            proofs = self.combine(&duties.data, proofs).await;
+        }
+        let seats: Vec<AttesterSeat> = duties
+            .data
+            .into_iter()
+            .zip(proofs)
+            .map(|(duty, proof)| AttesterSeat {
+                selection_proof: proof.filter(|proof| {
+                    AggregatorSelection::committee(duty.committee_length).selects(proof)
+                }),
+                duty,
+            })
+            .collect();
         let subscriptions: Arc<[BeaconCommitteeSubscription]> = seats
             .iter()
             .map(|seat| BeaconCommitteeSubscription {
@@ -159,7 +175,7 @@ impl<P: Preset> DutyScheduler<P> {
         let subscribed = self
             .context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Subscriptions, |client| {
                 let subscriptions = Arc::clone(&subscriptions);
                 async move {
                     client
@@ -172,6 +188,62 @@ impl<P: Preset> DutyScheduler<P> {
         if let Err(error) = subscribed {
             warn!(epoch = epoch.0, %error, "committee subscriptions refused");
         }
+    }
+
+    /// Exchanges each share's partial slot signature for the cluster's combined one.
+    ///
+    /// Only the combined signature decides aggregation, as every share of the cluster must agree.
+    /// A seat the middleware does not answer for gets no proof, so it does not aggregate.
+    /// See `submitBeaconCommitteeSelections` in the beacon API.
+    async fn combine(
+        &self,
+        duties: &[AttesterDuty],
+        partial: Vec<Option<BlsSignature>>,
+    ) -> Vec<Option<BlsSignature>> {
+        let selections: Vec<BeaconCommitteeSelection> = duties
+            .iter()
+            .zip(&partial)
+            .filter_map(|(duty, proof)| {
+                Some(BeaconCommitteeSelection {
+                    validator_index: duty.validator_index,
+                    slot: duty.slot,
+                    selection_proof: (*proof)?,
+                })
+            })
+            .collect();
+        if selections.is_empty() {
+            return partial;
+        }
+        let selections = &selections;
+        let combined = self
+            .context
+            .nodes
+            .first(|client| async move {
+                client
+                    .validator()
+                    .beacon_committee_selections(selections)
+                    .await
+            })
+            .await;
+        let combined: BTreeMap<(ValidatorIndex, Slot), BlsSignature> = match combined {
+            Ok(combined) => combined
+                .into_iter()
+                .map(|selection| {
+                    (
+                        (selection.validator_index, selection.slot),
+                        selection.selection_proof,
+                    )
+                })
+                .collect(),
+            Err(error) => {
+                warn!(%error, "distributed selection proofs unavailable");
+                BTreeMap::new()
+            }
+        };
+        duties
+            .iter()
+            .map(|duty| combined.get(&(duty.validator_index, duty.slot)).copied())
+            .collect()
     }
 
     /// Records the sync committee seats of the current and next periods, and subscribes them.
@@ -211,7 +283,7 @@ impl<P: Preset> DutyScheduler<P> {
             let subscribed = self
                 .context
                 .nodes
-                .broadcast(|client| {
+                .publish(ApiTopic::Subscriptions, |client| {
                     let subscriptions = Arc::clone(&subscriptions);
                     async move {
                         client

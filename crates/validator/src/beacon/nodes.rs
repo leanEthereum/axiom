@@ -1,6 +1,7 @@
 //! Several beacon nodes behind one interface, ranked by health, with fallback.
 
 use std::{
+    collections::BTreeSet,
     future::Future,
     sync::{Arc, Mutex, PoisonError},
 };
@@ -9,7 +10,7 @@ use axiom_beacon_json::api::SyncStatus;
 use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
-use crate::beacon::{BeaconClient, BeaconError};
+use crate::beacon::{ApiTopic, BeaconClient, BeaconError};
 
 /// How fit a beacon node is to serve duties, best first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -45,7 +46,9 @@ impl Health {
 /// # Overview
 ///
 /// Each request goes to the healthiest node first, then down the list until one answers.
-/// Publications go to every node that is not offline, so a message spreads from several peers.
+/// A publication of a broadcast topic goes to every node that is not offline.
+/// The message then spreads from several peers at once.
+/// Other publications go to the healthiest node that accepts them.
 /// A node's health comes from its sync status, refreshed by a periodic check.
 ///
 /// Any node may lie, so nothing a node says bypasses slashing protection.
@@ -56,6 +59,8 @@ pub struct BeaconNodes {
     nodes: Vec<Arc<BeaconClient>>,
     /// Each node's latest health, in the same order.
     health: Mutex<Vec<Health>>,
+    /// The topics published on every node rather than the healthiest one.
+    broadcast: BTreeSet<ApiTopic>,
 }
 
 impl BeaconNodes {
@@ -72,7 +77,15 @@ impl BeaconNodes {
         Ok(Self {
             nodes: nodes.into_iter().map(Arc::new).collect(),
             health: Mutex::new(health),
+            broadcast: ApiTopic::defaults(),
         })
+    }
+
+    /// Publishes these topics on every node, and the others on the healthiest one.
+    #[must_use]
+    pub fn with_broadcast(mut self, topics: BTreeSet<ApiTopic>) -> Self {
+        self.broadcast = topics;
+        self
     }
 
     /// Asks every node for its sync status and ranks it.
@@ -153,12 +166,25 @@ impl BeaconNodes {
         Err(last)
     }
 
-    /// Sends a publication to every node that is not offline, or to all when none is up.
+    /// Sends a publication of a topic, to every node or to the healthiest that accepts it.
     ///
     /// # Errors
     ///
     /// Fails with one node's error when no node accepted it.
-    pub async fn broadcast<F, Fut>(&self, publish: F) -> Result<(), BeaconError>
+    pub async fn publish<F, Fut>(&self, topic: ApiTopic, publish: F) -> Result<(), BeaconError>
+    where
+        F: Fn(Arc<BeaconClient>) -> Fut,
+        Fut: Future<Output = Result<(), BeaconError>> + Send + 'static,
+    {
+        if self.broadcast.contains(&topic) {
+            self.broadcast(publish).await
+        } else {
+            self.first(publish).await
+        }
+    }
+
+    /// Sends a publication to every node that is not offline, or to all when none is up.
+    async fn broadcast<F, Fut>(&self, publish: F) -> Result<(), BeaconError>
     where
         F: Fn(Arc<BeaconClient>) -> Fut,
         Fut: Future<Output = Result<(), BeaconError>> + Send + 'static,

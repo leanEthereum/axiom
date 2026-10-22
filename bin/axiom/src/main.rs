@@ -2,6 +2,7 @@
 
 mod account;
 mod cli;
+mod manager;
 mod run;
 mod validator;
 
@@ -37,6 +38,13 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Account(account) => match account.execute() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _unwritable = writeln!(io::stderr(), "error: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Manager(manager) => match manager.execute() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 let _unwritable = writeln!(io::stderr(), "error: {error}");

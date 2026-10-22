@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use crate::{
     account::Account,
+    manager::Manager,
     run::{PresetName, Run},
     validator::ValidatorCommand,
 };
@@ -33,6 +34,7 @@ USAGE:
     axiom [OPTIONS]
     axiom validator [OPTIONS]            run the validator client; see axiom validator --help
     axiom account <COMMAND> [OPTIONS]    keys, deposits, and slashing protection files
+    axiom validator-manager <COMMAND>    create validators, and manage running clients' keys
 
 OPTIONS:
     --network <NAME>             mainnet or minimal [default: mainnet]
@@ -112,6 +114,8 @@ pub(crate) enum Command {
     Account(Box<Account>),
     /// Run the validator client.
     Validator(ValidatorCommand),
+    /// Run a validator manager command.
+    Manager(Box<Manager>),
 }
 
 /// Why the command line cannot be used.
@@ -130,6 +134,22 @@ pub(crate) enum CliError {
         flag: &'static str,
         /// The value given.
         value: String,
+    },
+    /// A flag was given without another it needs.
+    #[error("{flag} needs {needs}")]
+    Requires {
+        /// The flag given.
+        flag: &'static str,
+        /// The flag it needs.
+        needs: &'static str,
+    },
+    /// Two flags that exclude each other were both given.
+    #[error("{flag} and {other} cannot be given together")]
+    Conflicts {
+        /// The first flag.
+        flag: &'static str,
+        /// The other flag.
+        other: &'static str,
     },
     /// A slasher setting was given without the slasher.
     #[error("{0} needs --slasher")]
@@ -288,6 +308,12 @@ impl Cli {
         // A leading command word picks a subcommand; flags alone run the beacon node.
         if arguments.next_if(|word| word == "account").is_some() {
             return Account::parse(arguments).map(|account| Command::Account(Box::new(account)));
+        }
+        if arguments
+            .next_if(|word| word == "validator-manager")
+            .is_some()
+        {
+            return Manager::parse(arguments).map(|manager| Command::Manager(Box::new(manager)));
         }
         if arguments.next_if(|word| word == "validator").is_some() {
             return ValidatorCommand::parse(arguments).map(Command::Validator);

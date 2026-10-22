@@ -112,6 +112,20 @@ impl DutyBook {
             .unwrap_or_default()
     }
 
+    /// Committee seats this client holds in an epoch.
+    #[must_use]
+    pub fn attester_count(&self, epoch: Epoch) -> usize {
+        self.attesters
+            .get(&epoch)
+            .map_or(0, |(_, seats)| seats.len())
+    }
+
+    /// Payload timeliness seats this client holds in an epoch.
+    #[must_use]
+    pub fn ptc_count(&self, epoch: Epoch) -> usize {
+        self.ptc.get(&epoch).map_or(0, Vec::len)
+    }
+
     /// Marks a slot's proposer preferences as published.
     ///
     /// # Returns

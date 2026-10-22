@@ -8,7 +8,7 @@ use axiom_types::{Preset, Root, Slot, constants::BUILDER_INDEX_SELF_BUILD, gloas
 use tracing::{info, warn};
 
 use crate::{
-    beacon::BeaconClient,
+    beacon::{ApiTopic, BeaconClient, BeaconError, BeaconNodes},
     duties::{DutyContext, DutyError},
     signing::SigningRequest,
 };
@@ -84,28 +84,44 @@ impl<P: Preset> BlockProposer<P> {
             .store
             .sign::<P>(&duty.pubkey, SigningRequest::RandaoReveal(epoch))
             .await?;
-        let graffiti = context.store.settings(&duty.pubkey).graffiti;
-        let boost = context.settings.builder_boost_factor;
+        let graffiti = context.store.graffiti(&duty.pubkey).0;
+        let boost = context.store.settings(&duty.pubkey).builder_boost_factor;
+        let builders = Arc::new(context.store.builder_config(&duty.pubkey));
+        let preserve = context.settings.preserve_graffiti;
 
         // Gloas separates the payload from the block, and its route keeps the payload for the envelope.
         let separated = context.fork(slot).separates_payloads();
-        let (produced, producer) = context
-            .nodes
-            .first(|client| async move {
-                let produced = if separated {
-                    client
-                        .validator()
-                        .produce_gloas_block::<P>(slot, randao_reveal, graffiti)
-                        .await?
-                } else {
-                    client
-                        .validator()
-                        .produce_block::<P>(slot, randao_reveal, graffiti, boost)
-                        .await?
-                };
-                Ok((produced, client))
-            })
-            .await?;
+        let mut produced = Err(DutyError::Beacon(BeaconError::NoNodes));
+        for nodes in self.node_sets() {
+            let builders = &builders;
+            produced = nodes
+                .first(|client| async move {
+                    let produced = if separated {
+                        client
+                            .validator()
+                            .produce_gloas_block::<P>(
+                                slot,
+                                randao_reveal,
+                                graffiti,
+                                builders,
+                                preserve,
+                            )
+                            .await?
+                    } else {
+                        client
+                            .validator()
+                            .produce_block::<P>(slot, randao_reveal, graffiti, boost, preserve)
+                            .await?
+                    };
+                    Ok((produced, client))
+                })
+                .await
+                .map_err(DutyError::from);
+            if produced.is_ok() {
+                break;
+            }
+        }
+        let (produced, producer) = produced?;
 
         // The node is not trusted to build what was asked: a block for another slot or proposer is refused.
         let header = produced.header();
@@ -122,18 +138,34 @@ impl<P: Preset> BlockProposer<P> {
             .sign::<P>(&duty.pubkey, SigningRequest::Block(&header))
             .await?;
         let proposal = Arc::new(produced.sign(signature));
-        context
-            .nodes
-            .broadcast(|client| {
-                let proposal = Arc::clone(&proposal);
-                async move { client.beacon().publish_block(&proposal).await }
-            })
-            .await?;
+        let mut published = Err(DutyError::Beacon(BeaconError::NoNodes));
+        for nodes in self.node_sets() {
+            published = nodes
+                .publish(ApiTopic::Blocks, |client| {
+                    let proposal = Arc::clone(&proposal);
+                    async move { client.beacon().publish_block(&proposal).await }
+                })
+                .await
+                .map_err(DutyError::from);
+            if published.is_ok() {
+                break;
+            }
+        }
+        published?;
         if separated {
             self.reveal(&duty, &producer, header.hash_tree_root())
                 .await?;
         }
         Ok(())
+    }
+
+    /// The node sets to build and publish through, in order: proposer nodes, then the others.
+    fn node_sets(&self) -> impl Iterator<Item = &BeaconNodes> {
+        self.context
+            .proposer_nodes
+            .iter()
+            .chain([&self.context.nodes])
+            .map(AsRef::as_ref)
     }
 
     /// Signs and publishes a self-built Gloas payload's envelope.

@@ -41,6 +41,9 @@ pub enum BeaconError {
         /// The fork the answer claims.
         found: String,
     },
+    /// A broadcast topic name is not one of the known topics.
+    #[error("unknown broadcast topic {0:?}")]
+    UnknownTopic(String),
     /// The node has nothing to answer, such as no block yet for a payload vote.
     #[error("beacon node has no content for this request")]
     NoContent,

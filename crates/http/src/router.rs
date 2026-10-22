@@ -2,7 +2,10 @@
 
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
 
-use crate::{Method, Request, Response, StatusCode};
+use crate::{
+    Method, Request, Response, StatusCode,
+    cors::{Admission, Cors},
+};
 
 /// The future a handler returns, boxed so handlers of different types share one table.
 type HandlerFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
@@ -47,6 +50,8 @@ struct Route {
 pub struct Router {
     /// Routes in insertion order.
     routes: Vec<Route>,
+    /// The cross-origin policy, when browser pages may call the server.
+    cors: Option<Cors>,
 }
 
 impl Router {
@@ -83,10 +88,47 @@ impl Router {
         self
     }
 
-    /// Runs the handler for a request, or answers 404 or 405.
+    /// Applies a cross-origin policy to every request.
+    #[must_use]
+    pub fn with_cors(mut self, cors: Cors) -> Self {
+        self.cors = Some(cors);
+        self
+    }
+
+    /// Runs the handler for a request, or answers 403, 404, or 405.
     ///
     /// The server calls this for every request; tests may call it without a socket.
-    pub async fn handle(&self, mut request: Request) -> Response {
+    pub async fn handle(&self, request: Request) -> Response {
+        let Some(cors) = &self.cors else {
+            return self.dispatch(request).await;
+        };
+        match cors.admit(&request) {
+            Admission::Pass => self.dispatch(request).await,
+            Admission::Refuse(refusal) => refusal,
+            Admission::Preflight(origin) => {
+                let methods = self.methods(&request.path);
+                cors.preflight(&request, &origin, &methods)
+            }
+            Admission::Serve(origin) => {
+                let response = self.dispatch(request).await;
+                cors.decorate(response, &origin)
+            }
+        }
+    }
+
+    /// The methods some route serves at a path, in insertion order.
+    fn methods(&self, path: &str) -> Vec<Method> {
+        let mut methods = Vec::new();
+        for route in &self.routes {
+            if route.capture(path).is_some() && !methods.contains(&route.method) {
+                methods.push(route.method);
+            }
+        }
+        methods
+    }
+
+    /// Runs the handler for a request, or answers 404 or 405.
+    async fn dispatch(&self, mut request: Request) -> Response {
         let mut allowed = Vec::new();
         let mut fallback = None;
         for route in &self.routes {
@@ -216,5 +258,37 @@ mod tests {
         // HEAD borrows the GET handler.
         let response = block_on(router().handle(Request::new(Method::Head, "/health")));
         assert_eq!(response.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn a_cors_policy_wraps_every_route() {
+        let router = router().with_cors(Cors::parse("http://localhost:3000").unwrap());
+        let page =
+            |method| Request::new(method, "/health").with_header("origin", "http://localhost:3000");
+
+        // The allowed page reads the reply.
+        let response = block_on(router.handle(page(Method::Get)));
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            response.headers.get("access-control-allow-origin"),
+            Some("http://localhost:3000")
+        );
+
+        // Its preflight lists the one method the path serves, without running the handler.
+        let preflight = page(Method::Options).with_header("access-control-request-method", "GET");
+        let response = block_on(router.handle(preflight));
+        assert_eq!(
+            (
+                response.status,
+                response.headers.get("access-control-allow-methods")
+            ),
+            (StatusCode::OK, Some("GET"))
+        );
+        assert_eq!(response.body, Vec::<u8>::new());
+
+        // Another page is refused before routing.
+        let other =
+            Request::new(Method::Get, "/health").with_header("origin", "http://evil.example");
+        assert_eq!(block_on(router.handle(other)).status, StatusCode::FORBIDDEN);
     }
 }

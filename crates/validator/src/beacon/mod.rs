@@ -18,6 +18,7 @@ pub(crate) mod client;
 mod error;
 mod node_api;
 mod nodes;
+mod topic;
 mod validator_api;
 
 pub use attestations::{Aggregate, AggregateAndProof, PoolAttestation, SignedAggregate};
@@ -27,4 +28,5 @@ pub use client::BeaconClient;
 pub use error::BeaconError;
 pub use node_api::NodeEndpoints;
 pub use nodes::{BeaconNodes, Health};
+pub use topic::ApiTopic;
 pub use validator_api::ValidatorEndpoints;

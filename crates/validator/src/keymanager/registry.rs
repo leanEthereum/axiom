@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use axiom_types::BlsPubkey;
 
 use crate::{
-    keymanager::KeyDirectory,
+    keymanager::{DirectoryError, KeyDirectory},
     signing::{SignError, ValidatorSigner},
-    validators::ValidatorStore,
+    validators::{ValidatorSettings, ValidatorStore},
 };
 
 /// The running keys and their durable copy, which key requests edit together.
@@ -66,5 +66,29 @@ impl KeyRegistry {
     /// The signer of a key the store runs.
     pub(crate) fn signer(&self, pubkey: &BlsPubkey) -> Option<Arc<ValidatorSigner>> {
         self.store.signer(pubkey)
+    }
+
+    /// Changes a running key's overrides, on disk first and then in the store.
+    ///
+    /// A key the directory does not define, such as one given on the command line, changes in memory only.
+    ///
+    /// # Returns
+    ///
+    /// Whether the store runs the key.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the definitions cannot be written; the store then keeps its old overrides.
+    pub(crate) fn edit_settings(
+        &self,
+        pubkey: &BlsPubkey,
+        change: impl Fn(&mut ValidatorSettings),
+    ) -> Result<bool, DirectoryError> {
+        let _edit = self.edit();
+        if !self.store.contains(pubkey) {
+            return Ok(false);
+        }
+        self.directory.edit_settings(pubkey, &change)?;
+        Ok(self.store.edit_overrides(pubkey, change))
     }
 }

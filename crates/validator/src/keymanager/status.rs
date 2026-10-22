@@ -1,10 +1,13 @@
 //! The per-key outcomes that import and delete requests report.
 
+use axiom_beacon_json::Fields;
 use axiom_json::Json;
+
+use crate::keymanager::KeymanagerClientError;
 
 /// What became of one key in an import request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ImportStatus {
+pub enum ImportStatus {
     /// The key is stored and runs.
     Imported,
     /// The client already runs the key.
@@ -14,6 +17,22 @@ pub(crate) enum ImportStatus {
 }
 
 impl ImportStatus {
+    /// Reads a status object of a response.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a status the keymanager API does not define.
+    pub fn from_json(json: &Json) -> Result<Self, KeymanagerClientError> {
+        let fields = Fields::of(json)?;
+        let status: String = fields.required("status")?;
+        match status.as_str() {
+            "imported" => Ok(Self::Imported),
+            "duplicate" => Ok(Self::Duplicate),
+            "error" => Ok(Self::Error(fields.optional("message")?.unwrap_or_default())),
+            _ => Err(KeymanagerClientError::UnknownStatus(status)),
+        }
+    }
+
     /// The status object of the response.
     pub(crate) fn to_json(&self) -> Json {
         match self {
@@ -29,7 +48,7 @@ impl ImportStatus {
 
 /// What became of one key in a delete request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DeleteStatus {
+pub enum DeleteStatus {
     /// The key ran, and no longer does.
     Deleted,
     /// The key did not run, but its slashing protection history is returned.
@@ -41,6 +60,23 @@ pub(crate) enum DeleteStatus {
 }
 
 impl DeleteStatus {
+    /// Reads a status object of a response.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a status the keymanager API does not define.
+    pub fn from_json(json: &Json) -> Result<Self, KeymanagerClientError> {
+        let fields = Fields::of(json)?;
+        let status: String = fields.required("status")?;
+        match status.as_str() {
+            "deleted" => Ok(Self::Deleted),
+            "not_active" => Ok(Self::NotActive),
+            "not_found" => Ok(Self::NotFound),
+            "error" => Ok(Self::Error(fields.optional("message")?.unwrap_or_default())),
+            _ => Err(KeymanagerClientError::UnknownStatus(status)),
+        }
+    }
+
     /// The status object of the response.
     pub(crate) fn to_json(&self) -> Json {
         match self {

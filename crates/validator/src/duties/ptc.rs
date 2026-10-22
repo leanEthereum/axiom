@@ -7,7 +7,7 @@ use axiom_types::{Preset, Slot, gloas::PayloadAttestationMessage};
 use tracing::{debug, info, warn};
 
 use crate::{
-    beacon::BeaconError,
+    beacon::{ApiTopic, BeaconError},
     duties::{DutyContext, DutyError},
     signing::SigningRequest,
 };
@@ -92,7 +92,7 @@ impl<P: Preset> PayloadTimeliness<P> {
         let messages = Arc::new(messages);
         context
             .nodes
-            .broadcast(|client| {
+            .publish(ApiTopic::Attestations, |client| {
                 let messages = Arc::clone(&messages);
                 async move { client.beacon().submit_payload_attestations(&messages).await }
             })

@@ -10,8 +10,9 @@
 //! - Fee recipient, gas limit, and graffiti override the client's defaults per validator.
 //! - A voluntary exit is signed on request, for the operator to submit.
 //!
-//! Every change to the keys reaches the key directory, so it survives a restart.
-//! The builder configuration routes are not served.
+//! - A builder configuration names the builders a Gloas proposal asks for bids.
+//!
+//! Every change reaches the key directory's definitions, so it survives a restart.
 //!
 //! # Invariants
 //!
@@ -19,6 +20,9 @@
 //! So the exported history covers every message the key signed here.
 
 mod auth;
+mod client;
+mod client_error;
+mod definitions;
 mod directory;
 mod error;
 mod exit;
@@ -32,10 +36,14 @@ mod status;
 
 use std::{io, marker::PhantomData, net::SocketAddr, sync::Arc};
 
-use axiom_http::{Router, Server, ServerConfig};
+use axiom_http::{Cors, Router, Server, ServerConfig};
 use axiom_types::Preset;
+pub use client::{KeymanagerClient, ListedKey};
+pub use client_error::KeymanagerClientError;
+pub use definitions::{Definitions, SignerKind, ValidatorDefinition};
 pub use directory::{KeyDirectory, KeySource, LoadedKey};
-pub use error::DirectoryError;
+pub use error::{DefinitionsError, DirectoryError};
+pub use status::{DeleteStatus, ImportStatus};
 
 use self::{
     auth::ApiToken, exit::ExitSigner, keystores::LocalKeystores, registry::KeyRegistry,
@@ -101,19 +109,21 @@ impl<P: Preset> Keymanager<P> {
         ));
         let routes = Routes::new(token);
         let routes = LocalKeystores::new(Arc::clone(&registry)).register(routes);
-        let routes = RemoteKeys::new(registry).register(routes);
-        let routes = ProposerOverrides::new(Arc::clone(&store)).register(routes);
+        let routes = RemoteKeys::new(Arc::clone(&registry)).register(routes);
+        let routes = ProposerOverrides::new(registry).register(routes);
         ExitSigner::<P>::new(store, timer).register(routes).finish()
     }
 
     /// Binds the server to an address; port zero picks a free port.
     ///
+    /// Browser pages at the policy's origin may call it, sending the token in their requests.
     /// The caller serves it until a shutdown future completes.
     ///
     /// # Errors
     ///
     /// Fails when the address cannot be bound.
-    pub async fn bind(self, address: SocketAddr) -> io::Result<Server> {
-        Server::bind(address, self.router(), ServerConfig::default()).await
+    pub async fn bind(self, address: SocketAddr, cors: Cors) -> io::Result<Server> {
+        let router = self.router().with_cors(cors.with_header("authorization"));
+        Server::bind(address, router, ServerConfig::default()).await
     }
 }

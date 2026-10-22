@@ -3,8 +3,9 @@
 use axiom_beacon_json::{
     ApiJson, Fields, ForkedJson,
     api::{
-        AttesterDuty, BeaconCommitteeSubscription, Duties, Liveness, ProposerDuty,
-        ProposerPreparation, PtcDuty, SyncCommitteeSubscription, SyncDuty,
+        AttesterDuty, BeaconCommitteeSelection, BeaconCommitteeSubscription, Duties, Liveness,
+        ProposerDuty, ProposerPreparation, PtcDuty, SyncCommitteeSelection,
+        SyncCommitteeSubscription, SyncDuty,
     },
 };
 use axiom_http::{Method, Request};
@@ -18,13 +19,21 @@ use axiom_types::{
     phase0::AttestationData,
 };
 
-use crate::beacon::{
-    Aggregate, BeaconClient, BeaconError, ProducedBlock, SignedAggregate,
-    client::{CONSENSUS_VERSION, JSON, SSZ},
+use crate::{
+    beacon::{
+        Aggregate, BeaconClient, BeaconError, ProducedBlock, SignedAggregate,
+        client::{CONSENSUS_VERSION, JSON, SSZ},
+    },
+    validators::ResolvedBuilderConfig,
 };
 
 /// Header saying whether a produced block is blinded.
 const BLINDED: &str = "eth-execution-payload-blinded";
+
+/// The query that asks a node to use the graffiti as given, without client versions appended.
+///
+/// Nodes that do not append versions ignore it, as the beacon API lets them ignore unknown queries.
+const PRESERVE_GRAFFITI: &str = "&graffiti_policy=PreserveUserGraffiti";
 
 /// The validator namespace of one beacon node.
 #[derive(Clone, Copy, Debug)]
@@ -142,12 +151,18 @@ impl<'a> ValidatorEndpoints<'a> {
         randao_reveal: BlsSignature,
         graffiti: Bytes32,
         builder_boost_factor: Option<u64>,
+        preserve_graffiti: bool,
     ) -> Result<ProducedBlock<P>, BeaconError> {
         let boost = builder_boost_factor
             .map(|factor| format!("&builder_boost_factor={factor}"))
             .unwrap_or_default();
+        let policy = if preserve_graffiti {
+            PRESERVE_GRAFFITI
+        } else {
+            ""
+        };
         let target = format!(
-            "/eth/v3/validator/blocks/{}?randao_reveal={}&graffiti={}{boost}",
+            "/eth/v3/validator/blocks/{}?randao_reveal={}&graffiti={}{boost}{policy}",
             slot.0,
             randao_reveal.0.to_data(),
             graffiti.0.to_data(),
@@ -163,7 +178,8 @@ impl<'a> ValidatorEndpoints<'a> {
 
     /// A Gloas block for a slot, whose self-built payload the node keeps for the envelope.
     ///
-    /// The request takes only the local payload and p2p bids, with no external builder.
+    /// The request weighs the local payload against bids from the gossip network.
+    /// It names no builder: an entry needs a signed request authentication this client does not make.
     /// See `produceBlockV4` in the beacon API.
     ///
     /// # Errors
@@ -174,17 +190,27 @@ impl<'a> ValidatorEndpoints<'a> {
         slot: Slot,
         randao_reveal: BlsSignature,
         graffiti: Bytes32,
+        builders: &ResolvedBuilderConfig,
+        preserve_graffiti: bool,
     ) -> Result<ProducedBlock<P>, BeaconError> {
+        let policy = if preserve_graffiti {
+            PRESERVE_GRAFFITI
+        } else {
+            ""
+        };
         let target = format!(
-            "/eth/v4/validator/blocks/{}?randao_reveal={}&graffiti={}&include_payload=false",
+            "/eth/v4/validator/blocks/{}?randao_reveal={}&graffiti={}&include_payload=false{policy}",
             slot.0,
             randao_reveal.0.to_data(),
             graffiti.0.to_data(),
         );
-        // A boost factor of zero prefers the local payload; no builder is asked.
+        // The floor and the weight govern bids from the gossip network; zero weight prefers local.
         let config = Json::from([
-            ("min_bid", 0_u64.to_json()),
-            ("builder_boost_factor", 0_u64.to_json()),
+            ("min_bid", builders.min_bid.to_json()),
+            (
+                "builder_boost_factor",
+                builders.builder_boost_factor.to_json(),
+            ),
             ("builders", Json::Array(Vec::new())),
         ]);
         let request = Request::new(Method::Post, &target)
@@ -449,6 +475,47 @@ impl<'a> ValidatorEndpoints<'a> {
             )
             .await?;
         Ok(())
+    }
+
+    /// Exchanges partial slot signatures for the combined ones of a distributed validator.
+    ///
+    /// A distributed validator middleware serves this; a plain beacon node may answer 501.
+    /// See `submitBeaconCommitteeSelections` in the beacon API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the middleware is unreachable, refuses, or answers malformed data.
+    pub async fn beacon_committee_selections(
+        self,
+        selections: &[BeaconCommitteeSelection],
+    ) -> Result<Vec<BeaconCommitteeSelection>, BeaconError> {
+        let body = Json::Array(selections.iter().map(ApiJson::to_json).collect());
+        let json = self
+            .client
+            .post_json("/eth/v1/validator/beacon_committee_selections", &body, None)
+            .await?
+            .ok_or(BeaconError::NoContent)?;
+        BeaconClient::data(&json)
+    }
+
+    /// Exchanges partial sync selection signatures for the combined ones of a distributed validator.
+    ///
+    /// See `submitSyncCommitteeSelections` in the beacon API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the middleware is unreachable, refuses, or answers malformed data.
+    pub async fn sync_committee_selections(
+        self,
+        selections: &[SyncCommitteeSelection],
+    ) -> Result<Vec<SyncCommitteeSelection>, BeaconError> {
+        let body = Json::Array(selections.iter().map(ApiJson::to_json).collect());
+        let json = self
+            .client
+            .post_json("/eth/v1/validator/sync_committee_selections", &body, None)
+            .await?
+            .ok_or(BeaconError::NoContent)?;
+        BeaconClient::data(&json)
     }
 
     /// Whether the node saw each validator active during an epoch.
