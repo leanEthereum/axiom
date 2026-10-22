@@ -27,9 +27,13 @@ impl NodeJson<'_> {
         object.insert("http_address", Self::text(node.http_address));
         object.insert(
             "http_allow_origin",
-            Json::from(node.http_allow_origin.clone()),
+            Self::text(node.http_allow_origin.as_ref()),
         );
         object.insert("metrics_address", Self::text(node.metrics_address));
+        object.insert(
+            "metrics_allow_origin",
+            Self::text(node.metrics_allow_origin.as_ref()),
+        );
         object.insert(
             "engine",
             node.engine.as_ref().map_or(Json::Null, |engine| {
