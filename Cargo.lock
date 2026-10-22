@@ -69,7 +69,6 @@ dependencies = [
 name = "axiom-bls12-381"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "proptest",
  "sha2",
  "thiserror",
@@ -80,7 +79,6 @@ name = "axiom-crypto"
 version = "0.1.0"
 dependencies = [
  "axiom-json",
- "criterion",
  "proptest",
  "sha2",
  "thiserror",
@@ -200,7 +198,6 @@ version = "0.1.0"
 dependencies = [
  "axiom-bls12-381",
  "axiom-yaml",
- "criterion",
  "proptest",
  "sha2",
  "thiserror",
@@ -269,7 +266,6 @@ dependencies = [
 name = "axiom-snappy"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "proptest",
  "thiserror",
 ]
@@ -300,7 +296,6 @@ name = "axiom-store"
 version = "0.1.0"
 dependencies = [
  "axiom-snappy",
- "criterion",
  "proptest",
  "thiserror",
 ]
