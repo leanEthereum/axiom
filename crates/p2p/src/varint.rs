@@ -33,20 +33,32 @@ pub const MAX_MULTIFORMAT_LEN: usize = 9;
 #[non_exhaustive]
 pub enum VarintError {
     /// The encoding runs past the longest length allowed.
-    #[error("varint exceeds its maximum length")]
-    TooLong,
+    #[error("varint runs past the {max}-byte limit of its dialect")]
+    TooLong {
+        /// Longest encoding the dialect accepts, in bytes.
+        max: usize,
+    },
 
     /// The tenth byte carries bits beyond the 64th.
-    #[error("varint overflows 64 bits")]
-    Overflow,
+    #[error("tenth varint byte {byte:#04x} overflows 64 bits")]
+    Overflow {
+        /// The offending tenth byte.
+        byte: u8,
+    },
 
     /// The encoding ends in a zero byte that a shorter encoding would drop.
-    #[error("varint is not minimally encoded")]
-    NotMinimal,
+    #[error("varint of {len} bytes ends in a redundant zero group")]
+    NotMinimal {
+        /// Length of the encoding, in bytes.
+        len: usize,
+    },
 
     /// The input ends before the last byte of the encoding.
-    #[error("varint is truncated")]
-    Truncated,
+    #[error("varint truncated after {len} bytes")]
+    Truncated {
+        /// Bytes available, all with the continuation bit set.
+        len: usize,
+    },
 }
 
 /// A varint dialect, which fixes the rules a decoder enforces.
@@ -106,7 +118,7 @@ impl Varint {
         for (index, &byte) in input.iter().enumerate() {
             // Invariant: index < max_len <= 10, so the shift stays below 70 and never panics.
             if index == max_len {
-                return Err(VarintError::TooLong);
+                return Err(VarintError::TooLong { max: max_len });
             }
             let group = u64::from(byte & 0x7f);
             // Byte 9 starts at bit 63: only its lowest bit fits in a u64.
@@ -114,7 +126,7 @@ impl Varint {
             //     bits 0..63 from bytes 0..8, bit 63 from byte 9
             //     → any group above 1 in byte 9 would be lost
             if index == 9 && group > 1 {
-                return Err(VarintError::Overflow);
+                return Err(VarintError::Overflow { byte });
             }
             value |= group << (7 * index);
             // A clear high bit ends the varint.
@@ -123,7 +135,7 @@ impl Varint {
                 //
                 //     [0x80, 0x00] decodes to 0, but [0x00] already does
                 if self.requires_minimal() && byte == 0 && index > 0 {
-                    return Err(VarintError::NotMinimal);
+                    return Err(VarintError::NotMinimal { len: index + 1 });
                 }
                 *input = &input[index + 1..];
                 return Ok(value);
@@ -132,9 +144,9 @@ impl Varint {
         // Every byte so far had its continuation bit set.
         // A full-length run is already malformed; a shorter one may still complete.
         if input.len() >= max_len {
-            Err(VarintError::TooLong)
+            Err(VarintError::TooLong { max: max_len })
         } else {
-            Err(VarintError::Truncated)
+            Err(VarintError::Truncated { len: input.len() })
         }
     }
 }
@@ -183,7 +195,7 @@ mod tests {
         // The multiformats dialect stops at nine bytes.
         assert_eq!(
             Varint::Multiformat.read(&mut &out[..]),
-            Err(VarintError::TooLong)
+            Err(VarintError::TooLong { max: 9 })
         );
     }
 
@@ -193,12 +205,12 @@ mod tests {
         let overflow = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02];
         assert_eq!(
             Varint::Protobuf.read(&mut &overflow[..]),
-            Err(VarintError::Overflow)
+            Err(VarintError::Overflow { byte: 0x02 })
         );
         // Eleven continuation bytes never terminate within ten.
         assert_eq!(
             Varint::Protobuf.read(&mut &[0x80; 11][..]),
-            Err(VarintError::TooLong)
+            Err(VarintError::TooLong { max: 10 })
         );
         // A redundant zero group: protobuf accepts it, multiformats does not.
         let mut input = &[0x80, 0x00][..];
@@ -207,18 +219,18 @@ mod tests {
         let mut input = &[0x80, 0x00][..];
         assert_eq!(
             Varint::Multiformat.read(&mut input),
-            Err(VarintError::NotMinimal)
+            Err(VarintError::NotMinimal { len: 2 })
         );
         // A failed read leaves the input untouched.
         assert_eq!(input, [0x80, 0x00]);
         // A truncated varint asks for more input.
         assert_eq!(
             Varint::Protobuf.read(&mut &[0x80, 0x80][..]),
-            Err(VarintError::Truncated)
+            Err(VarintError::Truncated { len: 2 })
         );
         assert_eq!(
             Varint::Protobuf.read(&mut &[][..]),
-            Err(VarintError::Truncated)
+            Err(VarintError::Truncated { len: 0 })
         );
     }
 

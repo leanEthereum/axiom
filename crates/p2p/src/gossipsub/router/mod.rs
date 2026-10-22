@@ -98,18 +98,29 @@ pub enum GossipsubEvent {
 }
 
 /// Why a publish failed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PublishError {
     /// The same content was already published or received recently.
-    #[error("message already published")]
-    Duplicate,
+    #[error("message {id:?} already published or seen")]
+    Duplicate {
+        /// Identifier of the message.
+        id: MessageId,
+    },
     /// No peer is eligible to receive the message.
-    #[error("no peer to publish to")]
-    InsufficientPeers,
+    #[error("no peer to publish to on topic {topic}")]
+    InsufficientPeers {
+        /// The topic published on.
+        topic: Topic,
+    },
     /// The encoded message exceeds the transmit limit.
-    #[error("message exceeds the transmit limit")]
-    MessageTooLarge,
+    #[error("message of {len} framed bytes exceeds the transmit limit of {max}")]
+    MessageTooLarge {
+        /// Encoded length plus the frame overhead allowance.
+        len: usize,
+        /// Largest frame the router transmits.
+        max: usize,
+    },
 }
 
 /// The gossipsub router state machine.
@@ -284,16 +295,22 @@ impl Router {
     ) -> Result<MessageId, PublishError> {
         let message = RawMessage::anonymous(topic, data);
         // The envelope must fit in one RPC frame.
-        if message.encode().len() + 16 > self.cx.config.max_transmit_size {
-            return Err(PublishError::MessageTooLarge);
+        let len = message.encode().len() + 16;
+        if len > self.cx.config.max_transmit_size {
+            return Err(PublishError::MessageTooLarge {
+                len,
+                max: self.cx.config.max_transmit_size,
+            });
         }
         let id = (self.cx.config.message_id)(&message.topic, &message.data);
         if self.seen.contains(&id) {
-            return Err(PublishError::Duplicate);
+            return Err(PublishError::Duplicate { id });
         }
         let recipients = self.publish_recipients(&message.topic, now);
         if recipients.is_empty() {
-            return Err(PublishError::InsufficientPeers);
+            return Err(PublishError::InsufficientPeers {
+                topic: message.topic,
+            });
         }
         self.seen.insert(id, now);
         self.gossip.put(id, message.clone());

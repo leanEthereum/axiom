@@ -84,7 +84,9 @@ async fn scenario() {
                 .expect("swarm running")
             {
                 Ok(_) => break,
-                Err(PublishError::InsufficientPeers) => sleep(Duration::from_millis(20)).await,
+                Err(PublishError::InsufficientPeers { .. }) => {
+                    sleep(Duration::from_millis(20)).await;
+                }
                 Err(error) => panic!("publish failed: {error}"),
             }
         }

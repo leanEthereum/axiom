@@ -181,6 +181,8 @@ impl FromStr for GossipTopic {
 }
 
 /// Text that is not a known consensus topic.
+///
+/// The caller holds the topic text, so the error does not copy it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum TopicError {

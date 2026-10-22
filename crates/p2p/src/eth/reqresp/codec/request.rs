@@ -22,7 +22,10 @@ enum Progress {
     /// The payload is complete and nothing followed it.
     Complete(Vec<u8>),
     /// Bytes followed a complete payload.
-    Trailing,
+    Trailing {
+        /// Bytes the payload took on the wire.
+        payload_len: usize,
+    },
     /// The bytes broke the encoding.
     Failed(ReqRespError),
 }
@@ -93,12 +96,16 @@ impl RequestDecoder {
     pub fn finish(self) -> Result<Vec<u8>, ReqRespError> {
         match self.progress {
             Progress::Complete(payload) => Ok(payload),
-            Progress::Trailing => Err(ReqRespError::TrailingBytes),
+            Progress::Trailing { payload_len } => Err(ReqRespError::TrailingBytes {
+                len: self.received - payload_len,
+            }),
             Progress::Failed(error) => Err(error),
             // Methods without request content expect no bytes at all.
             Progress::Reading if self.protocol.has_empty_request() => Ok(Vec::new()),
             // The stream closed before the declared length arrived.
-            Progress::Reading => Err(ReqRespError::UnexpectedEof),
+            Progress::Reading => Err(ReqRespError::UnexpectedEof {
+                received: self.received,
+            }),
         }
     }
 
@@ -110,16 +117,19 @@ impl RequestDecoder {
         match self.progress {
             Progress::Reading => {}
             // Bytes after the declared length must not exist: end of stream was expected.
+            // Invariant: the received count already includes the new bytes.
             Progress::Complete(_) => {
-                self.progress = Progress::Trailing;
+                self.progress = Progress::Trailing {
+                    payload_len: self.received - bytes.len(),
+                };
                 return;
             }
             // Nothing after a violation changes the outcome.
-            Progress::Trailing | Progress::Failed(_) => return,
+            Progress::Trailing { .. } | Progress::Failed(_) => return,
         }
         // Methods without request content send no bytes at all.
         if self.protocol.has_empty_request() {
-            self.progress = Progress::Trailing;
+            self.progress = Progress::Trailing { payload_len: 0 };
             return;
         }
         // With no unit in progress, decode straight from the new bytes, saving a copy.
@@ -134,7 +144,9 @@ impl RequestDecoder {
         let outcome = self.payload.advance(&mut input);
         let rest_len = input.len();
         self.progress = match outcome {
-            Ok(Some(_)) if rest_len > 0 => Progress::Trailing,
+            Ok(Some(_)) if rest_len > 0 => Progress::Trailing {
+                payload_len: self.received - rest_len,
+            },
             Ok(Some(payload)) => Progress::Complete(payload),
             Ok(None) => {
                 // Keep the unit in progress for the next bytes.
@@ -198,7 +210,7 @@ mod tests {
         assert_eq!(decode(Protocol::MetaDataV3, &[], 1024), Ok(vec![]));
         assert_eq!(
             decode(Protocol::MetaDataV3, &[0], 1024),
-            Err(ReqRespError::TrailingBytes)
+            Err(ReqRespError::TrailingBytes { len: 1 })
         );
     }
 
@@ -217,24 +229,24 @@ mod tests {
                 max: 8
             })
         );
-        // Mutation: one extra byte after the payload.
+        // Mutation: two extra bytes after the payload.
         let mut trailing = wire.clone();
-        trailing.push(0);
+        trailing.extend([0, 0]);
         assert_eq!(
             decode(Protocol::PingV1, &trailing, 1024),
-            Err(ReqRespError::TrailingBytes)
+            Err(ReqRespError::TrailingBytes { len: 2 })
         );
-        // Mutation: the stream closes one byte early.
+        // Mutation: the stream closes one byte early, after 1 + 10 + 4 + 4 + 8 - 1 = 26 bytes.
         assert_eq!(
             decode(Protocol::PingV1, &wire[..wire.len() - 1], 1024),
-            Err(ReqRespError::UnexpectedEof)
+            Err(ReqRespError::UnexpectedEof { received: 26 })
         );
-        // Mutation: the frames do not open with the identifier.
+        // Mutation: the frames open with a compressed chunk, type 0x00.
         let mut no_ident = wire;
         no_ident[1] = 0x00;
         assert_eq!(
             decode(Protocol::PingV1, &no_ident, 1024),
-            Err(ReqRespError::MissingStreamIdentifier)
+            Err(ReqRespError::MissingStreamIdentifier { chunk_type: 0x00 })
         );
     }
 

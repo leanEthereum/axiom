@@ -38,9 +38,13 @@ impl MessageReader {
     /// The next message after the header, as text, or nothing while it is incomplete.
     pub(super) fn next_text(&mut self) -> Result<Option<&str>, NegotiationError> {
         match self.next_body()? {
-            Some(body) => str::from_utf8(body)
-                .map(Some)
-                .map_err(|_| NegotiationError::InvalidUtf8),
+            Some(body) => {
+                str::from_utf8(body)
+                    .map(Some)
+                    .map_err(|error| NegotiationError::InvalidUtf8 {
+                        valid_up_to: error.valid_up_to(),
+                    })
+            }
             None => Ok(None),
         }
     }
@@ -52,7 +56,9 @@ impl MessageReader {
             let Some(header) = self.next_message()? else {
                 return Ok(None);
             };
-            let header = str::from_utf8(header).map_err(|_| NegotiationError::InvalidUtf8)?;
+            let header = str::from_utf8(header).map_err(|error| NegotiationError::InvalidUtf8 {
+                valid_up_to: error.valid_up_to(),
+            })?;
             if header != PROTOCOL_HEADER {
                 return Err(NegotiationError::InvalidHeader(header.to_owned()));
             }
@@ -83,8 +89,13 @@ impl MessageReader {
             protocols.push(name.to_owned());
         }
         // A nested message cut short by the end of the body is malformed.
-        if !nested.frames.buffered().is_empty() {
-            return Err(NegotiationError::Framing(ProtobufError::Truncated));
+        // Its full length is unknown, but it needs at least one byte more than remains.
+        let remaining = nested.frames.buffered().len();
+        if remaining > 0 {
+            return Err(NegotiationError::Framing(ProtobufError::Truncated {
+                needed: remaining as u64 + 1,
+                remaining,
+            }));
         }
         Ok(protocols)
     }
@@ -98,7 +109,7 @@ impl MessageReader {
         frame
             .strip_suffix(b"\n")
             .map(Some)
-            .ok_or(NegotiationError::MissingNewline)
+            .ok_or(NegotiationError::MissingNewline { len: frame.len() })
     }
 }
 

@@ -179,8 +179,13 @@ mod tests {
         let data = GossipEncoding::default().encode(&[0; 100]);
         assert!(matches!(
             GossipEncoding::new(10).decode(&data),
-            Err(GossipDecodeError::CompressedTooLarge { .. } | GossipDecodeError::Snappy(_))
+            Err(GossipDecodeError::Snappy(_))
         ));
+        // A 10-byte bound allows 32 + 10 + 1 = 43 compressed bytes, so 44 are refused unread.
+        assert_eq!(
+            GossipEncoding::new(10).decode(&[0; 44]),
+            Err(GossipDecodeError::CompressedTooLarge { len: 44, max: 43 })
+        );
     }
 
     proptest! {

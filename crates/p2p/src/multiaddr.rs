@@ -25,7 +25,7 @@ use thiserror::Error;
 
 use crate::{
     identity::{PeerId, PeerIdError},
-    varint::Varint,
+    varint::{Varint, VarintError},
 };
 
 /// Multicodec of IPv4.
@@ -92,17 +92,12 @@ impl Protocol {
     /// Reads one layer off the front of the input, advancing past it.
     fn read(input: &mut &[u8]) -> Result<Self, MultiaddrError> {
         // Any malformed varint makes the address unreadable from here on.
-        let read_varint = |input: &mut &[u8]| {
-            Varint::Multiformat
-                .read(input)
-                .map_err(|_| MultiaddrError::Truncated)
-        };
-        let code = read_varint(input)?;
+        let code = Varint::Multiformat.read(input)?;
         let protocol = match code {
-            CODE_IP4 => Self::Ip4(Ipv4Addr::from(Self::read_array::<4>(input)?)),
-            CODE_IP6 => Self::Ip6(Ipv6Addr::from(Self::read_array::<16>(input)?)),
+            CODE_IP4 => Self::Ip4(Ipv4Addr::from(Self::read_array::<4>(code, input)?)),
+            CODE_IP6 => Self::Ip6(Ipv6Addr::from(Self::read_array::<16>(code, input)?)),
             CODE_TCP | CODE_UDP => {
-                let port = u16::from_be_bytes(Self::read_array(input)?);
+                let port = u16::from_be_bytes(Self::read_array(code, input)?);
                 if code == CODE_TCP {
                     Self::Tcp(port)
                 } else {
@@ -111,11 +106,14 @@ impl Protocol {
             }
             CODE_QUIC_V1 => Self::QuicV1,
             CODE_P2P => {
-                let len = read_varint(input)?;
-                let len = usize::try_from(len).map_err(|_| MultiaddrError::Truncated)?;
-                let (peer, rest) = input
-                    .split_at_checked(len)
-                    .ok_or(MultiaddrError::Truncated)?;
+                let len = Varint::Multiformat.read(input)?;
+                let truncated = || MultiaddrError::Truncated {
+                    code,
+                    needed: len,
+                    remaining: input.len(),
+                };
+                let size = usize::try_from(len).map_err(|_| truncated())?;
+                let (peer, rest) = input.split_at_checked(size).ok_or_else(truncated)?;
                 let peer = PeerId::from_bytes(peer)?;
                 *input = rest;
                 Self::P2p(peer)
@@ -125,11 +123,15 @@ impl Protocol {
         Ok(protocol)
     }
 
-    /// Reads a fixed-size value off the front of the input.
-    fn read_array<const N: usize>(input: &mut &[u8]) -> Result<[u8; N], MultiaddrError> {
+    /// Reads the fixed-size value of the layer with this code off the front of the input.
+    fn read_array<const N: usize>(code: u64, input: &mut &[u8]) -> Result<[u8; N], MultiaddrError> {
         let (head, rest) = input
             .split_first_chunk::<N>()
-            .ok_or(MultiaddrError::Truncated)?;
+            .ok_or(MultiaddrError::Truncated {
+                code,
+                needed: N as u64,
+                remaining: input.len(),
+            })?;
         *input = rest;
         Ok(*head)
     }
@@ -257,22 +259,39 @@ impl FromStr for Multiaddr {
         // Text must open with a slash: "/ip4/1.2.3.4" splits into ["", "ip4", "1.2.3.4"].
         let mut parts = text.split('/');
         if parts.next() != Some("") {
-            return Err(MultiaddrError::InvalidText);
+            return Err(MultiaddrError::MissingLeadingSlash);
         }
         let mut protocols = Vec::new();
         while let Some(name) = parts.next() {
             // Each value-carrying name consumes the part after it.
-            let mut value = || parts.next().ok_or(MultiaddrError::InvalidText);
+            let mut value = |protocol| parts.next().ok_or(MultiaddrError::MissingValue(protocol));
+            // A value that does not parse names its protocol and keeps its text.
+            let invalid = |protocol, value: &str| MultiaddrError::InvalidValue {
+                protocol,
+                value: value.to_owned(),
+            };
             let protocol = match name {
-                "ip4" => Protocol::Ip4(value()?.parse().map_err(|_| MultiaddrError::InvalidText)?),
-                "ip6" => Protocol::Ip6(value()?.parse().map_err(|_| MultiaddrError::InvalidText)?),
-                "tcp" => Protocol::Tcp(value()?.parse().map_err(|_| MultiaddrError::InvalidText)?),
-                "udp" => Protocol::Udp(value()?.parse().map_err(|_| MultiaddrError::InvalidText)?),
+                "ip4" => {
+                    let text = value("ip4")?;
+                    Protocol::Ip4(text.parse().map_err(|_| invalid("ip4", text))?)
+                }
+                "ip6" => {
+                    let text = value("ip6")?;
+                    Protocol::Ip6(text.parse().map_err(|_| invalid("ip6", text))?)
+                }
+                "tcp" => {
+                    let text = value("tcp")?;
+                    Protocol::Tcp(text.parse().map_err(|_| invalid("tcp", text))?)
+                }
+                "udp" => {
+                    let text = value("udp")?;
+                    Protocol::Udp(text.parse().map_err(|_| invalid("udp", text))?)
+                }
                 "quic-v1" => Protocol::QuicV1,
-                "p2p" => Protocol::P2p(value()?.parse()?),
+                "p2p" => Protocol::P2p(value("p2p")?.parse()?),
                 // A trailing slash leaves one empty part, which is tolerated.
                 "" if parts.clone().next().is_none() && !protocols.is_empty() => break,
-                _ => return Err(MultiaddrError::InvalidText),
+                other => return Err(MultiaddrError::UnknownProtocol(other.to_owned())),
             };
             protocols.push(protocol);
         }
@@ -281,20 +300,50 @@ impl FromStr for Multiaddr {
 }
 
 /// A byte string or text that is not a supported multiaddress.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum MultiaddrError {
+    /// A protocol code or length varint is malformed.
+    #[error("malformed multiaddress varint: {0}")]
+    Varint(#[from] VarintError),
+
     /// The binary form ends inside a layer.
-    #[error("multiaddress ends inside a layer")]
-    Truncated,
+    #[error("multiaddress layer {code:#x} needs {needed} bytes but {remaining} remain")]
+    Truncated {
+        /// Protocol code of the layer.
+        code: u64,
+        /// Bytes the layer value needs.
+        needed: u64,
+        /// Bytes left in the input.
+        remaining: usize,
+    },
 
     /// A binary layer uses a protocol code this implementation does not know.
     #[error("unknown multiaddress protocol code {0:#x}")]
     UnknownCode(u64),
 
-    /// The text form names an unknown protocol or holds a malformed value.
-    #[error("malformed multiaddress text")]
-    InvalidText,
+    /// The text form does not open with a slash.
+    ///
+    /// The caller holds the text, so the error does not copy it.
+    #[error("multiaddress text does not start with a slash")]
+    MissingLeadingSlash,
+
+    /// The text form names a protocol this implementation does not know.
+    #[error("unknown multiaddress protocol {0:?}")]
+    UnknownProtocol(String),
+
+    /// The text form ends where the named protocol expects its value.
+    #[error("multiaddress protocol {0} lacks its value")]
+    MissingValue(&'static str),
+
+    /// The text form holds a value its protocol cannot parse.
+    #[error("invalid {protocol} value {value:?} in multiaddress")]
+    InvalidValue {
+        /// Name of the protocol.
+        protocol: &'static str,
+        /// The value text.
+        value: String,
+    },
 
     /// A peer layer holds a malformed identifier.
     #[error("malformed peer id layer: {0}")]
@@ -356,17 +405,25 @@ mod tests {
         // Missing port value.
         assert_eq!(
             "/ip4/1.2.3.4/tcp".parse::<Multiaddr>(),
-            Err(MultiaddrError::InvalidText)
+            Err(MultiaddrError::MissingValue("tcp"))
         );
         // Port above 65535.
         assert_eq!(
             "/tcp/70000".parse::<Multiaddr>(),
-            Err(MultiaddrError::InvalidText)
+            Err(MultiaddrError::InvalidValue {
+                protocol: "tcp",
+                value: "70000".into()
+            })
         );
         // No leading slash.
         assert_eq!(
             "ip4/1.2.3.4".parse::<Multiaddr>(),
-            Err(MultiaddrError::InvalidText)
+            Err(MultiaddrError::MissingLeadingSlash)
+        );
+        // A protocol name this implementation does not know.
+        assert_eq!(
+            "/dns4/example.org".parse::<Multiaddr>(),
+            Err(MultiaddrError::UnknownProtocol("dns4".into()))
         );
         // Code 0x35 is dns, not supported here.
         assert_eq!(
@@ -376,7 +433,25 @@ mod tests {
         // An ip4 layer with 3 of its 4 bytes.
         assert_eq!(
             Multiaddr::from_bytes(&[0x04, 1, 2, 3]),
-            Err(MultiaddrError::Truncated)
+            Err(MultiaddrError::Truncated {
+                code: 0x04,
+                needed: 4,
+                remaining: 3
+            })
+        );
+        // A p2p layer declaring 39 bytes with 1 present.
+        assert_eq!(
+            Multiaddr::from_bytes(&[0xa5, 0x03, 0x27, 0x00]),
+            Err(MultiaddrError::Truncated {
+                code: 0x01a5,
+                needed: 39,
+                remaining: 1
+            })
+        );
+        // A protocol code cut inside its varint.
+        assert_eq!(
+            Multiaddr::from_bytes(&[0xa5]),
+            Err(MultiaddrError::Varint(VarintError::Truncated { len: 1 }))
         );
     }
 

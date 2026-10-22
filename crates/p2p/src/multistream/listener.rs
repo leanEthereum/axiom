@@ -67,7 +67,10 @@ impl Listener {
             else {
                 self.proposals += 1;
                 if self.proposals > MAX_PROPOSALS {
-                    return Err(NegotiationError::TooManyProposals);
+                    return Err(NegotiationError::TooManyProposals {
+                        max: MAX_PROPOSALS,
+                        last: text.to_owned(),
+                    });
                 }
                 self.outbound.push(NOT_AVAILABLE);
             }
@@ -171,7 +174,10 @@ mod tests {
         // The only proposal is refused, leaving nothing to try.
         assert_eq!(
             dialer.receive(&listener.take_output()),
-            Err(NegotiationError::NoCommonProtocol)
+            Err(NegotiationError::NoCommonProtocol {
+                refused: 1,
+                last: "/a".into()
+            })
         );
     }
 
@@ -210,7 +216,7 @@ mod tests {
         let mut dialer = Dialer::new(["/a"]).unwrap();
         assert_eq!(
             dialer.receive(&[0x02, b'n', b'a']),
-            Err(NegotiationError::MissingNewline)
+            Err(NegotiationError::MissingNewline { len: 2 })
         );
         // An answer that is neither echo nor refusal.
         let mut dialer = Dialer::new(["/a"]).unwrap();
@@ -218,7 +224,10 @@ mod tests {
         flight.extend(message("/b"));
         assert_eq!(
             dialer.receive(&flight),
-            Err(NegotiationError::UnexpectedResponse("/b".into()))
+            Err(NegotiationError::UnexpectedResponse {
+                proposed: "/a".into(),
+                response: "/b".into()
+            })
         );
         // An empty proposal list.
         assert_eq!(
@@ -237,7 +246,10 @@ mod tests {
         }
         assert_eq!(
             listener.receive(&flight),
-            Err(NegotiationError::TooManyProposals)
+            Err(NegotiationError::TooManyProposals {
+                max: 32,
+                last: "/nope".into()
+            })
         );
     }
 
@@ -271,7 +283,13 @@ mod tests {
             }
             match expected {
                 Some(protocol) => prop_assert_eq!(outcome, Some(Ok(protocol))),
-                None => prop_assert_eq!(outcome, Some(Err(NegotiationError::NoCommonProtocol))),
+                None => prop_assert_eq!(
+                    outcome,
+                    Some(Err(NegotiationError::NoCommonProtocol {
+                        refused: dialer_set.len(),
+                        last: dialer_set[dialer_set.len() - 1].clone(),
+                    }))
+                ),
             }
         }
     }

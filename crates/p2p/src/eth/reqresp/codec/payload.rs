@@ -87,7 +87,7 @@ impl PayloadDecoder {
             let mut rest = *input;
             let len = match Varint::Protobuf.read(&mut rest) {
                 Ok(len) => len,
-                Err(VarintError::Truncated) => return Ok(None),
+                Err(VarintError::Truncated { .. }) => return Ok(None),
                 Err(error) => return Err(error.into()),
             };
             if !self.bounds.contains(&len) {
@@ -127,14 +127,16 @@ impl PayloadDecoder {
         if framed == 0 {
             if input.len() < STREAM_IDENTIFIER_LEN {
                 return match input.first() {
-                    Some(&byte) if byte != STREAM_IDENTIFIER_TYPE => {
-                        Err(ReqRespError::MissingStreamIdentifier)
+                    Some(&chunk_type) if chunk_type != STREAM_IDENTIFIER_TYPE => {
+                        Err(ReqRespError::MissingStreamIdentifier { chunk_type })
                     }
                     _ => Ok(None),
                 };
             }
             if input[0] != STREAM_IDENTIFIER_TYPE {
-                return Err(ReqRespError::MissingStreamIdentifier);
+                return Err(ReqRespError::MissingStreamIdentifier {
+                    chunk_type: input[0],
+                });
             }
             // The identifier is decoded like any chunk below, which validates its body.
             self.scratch.clear();
@@ -157,6 +159,7 @@ impl PayloadDecoder {
             // The spec forbids reading past max_compressed_len(n) framed bytes, identifier aside.
             if framed + chunk_len > max_compressed + STREAM_IDENTIFIER_LEN {
                 return Err(ReqRespError::CompressedTooLarge {
+                    len: framed + chunk_len - STREAM_IDENTIFIER_LEN,
                     max: max_compressed,
                 });
             }

@@ -25,12 +25,17 @@ pub enum ReqRespError {
     },
 
     /// The framed stream does not open with the snappy stream identifier.
-    #[error("missing snappy stream identifier")]
-    MissingStreamIdentifier,
+    #[error("framed stream opens with chunk type {chunk_type:#04x}, not the stream identifier")]
+    MissingStreamIdentifier {
+        /// Type byte of the first chunk.
+        chunk_type: u8,
+    },
 
     /// The framed stream exceeds the worst-case compressed size of its declared length.
-    #[error("compressed payload exceeds {max} bytes")]
+    #[error("compressed payload reaches {len} bytes, above the bound of {max}")]
     CompressedTooLarge {
+        /// Framed bytes after the identifier, the offending chunk included.
+        len: usize,
         /// Largest compressed length allowed.
         max: usize,
     },
@@ -49,10 +54,16 @@ pub enum ReqRespError {
     },
 
     /// Bytes follow a complete request.
-    #[error("bytes after the end of the payload")]
-    TrailingBytes,
+    #[error("{len} bytes follow the end of the payload")]
+    TrailingBytes {
+        /// Bytes received after the payload.
+        len: usize,
+    },
 
     /// The stream ended inside a request or a response chunk.
-    #[error("stream ended inside a payload")]
-    UnexpectedEof,
+    #[error("stream ended inside a payload after {received} bytes")]
+    UnexpectedEof {
+        /// Bytes the stream delivered in all.
+        received: usize,
+    },
 }

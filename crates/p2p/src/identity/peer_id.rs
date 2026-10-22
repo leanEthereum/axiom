@@ -5,7 +5,12 @@ use std::{fmt, str::FromStr};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{identity::PublicKey, multibase::Multibase, protobuf::ProtoMessage, varint::Varint};
+use crate::{
+    identity::PublicKey,
+    multibase::Multibase,
+    protobuf::{ProtoMessage, ProtobufError},
+    varint::{Varint, VarintError},
+};
 
 /// Multihash code of the identity function, which stores its input verbatim.
 const IDENTITY_CODE: u64 = 0x00;
@@ -63,24 +68,28 @@ impl PeerId {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PeerIdError> {
         let mut digest = bytes;
         // Phase 1: the hash function code.
-        let code = Varint::Multiformat
-            .read(&mut digest)
-            .map_err(|_| PeerIdError::InvalidMultihash)?;
+        let code = Varint::Multiformat.read(&mut digest)?;
         // Phase 2: the digest length.
-        let len = Varint::Multiformat
-            .read(&mut digest)
-            .map_err(|_| PeerIdError::InvalidMultihash)?;
+        let len = Varint::Multiformat.read(&mut digest)?;
         // Phase 3: the digest must fill the rest exactly.
         if digest.len() as u64 != len {
-            return Err(PeerIdError::InvalidMultihash);
+            return Err(PeerIdError::DigestLengthMismatch {
+                declared: len,
+                actual: digest.len(),
+            });
         }
         match code {
             // An embedded key must itself be a valid envelope.
             IDENTITY_CODE if digest.len() <= MAX_INLINE_KEY_LEN => {
-                PublicKey::decode(digest).map_err(|_| PeerIdError::InvalidMultihash)?;
+                PublicKey::decode(digest).map_err(PeerIdError::InvalidEmbeddedKey)?;
             }
             SHA256_CODE if digest.len() == 32 => {}
-            _ => return Err(PeerIdError::UnsupportedHash(code)),
+            _ => {
+                return Err(PeerIdError::UnsupportedHash {
+                    code,
+                    len: digest.len(),
+                });
+            }
         }
         Ok(Self {
             multihash: bytes.to_vec(),
@@ -144,14 +153,10 @@ impl FromStr for PeerId {
                 .decode(body)
                 .ok_or(PeerIdError::InvalidText)?;
             let mut multihash = &cid[..];
-            let version = Varint::Multiformat
-                .read(&mut multihash)
-                .map_err(|_| PeerIdError::InvalidText)?;
-            let codec = Varint::Multiformat
-                .read(&mut multihash)
-                .map_err(|_| PeerIdError::InvalidText)?;
+            let version = Varint::Multiformat.read(&mut multihash)?;
+            let codec = Varint::Multiformat.read(&mut multihash)?;
             if version != 1 || codec != LIBP2P_KEY_CODEC {
-                return Err(PeerIdError::InvalidText);
+                return Err(PeerIdError::UnsupportedCid { version, codec });
             }
             return Self::from_bytes(multihash);
         }
@@ -163,16 +168,45 @@ impl FromStr for PeerId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum PeerIdError {
-    /// The bytes are not a well-formed multihash of a key.
-    #[error("malformed peer id multihash")]
-    InvalidMultihash,
+    /// A multihash or CID varint is malformed.
+    #[error("malformed peer id varint: {0}")]
+    Varint(#[from] VarintError),
 
-    /// The multihash uses a function other than identity or SHA-256.
-    #[error("unsupported multihash code {0:#x}")]
-    UnsupportedHash(u64),
+    /// The multihash declares a digest length other than the bytes that follow.
+    #[error("multihash declares {declared} digest bytes but holds {actual}")]
+    DigestLengthMismatch {
+        /// Digest length the multihash declares.
+        declared: u64,
+        /// Digest bytes present.
+        actual: usize,
+    },
 
-    /// The text is neither base58btc nor a base32 CIDv1 of a libp2p key.
-    #[error("malformed peer id text")]
+    /// The key embedded in an identity multihash is not a valid key envelope.
+    #[error("malformed embedded public key: {0}")]
+    InvalidEmbeddedKey(#[source] ProtobufError),
+
+    /// The multihash uses a function other than identity or SHA-256, or a digest length it forbids.
+    #[error("unsupported multihash code {code:#x} with a {len}-byte digest")]
+    UnsupportedHash {
+        /// Multihash function code.
+        code: u64,
+        /// Digest length, in bytes.
+        len: usize,
+    },
+
+    /// A base32 CID is not a version 1 CID of a libp2p key.
+    #[error("unsupported CID version {version} with codec {codec:#x}")]
+    UnsupportedCid {
+        /// CID version.
+        version: u64,
+        /// Multicodec of the content.
+        codec: u64,
+    },
+
+    /// The text is neither base58btc nor base32 with the expected prefix.
+    ///
+    /// The caller holds the text, so the error does not copy it.
+    #[error("peer id text is neither base58btc nor a base32 CID")]
     InvalidText,
 }
 
@@ -250,19 +284,46 @@ mod tests {
         // Declared length 3, but 2 digest bytes follow.
         assert_eq!(
             PeerId::from_bytes(&[0x12, 0x03, 1, 2]),
-            Err(PeerIdError::InvalidMultihash)
+            Err(PeerIdError::DigestLengthMismatch {
+                declared: 3,
+                actual: 2
+            })
         );
         // A 31-byte SHA-256 digest is impossible.
         let mut short = vec![0x12, 31];
         short.extend_from_slice(&[0; 31]);
         assert_eq!(
             PeerId::from_bytes(&short),
-            Err(PeerIdError::UnsupportedHash(0x12))
+            Err(PeerIdError::UnsupportedHash {
+                code: 0x12,
+                len: 31
+            })
         );
         // Code 0x13 is SHA-512, not accepted for identifiers.
         assert_eq!(
             PeerId::from_bytes(&[0x13, 0x00]),
-            Err(PeerIdError::UnsupportedHash(0x13))
+            Err(PeerIdError::UnsupportedHash { code: 0x13, len: 0 })
+        );
+        // A multihash cut inside its length varint.
+        assert_eq!(
+            PeerId::from_bytes(&[0x00, 0x80]),
+            Err(PeerIdError::Varint(VarintError::Truncated { len: 1 }))
+        );
+        // An identity multihash of 2 bytes that are no key envelope: field 1 truncated.
+        assert_eq!(
+            PeerId::from_bytes(&[0x00, 0x02, 0x08, 0x80]),
+            Err(PeerIdError::InvalidEmbeddedKey(ProtobufError::Truncated {
+                needed: 2,
+                remaining: 1
+            }))
+        );
+        // A base32 CID of version 1 with the raw codec 0x55 instead of libp2p-key.
+        assert_eq!(
+            "bafkqaaa".parse::<PeerId>(),
+            Err(PeerIdError::UnsupportedCid {
+                version: 1,
+                codec: 0x55
+            })
         );
         // Text with neither prefix.
         assert_eq!("xyz".parse::<PeerId>(), Err(PeerIdError::InvalidText));

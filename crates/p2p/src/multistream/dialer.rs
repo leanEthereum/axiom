@@ -16,6 +16,8 @@ pub struct Dialer {
     remaining: VecDeque<String>,
     /// The proposal awaiting an answer.
     proposed: String,
+    /// Proposals the listener refused so far.
+    refused: usize,
     /// Messages waiting to be written.
     outbound: MessageWriter,
     /// Messages received, header first.
@@ -39,6 +41,7 @@ impl Dialer {
         Ok(Self {
             remaining,
             proposed,
+            refused: 0,
             outbound,
             inbound: MessageReader::new(),
         })
@@ -69,12 +72,19 @@ impl Dialer {
             }
             // Phase 2: a refusal moves on to the next proposal.
             if text != NOT_AVAILABLE {
-                return Err(NegotiationError::UnexpectedResponse(text.to_owned()));
+                return Err(NegotiationError::UnexpectedResponse {
+                    proposed: self.proposed.clone(),
+                    response: text.to_owned(),
+                });
             }
-            self.proposed = self
-                .remaining
-                .pop_front()
-                .ok_or(NegotiationError::NoCommonProtocol)?;
+            self.refused += 1;
+            let Some(next) = self.remaining.pop_front() else {
+                return Err(NegotiationError::NoCommonProtocol {
+                    refused: self.refused,
+                    last: mem::take(&mut self.proposed),
+                });
+            };
+            self.proposed = next;
             self.outbound.push(&self.proposed);
         }
         Ok(None)
