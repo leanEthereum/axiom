@@ -36,5 +36,5 @@ mod span;
 
 pub use config::{Geometry, SlasherConfig};
 pub use database::SlasherDatabase;
-pub use error::{ConfigError, SlasherError};
+pub use error::{LayoutError, SlasherError};
 pub use slasher::{Pass, Slasher, Slashing};

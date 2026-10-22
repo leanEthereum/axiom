@@ -45,6 +45,7 @@ dependencies = [
  "axiom-discv5",
  "axiom-node",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-telemetry",
  "axiom-types",
  "axiom-yaml",

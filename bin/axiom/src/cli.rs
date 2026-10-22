@@ -10,6 +10,7 @@ use std::{
 use axiom_discv5::Enr;
 use axiom_node::{AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
 use axiom_p2p::Multiaddr;
+use axiom_slasher::{LayoutError, SlasherConfig};
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
 use axiom_yaml::{ParseError, Yaml};
@@ -44,6 +45,11 @@ OPTIONS:
     --no-network                 run without peers
     --execution-endpoint <URL>   engine API endpoint, such as http://127.0.0.1:8551
     --jwt-secret <FILE>          hex JWT secret shared with the engine
+    --slasher                    detect slashable votes and proposals, and pool the evidence
+    --slasher-history <EPOCHS>   epochs of votes the slasher keeps [default: 4096]
+    --slasher-chunk-epochs <N>   epochs per span chunk on disk [default: 16]
+    --slasher-chunk-validators <N>
+                                 validators per span chunk on disk [default: 1024]
     --log <FILTER>               log filter, such as info,axiom_node=debug [default: info]
     --log-format <FORMAT>        compact, pretty, or json [default: compact]
     -h, --help                   print this help
@@ -84,6 +90,12 @@ pub(crate) enum CliError {
         /// The value given.
         value: String,
     },
+    /// A slasher setting was given without the slasher.
+    #[error("{0} needs --slasher")]
+    SlasherDisabled(&'static str),
+    /// The slasher settings cannot lay out its history.
+    #[error("slasher: {0}")]
+    Slasher(#[from] LayoutError),
     /// Only one of the engine endpoint and its secret was given.
     #[error("--execution-endpoint and --jwt-secret go together")]
     IncompleteEngine,
@@ -164,6 +176,50 @@ pub(crate) struct Cli {
     log: Option<String>,
     /// The log format.
     log_format: Option<LogFormat>,
+    /// The slasher flags.
+    slasher: SlasherFlags,
+}
+
+/// The slasher flags as given.
+#[derive(Debug, Default)]
+struct SlasherFlags {
+    /// Whether the slasher runs.
+    enabled: bool,
+    /// Epochs of history.
+    history: Option<u64>,
+    /// Epochs per span chunk.
+    chunk_epochs: Option<u64>,
+    /// Validators per span chunk.
+    chunk_validators: Option<u64>,
+}
+
+impl SlasherFlags {
+    /// The settings with defaults filled in, or none when the slasher is off.
+    fn resolve(&self) -> Result<Option<SlasherConfig>, CliError> {
+        if !self.enabled {
+            let settings = [
+                ("--slasher-history", self.history),
+                ("--slasher-chunk-epochs", self.chunk_epochs),
+                ("--slasher-chunk-validators", self.chunk_validators),
+            ];
+            return match settings.iter().find(|(_, value)| value.is_some()) {
+                Some((flag, _)) => Err(CliError::SlasherDisabled(flag)),
+                None => Ok(None),
+            };
+        }
+        let defaults = SlasherConfig::default();
+        let config = SlasherConfig {
+            history_length: self.history.unwrap_or(defaults.history_length),
+            chunk_size: self.chunk_epochs.unwrap_or(defaults.chunk_size),
+            validator_chunk_size: self
+                .chunk_validators
+                .unwrap_or(defaults.validator_chunk_size),
+            ..defaults
+        };
+        // The layout is checked now, so a bad flag fails before the node starts.
+        config.geometry()?;
+        Ok(Some(config))
+    }
 }
 
 impl Cli {
@@ -235,6 +291,20 @@ impl Cli {
                     cli.execution_endpoint = Some(value("--execution-endpoint")?);
                 }
                 "--jwt-secret" => cli.jwt_secret = Some(value("--jwt-secret")?.into()),
+                "--slasher" => cli.slasher.enabled = true,
+                "--slasher-history" => {
+                    let text = value("--slasher-history")?;
+                    cli.slasher.history = Some(Self::parsed("--slasher-history", text)?);
+                }
+                "--slasher-chunk-epochs" => {
+                    let text = value("--slasher-chunk-epochs")?;
+                    cli.slasher.chunk_epochs = Some(Self::parsed("--slasher-chunk-epochs", text)?);
+                }
+                "--slasher-chunk-validators" => {
+                    let text = value("--slasher-chunk-validators")?;
+                    cli.slasher.chunk_validators =
+                        Some(Self::parsed("--slasher-chunk-validators", text)?);
+                }
                 "--log" => cli.log = Some(value("--log")?),
                 "--log-format" => {
                     cli.log_format = Some(Self::log_format(value("--log-format")?)?);
@@ -247,6 +317,7 @@ impl Cli {
 
     /// Turns the flags into a run, reading the config file if one is named.
     fn resolve(self) -> Result<Run, CliError> {
+        let slasher = self.slasher.resolve()?;
         let (preset, chain) = self.chain()?;
         let engine = match (self.execution_endpoint, self.jwt_secret) {
             (Some(url), Some(jwt_secret)) => Some(EngineConfig { url, jwt_secret }),
@@ -305,6 +376,7 @@ impl Cli {
                 metrics_address: self.metrics_address,
                 engine,
                 network,
+                slasher,
                 ..NodeConfig::default()
             },
             log: LogConfig {
@@ -482,6 +554,50 @@ mod tests {
         );
         assert_eq!(run.log.filter, "debug");
         assert_eq!(run.log.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn the_slasher_flags_set_its_layout() {
+        // History of 1024 epochs in chunks of 8 by 512 validators.
+        let tuned = run(&[
+            "--slasher",
+            "--slasher-history",
+            "1024",
+            "--slasher-chunk-epochs",
+            "8",
+            "--slasher-chunk-validators",
+            "512",
+        ]);
+        assert_eq!(
+            tuned.node.slasher,
+            Some(SlasherConfig {
+                history_length: 1024,
+                chunk_size: 8,
+                validator_chunk_size: 512,
+                ..SlasherConfig::default()
+            })
+        );
+        // The bare flag takes every default.
+        assert_eq!(
+            run(&["--slasher"]).node.slasher,
+            Some(SlasherConfig::default())
+        );
+    }
+
+    #[test]
+    fn slasher_settings_need_the_slasher_and_a_valid_layout() {
+        assert!(matches!(
+            parse(&["--slasher-history", "64"]),
+            Err(CliError::SlasherDisabled("--slasher-history"))
+        ));
+        // 100 epochs do not split into chunks of 16.
+        assert!(matches!(
+            parse(&["--slasher", "--slasher-history", "100"]),
+            Err(CliError::Slasher(LayoutError::Indivisible {
+                history: 100,
+                chunk: 16
+            }))
+        ));
     }
 
     #[test]

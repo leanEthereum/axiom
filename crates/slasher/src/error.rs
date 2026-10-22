@@ -9,7 +9,7 @@ use crate::Geometry;
 
 /// A configuration that cannot lay out the span arrays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-pub enum ConfigError {
+pub enum LayoutError {
     /// A size that must be positive is zero.
     #[error("{field} must be positive")]
     Zero {
@@ -41,7 +41,7 @@ pub enum ConfigError {
 pub enum SlasherError {
     /// The configuration is invalid.
     #[error("invalid slasher configuration: {0}")]
-    Config(#[from] ConfigError),
+    Config(#[from] LayoutError),
 
     /// The database was written under another layout, which its chunks cannot be read with.
     #[error("database laid out as {stored:?}, configured as {configured:?}")]

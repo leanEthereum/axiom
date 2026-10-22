@@ -2,7 +2,7 @@
 
 use axiom_types::{Epoch, ValidatorIndex};
 
-use crate::ConfigError;
+use crate::LayoutError;
 
 /// Sizes of the slasher's history and of the chunks it stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ impl SlasherConfig {
     /// # Errors
     ///
     /// Fails when a size is zero, the history does not split into whole chunks, or is too long.
-    pub const fn geometry(&self) -> Result<Geometry, ConfigError> {
+    pub const fn geometry(&self) -> Result<Geometry, LayoutError> {
         let sizes = [
             ("history length", self.history_length),
             ("chunk size", self.chunk_size),
@@ -48,20 +48,20 @@ impl SlasherConfig {
         let mut index = 0;
         while index < sizes.len() {
             if sizes[index].1 == 0 {
-                return Err(ConfigError::Zero {
+                return Err(LayoutError::Zero {
                     field: sizes[index].0,
                 });
             }
             index += 1;
         }
         if !self.history_length.is_multiple_of(self.chunk_size) {
-            return Err(ConfigError::Indivisible {
+            return Err(LayoutError::Indivisible {
                 history: self.history_length,
                 chunk: self.chunk_size,
             });
         }
         if self.history_length > Self::MAX_HISTORY_LENGTH {
-            return Err(ConfigError::HistoryTooLong {
+            return Err(LayoutError::HistoryTooLong {
                 history: self.history_length,
                 limit: Self::MAX_HISTORY_LENGTH,
             });
@@ -239,7 +239,7 @@ mod tests {
         };
         assert_eq!(
             config.geometry(),
-            Err(ConfigError::Zero {
+            Err(LayoutError::Zero {
                 field: "validator chunk size"
             })
         );
@@ -254,7 +254,7 @@ mod tests {
         };
         assert_eq!(
             config.geometry(),
-            Err(ConfigError::Indivisible {
+            Err(LayoutError::Indivisible {
                 history: 100,
                 chunk: 16
             })
@@ -271,7 +271,7 @@ mod tests {
         };
         assert_eq!(
             config.geometry(),
-            Err(ConfigError::HistoryTooLong {
+            Err(LayoutError::HistoryTooLong {
                 history: 65536,
                 limit: 65535
             })

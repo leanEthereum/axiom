@@ -7,7 +7,7 @@ use std::{
 };
 
 use axiom_slasher::{
-    ConfigError, Pass, Slasher, SlasherConfig, SlasherDatabase, SlasherError, Slashing,
+    LayoutError, Pass, Slasher, SlasherConfig, SlasherDatabase, SlasherError, Slashing,
 };
 use axiom_types::{
     BlsSignature, Epoch, Minimal, Root, Slot, ValidatorIndex,
@@ -293,7 +293,7 @@ fn an_invalid_layout_is_refused() {
     let database = SlasherDatabase::in_memory().expect("memory store");
     assert!(matches!(
         Slasher::<Minimal>::open(zero, database),
-        Err(SlasherError::Config(ConfigError::Zero {
+        Err(SlasherError::Config(LayoutError::Zero {
             field: "prune period"
         }))
     ));
