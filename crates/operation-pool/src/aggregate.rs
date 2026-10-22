@@ -57,13 +57,17 @@ impl Aggregate {
     /// The aggregate of compressed signatures, compressed.
     ///
     /// No signature at all gives the point at infinity, the identity of the group.
+    /// One signature is its own sum, returned as given: the caller checked it on entry.
     ///
     /// # Errors
     ///
     /// Fails when a signature is not a valid point.
     pub fn sum(signatures: &[BlsSignature]) -> Result<BlsSignature, PoolError> {
-        if signatures.is_empty() {
-            return Ok(BlsSignature(Signature::INFINITY_BYTES));
+        match signatures {
+            [] => return Ok(BlsSignature(Signature::INFINITY_BYTES)),
+            // The sum of one point is that point: no decompression, no recompression.
+            [only] => return Ok(*only),
+            _ => {}
         }
         let points = signatures
             .iter()
