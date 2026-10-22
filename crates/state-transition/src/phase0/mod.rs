@@ -20,7 +20,11 @@ pub use slot::SlotRoots;
 
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
-    StateError, phase0::epoch::Rollover, sampling::WeightedSampler,
+    StateError,
+    phase0::epoch::{
+        CorrelationPenalty, HistoricalRootsUpdate, Hysteresis, RegistryUpdates, Rollover,
+    },
+    sampling::WeightedSampler,
 };
 
 impl<P: Preset> Fork for BeaconState<P> {
@@ -74,15 +78,7 @@ impl<P: Preset> Fork for BeaconState<P> {
         processor: &mut EpochProcessor<'_, Self>,
         step: EpochStep,
     ) -> Result<(), StateError> {
-        let rollover = Rollover::new(processor.current_epoch);
-        let state = &mut *processor.state.beacon;
-        match step {
-            EpochStep::Eth1DataReset => rollover.reset_eth1_data(state),
-            EpochStep::SlashingsReset => rollover.reset_slashings(state),
-            EpochStep::RandaoMixesReset => rollover.reset_randao_mix(state),
-            _ => return Err(EpochProcessor::<Self>::unsupported(step)),
-        }
-        Ok(())
+        Phase0Epoch::run(processor, step)
     }
 
     fn process_block<E: PayloadEngine<P>>(
@@ -96,5 +92,57 @@ impl<P: Preset> Fork for BeaconState<P> {
             rules: "block processing",
         }
         .into())
+    }
+}
+
+/// The epoch steps phase0 defined that read no participation records.
+///
+/// Later forks hand these steps to this type until they rewrite them.
+/// The penalty constants come from the state's fork, through the fork's constant table.
+#[derive(Clone, Copy, Debug)]
+pub struct Phase0Epoch;
+
+impl Phase0Epoch {
+    /// Runs a step phase0 defined, or reports the step as one the fork must write.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state breaks an invariant, or the fork has no rule for the step here.
+    pub fn run<S: Fork>(
+        processor: &mut EpochProcessor<'_, S>,
+        step: EpochStep,
+    ) -> Result<(), StateError> {
+        let current = processor.current_epoch;
+        let rollover = Rollover::new(current);
+        match step {
+            EpochStep::RegistryUpdates => {
+                RegistryUpdates::new(&*processor.state.beacon, processor.config)
+                    .apply(&mut processor.registry())
+            }
+            EpochStep::Slashings => {
+                CorrelationPenalty::new(&*processor.state.beacon, processor.total_active_balance)?
+                    .apply(&mut processor.state)
+            }
+            EpochStep::Eth1DataReset => {
+                rollover.reset_eth1_data(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::EffectiveBalanceUpdates => {
+                Hysteresis::new::<S::Preset>().apply(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::SlashingsReset => {
+                rollover.reset_slashings(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::RandaoMixesReset => {
+                rollover.reset_randao_mix(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::HistoricalRootsUpdate => {
+                HistoricalRootsUpdate::new(current).apply(&mut *processor.state.beacon)
+            }
+            _ => Err(EpochProcessor::<S>::unsupported(step)),
+        }
     }
 }

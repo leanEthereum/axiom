@@ -1,9 +1,14 @@
 //! The vectors of Bellatrix, the merge with the execution layer.
 
+use axiom_state_transition::{
+    KnownVerdict,
+    altair::block::{FlaggedAttestation, ParticipantDeposit},
+    bellatrix::block::PayloadExecution,
+};
 use axiom_types::{ForkName, Preset, bellatrix};
 
 use super::{Altair, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, OperationInput};
 
 /// The Bellatrix fork.
 ///
@@ -57,6 +62,40 @@ impl SpecFork for Bellatrix {
             "PowBlock" => case.round_trip::<bellatrix::PowBlock>(),
             "SignedBeaconBlock" => case.round_trip::<bellatrix::SignedBeaconBlock<P>>(),
             _ => Altair::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, bellatrix::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input.apply_with::<bellatrix::Attestation<P>>(
+                "attestation",
+                |attestation, processor| processor.apply(&FlaggedAttestation(attestation)),
+            ),
+            "attester_slashing" => {
+                input.apply::<bellatrix::AttesterSlashing<P>>("attester_slashing")
+            }
+            "block_header" => input
+                .apply_with::<bellatrix::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "deposit" => input.apply_with::<bellatrix::Deposit>("deposit", |deposit, processor| {
+                processor.apply(&ParticipantDeposit(deposit))
+            }),
+            "execution_payload" => {
+                let engine = KnownVerdict(input.execution_verdict()?);
+                input.apply_with::<bellatrix::BeaconBlockBody<P>>("body", |body, processor| {
+                    processor.apply(&PayloadExecution::new(body, &engine))
+                })
+            }
+            "proposer_slashing" => input.apply::<bellatrix::ProposerSlashing>("proposer_slashing"),
+            "sync_aggregate" => input.apply::<bellatrix::SyncAggregate<P>>("sync_aggregate"),
+            "voluntary_exit" => input.apply::<bellatrix::SignedVoluntaryExit>("voluntary_exit"),
+            other => Err(Failure(format!(
+                "unsupported operation {other} in bellatrix"
+            ))),
         }
     }
 }

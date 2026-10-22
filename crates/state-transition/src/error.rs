@@ -298,6 +298,14 @@ pub enum BlockError {
         /// The slot of the including block.
         state_slot: Slot,
     },
+    /// An attestation is included after its inclusion window, which Deneb lifted.
+    #[error("attestation of slot {slot} is included too late at slot {state_slot}")]
+    AttestationTooLate {
+        /// The attestation's slot.
+        slot: Slot,
+        /// The slot of the including block.
+        state_slot: Slot,
+    },
     /// An attestation sets the committee index field, which Electra retired.
     #[error("attestation committee index {0} is not zero")]
     AttestationIndexNotZero(CommitteeIndex),

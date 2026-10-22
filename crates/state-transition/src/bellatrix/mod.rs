@@ -1,12 +1,14 @@
 //! Bellatrix: the merge with the execution layer.
 //!
-//! Its penalty constants come from the fork's constant table; its other rules are Altair's.
+//! It adds the execution payload, and raises the penalties through the fork's constant table.
+//! Its other rules are Altair's.
 
+pub mod block;
 mod upgrade;
 
 use axiom_types::{
     Preset, ValidatorIndex,
-    accessors::ForkState,
+    accessors::ExecutionHeaderState,
     bellatrix::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
@@ -14,8 +16,15 @@ use axiom_types::{
 use crate::{
     BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
     StateError,
-    altair::AltairEpoch,
-    phase0::{ExitQueue, Slashing, SlotRoots},
+    altair::{
+        AltairEpoch,
+        block::{FlaggedAttestation, ParticipantDeposit},
+    },
+    bellatrix::block::PayloadExecution,
+    phase0::{
+        ExitQueue, Slashing, SlotRoots,
+        block::{DepositQuota, RandaoReveal},
+    },
     sampling::WeightedSampler,
 };
 
@@ -75,16 +84,43 @@ impl<P: Preset> Fork for BeaconState<P> {
         AltairEpoch::run(processor, step)
     }
 
+    /// Runs Bellatrix's block processing.
+    ///
+    /// 1. The header, by phase0's rule.
+    /// 2. The execution payload, once the merge is done or in the block that makes it.
+    /// 3. The RANDAO reveal and the eth1 vote, by phase0's rules.
+    /// 4. The operations, by Altair's rules under Bellatrix's penalty constants.
+    /// 5. The sync aggregate, by Altair's rule.
+    ///
+    /// The payload comes before the reveal, since it carries the mix the previous block left.
+    /// See `process_block` in the Bellatrix beacon chain spec.
     fn process_block<E: PayloadEngine<P>>(
-        _processor: &mut BlockProcessor<'_, Self>,
-        _block: &BeaconBlock<P>,
-        _header: &BeaconBlockHeader,
-        _engine: &E,
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BeaconBlock<P>,
+        header: &BeaconBlockHeader,
+        engine: &E,
     ) -> Result<(), BlockError> {
-        Err(StateError::RulesMissing {
-            fork: Self::FORK,
-            rules: "block processing",
+        let body = &block.body;
+        processor.apply(header)?;
+        let payload = PayloadExecution::new(body, engine);
+        let latest = processor.state.beacon().latest_execution_payload_header();
+        if payload.is_execution_enabled(latest) {
+            processor.apply(&payload)?;
         }
-        .into())
+        processor.apply(&RandaoReveal(body.randao_reveal))?;
+        processor.apply(&body.eth1_data)?;
+
+        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
+        processor.apply_all(&body.proposer_slashings)?;
+        processor.apply_all(&body.attester_slashings)?;
+        for attestation in &body.attestations {
+            processor.apply(&FlaggedAttestation(attestation))?;
+        }
+        for deposit in &body.deposits {
+            processor.apply(&ParticipantDeposit(deposit))?;
+        }
+        processor.apply_all(&body.voluntary_exits)?;
+
+        processor.apply(&body.sync_aggregate)
     }
 }

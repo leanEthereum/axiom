@@ -1,7 +1,15 @@
-//! Epoch steps phase0 introduced and no later fork rewrote.
+//! Epoch steps phase0 introduced, which later forks reuse until they rewrite them.
 
+mod effective_balance;
+mod historical_roots;
 mod justification;
+mod registry_updates;
 mod rollover;
+mod slashings;
 
+pub use effective_balance::Hysteresis;
+pub use historical_roots::HistoricalRootsUpdate;
 pub use justification::Justification;
+pub use registry_updates::RegistryUpdates;
 pub use rollover::Rollover;
+pub use slashings::CorrelationPenalty;
