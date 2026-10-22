@@ -225,6 +225,7 @@ name = "axiom-hashsig"
 version = "0.1.0"
 dependencies = [
  "axiom-crypto",
+ "criterion",
  "proptest",
  "sha2",
  "thiserror",
