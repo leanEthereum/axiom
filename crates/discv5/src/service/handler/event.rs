@@ -29,6 +29,8 @@ pub(crate) enum HandlerEvent {
     Response {
         /// The responder.
         node: NodeId,
+        /// The endpoint the response came from, which is where the request went.
+        addr: SocketAddr,
         /// The request.
         request: Message,
         /// The response.

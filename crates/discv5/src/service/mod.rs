@@ -22,6 +22,7 @@ mod filter;
 mod handler;
 mod lookup;
 mod request;
+mod votes;
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -39,6 +40,7 @@ use handler::{Handler, HandlerConfig, HandlerEvent};
 pub use lookup::LookupId;
 use lookup::{Lookup, Step};
 use request::{MAX_NODES_MESSAGES, Purpose, RequestState};
+pub use votes::{AddressVotes, ConfirmedAddress, VoteConfig};
 
 use crate::{
     distance::LogDistance,
@@ -80,6 +82,8 @@ pub struct Service {
     next_refresh: Duration,
     /// Datagrams and events not yet collected.
     outputs: VecDeque<Output>,
+    /// What peers' PONGs say the local endpoint is.
+    votes: AddressVotes,
 }
 
 impl Service {
@@ -123,6 +127,7 @@ impl Service {
             next_request: rng.next_u64(),
             next_ping: config.ping_interval,
             next_refresh: config.refresh_interval,
+            votes: AddressVotes::new(config.address_votes),
             config,
             handler,
             rng,
@@ -298,9 +303,10 @@ impl Service {
                 } => self.on_request(now, node, addr, message),
                 HandlerEvent::Response {
                     node,
+                    addr,
                     request,
                     message,
-                } => self.on_response(now, node, &request, message),
+                } => self.on_response(now, node, addr, &request, message),
             }
         }
     }
@@ -441,7 +447,14 @@ impl Service {
     }
 
     /// Acts on a response to one of this node's requests.
-    fn on_response(&mut self, now: Duration, node: NodeId, request: &Message, message: Message) {
+    fn on_response(
+        &mut self,
+        now: Duration,
+        node: NodeId,
+        addr: SocketAddr,
+        request: &Message,
+        message: Message,
+    ) {
         let key = (node, message.request_id());
         let Some(state) = self.requests.get_mut(&key) else {
             self.handler.complete(node, message.request_id());
@@ -458,15 +471,23 @@ impl Service {
                 },
             ) => {
                 let purpose = state.purpose;
+                let observed = SocketAddr::new(recipient_ip, recipient_port);
                 self.close_request(node, request_id);
                 self.table.record_success(&node);
                 self.refresh_if_stale(now, node, enr_seq);
+                // Every PONG is a vote on the local endpoint, whatever the PING was for.
+                if let Some(confirmed) = self.votes.record(now, node, addr.ip(), observed) {
+                    self.emit(Event::ExternalAddress {
+                        address: confirmed.address,
+                        votes: confirmed.votes,
+                    });
+                }
                 if purpose == Purpose::Ping {
                     self.emit(Event::Pong {
                         node,
                         request_id,
                         enr_seq,
-                        observed: SocketAddr::new(recipient_ip, recipient_port),
+                        observed,
                     });
                 }
             }
@@ -726,7 +747,10 @@ impl Service {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, net::Ipv4Addr};
+    use std::{
+        collections::VecDeque,
+        net::{Ipv4Addr, SocketAddrV4},
+    };
 
     use super::*;
     use crate::table::TableConfig;
@@ -750,11 +774,16 @@ mod tests {
     impl Wire {
         /// Nodes 1 to n on 10.0.i.1:9000, with a given key seed per node.
         fn new(count: u8) -> Self {
+            Self::with_config(count, &Config::default())
+        }
+
+        /// Nodes 1 to n on 10.0.i.1:9000, all under one configuration.
+        fn with_config(count: u8, config: &Config) -> Self {
             // Node i signs with key [i; 32] and seeds its generator with [i; 32].
             let nodes = (1..=count)
                 .map(|i| {
                     let enr = record(i, 1);
-                    Service::new(key(i), enr, Config::default(), [i; 32]).expect("key matches")
+                    Service::new(key(i), enr, config.clone(), [i; 32]).expect("key matches")
                 })
                 .collect();
             Self {
@@ -1014,6 +1043,52 @@ mod tests {
             .get(&alice_v1.node_id())
             .map(|entry| entry.enr.seq());
         assert_eq!(held, Some(2));
+    }
+
+    #[test]
+    fn liveness_pongs_confirm_the_external_address() {
+        // Threshold: 2 networks; each node lives alone in its private host, so each counts.
+        let config = Config {
+            address_votes: VoteConfig {
+                threshold: 2,
+                ..VoteConfig::default()
+            },
+            ..Config::default()
+        };
+        let mut wire = Wire::with_config(3, &config);
+        let (bob, carol) = (wire.enr(1), wire.enr(2));
+        wire.nodes[0].add_enr(Duration::ZERO, bob);
+        wire.nodes[0].add_enr(Duration::ZERO, carol);
+        // Timing: one liveness PING every 10 s; no application PING is ever sent.
+        let interval = Config::default().ping_interval;
+        let confirmed = |events: &[Event]| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::ExternalAddress { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for tick in 1..=20 {
+            wire.nodes[0].handle_timeout(interval * tick);
+            wire.settle(interval * tick);
+            if !confirmed(&wire.events[0]).is_empty() {
+                break;
+            }
+        }
+        // Bob and carol both saw alice at 10.0.1.1:9000, so that endpoint is confirmed once.
+        assert_eq!(
+            confirmed(&wire.events[0]),
+            [Event::ExternalAddress {
+                address: SocketAddrV4::new(Ipv4Addr::new(10, 0, 1, 1), 9000),
+                votes: 2,
+            }]
+        );
+        // Liveness answers stay internal: no application PONG event surfaced.
+        assert!(
+            !wire.events[0]
+                .iter()
+                .any(|event| matches!(event, Event::Pong { .. }))
+        );
     }
 
     #[test]

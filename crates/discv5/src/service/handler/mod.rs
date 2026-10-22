@@ -330,6 +330,7 @@ impl Handler {
         let request = self.in_flight.get(&(node, message.request_id()))?;
         (request.addr == from).then(|| HandlerEvent::Response {
             node,
+            addr: from,
             request: request.message.clone(),
             message,
         })
