@@ -49,10 +49,10 @@ impl<P: Preset> BlockFork for BeaconState<P> {
                 let stand_in = Assembly::<P>::stand_in(trial, &header)?;
                 let draft = assembly.block(Root::ZERO, &stand_in, commitments)?;
                 let (_, mut post) = trial.apply(&combine(&draft))?;
-                let state_root = BuilderHeader::<Self>(header.clone()).commit(&mut post);
-                let full = assembly.block(state_root, &stand_in, commitments)?;
-                let mut blinded = BlindedBeaconBlock::from(full);
-                blinded.body.execution_payload_header = header;
+                let mut blinded = BlindedBeaconBlock::from(draft);
+                blinded.body.execution_payload_header = header.clone();
+                let body_root = blinded.body.hash_tree_root();
+                blinded.state_root = BuilderHeader::<Self>(header).commit(&mut post, body_root);
                 let blinded = combined::BlindedBeaconBlock::Deneb(blinded);
                 return Ok(Built {
                     block: ProducedBlock::Blinded(blinded),

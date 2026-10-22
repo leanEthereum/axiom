@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, mem};
 
 use axiom_block_production::{
     BlockProducer, ExecutionChoice, GloasBid, LocalBuild, LocalPayload, ParentPayload,
-    ProducedBlock, ProposalRequest, RandaoCheck,
+    PayloadRequest, ProducedBlock, ProposalRequest, RandaoCheck,
 };
 use axiom_bls::SecretKey;
 use axiom_das::BlockColumns;
@@ -16,11 +16,11 @@ use axiom_ef_tests::{Case, Vectors, chain_builder::PYSPEC_GENESIS};
 use axiom_gossip::BlockBlobs;
 use axiom_kzg::Kzg;
 use axiom_operation_pool::{Aggregate, CommitteeAggregate, OperationPool, SyncPool};
-use axiom_ssz::{List, ProgressiveList, Ssz, U256};
+use axiom_ssz::{ByteList, List, ProgressiveList, Ssz, U256};
 use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{
-    BlsSignature, Bytes32, ChainConfig, CommitteeIndex, Epoch, ForkName, Hash32, KzgCommitment,
-    KzgProof, Minimal, Preset, Root, Slot, ValidatorIndex,
+    BlsPubkey, BlsSignature, Bytes32, ChainConfig, CommitteeIndex, Epoch, ForkName, Hash32,
+    KzgCommitment, KzgProof, Minimal, Preset, Root, Slot, ValidatorIndex,
     accessors::CoreState,
     altair::SyncCommitteeMessage,
     bellatrix, capella, combined,
@@ -69,7 +69,7 @@ fn pyspec_genesis() -> Option<phase0::BeaconState<Minimal>> {
 fn key(index: ValidatorIndex) -> SecretKey {
     let mut bytes = [0; 32];
     bytes[24..].copy_from_slice(&(index.0 + 1).to_be_bytes());
-    SecretKey::from_bytes(&bytes).unwrap()
+    SecretKey::from_bytes(&bytes).expect("small nonzero scalars are valid keys")
 }
 
 /// A validator's signature over a root.
@@ -78,7 +78,7 @@ fn sign(index: ValidatorIndex, root: Root) -> BlsSignature {
 }
 
 /// The point at infinity: the commitment and every proof of the zero blob.
-fn infinity_point() -> [u8; 48] {
+const fn infinity_point() -> [u8; 48] {
     let mut point = [0; 48];
     point[0] = 0xc0;
     point
@@ -98,6 +98,8 @@ struct Chain {
     payload_hash: Hash32,
     /// Validators and committees that voted for the latest block, whose votes wait in the pool.
     voters: (usize, usize),
+    /// Whether payloads from Bellatrix to Fulu come from a builder, revealed after signing.
+    builder: bool,
 }
 
 /// What one produced block carried.
@@ -117,6 +119,8 @@ struct Produced {
     attester_slashings: usize,
     /// Blob sidecars or columns built from the block's blobs.
     sidecars: usize,
+    /// Whether the block was produced blinded.
+    blinded: bool,
 }
 
 impl Chain {
@@ -128,6 +132,7 @@ impl Chain {
             blobs,
             payload_hash: TERMINAL,
             voters: (0, 0),
+            builder: false,
         }
     }
 
@@ -143,7 +148,9 @@ impl Chain {
     /// The state at a slot, without a block.
     fn advanced(&self, slot: Slot) -> State<Minimal> {
         let mut state = self.state.clone();
-        state.process_slots(&self.config, slot).unwrap();
+        state
+            .process_slots(&self.config, slot)
+            .expect("the chain advances through empty slots");
         state
     }
 
@@ -172,7 +179,10 @@ impl Chain {
                 validator_index: validator,
                 signature: sign(validator, signing_root),
             };
-            self.pool.sync_mut().insert_message(&message, &seats).unwrap();
+            self.pool
+                .sync_mut()
+                .insert_message(&message, &seats)
+                .expect("a seat message joins the pool");
         }
     }
 
@@ -191,19 +201,31 @@ impl Chain {
         let target_root = if slot == epoch.start_slot::<Minimal>() {
             head
         } else {
-            beacon.block_root(epoch).unwrap()
+            beacon
+                .block_root(epoch)
+                .expect("the epoch start is in the state history")
         };
         let domain = beacon.domain(DOMAIN_BEACON_ATTESTER, epoch);
         let electra_style = self.state.fork_name() >= ForkName::Electra;
-        let committees = self.state.committees(epoch).unwrap();
+        let committees = self
+            .state
+            .committees(epoch)
+            .expect("the head epoch committees are cached");
         let mut voters = 0;
         for index in 0..committees.committees_per_slot() {
             let committee_index = CommitteeIndex(index);
-            let members = committees.committee(slot, committee_index).unwrap().to_vec();
+            let members = committees
+                .committee(slot, committee_index)
+                .expect("every committee of the slot exists")
+                .to_vec();
             let data = AttestationData {
                 slot,
                 // From Electra the data names no committee; in Gloas zero signals the slot's block.
-                index: if electra_style { CommitteeIndex(0) } else { committee_index },
+                index: if electra_style {
+                    CommitteeIndex(0)
+                } else {
+                    committee_index
+                },
                 beacon_block_root: head,
                 source,
                 target: Checkpoint {
@@ -219,9 +241,13 @@ impl Chain {
                     data: data.clone(),
                     signature: sign(*member, signing_root),
                 };
-                let vote = CommitteeAggregate::single(&single, &members).unwrap();
+                let vote = CommitteeAggregate::single(&single, &members)
+                    .expect("the attester sits in its committee");
                 assert_eq!(vote.aggregate.bits.ones().collect::<Vec<_>>(), [seat]);
-                self.pool.attestations_mut().insert(vote).unwrap();
+                self.pool
+                    .attestations_mut()
+                    .insert(vote)
+                    .expect("a fresh vote joins the pool");
                 voters += 1;
             }
         }
@@ -229,23 +255,53 @@ impl Chain {
     }
 
     /// The payload the stand-in engine builds for a slot, as the producer asks for it.
-    fn execution(&self, producer: &BlockProducer<'_, Minimal>, slot: Slot) -> ExecutionChoice<Minimal> {
+    fn execution(
+        &self,
+        producer: &BlockProducer<'_, Minimal>,
+        slot: Slot,
+    ) -> (
+        ExecutionChoice<Minimal>,
+        Option<combined::ExecutionPayload<Minimal>>,
+    ) {
         let fork = self.config.fork_at(slot.epoch::<Minimal>());
         if fork < ForkName::Bellatrix {
-            return ExecutionChoice::PreMerge;
+            return (ExecutionChoice::PreMerge, None);
         }
         let parent = if fork == ForkName::Gloas {
             ParentPayload::Full(gloas::ExecutionRequests::default())
         } else {
             ParentPayload::Empty
         };
-        let request = producer.payload_request(&self.state, slot, &parent).unwrap();
+        let request = producer
+            .payload_request(&self.state, slot, &parent)
+            .expect("the payload request is computable");
+        let build = LocalBuild {
+            payload: self.payload(fork, &request),
+            value: U256::from_u64(1_000),
+        };
+        if fork == ForkName::Gloas {
+            let choice = ExecutionChoice::Gloas {
+                parent,
+                bid: GloasBid::SelfBuild(Box::new(build)),
+            };
+            return (choice, None);
+        }
+        if !self.builder {
+            return (ExecutionChoice::Local(build), None);
+        }
+        let (bid, payload) = builder_bid(build);
+        (ExecutionChoice::Builder(bid), Some(payload))
+    }
+
+    /// The stand-in engine's payload of a fork, on the latest payload.
+    fn payload(&self, fork: ForkName, request: &PayloadRequest) -> LocalPayload<Minimal> {
+        let slot = request.slot;
         let parent_hash = self.payload_hash;
         let block_hash = Hash32(Root::sha256(&slot.0.to_le_bytes()).0);
         let blobs = self.blobs;
         let commitments = vec![KzgCommitment(infinity_point()); blobs];
         let blob_list = vec![Blob::<Minimal>::default(); blobs];
-        let payload = match fork {
+        match fork {
             ForkName::Bellatrix => LocalPayload::Bellatrix(bellatrix::ExecutionPayload {
                 parent_hash,
                 prev_randao: request.prev_randao,
@@ -253,6 +309,7 @@ impl Chain {
                 gas_limit: GAS_LIMIT,
                 timestamp: request.timestamp,
                 block_hash,
+                transactions: transactions(slot),
                 ..bellatrix::ExecutionPayload::default()
             }),
             ForkName::Capella => LocalPayload::Capella(capella::ExecutionPayload {
@@ -262,7 +319,9 @@ impl Chain {
                 gas_limit: GAS_LIMIT,
                 timestamp: request.timestamp,
                 block_hash,
-                withdrawals: List::try_from(request.withdrawals).unwrap(),
+                transactions: transactions(slot),
+                withdrawals: List::try_from(request.withdrawals.clone())
+                    .expect("the list fits its bound"),
                 ..capella::ExecutionPayload::default()
             }),
             ForkName::Gloas => LocalPayload::Gloas {
@@ -273,7 +332,7 @@ impl Chain {
                     gas_limit: GAS_LIMIT,
                     timestamp: request.timestamp,
                     block_hash,
-                    withdrawals: ProgressiveList::from(request.withdrawals),
+                    withdrawals: ProgressiveList::from(request.withdrawals.clone()),
                     slot_number: slot.0,
                     ..gloas::ExecutionPayload::default()
                 },
@@ -288,13 +347,17 @@ impl Chain {
                     gas_limit: GAS_LIMIT,
                     timestamp: request.timestamp,
                     block_hash,
-                    withdrawals: List::try_from(request.withdrawals).unwrap(),
+                    transactions: transactions(slot),
+                    withdrawals: List::try_from(request.withdrawals.clone())
+                        .expect("the list fits its bound"),
                     ..deneb::ExecutionPayload::default()
                 };
                 let deneb_blobs = deneb::BlobsBundle {
-                    commitments: List::try_from(commitments.clone()).unwrap(),
-                    proofs: List::try_from(vec![KzgProof(infinity_point()); blobs]).unwrap(),
-                    blobs: List::try_from(blob_list.clone()).unwrap(),
+                    commitments: List::try_from(commitments.clone())
+                        .expect("the list fits its bound"),
+                    proofs: List::try_from(vec![KzgProof(infinity_point()); blobs])
+                        .expect("the list fits its bound"),
+                    blobs: List::try_from(blob_list.clone()).expect("the list fits its bound"),
                 };
                 match fork {
                     ForkName::Deneb => LocalPayload::Deneb {
@@ -313,18 +376,6 @@ impl Chain {
                     },
                 }
             }
-        };
-        let build = LocalBuild {
-            payload,
-            value: U256::from_u64(1_000),
-        };
-        if fork == ForkName::Gloas {
-            ExecutionChoice::Gloas {
-                parent,
-                bid: GloasBid::SelfBuild(Box::new(build)),
-            }
-        } else {
-            ExecutionChoice::Local(build)
         }
     }
 
@@ -332,7 +383,9 @@ impl Chain {
     fn propose(&mut self, slot: Slot) -> Option<Produced> {
         self.sign_sync(slot);
         let advanced = self.advanced(slot);
-        let proposer = advanced.beacon_proposer_index().unwrap();
+        let proposer = advanced
+            .beacon_proposer_index()
+            .expect("the slot has a proposer");
         // A slashed proposer cannot propose, so its slot stays empty.
         if advanced.beacon().validators()[proposer.as_usize()].slashed {
             return None;
@@ -348,47 +401,24 @@ impl Chain {
             graffiti: Bytes32([0x61; 32]),
             eth1_chain: Vec::new(),
             deposits: Vec::new(),
-            execution: self.execution(&producer, slot),
+            execution: ExecutionChoice::PreMerge,
         };
-        let proposal = producer.produce(&self.state, request).unwrap();
+        let (execution, revealed) = self.execution(&producer, slot);
+        let request = ProposalRequest {
+            execution,
+            ..request
+        };
+        let proposal = producer
+            .produce(&self.state, request)
+            .expect("the producer builds the block");
         let produced = proposal.block;
         let fork = produced.fork_name();
-        let block = produced.block().unwrap();
-        assert_eq!(block.slot(), slot);
-        assert_eq!(block.proposer_index(), proposer);
+        assert_eq!(produced.slot(), slot);
+        assert_eq!(produced.is_blinded(), revealed.is_some());
 
-        // The validator signs the block root in the proposer domain.
-        let domain = advanced.beacon().domain(DOMAIN_BEACON_PROPOSER, epoch);
-        let signing_root = SigningData {
-            object_root: block.hash_tree_root(),
-            domain,
-        }
-        .hash_tree_root();
-        let signature = sign(proposer, signing_root);
-        let signed = combined::SignedBeaconBlock::from_parts(block.clone(), signature);
-        self.state
-            .state_transition(&self.config, &signed, Verification::Verify, &KnownVerdict(true))
-            .unwrap();
-
-        let sidecars = self.sidecars(&produced, &signed);
-        if let ProducedBlock::GloasContents(contents) = &produced {
-            let domain = advanced.beacon().domain(DOMAIN_BEACON_BUILDER, epoch);
-            let envelope = gloas::SignedExecutionPayloadEnvelope {
-                signature: sign(
-                    proposer,
-                    SigningData::signing_root(&contents.execution_payload_envelope, domain),
-                ),
-                message: contents.execution_payload_envelope.clone(),
-            };
-            self.state
-                .verify_execution_payload_envelope(
-                    &self.config,
-                    &envelope,
-                    Verification::Verify,
-                    &KnownVerdict(true),
-                )
-                .unwrap();
-        }
+        let signed = self.sign_and_apply(&advanced, proposer, &produced, revealed);
+        let block = signed.message();
+        let sidecars = Self::sidecars(&produced, &signed);
         let hashes = block.execution_hashes();
         if hashes.block_hash != Hash32::ZERO {
             self.payload_hash = hashes.block_hash;
@@ -418,12 +448,78 @@ impl Chain {
                 .map(|aggregate| aggregate.sync_committee_bits.count_ones()),
             attester_slashings: block.conflicting_votes().len(),
             sidecars,
+            blinded: produced.is_blinded(),
         })
+    }
+
+    /// Signs a produced block as its proposer, then applies it with every signature checked.
+    ///
+    /// A blinded block is signed first, then unblinded with the payload its builder reveals.
+    fn sign_and_apply(
+        &mut self,
+        advanced: &State<Minimal>,
+        proposer: ValidatorIndex,
+        produced: &ProducedBlock<Minimal>,
+        revealed: Option<combined::ExecutionPayload<Minimal>>,
+    ) -> combined::SignedBeaconBlock<Minimal> {
+        let epoch = produced.slot().epoch::<Minimal>();
+        // The validator signs the block root in the proposer domain, blinded or not.
+        let domain = advanced.beacon().domain(DOMAIN_BEACON_PROPOSER, epoch);
+        let signing_root = SigningData {
+            object_root: produced.block_root(),
+            domain,
+        }
+        .hash_tree_root();
+        let signature = sign(proposer, signing_root);
+        let signed = match (produced, revealed) {
+            // The builder reveals the payload; the full block keeps the signed root.
+            (ProducedBlock::Blinded(blinded), Some(payload)) => {
+                let signed =
+                    combined::SignedBlindedBeaconBlock::from_parts(blinded.clone(), signature);
+                let full = signed
+                    .unblind(payload)
+                    .expect("the revealed payload matches the header");
+                assert_eq!(full.block_root(), produced.block_root());
+                full
+            }
+            _ => combined::SignedBeaconBlock::from_parts(
+                produced.block().expect("a full block"),
+                signature,
+            ),
+        };
+        let block = signed.message();
+        assert_eq!(block.proposer_index(), proposer);
+        self.state
+            .state_transition(
+                &self.config,
+                &signed,
+                Verification::Verify,
+                &KnownVerdict(true),
+            )
+            .expect("the produced block is valid with every signature");
+        if let ProducedBlock::GloasContents(contents) = produced {
+            let domain = advanced.beacon().domain(DOMAIN_BEACON_BUILDER, epoch);
+            let envelope = gloas::SignedExecutionPayloadEnvelope {
+                signature: sign(
+                    proposer,
+                    SigningData::signing_root(&contents.execution_payload_envelope, domain),
+                ),
+                message: contents.execution_payload_envelope.clone(),
+            };
+            self.state
+                .verify_execution_payload_envelope(
+                    &self.config,
+                    &envelope,
+                    Verification::Verify,
+                    &KnownVerdict(true),
+                )
+                .expect("the envelope is valid with every signature");
+        }
+        signed
     }
 
     /// The blob sidecars or columns a published block's blobs make, proofs checked.
     fn sidecars(
-        &self,
         produced: &ProducedBlock<Minimal>,
         signed: &combined::SignedBeaconBlock<Minimal>,
     ) -> usize {
@@ -432,19 +528,19 @@ impl Chain {
             (ProducedBlock::Deneb(contents), combined::SignedBeaconBlock::Deneb(block)) => {
                 BlockBlobs::deneb(block)
                     .sidecars(&contents.blobs, &contents.kzg_proofs, kzg)
-                    .unwrap()
+                    .expect("the zero blob proofs verify")
                     .len()
             }
             (ProducedBlock::Electra(contents), combined::SignedBeaconBlock::Electra(block)) => {
                 BlockBlobs::electra(block)
                     .sidecars(&contents.blobs, &contents.kzg_proofs, kzg)
-                    .unwrap()
+                    .expect("the zero blob proofs verify")
                     .len()
             }
             (ProducedBlock::Fulu(contents), combined::SignedBeaconBlock::Fulu(block)) => {
                 BlockColumns::new(block)
                     .sidecars(&contents.blobs, &contents.kzg_proofs, kzg)
-                    .unwrap()
+                    .expect("the zero blob proofs verify")
                     .len()
             }
             _ => 0,
@@ -457,22 +553,32 @@ fn sync_seats(state: &State<Minimal>, validator: ValidatorIndex) -> Option<Vec<u
     match state.beacon() {
         combined::BeaconState::Phase0(_) => None,
         combined::BeaconState::Altair(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
-        combined::BeaconState::Bellatrix(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
-        combined::BeaconState::Capella(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
+        combined::BeaconState::Bellatrix(beacon) => {
+            SyncPool::<Minimal>::seats(beacon, validator).ok()
+        }
+        combined::BeaconState::Capella(beacon) => {
+            SyncPool::<Minimal>::seats(beacon, validator).ok()
+        }
         combined::BeaconState::Deneb(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
-        combined::BeaconState::Electra(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
+        combined::BeaconState::Electra(beacon) => {
+            SyncPool::<Minimal>::seats(beacon, validator).ok()
+        }
         combined::BeaconState::Fulu(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
         combined::BeaconState::Gloas(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
     }
 }
 
 /// A Fulu blobs bundle of zero blobs, with every cell proof at infinity.
-fn fulu_bundle(commitments: &[KzgCommitment], blobs: &[Blob<Minimal>]) -> fulu::BlobsBundle<Minimal> {
+fn fulu_bundle(
+    commitments: &[KzgCommitment],
+    blobs: &[Blob<Minimal>],
+) -> fulu::BlobsBundle<Minimal> {
     let cells = Minimal::CELLS_PER_EXT_BLOB as usize;
     fulu::BlobsBundle {
-        commitments: List::try_from(commitments.to_vec()).unwrap(),
-        proofs: List::try_from(vec![KzgProof(infinity_point()); blobs.len() * cells]).unwrap(),
-        blobs: List::try_from(blobs.to_vec()).unwrap(),
+        commitments: List::try_from(commitments.to_vec()).expect("the list fits its bound"),
+        proofs: List::try_from(vec![KzgProof(infinity_point()); blobs.len() * cells])
+            .expect("the list fits its bound"),
+        blobs: List::try_from(blobs.to_vec()).expect("the list fits its bound"),
     }
 }
 
@@ -518,7 +624,7 @@ fn double_vote(state: &State<Minimal>, validators: &[ValidatorIndex]) -> Conflic
         IndexedVote {
             indices: validators.to_vec(),
             data,
-            signature: Aggregate::sum(&signatures).unwrap(),
+            signature: Aggregate::sum(&signatures).expect("signatures are points"),
         }
     };
     ConflictingVotes {
@@ -577,14 +683,20 @@ fn produced_blocks_of_every_fork_pass_the_transition_with_every_signature_checke
             // Slot 40 opens Electra: of Deneb's slot 39 votes, only committee 0's data has index 0.
             let (attesters, committees) = match slot {
                 40 => (4, vec![1]),
-                _ if fork >= ForkName::Electra => (block.parent_voters.0, vec![block.parent_voters.1]),
+                _ if fork >= ForkName::Electra => {
+                    (block.parent_voters.0, vec![block.parent_voters.1])
+                }
                 _ => (block.parent_voters.0, vec![1; block.parent_voters.1]),
             };
             assert_eq!(block.attesters, attesters, "slot {slot}");
             assert_eq!(block.committees, committees, "slot {slot}");
         }
         // Every block from Altair on carries all 32 sync committee signatures.
-        let signers = if fork == ForkName::Phase0 { None } else { Some(32) };
+        let signers = if fork == ForkName::Phase0 {
+            None
+        } else {
+            Some(32)
+        };
         assert_eq!(block.sync_signers, signers, "slot {slot}");
         // Deneb and Electra make one blob sidecar, Fulu all 128 columns, others none.
         let sidecars = match fork {
@@ -599,9 +711,15 @@ fn produced_blocks_of_every_fork_pass_the_transition_with_every_signature_checke
         .iter()
         .filter(|(_, block)| block.fork >= ForkName::Electra && block.committees == [2])
         .count();
-    assert!(joined >= 30, "{joined} Electra blocks joined two committees");
+    assert!(
+        joined >= 30,
+        "{joined} Electra blocks joined two committees"
+    );
     // The attester slashing went in exactly once.
-    let attester_slashings: usize = produced.iter().map(|(_, block)| block.attester_slashings).sum();
+    let attester_slashings: usize = produced
+        .iter()
+        .map(|(_, block)| block.attester_slashings)
+        .sum();
     assert_eq!(attester_slashings, 1);
 
     // Full participation through the pools justifies and finalizes as fast as the protocol allows.
@@ -609,4 +727,128 @@ fn produced_blocks_of_every_fork_pass_the_transition_with_every_signature_checke
     let state = chain.state.beacon();
     assert_eq!(state.current_justified_checkpoint().epoch, Epoch(8));
     assert_eq!(state.finalized_checkpoint().epoch, Epoch(7));
+}
+
+/// A builder's bid on a payload, unsigned, and the payload it reveals.
+fn builder_bid(
+    build: LocalBuild<Minimal>,
+) -> (
+    combined::SignedBuilderBid<Minimal>,
+    combined::ExecutionPayload<Minimal>,
+) {
+    let value = build.value;
+    let pubkey = BlsPubkey::default();
+    let signature = BlsSignature::default();
+    match build.payload {
+        LocalPayload::Bellatrix(payload) => {
+            let message = bellatrix::BuilderBid {
+                header: (&payload).into(),
+                value,
+                pubkey,
+            };
+            (
+                combined::SignedBuilderBid::Bellatrix(bellatrix::SignedBuilderBid {
+                    message,
+                    signature,
+                }),
+                combined::ExecutionPayload::Bellatrix(payload),
+            )
+        }
+        LocalPayload::Capella(payload) => {
+            let message = capella::BuilderBid {
+                header: (&payload).into(),
+                value,
+                pubkey,
+            };
+            (
+                combined::SignedBuilderBid::Capella(capella::SignedBuilderBid {
+                    message,
+                    signature,
+                }),
+                combined::ExecutionPayload::Capella(payload),
+            )
+        }
+        LocalPayload::Deneb { payload, blobs } => {
+            let message = deneb::BuilderBid {
+                header: (&payload).into(),
+                blob_kzg_commitments: blobs.commitments,
+                value,
+                pubkey,
+            };
+            (
+                combined::SignedBuilderBid::Deneb(deneb::SignedBuilderBid { message, signature }),
+                combined::ExecutionPayload::Deneb(payload),
+            )
+        }
+        LocalPayload::Electra {
+            payload,
+            blobs,
+            requests,
+        } => {
+            let message = electra::BuilderBid {
+                header: (&payload).into(),
+                blob_kzg_commitments: blobs.commitments,
+                execution_requests: requests,
+                value,
+                pubkey,
+            };
+            (
+                combined::SignedBuilderBid::Electra(electra::SignedBuilderBid {
+                    message,
+                    signature,
+                }),
+                combined::ExecutionPayload::Electra(payload),
+            )
+        }
+        LocalPayload::Fulu {
+            payload,
+            blobs,
+            requests,
+        } => {
+            let message = electra::BuilderBid {
+                header: (&payload).into(),
+                blob_kzg_commitments: blobs.commitments,
+                execution_requests: requests,
+                value,
+                pubkey,
+            };
+            (
+                combined::SignedBuilderBid::Fulu(electra::SignedBuilderBid { message, signature }),
+                combined::ExecutionPayload::Fulu(payload),
+            )
+        }
+        LocalPayload::Gloas { .. } => unreachable!("Gloas bids come through the protocol"),
+    }
+}
+
+#[test]
+fn blinded_blocks_on_builder_payloads_unblind_into_valid_blocks() {
+    let Some(genesis) = pyspec_genesis() else {
+        return;
+    };
+    // Fixture state: the same chain, with every payload from Bellatrix to Fulu from a builder.
+    // A blinded block carries no blob, so the blocks carry none.
+    let mut chain = Chain::new(genesis, 0);
+    chain.builder = true;
+    let mut blinded = Vec::new();
+    for slot in 1_u64..56 {
+        let block = chain.propose(Slot(slot)).unwrap();
+        blinded.push((block.fork, block.blinded));
+    }
+
+    // Slots 16 to 55 are Bellatrix to Fulu, all blinded; each unblinded block passed the transition.
+    let expected: Vec<(ForkName, bool)> = (1_u64..56)
+        .map(|slot| {
+            let fork = ForkName::ALL[(slot / 8) as usize];
+            (fork, slot >= 16)
+        })
+        .collect();
+    assert_eq!(blinded, expected);
+}
+
+/// One stand-in transaction naming the slot, so payloads differ from their empty stand-ins.
+fn transactions(slot: Slot) -> bellatrix::Transactions<Minimal> {
+    let transaction =
+        ByteList::try_from(slot.0.to_le_bytes().to_vec()).expect("eight bytes fit a transaction");
+    List::try_from(vec![transaction]).expect("the list fits its bound")
 }

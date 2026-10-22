@@ -78,16 +78,22 @@ pub trait BlockFork: PoolFork {
 /// A builder's header, revealed into the post-state a stand-in payload produced.
 ///
 /// The trial runs a stand-in payload with the header's fields but no transactions.
-/// Payload processing only records the payload's header, so the header is all that differs.
-/// See `process_execution_payload` in the Bellatrix beacon chain spec.
+/// The state records two things that differ from the true block's:
+///
+/// - the payload's header, which payload processing stores;
+/// - the body's root, which the block header stores.
+///
+/// A blinded body has the root of the full body, since a header has its payload's root.
+/// See `process_execution_payload` and `process_block_header` in the Bellatrix spec.
 #[derive(Clone, Debug)]
 struct BuilderHeader<S: ExecutionHeaderState>(S::ExecutionPayloadHeader);
 
 impl<S: ExecutionHeaderState + ForkState> BuilderHeader<S> {
-    /// Writes the header into the post-state, and returns the state's new root.
-    fn commit(self, post: &mut State<S::Preset>) -> Root {
+    /// Writes the header and the true body root into the post-state, and returns its new root.
+    fn commit(self, post: &mut State<S::Preset>, body_root: Root) -> Root {
         if let Some(state) = S::from_any_mut(post.beacon_mut()) {
             *state.latest_execution_payload_header_mut() = self.0;
+            state.latest_block_header_mut().body_root = body_root;
         }
         post.hash_tree_root()
     }

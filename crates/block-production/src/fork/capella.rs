@@ -44,11 +44,12 @@ impl<P: Preset> BlockFork for BeaconState<P> {
             ExecutionChoice::Builder(combined::SignedBuilderBid::Capella(bid)) => {
                 let header = bid.message.header;
                 let stand_in = Assembly::<P>::stand_in(trial, &header)?;
-                let (_, mut post) =
-                    trial.apply(&combine(&assembly.block(Root::ZERO, &stand_in)?))?;
-                let state_root = BuilderHeader::<Self>(header.clone()).commit(&mut post);
-                let mut blinded = BlindedBeaconBlock::from(assembly.block(state_root, &stand_in)?);
-                blinded.body.execution_payload_header = header;
+                let draft = assembly.block(Root::ZERO, &stand_in)?;
+                let (_, mut post) = trial.apply(&combine(&draft))?;
+                let mut blinded = BlindedBeaconBlock::from(draft);
+                blinded.body.execution_payload_header = header.clone();
+                let body_root = blinded.body.hash_tree_root();
+                blinded.state_root = BuilderHeader::<Self>(header).commit(&mut post, body_root);
                 let blinded = combined::BlindedBeaconBlock::Capella(blinded);
                 return Ok(Built {
                     block: ProducedBlock::Blinded(blinded),

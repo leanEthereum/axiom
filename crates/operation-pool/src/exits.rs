@@ -134,8 +134,10 @@ mod tests {
 
     /// A state at epoch 3 with two active validators: 0 with BLS credentials, 1 with 0x01 ones.
     fn state() -> phase0::BeaconState<Minimal> {
-        let mut state = phase0::BeaconState::<Minimal>::default();
-        state.slot = Epoch(3).start_slot::<Minimal>();
+        let mut state = phase0::BeaconState::<Minimal> {
+            slot: Epoch(3).start_slot::<Minimal>(),
+            ..phase0::BeaconState::default()
+        };
         for prefix in [0x00, 0x01] {
             let mut credentials = [0; 32];
             credentials[0] = prefix;

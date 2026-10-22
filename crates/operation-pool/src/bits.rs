@@ -242,7 +242,7 @@ mod tests {
                 .map(|(index, _)| index)
                 .collect();
             prop_assert_eq!(a.ones_outside(&b).collect::<Vec<_>>(), outside);
-            let mut union = a.clone();
+            let mut union = a;
             union.union_with(&b);
             let expected: Vec<bool> = pairs().map(|(x, y)| x | y).collect();
             prop_assert_eq!(union.iter().collect::<Vec<_>>(), expected);

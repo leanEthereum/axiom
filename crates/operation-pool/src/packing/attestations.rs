@@ -492,15 +492,25 @@ mod tests {
     }
 
     /// Every vote earns all three flags.
-    fn all_flags(_: &AttestationData) -> Option<Eligibility> {
-        let flags = [
+    fn every_flag() -> ParticipationFlags {
+        [
             TIMELY_SOURCE_FLAG_INDEX,
             TIMELY_TARGET_FLAG_INDEX,
             TIMELY_HEAD_FLAG_INDEX,
         ]
         .into_iter()
-        .fold(ParticipationFlags::default(), ParticipationFlags::with);
-        Some(Eligibility { flags })
+        .fold(ParticipationFlags::default(), ParticipationFlags::with)
+    }
+
+    /// The judgement of a fork that credits every vote with all three flags.
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the packer takes a judgement that may refuse"
+    )]
+    fn all_flags(_: &AttestationData) -> Option<Eligibility> {
+        Some(Eligibility {
+            flags: every_flag(),
+        })
     }
 
     /// Electra-style data of a slot of epoch 2, voting for a head marked by a byte.
@@ -608,7 +618,7 @@ mod tests {
     fn credits_already_held_pay_nothing() {
         // Fixture state: validator 0, seat 0 of committee 0 at slot 16, holds all three flags.
         let mut state = state();
-        state.current_epoch_participation[0] = all_flags(&data(16, 0)).unwrap().flags;
+        state.current_epoch_participation[0] = every_flag();
         let ledger = ledger(&state);
         let mut pool = AttestationPool::default();
         pool.insert(vote(data(16, 7), 0, &[0])).unwrap();
