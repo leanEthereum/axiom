@@ -220,7 +220,7 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, exit: &SignedVoluntaryExit| {
                         validator.voluntary_exit::<F>(exit, now)
                     },
-                    |_| None,
+                    |exit| Some(Self::job(move |chain| chain.on_voluntary_exit(exit))),
                 )
                 .await
             }
@@ -364,7 +364,7 @@ impl<P: Preset> GossipHandler<P> {
                 self.check(
                     data,
                     |validator, slashing: &ProposerSlashing| validator.proposer_slashing(slashing),
-                    |_| None,
+                    |slashing| Some(Self::job(move |chain| chain.on_proposer_slashing(slashing))),
                 )
                 .await
             }
@@ -374,7 +374,10 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, contribution: &SignedContributionAndProof<P>| {
                         validator.sync_contribution(contribution, now)
                     },
-                    |_| None,
+                    |signed| {
+                        let contribution = signed.message.contribution;
+                        Some(Self::job(move |chain| chain.on_contribution(&contribution)))
+                    },
                 )
                 .await
             }
@@ -384,7 +387,7 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, message: &SyncCommitteeMessage| {
                         validator.sync_committee_message(message, now, SubnetId(subnet))
                     },
-                    |_| None,
+                    |message| Some(Self::job(move |chain| chain.on_sync_message(&message))),
                 )
                 .await
             }
@@ -394,7 +397,7 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, change: &SignedBlsToExecutionChange| {
                         validator.bls_to_execution_change(change, now)
                     },
-                    |_| None,
+                    |change| Some(Self::job(move |chain| chain.on_credential_change(change))),
                 )
                 .await
             }
@@ -428,7 +431,12 @@ impl<P: Preset> GossipHandler<P> {
                     move |validator, bid: &SignedExecutionPayloadBid| {
                         validator.execution_payload_bid(bid, now)
                     },
-                    |_| None,
+                    |bid| {
+                        Some(Self::job(move |chain| {
+                            chain.pool_mut().bids_mut().insert(bid);
+                            Ok(())
+                        }))
+                    },
                 )
                 .await
             }

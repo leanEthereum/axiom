@@ -1,0 +1,25 @@
+[package]
+name = "axiom-block-production"
+description = "Building the block a validator proposes, for every fork, as a pure library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls.workspace = true
+axiom-operation-pool.workspace = true
+axiom-ssz.workspace = true
+axiom-state-transition.workspace = true
+axiom-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

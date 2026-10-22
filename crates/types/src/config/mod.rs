@@ -20,7 +20,7 @@ pub use yaml::ConfigError;
 
 use crate::{
     Domain, DomainType, Epoch, ExecutionAddress, ForkDigest, Gwei, Hash32, Preset, Root, Version,
-    phase0::ForkData,
+    constants::DOMAIN_APPLICATION_BUILDER, phase0::ForkData,
 };
 
 /// The minimal configuration's terminal total difficulty, 2^256 - 2^10.
@@ -531,6 +531,19 @@ impl ChainConfig {
             domain_type,
             self.fork_version_at(epoch),
             genesis_validators_root,
+        )
+    }
+
+    /// Signature domain of builder API messages, fixed for the life of the chain.
+    ///
+    /// The domain uses the genesis version and a zero chain root, so one signature serves every fork.
+    /// See the signing section of the Bellatrix builder spec.
+    #[must_use]
+    pub fn application_builder_domain(&self) -> Domain {
+        Domain::compute(
+            DOMAIN_APPLICATION_BUILDER,
+            self.genesis_fork_version,
+            Root::ZERO,
         )
     }
 

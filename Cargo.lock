@@ -54,6 +54,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-beacon-json"
+version = "0.1.0"
+dependencies = [
+ "axiom-json",
+ "axiom-snappy",
+ "axiom-ssz",
+ "axiom-types",
+ "axiom-yaml",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "axiom-block-production"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-operation-pool",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "axiom-bls"
 version = "0.1.0"
 dependencies = [
@@ -72,6 +98,21 @@ dependencies = [
  "proptest",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "axiom-builder-client"
+version = "0.1.0"
+dependencies = [
+ "axiom-beacon-json",
+ "axiom-bls",
+ "axiom-http",
+ "axiom-json",
+ "axiom-ssz",
+ "axiom-types",
+ "proptest",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -113,6 +154,8 @@ dependencies = [
 name = "axiom-ef-tests"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
+ "axiom-block-production",
  "axiom-bls",
  "axiom-das",
  "axiom-discv5",
@@ -124,6 +167,7 @@ dependencies = [
  "axiom-kzg",
  "axiom-light-client",
  "axiom-node",
+ "axiom-operation-pool",
  "axiom-p2p",
  "axiom-snappy",
  "axiom-ssz",
@@ -217,6 +261,10 @@ dependencies = [
 name = "axiom-node"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
+ "axiom-block-production",
+ "axiom-bls",
+ "axiom-builder-client",
  "axiom-crypto",
  "axiom-das",
  "axiom-discv5",
@@ -227,6 +275,7 @@ dependencies = [
  "axiom-json",
  "axiom-kzg",
  "axiom-light-client",
+ "axiom-operation-pool",
  "axiom-p2p",
  "axiom-ssz",
  "axiom-state-transition",
@@ -237,6 +286,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "axiom-operation-pool"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "proptest",
+ "thiserror",
 ]
 
 [[package]]

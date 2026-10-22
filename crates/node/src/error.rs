@@ -2,15 +2,17 @@
 
 use std::{io, net::SocketAddr, path::PathBuf};
 
+use axiom_builder_client::BuilderError;
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
 use axiom_light_client::LightClientError;
+use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
-use axiom_types::{CommitteeIndex, Root, Slot};
+use axiom_types::{CommitteeIndex, ForkName, Root, Slot};
 use thiserror::Error;
 
 /// Why the chain refused an input or could not persist it.
@@ -34,6 +36,15 @@ pub enum ChainError {
     /// A record the database must hold is missing.
     #[error("database has no {0}")]
     Missing(&'static str),
+    /// The operation pool refused an operation.
+    #[error("operation pool: {0}")]
+    Pool(#[from] PoolError),
+    /// The head's fork has no sync committee.
+    #[error("the head's {0} state has no sync committee")]
+    NoSyncCommittee(ForkName),
+    /// The head's state holds no payload timeliness committee for a slot.
+    #[error("no payload timeliness committee for slot {0} at the head")]
+    NoPayloadCommittee(Slot),
     /// A block the chain needs has no post-state in the fork choice store.
     #[error("no state for block {0}")]
     MissingState(Root),
@@ -61,6 +72,15 @@ pub enum NodeError {
     /// The chain could not be built or resumed.
     #[error("chain: {0}")]
     Chain(#[from] ChainError),
+    /// A builder endpoint is not a usable URL.
+    #[error("builder {url}: {error}")]
+    Builder {
+        /// The endpoint as configured.
+        url: String,
+        /// Why it is unusable, boxed since it is rare and large.
+        #[source]
+        error: Box<BuilderError>,
+    },
     /// An operating system resource, such as a thread or a runtime, failed.
     #[error("{context}: {error}")]
     Io {

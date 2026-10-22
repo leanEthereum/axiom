@@ -17,6 +17,7 @@ mod config;
 mod engine;
 mod error;
 pub(crate) mod network;
+mod proposer;
 mod publish;
 mod race;
 mod service;
@@ -27,9 +28,10 @@ pub use chain::{
     Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Head, Submission,
 };
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig};
+pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig, ProposerSettings};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use network::{DiscoverySettings, NodeKey};
+pub use proposer::{BlockOrder, ProposerError, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

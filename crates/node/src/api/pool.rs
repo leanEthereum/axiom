@@ -1,0 +1,711 @@
+//! The operation pool routes: submissions from validators, and the pool's contents.
+//!
+//! A submission passes the same gossip rules as a network message, then joins the pool.
+//! It is broadcast only when it passes, so a bad one costs the node no reputation.
+//! See the pool and aggregate routes of beacon-APIs.
+
+use axiom_beacon_json::ApiJson;
+use axiom_gossip::{
+    Aggregate, GossipError, GossipFork, SignedAggregate, SlashingEvidence, SubnetVote,
+};
+use axiom_http::{Request, Response, StatusCode};
+use axiom_json::Json;
+use axiom_operation_pool::{PackedAttestation, PoolError, PoolFork, SyncPool};
+use axiom_p2p::eth::GossipKind;
+use axiom_ssz::Ssz;
+use axiom_types::{
+    ForkName, Preset, SubnetId,
+    altair::{self, SignedContributionAndProof, SyncCommitteeMessage},
+    bellatrix,
+    capella::{self, SignedBlsToExecutionChange},
+    constants::SYNC_COMMITTEE_SUBNET_COUNT,
+    deneb, electra, fulu,
+    gloas::{self, PayloadAttestationMessage},
+    phase0::{self, ProposerSlashing, SignedVoluntaryExit},
+    vote::ConflictingVotes,
+};
+use tracing::debug;
+
+use super::{
+    ApiContext,
+    query::Body,
+    reply::{ApiError, ApiResult, Reply, Routes},
+};
+use crate::Chain;
+
+/// Routes under `/eth/v1/beacon/pool`, `/eth/v2/beacon/pool`, and the signed aggregate routes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PoolRoutes;
+
+/// A submission's failures, by position, as the API reports partial failures.
+type Failures = Vec<(usize, String)>;
+
+impl PoolRoutes {
+    /// Adds this namespace's routes.
+    pub(crate) fn register<P: Preset>(routes: Routes<ApiContext<P>>) -> Routes<ApiContext<P>> {
+        routes
+            .post("/eth/v2/beacon/pool/attestations", Self::attestations::<P>)
+            .get(
+                "/eth/v2/beacon/pool/attestations",
+                Self::pooled_attestations::<P>,
+            )
+            .post(
+                "/eth/v2/validator/aggregate_and_proofs",
+                Self::aggregates::<P>,
+            )
+            .post(
+                "/eth/v2/beacon/pool/attester_slashings",
+                Self::attester_slashings::<P>,
+            )
+            .get(
+                "/eth/v2/beacon/pool/attester_slashings",
+                Self::pooled_attester_slashings::<P>,
+            )
+            .post(
+                "/eth/v1/beacon/pool/proposer_slashings",
+                Self::proposer_slashings::<P>,
+            )
+            .get(
+                "/eth/v1/beacon/pool/proposer_slashings",
+                Self::pooled_proposer_slashings::<P>,
+            )
+            .post(
+                "/eth/v1/beacon/pool/voluntary_exits",
+                Self::voluntary_exits::<P>,
+            )
+            .get(
+                "/eth/v1/beacon/pool/voluntary_exits",
+                Self::pooled_exits::<P>,
+            )
+            .post(
+                "/eth/v1/beacon/pool/bls_to_execution_changes",
+                Self::credential_changes::<P>,
+            )
+            .get(
+                "/eth/v1/beacon/pool/bls_to_execution_changes",
+                Self::pooled_changes::<P>,
+            )
+            .post(
+                "/eth/v1/beacon/pool/sync_committees",
+                Self::sync_messages::<P>,
+            )
+            .post(
+                "/eth/v1/validator/contribution_and_proofs",
+                Self::contributions::<P>,
+            )
+            .post(
+                "/eth/v1/beacon/pool/payload_attestations",
+                Self::payload_attestations::<P>,
+            )
+    }
+
+    /// Single votes: subnet attestations of the fork the version header names.
+    async fn attestations<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let fork = Self::fork(&context, &request).await?;
+        match fork {
+            ForkName::Phase0 => Self::votes_in::<phase0::BeaconState<P>>(context, request).await,
+            ForkName::Altair => Self::votes_in::<altair::BeaconState<P>>(context, request).await,
+            ForkName::Bellatrix => {
+                Self::votes_in::<bellatrix::BeaconState<P>>(context, request).await
+            }
+            ForkName::Capella => Self::votes_in::<capella::BeaconState<P>>(context, request).await,
+            ForkName::Deneb => Self::votes_in::<deneb::BeaconState<P>>(context, request).await,
+            ForkName::Electra => Self::votes_in::<electra::BeaconState<P>>(context, request).await,
+            ForkName::Fulu => Self::votes_in::<fulu::BeaconState<P>>(context, request).await,
+            ForkName::Gloas => Self::votes_in::<gloas::BeaconState<P>>(context, request).await,
+        }
+    }
+
+    /// Signed aggregates of the fork the version header names.
+    async fn aggregates<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let fork = Self::fork(&context, &request).await?;
+        match fork {
+            ForkName::Phase0 => {
+                Self::aggregates_in::<phase0::BeaconState<P>>(context, request).await
+            }
+            ForkName::Altair => {
+                Self::aggregates_in::<altair::BeaconState<P>>(context, request).await
+            }
+            ForkName::Bellatrix => {
+                Self::aggregates_in::<bellatrix::BeaconState<P>>(context, request).await
+            }
+            ForkName::Capella => {
+                Self::aggregates_in::<capella::BeaconState<P>>(context, request).await
+            }
+            ForkName::Deneb => Self::aggregates_in::<deneb::BeaconState<P>>(context, request).await,
+            ForkName::Electra => {
+                Self::aggregates_in::<electra::BeaconState<P>>(context, request).await
+            }
+            ForkName::Fulu => Self::aggregates_in::<fulu::BeaconState<P>>(context, request).await,
+            ForkName::Gloas => Self::aggregates_in::<gloas::BeaconState<P>>(context, request).await,
+        }
+    }
+
+    /// Attester slashings of the fork the version header names.
+    async fn attester_slashings<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let fork = Self::fork(&context, &request).await?;
+        match fork {
+            ForkName::Phase0 => {
+                Self::slashings_in::<phase0::BeaconState<P>>(context, request).await
+            }
+            ForkName::Altair => {
+                Self::slashings_in::<altair::BeaconState<P>>(context, request).await
+            }
+            ForkName::Bellatrix => {
+                Self::slashings_in::<bellatrix::BeaconState<P>>(context, request).await
+            }
+            ForkName::Capella => {
+                Self::slashings_in::<capella::BeaconState<P>>(context, request).await
+            }
+            ForkName::Deneb => Self::slashings_in::<deneb::BeaconState<P>>(context, request).await,
+            ForkName::Electra => {
+                Self::slashings_in::<electra::BeaconState<P>>(context, request).await
+            }
+            ForkName::Fulu => Self::slashings_in::<fulu::BeaconState<P>>(context, request).await,
+            ForkName::Gloas => Self::slashings_in::<gloas::BeaconState<P>>(context, request).await,
+        }
+    }
+
+    /// Single votes of one fork: checked, counted, pooled, and broadcast on their subnet.
+    async fn votes_in<F>(context: ApiContext<F::Preset>, request: Request) -> ApiResult
+    where
+        F: GossipFork,
+        F::SubnetAttestation: ApiJson + Send + 'static,
+    {
+        let votes: Vec<F::SubnetAttestation> = Body(&request).json_items()?;
+        let now = context.publisher.now_ms();
+        let mut failures = Failures::new();
+        for (position, vote) in votes.into_iter().enumerate() {
+            let data = vote.data().clone();
+            let committee = vote.committee_index();
+            let bytes = vote.encode();
+            let outcome = context
+                .query(move |chain| {
+                    let per_slot = chain
+                        .head_state()?
+                        .clone()
+                        .committees(data.target.epoch)
+                        .map_err(|error| ApiError::bad_request(error.to_string()))?
+                        .committees_per_slot();
+                    let config = chain.config();
+                    // See `compute_subnet_for_attestation` in the phase0 validator spec.
+                    let since_epoch = per_slot * (data.slot.0 % F::Preset::SLOTS_PER_EPOCH);
+                    let subnet = (since_epoch + committee.0) % config.attestation_subnet_count;
+                    chain
+                        .validate_gossip(|validator| {
+                            validator.beacon_attestation::<F>(&vote, now, SubnetId(subnet))
+                        })
+                        .map_err(Self::refusal)?;
+                    let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
+                    // A vote of the current slot counts in fork choice only from the next slot.
+                    // It is pooled and broadcast all the same; the store sees it again in a block.
+                    if let Err(error) = chain.on_subnet_vote(&vote, claim) {
+                        debug!(%error, "vote pooled but not counted yet");
+                    }
+                    Ok(subnet)
+                })
+                .await;
+            match outcome {
+                Ok(subnet) => {
+                    let epoch = data.slot.epoch::<F::Preset>();
+                    context
+                        .publisher
+                        .gossip(GossipKind::BeaconAttestation(subnet), epoch, bytes)
+                        .await;
+                }
+                Err(error) => failures.push((position, error.to_string())),
+            }
+        }
+        Self::outcome(&failures)
+    }
+
+    /// Signed aggregates of one fork: checked, counted, pooled, and broadcast.
+    async fn aggregates_in<F>(context: ApiContext<F::Preset>, request: Request) -> ApiResult
+    where
+        F: GossipFork,
+        F::SignedAggregateAndProof: ApiJson + Send + 'static,
+    {
+        let aggregates: Vec<F::SignedAggregateAndProof> = Body(&request).json_items()?;
+        let now = context.publisher.now_ms();
+        let mut failures = Failures::new();
+        for (position, signed) in aggregates.into_iter().enumerate() {
+            let epoch = signed.aggregate().data().slot.epoch::<F::Preset>();
+            let bytes = signed.encode();
+            let outcome = context
+                .query(move |chain| {
+                    chain
+                        .validate_gossip(|validator| {
+                            validator.aggregate_and_proof::<F>(&signed, now)
+                        })
+                        .map_err(Self::refusal)?;
+                    if let Err(error) = chain.on_vote(&signed.aggregate().committee_vote()) {
+                        debug!(%error, "aggregate pooled but not counted yet");
+                    }
+                    Ok(())
+                })
+                .await;
+            match outcome {
+                Ok(()) => {
+                    context
+                        .publisher
+                        .gossip(GossipKind::BeaconAggregateAndProof, epoch, bytes)
+                        .await;
+                }
+                Err(error) => failures.push((position, error.to_string())),
+            }
+        }
+        Self::outcome(&failures)
+    }
+
+    /// Attester slashings of one fork: checked, pooled, and broadcast.
+    async fn slashings_in<F>(context: ApiContext<F::Preset>, request: Request) -> ApiResult
+    where
+        F: GossipFork,
+        F::AttesterSlashing: ApiJson + Send + 'static,
+    {
+        let slashings: Vec<F::AttesterSlashing> = Body(&request).json_items()?;
+        let mut failures = Failures::new();
+        for (position, slashing) in slashings.into_iter().enumerate() {
+            let bytes = slashing.encode();
+            let outcome = context
+                .query(move |chain| {
+                    chain
+                        .validate_gossip(|validator| validator.attester_slashing(&slashing))
+                        .map_err(Self::refusal)?;
+                    chain.on_attester_slashing(&slashing.conflicting_votes())?;
+                    Ok(chain.store().current_epoch())
+                })
+                .await;
+            match outcome {
+                Ok(epoch) => {
+                    context
+                        .publisher
+                        .gossip(GossipKind::AttesterSlashing, epoch, bytes)
+                        .await;
+                }
+                Err(error) => failures.push((position, error.to_string())),
+            }
+        }
+        Self::outcome(&failures)
+    }
+
+    /// Proposer slashings: checked, pooled, and broadcast.
+    async fn proposer_slashings<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let slashings: Vec<ProposerSlashing> = Body(&request).json_items()?;
+        Self::submit(
+            &context,
+            slashings,
+            GossipKind::ProposerSlashing,
+            |chain, slashing, _| {
+                chain
+                    .validate_gossip(|validator| validator.proposer_slashing(&slashing))
+                    .map_err(Self::refusal)?;
+                chain.on_proposer_slashing(slashing)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Voluntary exits: checked under the clock's fork, pooled, and broadcast.
+    async fn voluntary_exits<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let exits: Vec<SignedVoluntaryExit> = Body(&request).json_items()?;
+        Self::submit(
+            &context,
+            exits,
+            GossipKind::VoluntaryExit,
+            |chain, exit, now| {
+                let fork = chain.config().fork_at(chain.store().current_epoch());
+                let verdict = match fork {
+                    ForkName::Phase0 => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<phase0::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Altair => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<altair::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Bellatrix => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<bellatrix::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Capella => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<capella::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Deneb => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<deneb::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Electra => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<electra::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Fulu => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<fulu::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Gloas => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<gloas::BeaconState<P>>(&exit, now)
+                    }),
+                };
+                verdict.map_err(Self::refusal)?;
+                chain.on_voluntary_exit(exit)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Withdrawal credential changes: checked, pooled, and broadcast.
+    async fn credential_changes<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let changes: Vec<SignedBlsToExecutionChange> = Body(&request).json_items()?;
+        Self::submit(
+            &context,
+            changes,
+            GossipKind::BlsToExecutionChange,
+            |chain, change, now| {
+                chain
+                    .validate_gossip(|validator| validator.bls_to_execution_change(&change, now))
+                    .map_err(Self::refusal)?;
+                chain.on_credential_change(change)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Sync committee messages: checked on each subnet of the member's seats, pooled, broadcast.
+    async fn sync_messages<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let messages: Vec<SyncCommitteeMessage> = Body(&request).json_items()?;
+        let now = context.publisher.now_ms();
+        let mut failures = Failures::new();
+        for (position, message) in messages.into_iter().enumerate() {
+            let bytes = message.encode();
+            let epoch = message.slot.epoch::<P>();
+            let outcome = context
+                .query(move |chain| {
+                    let subnets = Self::sync_subnets(chain, &message)?;
+                    for subnet in &subnets {
+                        chain
+                            .validate_gossip(|validator| {
+                                validator.sync_committee_message(&message, now, SubnetId(*subnet))
+                            })
+                            .map_err(Self::refusal)?;
+                    }
+                    chain.on_sync_message(&message)?;
+                    Ok(subnets)
+                })
+                .await;
+            match outcome {
+                Ok(subnets) => {
+                    for subnet in subnets {
+                        context
+                            .publisher
+                            .gossip(GossipKind::SyncCommittee(subnet), epoch, bytes.clone())
+                            .await;
+                    }
+                }
+                Err(error) => failures.push((position, error.to_string())),
+            }
+        }
+        Self::outcome(&failures)
+    }
+
+    /// Signed sync contributions: checked, pooled, and broadcast.
+    async fn contributions<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let contributions: Vec<SignedContributionAndProof<P>> = Body(&request).json_items()?;
+        Self::submit(
+            &context,
+            contributions,
+            GossipKind::SyncCommitteeContributionAndProof,
+            |chain, signed, now| {
+                chain
+                    .validate_gossip(|validator| validator.sync_contribution(&signed, now))
+                    .map_err(Self::refusal)?;
+                chain.on_contribution(&signed.message.contribution)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Payload timeliness votes: checked, counted, pooled, and broadcast.
+    async fn payload_attestations<P: Preset>(
+        context: ApiContext<P>,
+        request: Request,
+    ) -> ApiResult {
+        let messages: Vec<PayloadAttestationMessage> = Body(&request).json_items()?;
+        Self::submit(
+            &context,
+            messages,
+            GossipKind::PayloadAttestationMessage,
+            |chain, message, now| {
+                chain
+                    .validate_gossip(|validator| {
+                        validator.payload_attestation_message(&message, now)
+                    })
+                    .map_err(Self::refusal)?;
+                chain.on_payload_attestation(&message)?;
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// The pool's attestations, each committee's best aggregate in the clock's fork.
+    async fn pooled_attestations<P: Preset>(
+        context: ApiContext<P>,
+        _request: Request,
+    ) -> ApiResult {
+        context
+            .query(|chain| {
+                let fork = chain.config().fork_at(chain.store().current_epoch());
+                let mut items = Vec::new();
+                for group in chain.pool().attestations().groups() {
+                    for (committee, votes) in &group.committees {
+                        let Some(best) = votes.best() else {
+                            continue;
+                        };
+                        let packed = PackedAttestation {
+                            data: group.data.clone(),
+                            committees: vec![(*committee, best.bits.clone())],
+                            signature: best.signature,
+                            gain: 0,
+                        };
+                        if let Ok(json) = Self::attestation_json::<P>(fork, packed) {
+                            items.push(json);
+                        }
+                    }
+                }
+                Ok(Self::versioned(fork, items))
+            })
+            .await
+    }
+
+    /// The pool's attester slashings, in the clock's fork.
+    async fn pooled_attester_slashings<P: Preset>(
+        context: ApiContext<P>,
+        _request: Request,
+    ) -> ApiResult {
+        context
+            .query(|chain| {
+                let fork = chain.config().fork_at(chain.store().current_epoch());
+                let state = chain.head_state()?.beacon();
+                let items = chain
+                    .pool()
+                    .slashings()
+                    .attesters_by_reach(state)
+                    .into_iter()
+                    .filter_map(|votes| Self::attester_slashing_json::<P>(fork, votes))
+                    .collect();
+                Ok(Self::versioned(fork, items))
+            })
+            .await
+    }
+
+    /// The pool's proposer slashings.
+    async fn pooled_proposer_slashings<P: Preset>(
+        context: ApiContext<P>,
+        _request: Request,
+    ) -> ApiResult {
+        context
+            .query(|chain| {
+                let items = chain
+                    .pool()
+                    .slashings()
+                    .proposers()
+                    .map(ApiJson::to_json)
+                    .collect();
+                Ok(Reply::data(Json::Array(items), None))
+            })
+            .await
+    }
+
+    /// The pool's voluntary exits.
+    async fn pooled_exits<P: Preset>(context: ApiContext<P>, _request: Request) -> ApiResult {
+        context
+            .query(|chain| {
+                let items = chain
+                    .pool()
+                    .requests()
+                    .exits()
+                    .map(ApiJson::to_json)
+                    .collect();
+                Ok(Reply::data(Json::Array(items), None))
+            })
+            .await
+    }
+
+    /// The pool's credential changes.
+    async fn pooled_changes<P: Preset>(context: ApiContext<P>, _request: Request) -> ApiResult {
+        context
+            .query(|chain| {
+                let items = chain
+                    .pool()
+                    .requests()
+                    .credential_changes()
+                    .map(ApiJson::to_json)
+                    .collect();
+                Ok(Reply::data(Json::Array(items), None))
+            })
+            .await
+    }
+
+    /// Submits operations one by one, broadcasting those the rule accepts.
+    async fn submit<P, T>(
+        context: &ApiContext<P>,
+        items: Vec<T>,
+        kind: GossipKind,
+        rule: impl Fn(&mut Chain<P>, T, u64) -> Result<(), ApiError> + Clone + Send + 'static,
+    ) -> ApiResult
+    where
+        P: Preset,
+        T: Ssz + Send + 'static,
+    {
+        let now = context.publisher.now_ms();
+        let mut failures = Failures::new();
+        for (position, item) in items.into_iter().enumerate() {
+            let bytes = item.encode();
+            let rule = rule.clone();
+            let outcome = context
+                .query(move |chain| {
+                    rule(chain, item, now)?;
+                    Ok(chain.store().current_epoch())
+                })
+                .await;
+            match outcome {
+                Ok(epoch) => context.publisher.gossip(kind, epoch, bytes).await,
+                Err(error) => failures.push((position, error.to_string())),
+            }
+        }
+        Self::outcome(&failures)
+    }
+
+    /// The subnets of a sync committee member's seats.
+    ///
+    /// See `compute_subnets_for_sync_committee` in the Altair validator spec.
+    fn sync_subnets<P: Preset>(
+        chain: &Chain<P>,
+        message: &SyncCommitteeMessage,
+    ) -> Result<Vec<u64>, ApiError> {
+        let state = chain.head_state()?.beacon();
+        let committees = state
+            .sync_committees()
+            .ok_or_else(|| ApiError::bad_request("the head's fork has no sync committee"))?;
+        let seats = SyncPool::<P>::seats(committees, message.validator_index)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let size = P::SYNC_COMMITTEE_SIZE / SYNC_COMMITTEE_SUBNET_COUNT;
+        let mut subnets: Vec<u64> = seats.iter().map(|seat| *seat as u64 / size).collect();
+        subnets.dedup();
+        Ok(subnets)
+    }
+
+    /// The fork a submission belongs to: the version header, or else the clock's.
+    async fn fork<P: Preset>(
+        context: &ApiContext<P>,
+        request: &Request,
+    ) -> Result<ForkName, ApiError> {
+        match request.headers.get("eth-consensus-version") {
+            Some(name) => ForkName::from_name(name)
+                .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {name}"))),
+            None => {
+                context
+                    .query(|chain| Ok(chain.config().fork_at(chain.store().current_epoch())))
+                    .await
+            }
+        }
+    }
+
+    /// The JSON of an aggregate in a fork's container.
+    fn attestation_json<P: Preset>(
+        fork: ForkName,
+        packed: PackedAttestation,
+    ) -> Result<Json, ApiError> {
+        let invalid = |error: PoolError| ApiError::internal(error.to_string());
+        Ok(match fork {
+            ForkName::Phase0 => phase0::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Altair => altair::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Bellatrix => bellatrix::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Capella => capella::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Deneb => deneb::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Electra => electra::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Fulu => fulu::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+            ForkName::Gloas => gloas::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
+        })
+    }
+
+    /// The JSON of conflicting votes in a fork's attester slashing, when they fit it.
+    fn attester_slashing_json<P: Preset>(fork: ForkName, votes: &ConflictingVotes) -> Option<Json> {
+        let json = match fork {
+            ForkName::Phase0 => phase0::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Altair => altair::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Bellatrix => bellatrix::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Capella => capella::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Deneb => deneb::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Electra => electra::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Fulu => fulu::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Gloas => gloas::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+        };
+        Some(json)
+    }
+
+    /// A list reply tagged with its fork.
+    fn versioned(fork: ForkName, items: Vec<Json>) -> Response {
+        let body = Json::from([
+            ("version", Json::from(fork.to_string())),
+            ("data", Json::Array(items)),
+        ]);
+        Reply::json(StatusCode::OK, &body).with_header("eth-consensus-version", fork.to_string())
+    }
+
+    /// A gossip refusal, as the client's error.
+    fn refusal(error: GossipError) -> ApiError {
+        ApiError::bad_request(error.to_string())
+    }
+
+    /// The reply to a submission: 200, or 400 listing each failed item.
+    ///
+    /// See the indexed error message of beacon-APIs.
+    fn outcome(failures: &Failures) -> ApiResult {
+        if failures.is_empty() {
+            return Ok(Response::new(StatusCode::OK));
+        }
+        for (position, message) in failures {
+            debug!(position, %message, "pool submission refused");
+        }
+        let listed: Vec<String> = failures
+            .iter()
+            .map(|(position, message)| format!("item {position}: {message}"))
+            .collect();
+        Err(ApiError::bad_request(format!(
+            "some items were refused: {}",
+            listed.join("; ")
+        )))
+    }
+}
