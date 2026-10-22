@@ -297,3 +297,145 @@ impl SecretKey {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::OnceLock;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::{
+        entropy::SeedStream,
+        instantiation::{HypercubeLifetime, Instantiation},
+    };
+
+    /// The test lifetime: 2^8 epochs in 16 bottom trees of 16, 4 chains of length 8.
+    fn scheme() -> Scheme {
+        Instantiation::Hypercube(HypercubeLifetime::TestOnly8).scheme()
+    }
+
+    /// One key over epochs 16 to 63, bottom trees 1 to 3, generated once.
+    fn key() -> &'static (PublicKey, SecretKey) {
+        static KEY: OnceLock<(PublicKey, SecretKey)> = OnceLock::new();
+        KEY.get_or_init(|| {
+            scheme()
+                .generate(&mut SeedStream::new(b"properties"), 16..64)
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn signing_outside_the_window_is_refused() {
+        // Fixture state: activation [16, 64), prepared window [16, 48).
+        let (_, secret) = key();
+        assert_eq!(
+            secret.sign(LeafEpoch(15), &[0; 32]),
+            Err(SignError::Inactive {
+                epoch: 15,
+                start: 16,
+                end: 64
+            })
+        );
+        assert_eq!(
+            secret.sign(LeafEpoch(48), &[0; 32]),
+            Err(SignError::NotPrepared {
+                epoch: 48,
+                start: 16,
+                end: 48
+            })
+        );
+    }
+
+    #[test]
+    fn the_window_slides_once_then_stops() {
+        // Fixture state: trees 1 to 3, so one slide reaches the last window [32, 64).
+        let (public, mut secret) = key().clone();
+        let preparation = secret.preparation().unwrap();
+        assert_eq!(preparation.index(), 3);
+
+        // A tree other than the next one is refused, then the right one is installed.
+        let stale = Preparation::new(secret.keys.clone(), 2).build();
+        assert_eq!(
+            secret.install(stale),
+            Err(PrepareError::WrongTree {
+                expected: 3,
+                actual: 2
+            })
+        );
+        let tree = preparation.build();
+        secret.install(tree.clone()).unwrap();
+        assert_eq!(secret.prepared(), 32..64);
+
+        // Epoch 63 now signs, and the key cannot slide further.
+        let signature = secret.sign(LeafEpoch(63), &[7; 32]).unwrap();
+        assert_eq!(
+            scheme().verify(&public, LeafEpoch(63), &[7; 32], &signature),
+            Ok(())
+        );
+        assert!(secret.preparation().is_none());
+        assert!(!secret.advance());
+        assert_eq!(
+            secret.install(tree),
+            Err(PrepareError::Exhausted { end: 64 })
+        );
+    }
+
+    #[test]
+    fn secret_key_decoding_checks_the_activation() {
+        let (_, secret) = key();
+        let bytes = secret.to_bytes();
+
+        // Activation length 47 is not whole bottom trees of 16.
+        let mut broken = bytes.clone();
+        broken[60..68].copy_from_slice(&47_u64.to_le_bytes());
+        assert_eq!(
+            scheme().decode_secret_key(&broken),
+            Err(DecodeError::Activation { start: 16, len: 47 })
+        );
+
+        // A truncated key fails inside the last tree.
+        assert!(
+            scheme()
+                .decode_secret_key(&bytes[..bytes.len() - 1])
+                .is_err()
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn signatures_verify_only_at_their_epoch_and_message(
+            epoch in 16_u32..48,
+            other_epoch in 0_u32..256,
+            message: [u8; 32],
+            other_message: [u8; 32],
+        ) {
+            let (public, secret) = key();
+            let scheme = scheme();
+            let signature = secret.sign(LeafEpoch(epoch), &message).unwrap();
+
+            // Round trip through bytes, then verification.
+            let decoded = scheme.decode_signature(&signature.to_bytes()).unwrap();
+            prop_assert_eq!(&decoded, &signature);
+            prop_assert_eq!(scheme.verify(public, LeafEpoch(epoch), &message, &signature), Ok(()));
+
+            // Never under another epoch, nor for another message.
+            if other_epoch != epoch {
+                prop_assert!(scheme.verify(public, LeafEpoch(other_epoch), &message, &signature).is_err());
+            }
+            if other_message != message {
+                prop_assert!(scheme.verify(public, LeafEpoch(epoch), &other_message, &signature).is_err());
+            }
+        }
+
+        #[test]
+        fn decoding_arbitrary_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..400)) {
+            let scheme = scheme();
+            let _ = scheme.decode_signature(&bytes);
+            let _ = scheme.decode_public_key(&bytes);
+            let _ = scheme.decode_secret_key(&bytes);
+        }
+    }
+}

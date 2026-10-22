@@ -443,7 +443,11 @@ impl Scheme {
 
 #[cfg(test)]
 mod tests {
-    use crate::instantiation::{HypercubeLifetime, Instantiation};
+    use super::*;
+    use crate::{
+        entropy::SeedStream,
+        instantiation::{HypercubeLifetime, Instantiation},
+    };
 
     #[test]
     fn activation_widens_to_whole_bottom_trees() {
@@ -466,5 +470,83 @@ mod tests {
         let scheme = Instantiation::Hypercube(HypercubeLifetime::Epochs32).scheme();
         assert_eq!(scheme.signature_len(), 12 + 28 + 32 * 32 + 46 * 32);
         assert_eq!(scheme.public_key_len(), 52);
+    }
+
+    #[test]
+    fn key_generation_refuses_empty_and_oversized_activations() {
+        let scheme = Instantiation::Hypercube(HypercubeLifetime::TestOnly8).scheme();
+        let mut stream = SeedStream::new(b"refused");
+        assert_eq!(
+            scheme.generate(&mut stream, 5..5).map(|_| ()),
+            Err(KeyGenError::Empty)
+        );
+        assert_eq!(
+            scheme.generate(&mut stream, 200..257).map(|_| ()),
+            Err(KeyGenError::BeyondLifetime {
+                start: 200,
+                count: 57,
+                lifetime: 256
+            })
+        );
+    }
+
+    #[test]
+    fn verification_names_the_failed_check() {
+        // Fixture state: a key over epochs 16 to 47 of the test lifetime.
+        let scheme = Instantiation::Hypercube(HypercubeLifetime::TestOnly8).scheme();
+        let (public, secret) = scheme
+            .generate(&mut SeedStream::new(b"verification"), 16..48)
+            .unwrap();
+        let signature = secret.sign(LeafEpoch(20), &[1; 32]).unwrap();
+
+        // Epoch 256 is past the lifetime.
+        assert_eq!(
+            scheme.verify(&public, LeafEpoch(256), &[1; 32], &signature),
+            Err(VerifyError::BeyondLifetime {
+                epoch: 256,
+                lifetime: 256
+            })
+        );
+
+        // A signature of the 2^32 instantiation has 32 siblings, not 8.
+        let other = Instantiation::Hypercube(HypercubeLifetime::Epochs32).scheme();
+        assert_eq!(
+            other.verify(&public, LeafEpoch(20), &[1; 32], &signature),
+            Err(VerifyError::Shape {
+                part: "authentication path",
+                expected: 32,
+                actual: 8
+            })
+        );
+    }
+
+    #[test]
+    fn any_changed_sibling_or_chain_value_breaks_the_root() {
+        // Fixture state: a key over epochs 0 to 31, signing at epoch 21.
+        let scheme = Instantiation::Hypercube(HypercubeLifetime::TestOnly8).scheme();
+        let (public, secret) = scheme
+            .generate(&mut SeedStream::new(b"tamper"), 0..32)
+            .unwrap();
+        let signature = secret.sign(LeafEpoch(21), &[3; 32]).unwrap();
+        let one = KoalaBear::ONE;
+
+        // Mutation: add one to the first element of each of the 8 siblings and 4 chain values.
+        // The codeword is unchanged, so each failure is at the root.
+        for index in 0..signature.path.len() + signature.chain_values.len() {
+            let mut tampered = signature.clone();
+            let (list, at) = if index < tampered.path.len() {
+                (&mut tampered.path, index)
+            } else {
+                (&mut tampered.chain_values, index - signature.path.len())
+            };
+            let mut elements = list[at].elements().to_vec();
+            elements[0] = elements[0] + one;
+            list[at] = Words::from_slice(&elements);
+            assert_eq!(
+                scheme.verify(&public, LeafEpoch(21), &[3; 32], &tampered),
+                Err(VerifyError::RootMismatch),
+                "part {index}"
+            );
+        }
     }
 }
