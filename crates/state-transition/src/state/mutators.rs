@@ -10,7 +10,7 @@ use axiom_types::{
 };
 
 use super::State;
-use crate::StateError;
+use crate::{StateError, Verification};
 
 /// The point at infinity of G2, compressed: a placeholder signature.
 ///
@@ -294,13 +294,16 @@ impl<P: Preset> State<P> {
         match self.validator_index(&deposit.pubkey) {
             Some(index) => self.increase_balance(index, deposit.amount),
             None => {
-                if Self::is_valid_deposit_signature(
-                    config,
-                    &deposit.pubkey,
-                    deposit.withdrawal_credentials,
-                    deposit.amount,
-                    &deposit.signature,
-                ) {
+                let skip = self.verification == Verification::Skip;
+                if skip
+                    || Self::is_valid_deposit_signature(
+                        config,
+                        &deposit.pubkey,
+                        deposit.withdrawal_credentials,
+                        deposit.amount,
+                        &deposit.signature,
+                    )
+                {
                     self.add_validator_to_registry(
                         deposit.pubkey,
                         deposit.withdrawal_credentials,

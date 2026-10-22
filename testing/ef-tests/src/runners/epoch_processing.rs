@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use axiom_state_transition::{EpochProcessor, EpochStep, State};
+use axiom_state_transition::{EpochProcessor, EpochStep, State, Verification};
 use axiom_types::{BeaconState, Preset};
 
 use super::{BEACON_STATE_FIELDS, config_of};
@@ -21,9 +21,15 @@ impl<P: Preset> Runner for EpochProcessing<P> {
         let step = EpochStep::from_name(handler)
             .ok_or_else(|| Failure(format!("unsupported epoch step {handler}")))?;
         let config = config_of::<P>();
+        let verification = if case.meta()?.bls_ignored() {
+            Verification::Skip
+        } else {
+            Verification::Verify
+        };
 
         // Phase 1: the sub-transition on its own.
         let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
+        state.set_verification(verification);
         let outcome = EpochProcessor::new(&mut state, &config).run(step);
         match (outcome, case.ssz_if_present::<BeaconState<P>>("post")?) {
             (Ok(()), Some(expected)) => {
@@ -37,6 +43,7 @@ impl<P: Preset> Runner for EpochProcessing<P> {
         // Phase 2: the whole epoch transition, when the case carries its endpoints.
         if let Some(pre_epoch) = case.ssz_if_present::<BeaconState<P>>("pre_epoch")? {
             let mut state = State::new(pre_epoch);
+            state.set_verification(verification);
             let outcome = EpochProcessor::new(&mut state, &config).process();
             match (
                 outcome,

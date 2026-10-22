@@ -34,6 +34,8 @@ pub struct State<P: Preset> {
     pub(crate) pubkeys: PubkeyCache,
     /// Committees of the previous, current, and next epochs, computed on demand.
     pub(crate) committees: Vec<Arc<EpochCommittees>>,
+    /// Whether signatures are checked, including deposit proofs of possession in epoch processing.
+    pub(crate) verification: Verification,
 }
 
 impl<P: Preset> State<P> {
@@ -46,6 +48,7 @@ impl<P: Preset> State<P> {
             beacon,
             pubkeys,
             committees: Vec::new(),
+            verification: Verification::Verify,
         }
     }
 
@@ -57,7 +60,21 @@ impl<P: Preset> State<P> {
             beacon,
             pubkeys,
             committees: Vec::new(),
+            verification: Verification::Verify,
         }
+    }
+
+    /// Sets whether later transitions check signatures.
+    ///
+    /// Skipping also accepts every deposit proof of possession, as the spec's tests expect.
+    pub const fn set_verification(&mut self, verification: Verification) {
+        self.verification = verification;
+    }
+
+    /// Whether transitions check signatures.
+    #[must_use]
+    pub const fn verification(&self) -> Verification {
+        self.verification
     }
 
     /// The consensus state.
@@ -134,6 +151,7 @@ impl<P: Preset> State<P> {
         verification: Verification,
         engine: &impl ExecutionEngine<P>,
     ) -> Result<(), TransitionError> {
+        self.verification = verification;
         let block = &signed_block.message;
         if block.slot > self.beacon.slot {
             self.process_slots(config, block.slot)

@@ -51,14 +51,6 @@ impl<P: Preset> BlockProcessor<'_, P> {
             });
         }
 
-        // An empty transaction can never be valid, so the consensus layer rejects it itself.
-        if payload
-            .transactions
-            .iter()
-            .any(|transaction| transaction.is_empty())
-        {
-            return Err(BlockError::PayloadInvalid);
-        }
         let versioned_hashes = body
             .blob_kzg_commitments
             .iter()
