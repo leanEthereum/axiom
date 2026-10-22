@@ -513,6 +513,8 @@ impl TestNode {
             if let Some(envelope) = proposal.envelope() {
                 let request =
                     Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelopes")
+                        .with_header("eth-consensus-version", "gloas")
+                        .with_header("eth-blob-data-included", "false")
                         .with_body("application/octet-stream", envelope.encode());
                 let response = self.client.send(&request).await.expect("node answers");
                 assert_eq!(

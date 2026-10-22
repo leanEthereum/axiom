@@ -509,6 +509,60 @@ impl ChainConfig {
         }
     }
 
+    /// Point in the slot, in basis points, by which a fork's attestations are due.
+    ///
+    /// Gloas moves it earlier, to leave room for the payload reveal.
+    /// See `get_attestation_due_ms` in the phase0 and Gloas fork choice specs.
+    #[must_use]
+    pub const fn attestation_due_bps(&self, fork: ForkName) -> u64 {
+        match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu => self.attestation_due_bps,
+            ForkName::Gloas => self.attestation_due_bps_gloas,
+        }
+    }
+
+    /// Point in the slot, in basis points, by which a fork's aggregates are due.
+    ///
+    /// Gloas moves it earlier, with the attestation deadline.
+    /// See `get_aggregate_due_ms` in the phase0 and Gloas fork choice specs.
+    #[must_use]
+    pub const fn aggregate_due_bps(&self, fork: ForkName) -> u64 {
+        match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu => self.aggregate_due_bps,
+            ForkName::Gloas => self.aggregate_due_bps_gloas,
+        }
+    }
+
+    /// Point in the slot, in basis points, by which a fork's sync contributions are due.
+    ///
+    /// Gloas moves it earlier, with the sync message deadline.
+    /// See `get_contribution_due_ms` in the Altair and Gloas fork choice specs.
+    #[must_use]
+    pub const fn contribution_due_bps(&self, fork: ForkName) -> u64 {
+        match fork {
+            ForkName::Phase0
+            | ForkName::Altair
+            | ForkName::Bellatrix
+            | ForkName::Capella
+            | ForkName::Deneb
+            | ForkName::Electra
+            | ForkName::Fulu => self.contribution_due_bps,
+            ForkName::Gloas => self.contribution_due_bps_gloas,
+        }
+    }
+
     /// Version of the fork active at an epoch.
     ///
     /// See `compute_fork_version` in the Fulu fork spec.
@@ -847,5 +901,21 @@ mod tests {
             ChainConfig::from_yaml(&yaml),
             Err(ConfigError::UnknownPresetBase("gnosis".to_owned()))
         );
+    }
+
+    #[test]
+    fn duty_deadlines_move_earlier_at_gloas() {
+        // Mainnet: a third and two thirds of the slot until Fulu, a quarter and a half at Gloas.
+        let config = ChainConfig::mainnet();
+        let deadlines = |fork| {
+            [
+                config.attestation_due_bps(fork),
+                config.aggregate_due_bps(fork),
+                config.sync_message_due_bps(fork),
+                config.contribution_due_bps(fork),
+            ]
+        };
+        assert_eq!(deadlines(ForkName::Fulu), [3333, 6667, 3333, 6667]);
+        assert_eq!(deadlines(ForkName::Gloas), [2500, 5000, 2500, 5000]);
     }
 }

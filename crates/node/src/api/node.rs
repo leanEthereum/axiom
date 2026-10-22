@@ -5,6 +5,7 @@ use std::{
     sync::atomic::Ordering,
 };
 
+use axiom_beacon_json::{ApiJson, api::SyncStatus};
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_types::Preset;
@@ -222,17 +223,15 @@ impl NodeRoutes {
         let (head, distance) = context
             .query(|chain| Ok((chain.head(), Self::distance(chain))))
             .await?;
-        Ok(Reply::data(
-            Json::from([
-                ("head_slot", Reply::number(head.slot.0)),
-                ("sync_distance", Reply::number(distance)),
-                ("is_syncing", (distance >= SYNCING_DISTANCE).into()),
-                ("is_optimistic", head.optimistic.into()),
-                // The engine is never probed directly, so it is assumed reachable.
-                ("el_offline", false.into()),
-            ]),
-            None,
-        ))
+        let status = SyncStatus {
+            head_slot: head.slot,
+            sync_distance: distance,
+            is_syncing: distance >= SYNCING_DISTANCE,
+            is_optimistic: head.optimistic,
+            // The engine is never probed directly, so it is assumed reachable.
+            el_offline: false,
+        };
+        Ok(Reply::data(status.to_json(), None))
     }
 
     /// The node's network identity: peer id, record, addresses, and metadata.

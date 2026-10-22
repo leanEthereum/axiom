@@ -11,10 +11,14 @@ mod debug;
 mod duties;
 mod encoding;
 mod events;
+#[cfg(test)]
+mod fixture;
 mod ids;
 mod light_client;
+mod liveness;
 mod node;
 mod pool;
+mod preparation;
 mod query;
 mod registry;
 mod reply;
@@ -34,11 +38,14 @@ use self::{
     beacon::BeaconRoutes,
     config::ConfigRoutes,
     debug::DebugRoutes,
+    duties::DutyRoutes,
     events::EventRoutes,
     ids::{StateId, StateView},
     light_client::LightClientRoutes,
+    liveness::LivenessRoutes,
     node::NodeRoutes,
     pool::PoolRoutes,
+    preparation::PreparationRoutes,
     registry::RegistryRoutes,
     reply::{ApiError, Freshness, Routes},
     rewards::RewardsRoutes,
@@ -213,6 +220,9 @@ impl BeaconApi {
         let routes = EventRoutes::register(routes);
         let routes = RewardsRoutes::register(routes);
         let routes = ValidatorRoutes::register(routes);
+        let routes = DutyRoutes::register(routes);
+        let routes = PreparationRoutes::register(routes);
+        let routes = LivenessRoutes::register(routes);
         let routes = PoolRoutes::register(routes);
         DebugRoutes::register(routes).finish()
     }

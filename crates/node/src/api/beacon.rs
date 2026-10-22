@@ -463,8 +463,19 @@ impl BeaconRoutes {
 
     /// Publishes a Gloas payload envelope its block's builder revealed, as JSON or SSZ.
     ///
+    /// # Overview
+    ///
+    /// Two headers are required: the consensus version, and whether blob data is included.
+    /// This node takes the signed envelope alone, so a body announced with blob data is refused.
+    ///
+    /// The envelope passes the gossip rules before it is broadcast, the default validation level.
+    /// The consensus levels need a full import before the broadcast, which this node does not do.
+    /// So a request for them is refused rather than silently weakened.
+    ///
     /// Statuses follow the block route: 200 imported, 202 broadcast only, 400 invalid.
+    /// See `publishExecutionPayloadEnvelope` in the beacon API.
     async fn publish_envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        Self::check_envelope_request(&request)?;
         let encoding = Encoding::of_body(&request, true)?;
         let envelope = match encoding {
             Encoding::Ssz => SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
@@ -479,6 +490,46 @@ impl BeaconRoutes {
             }
             Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
             Err(error) => Err(ApiError::bad_request(error.to_string())),
+        }
+    }
+
+    /// Checks the headers and query of an envelope publication against the beacon API.
+    fn check_envelope_request(request: &Request) -> Result<(), ApiError> {
+        let named = request
+            .headers
+            .get("eth-consensus-version")
+            .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
+        let fork = ForkName::from_name(named)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))?;
+        if !fork.separates_payloads() {
+            return Err(ApiError::bad_request(format!(
+                "{fork} blocks carry their payload"
+            )));
+        }
+        match request.headers.get("eth-blob-data-included") {
+            Some(value) if value.eq_ignore_ascii_case("false") => {}
+            Some(value) if value.eq_ignore_ascii_case("true") => {
+                return Err(ApiError::bad_request(
+                    "this node takes the signed envelope alone, without blob data",
+                ));
+            }
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "blob data included header is not a boolean: {other}"
+                )));
+            }
+            None => return Err(ApiError::bad_request("missing blob data included header")),
+        }
+        match Query::of(request).text("broadcast_validation") {
+            None | Some("gossip") => Ok(()),
+            Some(level @ ("consensus" | "consensus_and_equivocation")) => {
+                Err(ApiError::bad_request(format!(
+                    "broadcast validation {level} is not supported; gossip is"
+                )))
+            }
+            Some(other) => Err(ApiError::bad_request(format!(
+                "unknown broadcast validation: {other}"
+            ))),
         }
     }
 
@@ -525,5 +576,109 @@ impl BeaconRoutes {
     fn json_body(request: &Request) -> Result<Json, ApiError> {
         Json::parse(&request.body)
             .map_err(|error| ApiError::bad_request(format!("malformed JSON body: {error}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_http::Method;
+    use axiom_types::Minimal;
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    /// An error reply's body.
+    fn error(code: u16, message: &str) -> Json {
+        Json::from([
+            ("code", Json::from(u64::from(code))),
+            ("message", Json::from(message)),
+        ])
+    }
+
+    /// A request to publish an envelope, with some headers.
+    fn publish(path: &str, headers: &[(&str, &str)], body: Vec<u8>) -> Request {
+        headers.iter().fold(
+            Request::new(Method::Post, path).with_body("application/octet-stream", body),
+            |request, (name, value)| request.with_header(name, *value),
+        )
+    }
+
+    #[test]
+    fn an_envelope_publication_needs_both_headers() {
+        let api = TestApi::gloas(8);
+        let route = "/eth/v1/beacon/execution_payload_envelopes";
+        let both = [
+            ("eth-consensus-version", "gloas"),
+            ("eth-blob-data-included", "false"),
+        ];
+        let cases = [
+            // The consensus version is required.
+            (
+                publish(route, &both[1..], vec![1, 2, 3]),
+                error(400, "missing consensus version header"),
+            ),
+            // Fulu blocks carry their payload, so no envelope travels in Fulu.
+            (
+                publish(
+                    route,
+                    &[
+                        ("eth-consensus-version", "fulu"),
+                        ("eth-blob-data-included", "false"),
+                    ],
+                    vec![1, 2, 3],
+                ),
+                error(400, "fulu blocks carry their payload"),
+            ),
+            // The blob data header is required, and this node takes the envelope alone.
+            (
+                publish(route, &both[..1], vec![1, 2, 3]),
+                error(400, "missing blob data included header"),
+            ),
+            (
+                publish(
+                    route,
+                    &[
+                        ("eth-consensus-version", "gloas"),
+                        ("eth-blob-data-included", "true"),
+                    ],
+                    vec![1, 2, 3],
+                ),
+                error(
+                    400,
+                    "this node takes the signed envelope alone, without blob data",
+                ),
+            ),
+            // Only gossip validation runs before the broadcast.
+            (
+                publish(
+                    &format!("{route}?broadcast_validation=consensus"),
+                    &both,
+                    vec![1, 2, 3],
+                ),
+                error(
+                    400,
+                    "broadcast validation consensus is not supported; gossip is",
+                ),
+            ),
+            // Three bytes are no envelope.
+            (
+                publish(route, &both, vec![1, 2, 3]),
+                error(
+                    400,
+                    &format!(
+                        "malformed envelope: {}",
+                        SignedExecutionPayloadEnvelope::<Minimal>::decode(&[1, 2, 3]).unwrap_err()
+                    ),
+                ),
+            ),
+        ];
+        for (request, expected) in cases {
+            let target = request.target();
+            assert_eq!(
+                TestApi::parsed(&api.send(request)),
+                (StatusCode::BAD_REQUEST, expected),
+                "{target}"
+            );
+        }
     }
 }

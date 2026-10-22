@@ -21,7 +21,7 @@ use axiom_fork_choice::{
     DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, NodePayload,
     PayloadArrival, PayloadStatus, Store,
 };
-use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
+use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
 use axiom_json::Json;
 use axiom_light_client::{
     LightClientServer, PostState,
@@ -507,7 +507,10 @@ impl<P: Preset> Chain<P> {
         self.database.canonical_root(slot)
     }
 
-    /// Advances the fork choice clock.
+    /// Advances the fork choice clock, never moving it back.
+    ///
+    /// The ticker and a publication may read the clock in either order before reaching the chain.
+    /// A late arrival with the earlier time leaves the clock where it is.
     ///
     /// # Errors
     ///
@@ -515,7 +518,7 @@ impl<P: Preset> Chain<P> {
     pub fn on_tick(&mut self, time_ms: u64) -> Result<(), ChainError> {
         let epoch = self.store.current_epoch();
         let slot = self.store.current_slot();
-        self.store.on_tick(time_ms);
+        self.store.on_tick(time_ms.max(self.store.time_ms()));
         if self.store.current_slot() != slot {
             // Votes and signatures too old for any coming block leave the pool.
             self.pool.on_slot(self.store.current_slot());
@@ -731,6 +734,11 @@ impl<P: Preset> Chain<P> {
     #[must_use]
     pub const fn custody(&self) -> &BTreeSet<ColumnIndex> {
         self.availability.custody()
+    }
+
+    /// What gossip validation remembers of the messages it let through.
+    pub(crate) const fn seen(&self) -> &Seen {
+        &self.gossip.seen
     }
 
     /// Runs gossip validation against the chain.
@@ -1130,7 +1138,10 @@ impl<P: Preset> Chain<P> {
     /// Committees of an epoch as the head state shuffles them.
     ///
     /// Shuffling walks every validator, so the result is kept until the head changes.
-    fn committees_at(&mut self, epoch: Epoch) -> Result<Arc<EpochCommittees>, ChainError> {
+    pub(crate) fn committees_at(
+        &mut self,
+        epoch: Epoch,
+    ) -> Result<Arc<EpochCommittees>, ChainError> {
         if let Some((cached, root, committees)) = &self.committees
             && *cached == epoch
             && *root == self.head.root

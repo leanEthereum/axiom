@@ -4,8 +4,8 @@ use axiom_json::Json;
 use axiom_types::{
     Preset,
     altair::{
-        ContributionAndProof, SignedContributionAndProof, SyncAggregate, SyncCommitteeContribution,
-        SyncCommitteeMessage,
+        ContributionAndProof, SignedContributionAndProof, SyncAggregate,
+        SyncAggregatorSelectionData, SyncCommitteeContribution, SyncCommitteeMessage,
     },
 };
 
@@ -27,6 +27,23 @@ impl<P: Preset> ApiJson for SyncAggregate<P> {
         Ok(Self {
             sync_committee_bits: fields.required("sync_committee_bits")?,
             sync_committee_signature: fields.required("sync_committee_signature")?,
+        })
+    }
+}
+
+impl ApiJson for SyncAggregatorSelectionData {
+    fn to_json(&self) -> Json {
+        Json::from([
+            ("slot", self.slot.to_json()),
+            ("subcommittee_index", self.subcommittee_index.to_json()),
+        ])
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        let fields = Fields::of(value)?;
+        Ok(Self {
+            slot: fields.required("slot")?,
+            subcommittee_index: fields.required("subcommittee_index")?,
         })
     }
 }
@@ -128,6 +145,15 @@ mod tests {
         }
     }
 
+    impl Sample for SyncAggregatorSelectionData {
+        fn sample(sampler: &mut Sampler) -> Self {
+            Self {
+                slot: sampler.draw(),
+                subcommittee_index: sampler.draw(),
+            }
+        }
+    }
+
     impl Sample for SyncCommitteeMessage {
         fn sample(sampler: &mut Sampler) -> Self {
             Self {
@@ -179,6 +205,7 @@ mod tests {
             let mut sampler = Sampler::new(seed);
             sampler.round_trip::<SyncAggregate<Minimal>>().map_err(TestCaseError::fail)?;
             sampler.round_trip::<SyncCommitteeMessage>().map_err(TestCaseError::fail)?;
+            sampler.round_trip::<SyncAggregatorSelectionData>().map_err(TestCaseError::fail)?;
             sampler.round_trip::<SyncCommitteeContribution<Minimal>>().map_err(TestCaseError::fail)?;
             sampler.round_trip::<ContributionAndProof<Minimal>>().map_err(TestCaseError::fail)?;
             sampler.round_trip::<SignedContributionAndProof<Minimal>>().map_err(TestCaseError::fail)?;

@@ -46,6 +46,7 @@ use axiom_types::{
     deneb::{self, Blob},
     electra,
     fulu::{BeaconState, SignedBeaconBlock, SignedBlockContents},
+    gloas,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -341,10 +342,12 @@ impl TestNode {
         }
     }
 
-    /// Publishes a Gloas payload envelope over the API.
+    /// Publishes a Gloas payload envelope over the API, alone, without blob data.
     async fn publish_envelope(&self, proposal: &Proposal<Minimal>) -> Option<Response> {
         let envelope = proposal.envelope()?;
         let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelopes")
+            .with_header("eth-consensus-version", "gloas")
+            .with_header("eth-blob-data-included", "false")
             .with_body("application/octet-stream", envelope.encode());
         Some(self.client.send(&request).await.expect("node answers"))
     }
@@ -416,6 +419,58 @@ impl TestNode {
             panic!("an Altair chain serves Altair updates");
         };
         (update.attested_header.beacon.slot, update.signature_slot)
+    }
+
+    /// Checks the node serves the first block of every fork back by its slot.
+    ///
+    /// Genesis fills slot 0, so phase0 is checked at slot 1.
+    async fn serves_each_fork(&self, config: &ChainConfig, proposals: &[Proposal<Minimal>]) {
+        for fork in ForkName::ALL {
+            let slot = config.fork_epoch(fork).start_slot::<Minimal>().0.max(1);
+            let expected = format!("{}", proposals[(slot - 1) as usize].block().block_root());
+            let root = self
+                .json(&format!("/eth/v1/beacon/blocks/{slot}/root"))
+                .await
+                .expect("the node holds the block");
+            let root = root.get("data").and_then(|data| data.get("root"));
+            assert_eq!(
+                root.and_then(Json::as_str),
+                Some(expected.as_str()),
+                "{fork}"
+            );
+        }
+    }
+
+    /// Checks the node serves a block's envelope back by its root, as SSZ and as versioned JSON.
+    async fn serves_envelope(
+        &self,
+        tip: &str,
+        envelope: &gloas::SignedExecutionPayloadEnvelope<Minimal>,
+    ) {
+        let path = format!("/eth/v1/beacon/execution_payload_envelopes/{tip}");
+        let request =
+            Request::new(Method::Get, &path).with_header("accept", "application/octet-stream");
+        let response = self.client.send(&request).await.expect("node answers");
+        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
+        assert_eq!(response.body, envelope.encode());
+        let reply = self.json(&path).await.expect("the node holds the envelope");
+        assert_eq!(reply.get("version").and_then(Json::as_str), Some("gloas"));
+        assert_eq!(
+            reply.get("finalized").and_then(Json::as_bool),
+            Some(false),
+            "the tip is not finalized"
+        );
+        let slot = reply
+            .get("data")
+            .and_then(|data| data.get("message"))
+            .and_then(|message| message.get("payload"))
+            .and_then(|payload| payload.get("slot_number"))
+            .and_then(Json::as_str);
+        assert_eq!(
+            slot,
+            Some(envelope.message.payload.slot_number.to_string().as_str())
+        );
     }
 
     /// The head block's root, as the header route reports it.
@@ -945,20 +1000,14 @@ fn a_node_syncs_from_genesis_through_every_fork() {
         );
 
         // B serves each fork's blocks back by slot, the first slot of each fork included.
-        for fork in ForkName::ALL {
-            let slot = config.fork_epoch(fork).start_slot::<Minimal>().0.max(1);
-            let expected = format!("{}", proposals[(slot - 1) as usize].block().block_root());
-            let root = b
-                .json(&format!("/eth/v1/beacon/blocks/{slot}/root"))
-                .await
-                .expect("B holds the block");
-            let root = root.get("data").and_then(|data| data.get("root"));
-            assert_eq!(
-                root.and_then(Json::as_str),
-                Some(expected.as_str()),
-                "{fork}"
-            );
-        }
+        b.serves_each_fork(&config, &proposals).await;
+
+        // A serves the tip's envelope back by block root, as SSZ and as versioned JSON.
+        let envelope = proposals
+            .last()
+            .and_then(Proposal::envelope)
+            .expect("the Gloas tip has an envelope");
+        a.serves_envelope(&tip, envelope).await;
 
         // Before importing the merge block of slot 16, B asked its engine for the terminal block.
         // The terminal block at 1000 led to its parent at 999, and nothing else was looked up.

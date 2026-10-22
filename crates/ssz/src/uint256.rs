@@ -76,6 +76,31 @@ impl U256 {
         Some(Self(value))
     }
 
+    /// The value written in decimal, without leading zeros.
+    ///
+    /// The beacon API writes wei amounts this way.
+    #[must_use]
+    pub fn to_decimal(self) -> String {
+        // Divide by 10 repeatedly, collecting remainders from the least significant digit.
+        let mut value = self.0;
+        let mut digits = Vec::new();
+        loop {
+            let mut remainder = 0_u16;
+            for byte in value.iter_mut().rev() {
+                let current = (remainder << 8) | u16::from(*byte);
+                *byte = (current / 10) as u8;
+                remainder = current % 10;
+            }
+            digits.push(b'0' + remainder as u8);
+            if value.iter().all(|byte| *byte == 0) {
+                break;
+            }
+        }
+        digits.reverse();
+        // Invariant: every pushed byte is an ASCII digit.
+        String::from_utf8(digits).expect("decimal digits are ASCII")
+    }
+
     /// The little-endian bytes.
     #[must_use]
     pub const fn to_le_bytes(self) -> [u8; 32] {
@@ -192,6 +217,18 @@ mod tests {
         assert_eq!(U256::from_decimal("65536"), Some(U256(expected)));
         assert_eq!(U256::from_decimal("12a"), None);
         assert_eq!(U256::from_decimal(""), None);
+    }
+
+    #[test]
+    fn decimal_writes_back_what_it_reads() {
+        // Zero, a small value, and 2^256 - 1 write as they were read.
+        for text in [
+            "0",
+            "65536",
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        ] {
+            assert_eq!(U256::from_decimal(text).unwrap().to_decimal(), text);
+        }
     }
 
     #[test]

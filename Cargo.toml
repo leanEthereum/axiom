@@ -97,6 +97,8 @@ axiom-operation-pool = { path = "crates/operation-pool" }
 axiom-block-production = { path = "crates/block-production" }
 axiom-beacon-json = { path = "crates/beacon-json" }
 axiom-builder-client = { path = "crates/builder-client" }
+axiom-validator = { path = "crates/validator" }
+axiom-ef-tests = { path = "testing/ef-tests" }
 axiom-slasher = { path = "crates/slasher" }
 
 # Error types: the derive writes the Display and Error impls each error enum needs.

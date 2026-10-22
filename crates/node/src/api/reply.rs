@@ -7,17 +7,24 @@ use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
 use axiom_ssz::Ssz;
 use axiom_types::ForkName;
+use tracing::debug;
 
 use super::encoding::{Encoding, JSON, SSZ};
 use crate::{ChainError, ChainStopped};
+
+/// One refused item of a list submission: its position and the reason.
+pub(crate) type Failure = (usize, String);
 
 /// What a route returns: a response, or an error the client is told about.
 pub(crate) type ApiResult = Result<Response, ApiError>;
 
 /// An error reply, sent as the beacon API's error object.
 ///
+/// A list submission names each refused item, as the indexed error object does.
+///
 /// ```text
 ///     {"code":404,"message":"block not found"}
+///     {"code":400,"message":"some items were refused","failures":[{"index":1,"message":"..."}]}
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ApiError {
@@ -25,6 +32,8 @@ pub(crate) struct ApiError {
     status: StatusCode,
     /// A sentence for the client.
     message: String,
+    /// The refused items of a list submission, empty for any other error.
+    failures: Vec<Failure>,
 }
 
 impl ApiError {
@@ -61,6 +70,22 @@ impl ApiError {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
     }
 
+    /// Some items of a list submission were refused; the others were accepted.
+    ///
+    /// See `IndexedErrorMessage` in the beacon API.
+    pub(crate) fn indexed(failures: Vec<Failure>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: format!("{} of the submitted items were refused", failures.len()),
+            failures,
+        }
+    }
+
+    /// The node does not implement this optional route.
+    pub(crate) fn not_implemented(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_IMPLEMENTED, message)
+    }
+
     /// The node failed in a way the client cannot fix.
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
@@ -71,17 +96,31 @@ impl ApiError {
         Self {
             status,
             message: message.into(),
+            failures: Vec::new(),
         }
     }
 
     /// The error as a response.
     pub(crate) fn into_response(self) -> Response {
-        let body: Object = [
+        let mut body: Object = [
             ("code", Json::from(u64::from(self.status.as_u16()))),
             ("message", Json::from(self.message)),
         ]
         .into_iter()
         .collect();
+        if !self.failures.is_empty() {
+            let failures = self
+                .failures
+                .into_iter()
+                .map(|(index, message)| {
+                    Json::from([
+                        ("index", Json::from(index as u64)),
+                        ("message", Json::from(message)),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            body.insert("failures", Json::Array(failures));
+        }
         Response::new(self.status).with_body(JSON, Json::from(body).to_string().into_bytes())
     }
 }
@@ -226,6 +265,25 @@ impl Reply {
         }
         body.insert("data", data);
         body
+    }
+
+    /// The reply to a list submission: 200, or 400 naming each refused item.
+    ///
+    /// Items are handled one by one, so the accepted ones stand even when others fail.
+    /// See `IndexedErrorMessage` in the beacon API.
+    pub(crate) fn submission(failures: Vec<Failure>) -> ApiResult {
+        if failures.is_empty() {
+            return Ok(Response::new(StatusCode::OK));
+        }
+        for (position, message) in &failures {
+            debug!(position, %message, "submitted item refused");
+        }
+        Err(ApiError::indexed(failures))
+    }
+
+    /// An empty reply: the request was fine, but there is nothing to answer.
+    pub(crate) const fn no_content() -> Response {
+        Response::new(StatusCode::NO_CONTENT)
     }
 
     /// A JSON reply with an explicit status.

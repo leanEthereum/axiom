@@ -1,13 +1,11 @@
-//! The validator namespace: duties, attestation data, aggregates, and block production.
+//! The validator namespace: attestation data, aggregates, payload votes, and block production.
 //!
 //! The node produces unsigned objects and takes signed ones; the validator client signs.
 //! See the validator routes of beacon-APIs.
 
-use std::collections::BTreeSet;
-
 use axiom_beacon_json::{ApiJson, ForkedJson};
 use axiom_block_production::{BuilderBoost, ProducedBlock, ProductionError, Proposal, RandaoCheck};
-use axiom_bls::{PublicKey, Signature};
+use axiom_bls::Signature;
 use axiom_builder_client::{RevealedBlobs, UnblindedBlock};
 use axiom_fork_choice::NodePayload;
 use axiom_http::{Request, Response, StatusCode};
@@ -16,16 +14,13 @@ use axiom_operation_pool::{PackedAttestation, PoolError, PoolFork};
 use axiom_ssz::{Ssz, U256};
 use axiom_state_transition::State;
 use axiom_types::{
-    BlsSignature, Bytes32, CommitteeIndex, Epoch, ExecutionAddress, ForkName, Preset, Root, Slot,
-    ValidatorIndex, accessors::CoreState, altair, bellatrix,
-    bellatrix::SignedValidatorRegistrationV1, capella, combined,
-    combined::SignedBlindedBeaconBlock, deneb, electra, fulu, gloas, phase0,
-    phase0::AttestationData,
+    BlsSignature, Bytes32, CommitteeIndex, ForkName, Preset, Root, Slot, accessors::CoreState,
+    altair, bellatrix, capella, combined, combined::SignedBlindedBeaconBlock, deneb, electra, fulu,
+    gloas, phase0, phase0::AttestationData,
 };
 
 use super::{
     ApiContext,
-    duties::{AttesterDuty, Duties, ProposerDuty, SyncDuty},
     encoding::Encoding,
     query::{Body, Query},
     reply::{ApiError, ApiResult, Reply, Routes},
@@ -68,39 +63,7 @@ impl ValidatorRoutes {
                 "/eth/v1/validator/payload_attestation_data",
                 Self::payload_attestation_data::<P>,
             )
-            .get(
-                "/eth/v1/validator/duties/proposer/{epoch}",
-                Self::proposer_duties::<P>,
-            )
-            .post(
-                "/eth/v1/validator/duties/attester/{epoch}",
-                Self::attester_duties::<P>,
-            )
-            .post(
-                "/eth/v1/validator/duties/sync/{epoch}",
-                Self::sync_duties::<P>,
-            )
-            .post(
-                "/eth/v1/validator/duties/ptc/{epoch}",
-                Self::ptc_duties::<P>,
-            )
-            .post(
-                "/eth/v1/validator/prepare_beacon_proposer",
-                Self::prepare_beacon_proposer::<P>,
-            )
-            .post(
-                "/eth/v1/validator/register_validator",
-                Self::register_validator::<P>,
-            )
             .post("/eth/v2/beacon/blinded_blocks", Self::publish_blinded::<P>)
-            .post(
-                "/eth/v1/validator/beacon_committee_subscriptions",
-                Self::subscriptions::<P>,
-            )
-            .post(
-                "/eth/v1/validator/sync_committee_subscriptions",
-                Self::subscriptions::<P>,
-            )
     }
 
     /// Produces an unsigned block up to Fulu, full or blinded.
@@ -255,17 +218,31 @@ impl ValidatorRoutes {
             .with_header("eth-consensus-version", ForkName::Gloas.to_string()))
     }
 
-    /// The vote a validator of a committee signs at a slot.
+    /// The vote a validator of a committee signs at a slot, as JSON or SSZ.
     ///
     /// The source and target come from the head's state advanced to the slot.
+    /// The committee index matters before Electra only, so it may be left out from Electra on.
+    /// An optimistic head is refused: a vote must not attest to a payload no engine validated.
     /// See "Attestation data" in the phase0 validator spec, and its Gloas payload signal.
     async fn attestation_data<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let query = Query::of(&request);
         let slot = Slot(query.number("slot")?);
-        let committee_index = CommitteeIndex(query.number("committee_index")?);
+        let committee_index = query
+            .optional_number("committee_index")?
+            .map(CommitteeIndex);
+        let ssz = Encoding::accepted(&request, true)? == Encoding::Ssz;
         context
             .query(move |chain| {
+                if chain.head().optimistic {
+                    return Err(ApiError::unavailable(
+                        "the head is optimistic: its payload is not validated yet",
+                    ));
+                }
                 let data = Self::vote_at(chain, slot, committee_index)?;
+                if ssz {
+                    let fork = chain.config().fork_at(slot.epoch::<P>());
+                    return Ok(Reply::ssz(data.encode(), fork));
+                }
                 Ok(Reply::data(data.to_json(), None))
             })
             .await
@@ -330,18 +307,26 @@ impl ValidatorRoutes {
 
     /// What a payload timeliness committee member attests at a slot: the block and its payload.
     ///
+    /// Without a block at the slot there is nothing to attest, which the empty 204 reply says.
+    /// See `producePayloadAttestationData` in the beacon API.
     /// See "Constructing the payload attestation message" in the Gloas validator spec.
     async fn payload_attestation_data<P: Preset>(
         context: ApiContext<P>,
         request: Request,
     ) -> ApiResult {
-        // The slot travels in the query, as the beacon API defines the route.
         let slot = Slot(Query::of(&request).number("slot")?);
+        let encoding = Encoding::accepted(&request, true)?;
         context
             .query(move |chain| {
-                let root = chain
-                    .canonical_root(slot)?
-                    .ok_or_else(|| ApiError::not_found("no block at the slot"))?;
+                let fork = chain.config().fork_at(slot.epoch::<P>());
+                if !fork.separates_payloads() {
+                    return Err(ApiError::bad_request(format!(
+                        "{fork} blocks carry their payload, so no payload is attested"
+                    )));
+                }
+                let Some(root) = chain.canonical_root(slot)? else {
+                    return Ok(Reply::no_content());
+                };
                 let envelope = chain.database().envelope(root)?;
                 let data = gloas::PayloadAttestationData {
                     beacon_block_root: root,
@@ -349,157 +334,9 @@ impl ValidatorRoutes {
                     payload_present: envelope.is_some(),
                     blob_data_available: envelope.is_some(),
                 };
-                Ok(Reply::data(data.to_json(), None))
+                Ok(Reply::typed(encoding, fork, None, &data))
             })
             .await
-    }
-
-    /// The proposers of an epoch.
-    async fn proposer_duties<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let epoch = Epoch(Self::path_number(&request, "epoch")?);
-        context
-            .query(move |chain| {
-                let head = chain.head();
-                let (dependent_root, duties) =
-                    Duties::new(chain.head_state()?, chain.config(), head.root).proposers(epoch)?;
-                let data = duties.iter().map(Self::proposer_json).collect::<Vec<_>>();
-                Ok(Self::duties_reply(dependent_root, head.optimistic, data))
-            })
-            .await
-    }
-
-    /// The committee seats of some validators in an epoch.
-    async fn attester_duties<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let epoch = Epoch(Self::path_number(&request, "epoch")?);
-        let validators = Self::indices(&request)?;
-        context
-            .query(move |chain| {
-                let head = chain.head();
-                let (dependent_root, duties) =
-                    Duties::new(chain.head_state()?, chain.config(), head.root)
-                        .attesters(epoch, &validators)?;
-                let data = duties.iter().map(Self::attester_json).collect::<Vec<_>>();
-                Ok(Self::duties_reply(dependent_root, head.optimistic, data))
-            })
-            .await
-    }
-
-    /// The sync committee seats of some validators in an epoch's period.
-    async fn sync_duties<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let epoch = Epoch(Self::path_number(&request, "epoch")?);
-        let validators = Self::indices(&request)?;
-        context
-            .query(move |chain| {
-                let head = chain.head();
-                let duties = Duties::new(chain.head_state()?, chain.config(), head.root)
-                    .sync(epoch, &validators)?;
-                let data = duties.iter().map(Self::sync_json).collect::<Vec<_>>();
-                let body = Json::from([
-                    ("execution_optimistic", Json::from(head.optimistic)),
-                    ("data", Json::Array(data)),
-                ]);
-                Ok(Reply::json(StatusCode::OK, &body))
-            })
-            .await
-    }
-
-    /// The payload timeliness committee seats of some validators in an epoch.
-    async fn ptc_duties<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let epoch = Epoch(Self::path_number(&request, "epoch")?);
-        let validators = Self::indices(&request)?;
-        context
-            .query(move |chain| {
-                let head = chain.head();
-                let (dependent_root, duties) =
-                    Duties::new(chain.head_state()?, chain.config(), head.root)
-                        .ptc(epoch, &validators)?;
-                let data = duties.iter().map(Self::proposer_json).collect::<Vec<_>>();
-                Ok(Self::duties_reply(dependent_root, head.optimistic, data))
-            })
-            .await
-    }
-
-    /// Records the fee recipients validators name for their coming proposals.
-    async fn prepare_beacon_proposer<P: Preset>(
-        context: ApiContext<P>,
-        request: Request,
-    ) -> ApiResult {
-        let value = Body(&request).json()?;
-        let items = value
-            .as_array()
-            .ok_or_else(|| ApiError::bad_request("body is not a JSON array"))?;
-        let mut recipients = Vec::with_capacity(items.len());
-        for (position, item) in items.iter().enumerate() {
-            let invalid = |what: &str| ApiError::bad_request(format!("item {position}: {what}"));
-            let index = item
-                .get("validator_index")
-                .and_then(Json::as_str)
-                .and_then(|text| text.parse().ok())
-                .ok_or_else(|| invalid("validator_index is not a decimal string"))?;
-            let address = item
-                .get("fee_recipient")
-                .and_then(Json::as_str)
-                .and_then(|text| <[u8; 20]>::from_data(text).ok())
-                .ok_or_else(|| invalid("fee_recipient is not a 20-byte address"))?;
-            recipients.push((ValidatorIndex(index), ExecutionAddress(address)));
-        }
-        // Validators the head does not know cannot propose, so naming them is an error.
-        let count = recipients.len();
-        let largest = recipients.iter().map(|(index, _)| *index).max();
-        context
-            .query(move |chain| {
-                let registry_size = chain.head_state()?.beacon().validators().len();
-                match largest {
-                    Some(index) if index.as_usize() >= registry_size => Err(ApiError::bad_request(
-                        format!("validator {index} is not in the registry of {registry_size}"),
-                    )),
-                    _ => Ok(count),
-                }
-            })
-            .await?;
-        context.proposer.prepare(recipients);
-        Ok(Response::new(StatusCode::OK))
-    }
-
-    /// Records the builder registrations validators signed.
-    ///
-    /// Each registration must carry its key's signature in the application builder domain.
-    /// See `verify_registration_signature` in the Bellatrix builder spec.
-    async fn register_validator<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let registrations: Vec<SignedValidatorRegistrationV1> = Body(&request).items()?;
-        let domain = context
-            .query(|chain| Ok(chain.config().application_builder_domain()))
-            .await?;
-        let mut accepted = Vec::with_capacity(registrations.len());
-        for (position, signed) in registrations.into_iter().enumerate() {
-            let root = phase0::SigningData::signing_root(&signed.message, domain);
-            let valid = PublicKey::from_bytes(&signed.message.pubkey.0)
-                .ok()
-                .zip(Signature::from_bytes(&signed.signature.0).ok())
-                .is_some_and(|(key, signature)| signature.verify(&key, root.as_ref()));
-            if !valid {
-                return Err(ApiError::bad_request(format!(
-                    "registration {position} is not signed by its key"
-                )));
-            }
-            accepted.push(signed);
-        }
-        context.proposer.register_with_builders(&accepted).await;
-        Ok(Response::new(StatusCode::OK))
-    }
-
-    /// Accepts committee subscriptions.
-    ///
-    /// The node joins the attestation subnets of its own identity only.
-    /// An aggregator on another subnet still receives the aggregates of its committee.
-    async fn subscriptions<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let value = Body(&request).json()?;
-        if value.as_array().is_none() {
-            return Err(ApiError::bad_request("body is not a JSON array"));
-        }
-        // A subscription needs a running chain, whose subnets it would join.
-        context.query(|_| Ok(())).await?;
-        Ok(Response::new(StatusCode::OK))
     }
 
     /// Publishes a signed blinded block, once its builder reveals the payload.
@@ -567,10 +404,14 @@ impl ValidatorRoutes {
     }
 
     /// The vote of a committee at a slot, on the head as the slot sees it.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a slot more than an epoch past the head, or before Electra without a committee.
     fn vote_at<P: Preset>(
         chain: &mut Chain<P>,
         slot: Slot,
-        committee_index: CommitteeIndex,
+        committee_index: Option<CommitteeIndex>,
     ) -> Result<AttestationData, ApiError> {
         let head = chain.head();
         if slot.epoch::<P>() > head.slot.epoch::<P>() + 1 {
@@ -602,7 +443,11 @@ impl ValidatorRoutes {
         } else if !fork.names_committee_in_vote() {
             CommitteeIndex(0)
         } else {
-            committee_index
+            committee_index.ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "{fork} votes name their committee, so committee_index is required"
+                ))
+            })?
         };
         Ok(AttestationData {
             slot,
@@ -729,75 +574,6 @@ impl ValidatorRoutes {
             .map_err(|_| ApiError::bad_request(format!("{name} is not a root: {text}")))
     }
 
-    /// The validator indices of a duties request body: a JSON array of decimal strings.
-    fn indices(request: &Request) -> Result<BTreeSet<ValidatorIndex>, ApiError> {
-        let value = Body(request).json()?;
-        let items = value
-            .as_array()
-            .ok_or_else(|| ApiError::bad_request("body is not a JSON array"))?;
-        items
-            .iter()
-            .map(|item| {
-                item.as_str()
-                    .and_then(|text| text.parse().ok())
-                    .map(ValidatorIndex)
-                    .ok_or_else(|| ApiError::bad_request("validator index is not a decimal string"))
-            })
-            .collect()
-    }
-
-    /// A duties reply, with the root the duties depend on.
-    fn duties_reply(dependent_root: Root, optimistic: bool, data: Vec<Json>) -> Response {
-        let body = Json::from([
-            ("dependent_root", Reply::text(&dependent_root)),
-            ("execution_optimistic", Json::from(optimistic)),
-            ("data", Json::Array(data)),
-        ]);
-        Reply::json(StatusCode::OK, &body)
-    }
-
-    /// A proposer or payload committee duty in JSON.
-    fn proposer_json(duty: &ProposerDuty) -> Json {
-        Json::from([
-            ("pubkey", Reply::text(&duty.pubkey)),
-            ("validator_index", Reply::number(duty.validator_index.0)),
-            ("slot", Reply::number(duty.slot.0)),
-        ])
-    }
-
-    /// An attester duty in JSON.
-    fn attester_json(duty: &AttesterDuty) -> Json {
-        Json::from([
-            ("pubkey", Reply::text(&duty.pubkey)),
-            ("validator_index", Reply::number(duty.validator_index.0)),
-            ("committee_index", Reply::number(duty.committee_index.0)),
-            ("committee_length", Reply::number(duty.committee_length)),
-            ("committees_at_slot", Reply::number(duty.committees_at_slot)),
-            (
-                "validator_committee_index",
-                Reply::number(duty.validator_committee_index),
-            ),
-            ("slot", Reply::number(duty.slot.0)),
-        ])
-    }
-
-    /// A sync committee duty in JSON.
-    fn sync_json(duty: &SyncDuty) -> Json {
-        Json::from([
-            ("pubkey", Reply::text(&duty.pubkey)),
-            ("validator_index", Reply::number(duty.validator_index.0)),
-            (
-                "validator_sync_committee_indices",
-                Json::Array(
-                    duty.seats
-                        .iter()
-                        .map(|seat| Reply::number(*seat as u64))
-                        .collect(),
-                ),
-            ),
-        ])
-    }
-
     /// A wei amount as a decimal string.
     fn wei(value: U256) -> String {
         value
@@ -828,5 +604,122 @@ impl From<ProposerError> for ApiError {
             }
             other => Self::internal(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_http::Method;
+    use axiom_types::Epoch;
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    #[test]
+    fn payload_attestation_data_takes_its_slot_from_the_query() {
+        let api = TestApi::gloas(8);
+        let genesis = api.run(|chain| chain.head().root);
+
+        // Slot 0 holds the genesis block, whose payload no envelope revealed.
+        let response = api.send(Request::new(
+            Method::Get,
+            "/eth/v1/validator/payload_attestation_data?slot=0",
+        ));
+        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
+        let data = gloas::PayloadAttestationData {
+            beacon_block_root: genesis,
+            slot: Slot(0),
+            payload_present: false,
+            blob_data_available: false,
+        };
+        let expected = Json::from([("version", Json::from("gloas")), ("data", data.to_json())]);
+        assert_eq!(TestApi::parsed(&response), (StatusCode::OK, expected));
+
+        // No block was seen at slot 1, so there is nothing to attest.
+        api.at_slot(Slot(1));
+        let response = api.send(Request::new(
+            Method::Get,
+            "/eth/v1/validator/payload_attestation_data?slot=1",
+        ));
+        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        assert_eq!(response.body, Vec::<u8>::new());
+
+        // The slot is required, and the path no longer carries it.
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(r#"{"code":400,"message":"missing query parameter slot"}"#).unwrap()
+            )
+        );
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data/0").0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[test]
+    fn payload_attestation_data_exists_from_gloas_on() {
+        let api = TestApi::phase0(8);
+        assert_eq!(
+            api.get("/eth/v1/validator/payload_attestation_data?slot=0"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(
+                    r#"{"code":400,"message":"phase0 blocks carry their payload, so no payload is attested"}"#
+                )
+                .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn attestation_data_needs_a_committee_only_where_votes_name_one() {
+        // Phase0 votes name their committee, so leaving it out is an error.
+        let api = TestApi::phase0(64);
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0"),
+            (
+                StatusCode::BAD_REQUEST,
+                Json::parse(
+                    r#"{"code":400,"message":"phase0 votes name their committee, so committee_index is required"}"#
+                )
+                .unwrap()
+            )
+        );
+
+        // Committee 1 at genesis: source and target both rest on the genesis block.
+        let genesis = api.run(|chain| chain.head().root);
+        let vote = AttestationData {
+            slot: Slot(0),
+            index: CommitteeIndex(1),
+            beacon_block_root: genesis,
+            source: phase0::Checkpoint::default(),
+            target: phase0::Checkpoint {
+                epoch: Epoch(0),
+                root: genesis,
+            },
+        };
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0&committee_index=1"),
+            (StatusCode::OK, Json::from([("data", vote.to_json())]))
+        );
+
+        // A Gloas vote signals the payload in its index, so no committee is asked for.
+        let api = TestApi::gloas(64);
+        let genesis = api.run(|chain| chain.head().root);
+        let vote = AttestationData {
+            index: CommitteeIndex(0),
+            beacon_block_root: genesis,
+            target: phase0::Checkpoint {
+                epoch: Epoch(0),
+                root: genesis,
+            },
+            ..vote
+        };
+        assert_eq!(
+            api.get("/eth/v1/validator/attestation_data?slot=0"),
+            (StatusCode::OK, Json::from([("data", vote.to_json())]))
+        );
     }
 }

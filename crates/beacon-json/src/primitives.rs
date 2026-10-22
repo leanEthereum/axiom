@@ -49,6 +49,20 @@ impl ApiJson for U256 {
     }
 }
 
+impl ApiJson for String {
+    /// Free text, such as a status message or a graffiti string.
+    fn to_json(&self) -> Json {
+        Json::String(self.clone())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        value
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| ApiJsonError::wrong_type("a string", value))
+    }
+}
+
 impl ApiJson for bool {
     fn to_json(&self) -> Json {
         Json::Bool(*self)

@@ -115,6 +115,17 @@ pub enum ChainBuilderError {
         /// Commitments one body holds.
         limit: usize,
     },
+    /// Supplied votes are of another fork's shape than the block's.
+    #[error("the {fork} block of slot {slot} takes votes of another shape")]
+    AttestationShape {
+        /// The slot of the block.
+        slot: Slot,
+        /// The fork of the block.
+        fork: ForkName,
+    },
+    /// A sync aggregate was supplied for a block of a fork without sync committees.
+    #[error("the block of slot {0} predates sync committees")]
+    NoSyncAggregate(Slot),
     /// The envelope built for a Gloas block does not reveal its bid.
     #[error("the envelope built for slot {slot} is invalid: {source}")]
     Envelope {

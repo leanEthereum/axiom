@@ -11,7 +11,7 @@ use std::str::FromStr;
 use axiom_beacon_json::ApiJson;
 use axiom_http::Request;
 use axiom_json::{Data, Json};
-use axiom_ssz::Ssz;
+use axiom_ssz::{ProgressiveList, Ssz};
 
 use super::{encoding::Encoding, reply::ApiError};
 
@@ -161,6 +161,11 @@ impl Body<'_> {
             .map_err(|error| ApiError::bad_request(format!("body is not JSON: {error}")))
     }
 
+    /// A single JSON object of a type.
+    pub(crate) fn json_item<T: ApiJson>(self) -> Result<T, ApiError> {
+        T::from_json(&self.json()?).map_err(|error| ApiError::bad_request(error.to_string()))
+    }
+
     /// A JSON array of items, each decoded alone, the failing item named.
     pub(crate) fn json_items<T: ApiJson>(self) -> Result<Vec<T>, ApiError> {
         let value = self.json()?;
@@ -179,26 +184,16 @@ impl Body<'_> {
 
     /// Items from a JSON array, or from SSZ when the body says so.
     ///
-    /// An SSZ body of several items is the SSZ list of them, of fixed-size items here.
+    /// An SSZ body of several items is the SSZ list of them, of fixed or variable size.
+    /// A list encodes the same whatever its limit, so an unbounded list reads any of them.
+    /// The server's body limit bounds the count.
     pub(crate) fn items<T: ApiJson + Ssz>(self) -> Result<Vec<T>, ApiError> {
         if Encoding::of_body(self.0, true)? == Encoding::Json {
             return self.json_items();
         }
-        let size = T::FIXED_SIZE
-            .ok_or_else(|| ApiError::unsupported_media_type("application/octet-stream"))?;
-        let body = &self.0.body;
-        if size == 0 || !body.len().is_multiple_of(size) {
-            return Err(ApiError::bad_request(format!(
-                "SSZ body of {} bytes is not a list of {size}-byte items",
-                body.len()
-            )));
-        }
-        body.chunks(size)
-            .map(|chunk| {
-                T::decode(chunk)
-                    .map_err(|error| ApiError::bad_request(format!("SSZ item: {error}")))
-            })
-            .collect()
+        ProgressiveList::<T>::decode(&self.0.body)
+            .map(ProgressiveList::into_vec)
+            .map_err(|error| ApiError::bad_request(format!("SSZ body: {error}")))
     }
 }
 

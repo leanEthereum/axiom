@@ -455,9 +455,13 @@ impl<P: Preset> Publisher<P> {
         sidecars: Sidecars<P>,
     ) -> Published {
         let payload = self.execution.verdict(&self.chain, &block).await;
+        // Timing: a proposer publishes at the very start of its slot, often before the ticker.
+        // The store first catches up with the wall clock, or it would hold the block as future.
+        let now = self.clock.now_ms();
         let outcome = self
             .chain
             .run(move |chain| {
+                chain.on_tick(now)?;
                 sidecars.submit(chain)?;
                 chain.submit_block(block, payload)
             })

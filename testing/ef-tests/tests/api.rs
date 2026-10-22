@@ -20,7 +20,7 @@ use axiom_yaml::Yaml;
 /// Routes of the definition the node does not serve yet, each with its reason.
 ///
 /// Each entry is asserted to exist in the definition and to be unserved, so the list cannot go stale.
-const NOT_SERVED: [(&str, &str, &str); 9] = [
+const NOT_SERVED: [(&str, &str, &str); 4] = [
     (
         "GET",
         "/eth/v1/beacon/pool/payload_attestations",
@@ -32,39 +32,14 @@ const NOT_SERVED: [(&str, &str, &str); 9] = [
         "the Gloas preferences pool",
     ),
     (
-        "GET",
-        "/eth/v2/validator/duties/proposer/{epoch}",
-        "the second proposer duties format",
-    ),
-    (
         "POST",
         "/eth/v1/beacon/execution_payload_bids",
         "bids submitted by builders",
     ),
     (
         "POST",
-        "/eth/v1/validator/beacon_committee_selections",
-        "distributed validator middleware",
-    ),
-    (
-        "POST",
         "/eth/v1/validator/builder_preferences",
         "the Gloas builder preferences",
-    ),
-    (
-        "POST",
-        "/eth/v1/validator/liveness/{epoch}",
-        "the liveness check",
-    ),
-    (
-        "POST",
-        "/eth/v1/validator/proposer_preferences",
-        "the Gloas proposer preferences",
-    ),
-    (
-        "POST",
-        "/eth/v1/validator/sync_committee_selections",
-        "distributed validator middleware",
     ),
 ];
 

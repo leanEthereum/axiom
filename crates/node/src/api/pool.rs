@@ -2,6 +2,10 @@
 //!
 //! A submission passes the same gossip rules as a network message, then joins the pool.
 //! It is broadcast only when it passes, so a bad one costs the node no reputation.
+//!
+//! Slashings and exits come one per request, and a refusal is a plain error.
+//! Every other operation comes as a list, each item handled alone.
+//! A list's refusals are reported item by item, while the accepted items stand.
 //! See the pool and aggregate routes of beacon-APIs.
 
 use axiom_beacon_json::ApiJson;
@@ -14,7 +18,7 @@ use axiom_operation_pool::{PackedAttestation, PoolError, PoolFork, SyncPool};
 use axiom_p2p::eth::GossipKind;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    ForkName, Preset, SubnetId,
+    CommitteeIndex, ForkName, Preset, Slot, SubnetId,
     altair::{self, SignedContributionAndProof, SyncCommitteeMessage},
     bellatrix,
     capella::{self, SignedBlsToExecutionChange},
@@ -28,17 +32,42 @@ use tracing::debug;
 
 use super::{
     ApiContext,
-    query::Body,
-    reply::{ApiError, ApiResult, Reply, Routes},
+    query::{Body, Query},
+    reply::{ApiError, ApiResult, Failure, Reply, Routes},
 };
 use crate::Chain;
+
+/// What an accepted submission does on the network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spread {
+    /// The submission is news, so it goes out on its topic.
+    Broadcast,
+    /// The node already holds everything the submission carries, so peers would drop it.
+    Known,
+}
+
+impl Spread {
+    /// The fate of an aggregate, or a sync contribution, after its gossip rules.
+    ///
+    /// Aggregators of one committee often hold the same votes, and each submits them.
+    /// Gossip ignores a repeat whose votes are already seen, so the first one alone spreads.
+    /// The repeat is still valid, so the client is told it was accepted.
+    /// Only a rejection, such as a bad signature, is refused.
+    fn of_aggregate(verdict: Result<(), GossipError>) -> Result<Self, ApiError> {
+        match verdict {
+            Ok(()) => Ok(Self::Broadcast),
+            Err(error @ GossipError::Ignore { .. }) => {
+                debug!(%error, "aggregate adds nothing the node has not seen");
+                Ok(Self::Known)
+            }
+            Err(error @ GossipError::Reject { .. }) => Err(PoolRoutes::refusal(error)),
+        }
+    }
+}
 
 /// Routes under `/eth/v1/beacon/pool`, `/eth/v2/beacon/pool`, and the signed aggregate routes.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PoolRoutes;
-
-/// A submission's failures, by position, as the API reports partial failures.
-type Failures = Vec<(usize, String)>;
 
 impl PoolRoutes {
     /// Adds this namespace's routes.
@@ -172,9 +201,9 @@ impl PoolRoutes {
         F: GossipFork,
         F::SubnetAttestation: ApiJson + Send + 'static,
     {
-        let votes: Vec<F::SubnetAttestation> = Body(&request).json_items()?;
+        let votes: Vec<F::SubnetAttestation> = Body(&request).items()?;
         let now = context.publisher.now_ms();
-        let mut failures = Failures::new();
+        let mut failures = Vec::<Failure>::new();
         for (position, vote) in votes.into_iter().enumerate() {
             let data = vote.data().clone();
             let committee = vote.committee_index();
@@ -216,7 +245,7 @@ impl PoolRoutes {
                 Err(error) => failures.push((position, error.to_string())),
             }
         }
-        Self::outcome(&failures)
+        Reply::submission(failures)
     }
 
     /// Signed aggregates of one fork: checked, counted, pooled, and broadcast.
@@ -225,94 +254,88 @@ impl PoolRoutes {
         F: GossipFork,
         F::SignedAggregateAndProof: ApiJson + Send + 'static,
     {
-        let aggregates: Vec<F::SignedAggregateAndProof> = Body(&request).json_items()?;
+        let aggregates: Vec<F::SignedAggregateAndProof> = Body(&request).items()?;
         let now = context.publisher.now_ms();
-        let mut failures = Failures::new();
+        let mut failures = Vec::<Failure>::new();
         for (position, signed) in aggregates.into_iter().enumerate() {
             let epoch = signed.aggregate().data().slot.epoch::<F::Preset>();
             let bytes = signed.encode();
             let outcome = context
                 .query(move |chain| {
-                    chain
-                        .validate_gossip(|validator| {
-                            validator.aggregate_and_proof::<F>(&signed, now)
-                        })
-                        .map_err(Self::refusal)?;
+                    let verdict = chain.validate_gossip(|validator| {
+                        validator.aggregate_and_proof::<F>(&signed, now)
+                    });
+                    if Spread::of_aggregate(verdict)? == Spread::Known {
+                        return Ok(Spread::Known);
+                    }
                     if let Err(error) = chain.on_vote(&signed.aggregate().committee_vote()) {
                         debug!(%error, "aggregate pooled but not counted yet");
                     }
-                    Ok(())
+                    Ok(Spread::Broadcast)
                 })
                 .await;
             match outcome {
-                Ok(()) => {
+                Ok(Spread::Broadcast) => {
                     context
                         .publisher
                         .gossip(GossipKind::BeaconAggregateAndProof, epoch, bytes)
                         .await;
                 }
+                Ok(Spread::Known) => {}
                 Err(error) => failures.push((position, error.to_string())),
             }
         }
-        Self::outcome(&failures)
+        Reply::submission(failures)
     }
 
-    /// Attester slashings of one fork: checked, pooled, and broadcast.
+    /// An attester slashing of one fork: checked, pooled, and broadcast.
     async fn slashings_in<F>(context: ApiContext<F::Preset>, request: Request) -> ApiResult
     where
         F: GossipFork,
         F::AttesterSlashing: ApiJson + Send + 'static,
     {
-        let slashings: Vec<F::AttesterSlashing> = Body(&request).json_items()?;
-        let mut failures = Failures::new();
-        for (position, slashing) in slashings.into_iter().enumerate() {
-            let bytes = slashing.encode();
-            let outcome = context
-                .query(move |chain| {
-                    chain
-                        .validate_gossip(|validator| validator.attester_slashing(&slashing))
-                        .map_err(Self::refusal)?;
-                    chain.on_attester_slashing(&slashing.conflicting_votes())?;
-                    Ok(chain.store().current_epoch())
-                })
-                .await;
-            match outcome {
-                Ok(epoch) => {
-                    context
-                        .publisher
-                        .gossip(GossipKind::AttesterSlashing, epoch, bytes)
-                        .await;
-                }
-                Err(error) => failures.push((position, error.to_string())),
-            }
-        }
-        Self::outcome(&failures)
+        let slashing: F::AttesterSlashing = Body(&request).json_item()?;
+        let bytes = slashing.encode();
+        let epoch = context
+            .query(move |chain| {
+                chain
+                    .validate_gossip(|validator| validator.attester_slashing(&slashing))
+                    .map_err(Self::refusal)?;
+                chain.on_attester_slashing(&slashing.conflicting_votes())?;
+                Ok(chain.store().current_epoch())
+            })
+            .await?;
+        context
+            .publisher
+            .gossip(GossipKind::AttesterSlashing, epoch, bytes)
+            .await;
+        Ok(Response::new(StatusCode::OK))
     }
 
-    /// Proposer slashings: checked, pooled, and broadcast.
+    /// A proposer slashing: checked, pooled, and broadcast.
     async fn proposer_slashings<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let slashings: Vec<ProposerSlashing> = Body(&request).json_items()?;
-        Self::submit(
+        let slashing: ProposerSlashing = Body(&request).json_item()?;
+        Self::offer(
             &context,
-            slashings,
+            slashing,
             GossipKind::ProposerSlashing,
             |chain, slashing, _| {
                 chain
                     .validate_gossip(|validator| validator.proposer_slashing(&slashing))
                     .map_err(Self::refusal)?;
                 chain.on_proposer_slashing(slashing)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
     }
 
-    /// Voluntary exits: checked under the clock's fork, pooled, and broadcast.
+    /// A voluntary exit: checked under the clock's fork, pooled, and broadcast.
     async fn voluntary_exits<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let exits: Vec<SignedVoluntaryExit> = Body(&request).json_items()?;
-        Self::submit(
+        let exit: SignedVoluntaryExit = Body(&request).json_item()?;
+        Self::offer(
             &context,
-            exits,
+            exit,
             GossipKind::VoluntaryExit,
             |chain, exit, now| {
                 let fork = chain.config().fork_at(chain.store().current_epoch());
@@ -344,7 +367,7 @@ impl PoolRoutes {
                 };
                 verdict.map_err(Self::refusal)?;
                 chain.on_voluntary_exit(exit)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -362,7 +385,7 @@ impl PoolRoutes {
                     .validate_gossip(|validator| validator.bls_to_execution_change(&change, now))
                     .map_err(Self::refusal)?;
                 chain.on_credential_change(change)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
@@ -372,7 +395,7 @@ impl PoolRoutes {
     async fn sync_messages<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let messages: Vec<SyncCommitteeMessage> = Body(&request).json_items()?;
         let now = context.publisher.now_ms();
-        let mut failures = Failures::new();
+        let mut failures = Vec::<Failure>::new();
         for (position, message) in messages.into_iter().enumerate() {
             let bytes = message.encode();
             let epoch = message.slot.epoch::<P>();
@@ -402,7 +425,7 @@ impl PoolRoutes {
                 Err(error) => failures.push((position, error.to_string())),
             }
         }
-        Self::outcome(&failures)
+        Reply::submission(failures)
     }
 
     /// Signed sync contributions: checked, pooled, and broadcast.
@@ -413,22 +436,24 @@ impl PoolRoutes {
             contributions,
             GossipKind::SyncCommitteeContributionAndProof,
             |chain, signed, now| {
-                chain
-                    .validate_gossip(|validator| validator.sync_contribution(&signed, now))
-                    .map_err(Self::refusal)?;
+                let verdict =
+                    chain.validate_gossip(|validator| validator.sync_contribution(&signed, now));
+                if Spread::of_aggregate(verdict)? == Spread::Known {
+                    return Ok(Spread::Known);
+                }
                 chain.on_contribution(&signed.message.contribution)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
     }
 
-    /// Payload timeliness votes: checked, counted, pooled, and broadcast.
+    /// Payload timeliness votes, as JSON or SSZ: checked, counted, pooled, and broadcast.
     async fn payload_attestations<P: Preset>(
         context: ApiContext<P>,
         request: Request,
     ) -> ApiResult {
-        let messages: Vec<PayloadAttestationMessage> = Body(&request).json_items()?;
+        let messages: Vec<PayloadAttestationMessage> = Body(&request).items()?;
         Self::submit(
             &context,
             messages,
@@ -440,23 +465,35 @@ impl PoolRoutes {
                     })
                     .map_err(Self::refusal)?;
                 chain.on_payload_attestation(&message)?;
-                Ok(())
+                Ok(Spread::Broadcast)
             },
         )
         .await
     }
 
     /// The pool's attestations, each committee's best aggregate in the clock's fork.
-    async fn pooled_attestations<P: Preset>(
-        context: ApiContext<P>,
-        _request: Request,
-    ) -> ApiResult {
+    ///
+    /// The optional slot and committee index parameters narrow the list.
+    async fn pooled_attestations<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let query = Query::of(&request);
+        let slot = query.optional_number("slot")?.map(Slot);
+        let committee_index = query
+            .optional_number("committee_index")?
+            .map(CommitteeIndex);
         context
-            .query(|chain| {
+            .query(move |chain| {
                 let fork = chain.config().fork_at(chain.store().current_epoch());
                 let mut items = Vec::new();
-                for group in chain.pool().attestations().groups() {
-                    for (committee, votes) in &group.committees {
+                let groups = chain
+                    .pool()
+                    .attestations()
+                    .groups()
+                    .filter(|group| slot.is_none_or(|slot| group.data.slot == slot));
+                for group in groups {
+                    let committees = group.committees.iter().filter(|(index, _)| {
+                        committee_index.is_none_or(|wanted| **index == wanted)
+                    });
+                    for (committee, votes) in committees {
                         let Some(best) = votes.best() else {
                             continue;
                         };
@@ -550,29 +587,41 @@ impl PoolRoutes {
         context: &ApiContext<P>,
         items: Vec<T>,
         kind: GossipKind,
-        rule: impl Fn(&mut Chain<P>, T, u64) -> Result<(), ApiError> + Clone + Send + 'static,
+        rule: impl Fn(&mut Chain<P>, T, u64) -> Result<Spread, ApiError> + Clone + Send + 'static,
+    ) -> ApiResult
+    where
+        P: Preset,
+        T: Ssz + Send + 'static,
+    {
+        let mut failures = Vec::<Failure>::new();
+        for (position, item) in items.into_iter().enumerate() {
+            if let Err(error) = Self::offer(context, item, kind, rule.clone()).await {
+                failures.push((position, error.to_string()));
+            }
+        }
+        Reply::submission(failures)
+    }
+
+    /// Submits one operation, broadcasting it when the rule accepts it as news.
+    async fn offer<P, T>(
+        context: &ApiContext<P>,
+        item: T,
+        kind: GossipKind,
+        rule: impl FnOnce(&mut Chain<P>, T, u64) -> Result<Spread, ApiError> + Send + 'static,
     ) -> ApiResult
     where
         P: Preset,
         T: Ssz + Send + 'static,
     {
         let now = context.publisher.now_ms();
-        let mut failures = Failures::new();
-        for (position, item) in items.into_iter().enumerate() {
-            let bytes = item.encode();
-            let rule = rule.clone();
-            let outcome = context
-                .query(move |chain| {
-                    rule(chain, item, now)?;
-                    Ok(chain.store().current_epoch())
-                })
-                .await;
-            match outcome {
-                Ok(epoch) => context.publisher.gossip(kind, epoch, bytes).await,
-                Err(error) => failures.push((position, error.to_string())),
-            }
+        let bytes = item.encode();
+        let (spread, epoch) = context
+            .query(move |chain| Ok((rule(chain, item, now)?, chain.store().current_epoch())))
+            .await?;
+        if spread == Spread::Broadcast {
+            context.publisher.gossip(kind, epoch, bytes).await;
         }
-        Self::outcome(&failures)
+        Ok(Response::new(StatusCode::OK))
     }
 
     /// The subnets of a sync committee member's seats.
@@ -688,24 +737,276 @@ impl PoolRoutes {
     fn refusal(error: GossipError) -> ApiError {
         ApiError::bad_request(error.to_string())
     }
+}
 
-    /// The reply to a submission: 200, or 400 listing each failed item.
-    ///
-    /// See the indexed error message of beacon-APIs.
-    fn outcome(failures: &Failures) -> ApiResult {
-        if failures.is_empty() {
-            return Ok(Response::new(StatusCode::OK));
-        }
-        for (position, message) in failures {
-            debug!(position, %message, "pool submission refused");
-        }
-        let listed: Vec<String> = failures
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use axiom_beacon_json::ApiJsonError;
+    use axiom_http::Method;
+    use axiom_operation_pool::{Aggregate, Bits, CommitteeAggregate};
+    use axiom_types::{
+        BlsSignature, CommitteeIndex, Epoch, Minimal, Root, Slot, ValidatorIndex,
+        capella::BlsToExecutionChange,
+        phase0::{AttestationData, Checkpoint, VoluntaryExit},
+    };
+
+    use super::*;
+    use crate::api::fixture::TestApi;
+
+    /// An error reply's body.
+    fn error(message: &str) -> Json {
+        Json::from([
+            ("code", Json::from(400_u64)),
+            ("message", Json::from(message)),
+        ])
+    }
+
+    /// The reply to a list whose items were all refused, for these reasons.
+    fn indexed(reasons: &[String]) -> Json {
+        let failures = reasons
             .iter()
-            .map(|(position, message)| format!("item {position}: {message}"))
+            .enumerate()
+            .map(|(index, message)| {
+                Json::from([
+                    ("index", Json::from(index as u64)),
+                    ("message", Json::from(message.as_str())),
+                ])
+            })
+            .collect::<Vec<_>>();
+        Json::from([
+            ("code", Json::from(400_u64)),
+            (
+                "message",
+                Json::from(format!(
+                    "{} of the submitted items were refused",
+                    reasons.len()
+                )),
+            ),
+            ("failures", Json::Array(failures)),
+        ])
+    }
+
+    /// Why a JSON value does not decode as a type, as the routes report it.
+    fn undecodable<T: ApiJson>(value: &Json) -> String {
+        T::from_json(value)
+            .err()
+            .as_ref()
+            .map(ApiJsonError::to_string)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_repeated_aggregate_is_accepted_but_not_spread() {
+        // A fresh aggregate goes out on its topic.
+        assert_eq!(Spread::of_aggregate(Ok(())), Ok(Spread::Broadcast));
+
+        // A second aggregator's copy of seen votes is valid news to no one.
+        let seen = GossipError::ignore("already seen aggregate for this data");
+        assert_eq!(Spread::of_aggregate(Err(seen)), Ok(Spread::Known));
+
+        // A bad signature is refused, with the gossip rule's words.
+        let forged = GossipError::reject("invalid aggregate signature");
+        assert_eq!(
+            Spread::of_aggregate(Err(forged)),
+            Err(PoolRoutes::refusal(forged))
+        );
+    }
+
+    #[test]
+    fn slashings_and_exits_come_one_per_request() {
+        let api = TestApi::phase0(8);
+        // A list where one object is expected is refused before any check.
+        let list = Json::Array(Vec::new());
+        let routes = [
+            (
+                "/eth/v1/beacon/pool/voluntary_exits",
+                undecodable::<SignedVoluntaryExit>(&list),
+            ),
+            (
+                "/eth/v1/beacon/pool/proposer_slashings",
+                undecodable::<ProposerSlashing>(&list),
+            ),
+            (
+                "/eth/v2/beacon/pool/attester_slashings",
+                undecodable::<phase0::AttesterSlashing<Minimal>>(&list),
+            ),
+        ];
+        for (route, reason) in routes {
+            assert_eq!(
+                api.post(route, "[]"),
+                (StatusCode::BAD_REQUEST, error(&reason)),
+                "{route}"
+            );
+        }
+
+        // One exit of validator 99, which does not exist, fails the gossip rules alone.
+        // The refusal is a plain error, not an indexed one.
+        let exit = SignedVoluntaryExit {
+            message: VoluntaryExit {
+                epoch: Epoch(0),
+                validator_index: ValidatorIndex(99),
+            },
+            signature: BlsSignature::default(),
+        };
+        let now = api.now_ms();
+        let checked = exit.clone();
+        let reason = api.run(move |chain| {
+            chain
+                .validate_gossip(|validator| {
+                    validator.voluntary_exit::<phase0::BeaconState<Minimal>>(&checked, now)
+                })
+                .unwrap_err()
+                .to_string()
+        });
+        assert_eq!(
+            api.post(
+                "/eth/v1/beacon/pool/voluntary_exits",
+                &exit.to_json().to_string()
+            ),
+            (StatusCode::BAD_REQUEST, error(&reason))
+        );
+    }
+
+    #[test]
+    fn refused_list_items_are_reported_by_index() {
+        let api = TestApi::phase0(8);
+        // Two credential changes before Capella: the gossip rules refuse each one.
+        let changes: Vec<SignedBlsToExecutionChange> = [0, 99]
+            .into_iter()
+            .map(|index| SignedBlsToExecutionChange {
+                message: BlsToExecutionChange {
+                    validator_index: ValidatorIndex(index),
+                    ..BlsToExecutionChange::default()
+                },
+                signature: BlsSignature::default(),
+            })
             .collect();
-        Err(ApiError::bad_request(format!(
-            "some items were refused: {}",
-            listed.join("; ")
-        )))
+        let now = api.now_ms();
+        let checked = changes.clone();
+        let reasons = api.run(move |chain| {
+            checked
+                .iter()
+                .map(|change| {
+                    chain
+                        .validate_gossip(|validator| validator.bls_to_execution_change(change, now))
+                        .unwrap_err()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        });
+        let body = Json::Array(changes.iter().map(ApiJson::to_json).collect());
+        assert_eq!(
+            api.post(
+                "/eth/v1/beacon/pool/bls_to_execution_changes",
+                &body.to_string()
+            ),
+            (StatusCode::BAD_REQUEST, indexed(&reasons))
+        );
+    }
+
+    #[test]
+    fn payload_attestations_arrive_as_an_ssz_list() {
+        let api = TestApi::gloas(8);
+        // Two votes of validators 0 and 1 on a block the node never saw.
+        let messages: Vec<PayloadAttestationMessage> = [0, 1]
+            .into_iter()
+            .map(|index| PayloadAttestationMessage {
+                validator_index: ValidatorIndex(index),
+                ..PayloadAttestationMessage::default()
+            })
+            .collect();
+        let now = api.now_ms();
+        let checked = messages.clone();
+        let reasons = api.run(move |chain| {
+            checked
+                .iter()
+                .map(|message| {
+                    chain
+                        .validate_gossip(|validator| {
+                            validator.payload_attestation_message(message, now)
+                        })
+                        .unwrap_err()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        });
+        // The SSZ list of two fixed-size messages is their encodings end to end.
+        let body = messages.iter().flat_map(Ssz::encode).collect();
+        let request = Request::new(Method::Post, "/eth/v1/beacon/pool/payload_attestations")
+            .with_header("eth-consensus-version", "gloas")
+            .with_body("application/octet-stream", body);
+        assert_eq!(
+            TestApi::parsed(&api.send(request)),
+            (StatusCode::BAD_REQUEST, indexed(&reasons))
+        );
+    }
+
+    #[test]
+    fn pooled_attestations_are_filtered_by_slot_and_committee() {
+        let api = TestApi::phase0(64);
+        // One signer in each of three committee votes.
+        // Slot 1 has committees 0 and 1, slot 2 has committee 0.
+        let votes = [(1, 0), (1, 1), (2, 0)];
+        let vote = |slot: u64, committee: u64| AttestationData {
+            slot: Slot(slot),
+            index: CommitteeIndex(committee),
+            beacon_block_root: Root([7; 32]),
+            source: Checkpoint::default(),
+            target: Checkpoint::default(),
+        };
+        api.run(move |chain| {
+            for (slot, committee) in votes {
+                chain
+                    .pool_mut()
+                    .attestations_mut()
+                    .insert(CommitteeAggregate {
+                        data: vote(slot, committee),
+                        committee: CommitteeIndex(committee),
+                        aggregate: Aggregate {
+                            bits: Bits::single(4, 1),
+                            signature: BlsSignature::default(),
+                        },
+                    })
+                    .unwrap();
+            }
+        });
+        let attestation = |slot, committee| {
+            let mut bits = phase0::AggregationBits::<Minimal>::with_len(4).unwrap();
+            bits.set(1, true);
+            phase0::Attestation::<Minimal> {
+                aggregation_bits: bits,
+                data: vote(slot, committee),
+                signature: BlsSignature::default(),
+            }
+            .to_json()
+            .to_string()
+        };
+        // The pool keeps no order, so the items compare as a set.
+        let listed = |query: &str| {
+            let (status, body) = api.get(&format!("/eth/v2/beacon/pool/attestations{query}"));
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body.get("version"), Some(&Json::from("phase0")));
+            body.get("data")
+                .and_then(Json::as_array)
+                .unwrap()
+                .iter()
+                .map(Json::to_string)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            listed("?slot=1&committee_index=1"),
+            BTreeSet::from([attestation(1, 1)])
+        );
+        assert_eq!(
+            listed("?committee_index=0"),
+            BTreeSet::from([attestation(1, 0), attestation(2, 0)])
+        );
+        assert_eq!(
+            listed("?slot=1"),
+            BTreeSet::from([attestation(1, 0), attestation(1, 1)])
+        );
+        assert_eq!(listed("").len(), 3);
     }
 }

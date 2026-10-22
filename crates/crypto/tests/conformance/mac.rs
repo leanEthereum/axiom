@@ -1,6 +1,9 @@
-//! Wycheproof HMAC-SHA256 and HKDF-SHA256 suites.
+//! Wycheproof HMAC-SHA256, HMAC-SHA512, and HKDF-SHA256 suites.
 
-use axiom_crypto::{hkdf::Hkdf, hmac::HmacSha256};
+use axiom_crypto::{
+    hkdf::Hkdf,
+    hmac::{HmacSha256, HmacSha512},
+};
 
 use crate::wycheproof::{Outcome, Tally, VectorFile};
 
@@ -35,6 +38,46 @@ fn hmac_sha256() {
         }
     });
     // 174 cases: 66 valid, 108 with a modified tag, half of each with 128-bit tags.
+    assert_eq!(
+        tally,
+        Tally {
+            valid: 66,
+            invalid: 108,
+            ..Tally::default()
+        }
+    );
+}
+
+#[test]
+fn hmac_sha512() {
+    let Some(file) = VectorFile::load("hmac_sha512_test.json") else {
+        return;
+    };
+    let tally = file.run(|case| {
+        let key = case.hex("key");
+        let message = case.hex("msg");
+        let tag = case.hex("tag");
+
+        // A full 64-byte tag goes through the constant-time verifier.
+        if let Ok(full) = <[u8; 64]>::try_from(tag.as_slice()) {
+            let mut mac = HmacSha512::new(&key);
+            mac.update(&message);
+            return if mac.verify(&full) {
+                Outcome::Accepted
+            } else {
+                Outcome::Rejected
+            };
+        }
+
+        // A truncated tag, here 32 bytes, is the prefix of the full one, per RFC 2104, section 5.
+        let computed = HmacSha512::mac(&key, &message);
+        if computed.get(..tag.len()) == Some(tag.as_slice()) {
+            Outcome::Accepted
+        } else {
+            Outcome::Rejected
+        }
+    });
+    // 174 cases: 66 valid, 108 with a modified tag, half of each with 256-bit tags.
     assert_eq!(
         tally,
         Tally {

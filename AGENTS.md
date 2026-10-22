@@ -316,7 +316,7 @@ A comment in the house style:
 - Benchmarks are criterion benches under `benches/`, never ignored tests.
   Each bench target sets `harness = false` and drives criterion from a plain `main`, without its macros.
 - The tree keeps only the benchmarks that guard the client's critical paths:
-  - signing and verification, the baseline for signature scheme work
+  - signing and verification
   - block and epoch processing, and the state root
 - A performance change measures with a throwaway harness or a local bench.
   Its numbers go in the pull request, and the bench code stays out of the tree.

@@ -14,12 +14,16 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+axiom-beacon-json.workspace = true
 axiom-discv5.workspace = true
+axiom-http.workspace = true
+axiom-json.workspace = true
 axiom-node.workspace = true
 axiom-p2p.workspace = true
 axiom-slasher.workspace = true
 axiom-telemetry.workspace = true
 axiom-types.workspace = true
+axiom-validator.workspace = true
 axiom-yaml.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
