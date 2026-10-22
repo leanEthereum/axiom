@@ -68,7 +68,7 @@ impl Run {
     }
 
     /// A future that completes on the first interrupt or termination signal.
-    async fn shutdown_signal() {
+    pub(crate) async fn shutdown_signal() {
         let notify = Arc::new(Notify::new());
 
         // Ctrl-C from a terminal.

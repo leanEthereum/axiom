@@ -15,10 +15,13 @@ workspace = true
 
 [dependencies]
 axiom-discv5.workspace = true
+axiom-http.workspace = true
+axiom-json.workspace = true
 axiom-node.workspace = true
 axiom-p2p.workspace = true
 axiom-telemetry.workspace = true
 axiom-types.workspace = true
+axiom-validator.workspace = true
 axiom-yaml.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

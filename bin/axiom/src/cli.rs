@@ -3,7 +3,7 @@
 use std::{
     fs, io,
     net::{Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
 };
 
@@ -15,7 +15,11 @@ use axiom_types::{ChainConfig, ConfigError};
 use axiom_yaml::{ParseError, Yaml};
 use thiserror::Error;
 
-use crate::run::{PresetName, Run};
+use crate::{
+    account::Account,
+    run::{PresetName, Run},
+    validator::ValidatorCommand,
+};
 
 /// The usage text, shown by the help flag.
 pub(crate) const USAGE: &str = "\
@@ -23,6 +27,8 @@ axiom: an Ethereum consensus client
 
 USAGE:
     axiom [OPTIONS]
+    axiom validator [OPTIONS]            run the validator client; see axiom validator --help
+    axiom account <COMMAND> [OPTIONS]    keys, deposits, and slashing protection files
 
 OPTIONS:
     --network <NAME>             mainnet or minimal [default: mainnet]
@@ -65,6 +71,10 @@ pub(crate) enum Command {
     Version,
     /// Run a node.
     Run(Box<Run>),
+    /// Run an account command.
+    Account(Box<Account>),
+    /// Run the validator client.
+    Validator(ValidatorCommand),
 }
 
 /// Why the command line cannot be used.
@@ -174,7 +184,14 @@ impl Cli {
     /// Fails on an unknown flag, a missing value, or a value that does not parse.
     pub(crate) fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Command, CliError> {
         let mut cli = Self::default();
-        let mut arguments = arguments.into_iter();
+        let mut arguments = arguments.into_iter().peekable();
+        // A leading command word picks a subcommand; flags alone run the beacon node.
+        if arguments.next_if(|word| word == "account").is_some() {
+            return Account::parse(arguments).map(|account| Command::Account(Box::new(account)));
+        }
+        if arguments.next_if(|word| word == "validator").is_some() {
+            return ValidatorCommand::parse(arguments).map(Command::Validator);
+        }
         while let Some(flag) = arguments.next() {
             // Each flag either stands alone or takes the next argument as its value.
             let mut value =
@@ -315,13 +332,23 @@ impl Cli {
 
     /// The preset and chain configuration, from the config file or the network name.
     fn chain(&self) -> Result<(PresetName, ChainConfig), CliError> {
-        if let Some(path) = &self.config {
+        Self::choose_chain(self.network.as_deref(), self.config.as_deref())
+    }
+
+    /// The preset and chain configuration a network name or a config file names.
+    ///
+    /// A config file wins over the network name.
+    pub(crate) fn choose_chain(
+        network: Option<&str>,
+        config: Option<&Path>,
+    ) -> Result<(PresetName, ChainConfig), CliError> {
+        if let Some(path) = config {
             let text = fs::read_to_string(path).map_err(|source| CliError::ConfigFile {
-                path: path.clone(),
+                path: path.to_owned(),
                 source,
             })?;
             let yaml = Yaml::parse(&text).map_err(|source| CliError::ConfigYaml {
-                path: path.clone(),
+                path: path.to_owned(),
                 source,
             })?;
             // The file's own preset base wins over the network flag.
@@ -330,12 +357,12 @@ impl Cli {
                 _ => PresetName::Mainnet,
             };
             let chain = ChainConfig::from_yaml(&yaml).map_err(|source| CliError::Config {
-                path: path.clone(),
+                path: path.to_owned(),
                 source,
             })?;
             return Ok((preset, chain));
         }
-        match self.network.as_deref() {
+        match network {
             None | Some("mainnet") => Ok((PresetName::Mainnet, ChainConfig::mainnet())),
             Some("minimal") => Ok((PresetName::Minimal, ChainConfig::minimal())),
             Some(other) => Err(CliError::InvalidValue {
@@ -353,7 +380,7 @@ impl Cli {
     }
 
     /// The log format flag.
-    fn log_format(value: String) -> Result<LogFormat, CliError> {
+    pub(crate) fn log_format(value: String) -> Result<LogFormat, CliError> {
         match value.as_str() {
             "compact" => Ok(LogFormat::Compact),
             "pretty" => Ok(LogFormat::Pretty),
