@@ -63,3 +63,35 @@ pub enum KzgError {
     #[error("cell indices are not in ascending order")]
     UnsortedCellIndices,
 }
+
+impl KzgError {
+    /// Checks that paired lists all have the length of the first.
+    ///
+    /// # Errors
+    ///
+    /// Fails with the first length that differs.
+    pub(crate) fn check_paired(expected: usize, others: &[usize]) -> Result<(), Self> {
+        match others.iter().find(|actual| **actual != expected) {
+            Some(&actual) => Err(Self::LengthMismatch { expected, actual }),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lengths_must_match_the_first_list() {
+        // The second list of three, the first of two, is the reported mismatch.
+        assert_eq!(
+            KzgError::check_paired(2, &[2, 3]),
+            Err(KzgError::LengthMismatch {
+                expected: 2,
+                actual: 3
+            })
+        );
+        assert_eq!(KzgError::check_paired(2, &[2, 2]), Ok(()));
+    }
+}

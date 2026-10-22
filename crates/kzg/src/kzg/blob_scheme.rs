@@ -4,50 +4,50 @@
 
 use axiom_bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Gt, Scalar};
 
-use super::Kzg;
+use super::opening::Opening;
 use crate::{
-    Blob, Bytes32, Bytes48, FIELD_ELEMENTS_PER_BLOB, KzgError, parallel,
-    transcript::{OpeningClaim, batch_challenge, blob_challenge},
+    Blob, Bytes32, Bytes48, FIELD_ELEMENTS_PER_BLOB, KzgError, basis::Basis, fft::Domain,
+    parallel::Threads, powers::Powers,
 };
 
-/// One opening with its points decoded, ready for the pairing check.
-#[derive(Clone, Copy, Debug)]
-struct Opening<'a> {
-    /// The claim, with the bytes the transcript hashes.
-    claim: OpeningClaim<'a>,
-    /// The decoded commitment.
-    commitment: G1Affine,
-    /// The decoded proof.
-    proof: G1Affine,
+/// The EIP-4844 prover and verifier: commitments to blobs and their openings at single points.
+#[derive(Clone, Debug)]
+pub(super) struct BlobScheme {
+    /// The Lagrange basis in bit-reversal order, matching the order of blob evaluations.
+    lagrange_brp: Basis,
+    /// The secret in G2, [s]_2, which every opening check pairs against.
+    s_g2: G2Affine,
+    /// The 4096-th roots of unity in bit-reversal order, matching the order of blob evaluations.
+    roots_brp: Vec<Scalar>,
+    /// The inverse of the blob size, 1 / 4096.
+    size_inverse: Scalar,
 }
 
-impl Kzg {
-    /// Commits to a blob: [f(s)] for the polynomial its evaluations define.
-    ///
-    /// The Lagrange basis turns the commitment into one MSM over the evaluations.
+impl BlobScheme {
+    /// Builds the scheme from its setup points and the blob domain.
+    pub(super) fn new(lagrange_brp: Basis, s_g2: G2Affine, domain: &Domain) -> Self {
+        // The spec stores blob evaluations at the bit-reversed roots, so the roots follow suit.
+        let mut roots_brp = domain.roots().to_vec();
+        domain.bit_reversal().permute(&mut roots_brp);
+        Self {
+            lagrange_brp,
+            s_g2,
+            roots_brp,
+            size_inverse: domain.size_inverse(),
+        }
+    }
+
+    /// Commits to a blob, blob_to_kzg_commitment in the Deneb spec.
     ///
     /// ```text
     ///     [f(s)] = sum_i f(omega_i) [L_i(s)]
     /// ```
-    ///
-    /// See blob_to_kzg_commitment in the Deneb spec.
-    #[must_use]
-    pub fn blob_to_kzg_commitment(&self, blob: &Blob) -> Bytes48 {
-        Bytes48::from_point(&self.commit_evaluations(blob.evaluations()))
+    pub(super) fn commit(&self, blob: &Blob) -> Bytes48 {
+        Bytes48::from_point(&self.lagrange_brp.commit(blob.evaluations()))
     }
 
-    /// Opens the blob's polynomial at z.
-    ///
-    /// See compute_kzg_proof in the Deneb spec.
-    ///
-    /// # Returns
-    ///
-    /// The proof and the evaluation y = f(z).
-    ///
-    /// # Errors
-    ///
-    /// Fails when z is not a canonical field element.
-    pub fn compute_kzg_proof(
+    /// Opens the blob at z, compute_kzg_proof in the Deneb spec.
+    pub(super) fn compute_kzg_proof(
         &self,
         blob: &Blob,
         z: &Bytes32,
@@ -57,35 +57,20 @@ impl Kzg {
         Ok((Bytes48::from_point(&proof), Bytes32::from_scalar(&y)))
     }
 
-    /// Opens the blob at the Fiat-Shamir challenge derived from the blob and its commitment.
-    ///
-    /// The commitment is only validated, never checked against the blob.
-    ///
-    /// See compute_blob_kzg_proof in the Deneb spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the commitment is not a point of G1.
-    pub fn compute_blob_kzg_proof(
+    /// Opens the blob at its Fiat-Shamir challenge, compute_blob_kzg_proof in the Deneb spec.
+    pub(super) fn compute_blob_kzg_proof(
         &self,
         blob: &Blob,
         commitment: &Bytes48,
     ) -> Result<Bytes48, KzgError> {
         commitment.to_commitment()?;
-        let z = blob_challenge(blob, commitment);
+        let z = blob.challenge(commitment);
         let (proof, _) = self.open(blob, &z);
         Ok(Bytes48::from_point(&proof))
     }
 
-    /// Checks a proof that the committed polynomial takes the value y at z.
-    ///
-    /// See verify_kzg_proof in the Deneb spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails when a point or a field element is malformed.
-    /// A well-formed but wrong proof returns false.
-    pub fn verify_kzg_proof(
+    /// Checks one opening given as bytes, verify_kzg_proof in the Deneb spec.
+    pub(super) fn verify_kzg_proof(
         &self,
         commitment: &Bytes48,
         z: &Bytes32,
@@ -99,42 +84,25 @@ impl Kzg {
         Ok(self.check_opening(&commitment, &z, &y, &proof))
     }
 
-    /// Checks a blob proof: the opening at the challenge matches the blob's own evaluation there.
-    ///
-    /// See verify_blob_kzg_proof in the Deneb spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the commitment or the proof is not a point of G1.
-    pub fn verify_blob_kzg_proof(
+    /// Checks one blob proof, verify_blob_kzg_proof in the Deneb spec.
+    pub(super) fn verify_blob_kzg_proof(
         &self,
         blob: &Blob,
         commitment: &Bytes48,
         proof: &Bytes48,
     ) -> Result<bool, KzgError> {
         let opening = self.blob_opening(blob, commitment, proof)?;
-        Ok(self.check_opening(
-            &opening.commitment,
-            &opening.claim.z,
-            &opening.claim.y,
-            &opening.proof,
-        ))
+        Ok(self.check_opening(&opening.commitment, &opening.z, &opening.y, &opening.proof))
     }
 
-    /// Checks many blob proofs with one pairing check, true for an empty batch.
-    ///
-    /// See verify_blob_kzg_proof_batch in the Deneb spec.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the lists differ in length or any point is malformed.
-    pub fn verify_blob_kzg_proof_batch(
+    /// Checks many blob proofs at once, verify_blob_kzg_proof_batch in the Deneb spec.
+    pub(super) fn verify_blob_kzg_proof_batch(
         &self,
         blobs: &[Blob],
         commitments: &[Bytes48],
         proofs: &[Bytes48],
     ) -> Result<bool, KzgError> {
-        check_lengths(blobs.len(), &[commitments.len(), proofs.len()])?;
+        KzgError::check_paired(blobs.len(), &[commitments.len(), proofs.len()])?;
 
         // Each blob needs a challenge hash and a barycentric evaluation, independent of the others.
         let triples: Vec<(&Blob, &Bytes48, &Bytes48)> = blobs
@@ -143,12 +111,11 @@ impl Kzg {
             .zip(proofs)
             .map(|((blob, commitment), proof)| (blob, commitment, proof))
             .collect();
-        let openings = parallel::map(&triples, |(blob, commitment, proof)| {
-            self.blob_opening(blob, commitment, proof)
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.check_openings(&openings))
+        let openings: Result<Vec<Opening<'_>>, KzgError> = Threads::available()
+            .map(&triples, |(blob, commitment, proof)| {
+                self.blob_opening(blob, commitment, proof)
+            });
+        Ok(self.check_openings(&openings?))
     }
 
     /// Decodes a blob opening and computes its challenge and evaluation.
@@ -160,24 +127,17 @@ impl Kzg {
     ) -> Result<Opening<'a>, KzgError> {
         // The spec validates the commitment, derives z and y, then validates the proof.
         let commitment_point = commitment.to_commitment()?;
-        let z = blob_challenge(blob, commitment);
+        let z = blob.challenge(commitment);
         let y = self.evaluate(blob, &z);
         let proof_point = proof.to_proof()?;
         Ok(Opening {
-            claim: OpeningClaim {
-                commitment,
-                z,
-                y,
-                proof,
-            },
+            commitment_bytes: commitment,
+            proof_bytes: proof,
             commitment: commitment_point,
             proof: proof_point,
+            z,
+            y,
         })
-    }
-
-    /// Commits to evaluations in bit-reversal order with the matching Lagrange basis.
-    fn commit_evaluations(&self, evaluations: &[Scalar]) -> G1Projective {
-        parallel::multi_exp(&self.setup.g1_lagrange_brp, evaluations)
     }
 
     /// Evaluates the blob's polynomial at any point.
@@ -195,7 +155,7 @@ impl Kzg {
     /// On the domain, the stored evaluation, since the formula would divide by zero.
     fn evaluate(&self, blob: &Blob, z: &Scalar) -> Scalar {
         let evaluations = blob.evaluations();
-        let roots = &self.blob_roots_brp;
+        let roots = &self.roots_brp;
 
         // z = omega_i: the answer is stored.
         if let Some(index) = roots.iter().position(|root| root == z) {
@@ -216,7 +176,7 @@ impl Kzg {
         // The prefactor (z^n - 1) / n, with z^n by 12 squarings.
         let z_to_n =
             (0..FIELD_ELEMENTS_PER_BLOB.trailing_zeros()).fold(*z, |power, _| power.square());
-        sum * (z_to_n - Scalar::ONE) * self.blob_domain.size_inverse()
+        sum * (z_to_n - Scalar::ONE) * self.size_inverse
     }
 
     /// Computes the opening proof at z and the evaluation y, compute_kzg_proof_impl in the Deneb spec.
@@ -233,7 +193,7 @@ impl Kzg {
     /// The second line is the derivative rule at a root, from Feist, "PCS multiproofs using random evaluation".
     fn open(&self, blob: &Blob, z: &Scalar) -> (G1Projective, Scalar) {
         let evaluations = blob.evaluations();
-        let roots = &self.blob_roots_brp;
+        let roots = &self.roots_brp;
         let y = self.evaluate(blob, z);
 
         // Phase 1: invert every omega_i - z at once.
@@ -266,7 +226,7 @@ impl Kzg {
             quotient[m] = -(sum * z_inverse);
         }
 
-        (self.commit_evaluations(&quotient), y)
+        (self.lagrange_brp.commit(&quotient), y)
     }
 
     /// The pairing check of one opening, verify_kzg_proof_impl in the Deneb spec.
@@ -282,8 +242,7 @@ impl Kzg {
         y: &Scalar,
         proof: &G1Affine,
     ) -> bool {
-        let s_minus_z =
-            G2Projective::from(self.setup.g2_monomial[1]) - G2Projective::GENERATOR.mul_vartime(z);
+        let s_minus_z = G2Projective::from(self.s_g2) - G2Projective::GENERATOR.mul_vartime(z);
         let c_minus_y = G1Projective::from(commitment) - G1Projective::GENERATOR.mul_vartime(y);
         Gt::multi_pairing(&[
             (G1Affine::from(c_minus_y), -G2Affine::GENERATOR),
@@ -311,23 +270,24 @@ impl Kzg {
         }
 
         // Phase 1: the coefficients r^0, r^1, ..., r^{n-1}.
-        let claims: Vec<OpeningClaim<'_>> = openings.iter().map(|opening| opening.claim).collect();
-        let r = batch_challenge(&claims);
-        let r_powers = powers(&r, openings.len());
+        let r = Opening::batch_challenge(openings);
+        let r_powers: Vec<Scalar> = Powers::new(r).take(openings.len()).collect();
 
         // Phase 2: the three combinations, as MSMs.
         let proofs: Vec<G1Affine> = openings.iter().map(|opening| opening.proof).collect();
         let commitments: Vec<G1Affine> =
             openings.iter().map(|opening| opening.commitment).collect();
-        let z_weights: Vec<Scalar> = claims
+        let z_weights: Vec<Scalar> = openings
             .iter()
             .zip(&r_powers)
-            .map(|(claim, power)| claim.z * power)
+            .map(|(opening, power)| opening.z * power)
             .collect();
-        let y_sum = claims
+        let y_sum = openings
             .iter()
             .zip(&r_powers)
-            .fold(Scalar::ZERO, |acc, (claim, power)| acc + claim.y * power);
+            .fold(Scalar::ZERO, |acc, (opening, power)| {
+                acc + opening.y * power
+            });
 
         let proof_lincomb = G1Projective::multi_exp(&proofs, &r_powers);
         let proof_z_lincomb = G1Projective::multi_exp(&proofs, &z_weights);
@@ -339,7 +299,7 @@ impl Kzg {
 
         // Phase 3: one product of two pairings.
         Gt::multi_pairing(&[
-            (G1Affine::from(proof_lincomb), -self.setup.g2_monomial[1]),
+            (G1Affine::from(proof_lincomb), -self.s_g2),
             (
                 G1Affine::from(c_minus_y_lincomb + proof_z_lincomb),
                 G2Affine::GENERATOR,
@@ -349,37 +309,18 @@ impl Kzg {
     }
 }
 
-/// The powers x^0, ..., x^{n-1}, compute_powers in the Deneb spec.
-pub(super) fn powers(x: &Scalar, count: usize) -> Vec<Scalar> {
-    let mut power = Scalar::ONE;
-    (0..count)
-        .map(|_| {
-            let current = power;
-            power *= x;
-            current
-        })
-        .collect()
-}
-
-/// Checks that paired lists all have the length of the first.
-pub(super) fn check_lengths(expected: usize, others: &[usize]) -> Result<(), KzgError> {
-    match others.iter().find(|actual| **actual != expected) {
-        Some(&actual) => Err(KzgError::LengthMismatch { expected, actual }),
-        None => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Kzg, setup::TrustedSetup};
 
     #[test]
     fn evaluation_on_and_off_the_domain_agree_with_the_coefficients() {
         // Fixture state: the blob of f(X) = X, so its evaluation at any z is z itself.
         // Element i stores f(omega_{rev(i)}) = omega_{rev(i)}.
-        let kzg = Kzg::mainnet();
-        let bytes: Vec<u8> = kzg
-            .blob_roots_brp
+        let scheme = &Kzg::mainnet().blobs;
+        let bytes: Vec<u8> = scheme
+            .roots_brp
             .iter()
             .flat_map(Scalar::to_bytes_be)
             .collect();
@@ -387,46 +328,33 @@ mod tests {
 
         // Off the domain: z = 5 goes through the barycentric formula.
         assert_eq!(
-            kzg.evaluate(&blob, &Scalar::from_u64(5)),
+            scheme.evaluate(&blob, &Scalar::from_u64(5)),
             Scalar::from_u64(5)
         );
         // On the domain: z = omega_7 reads the stored value.
-        let root = kzg.blob_domain.roots()[7];
-        assert_eq!(kzg.evaluate(&blob, &root), root);
+        let root = Domain::new(12).roots()[7];
+        assert_eq!(scheme.evaluate(&blob, &root), root);
     }
 
     #[test]
     fn opening_on_the_domain_uses_the_derivative_rule() {
         // Fixture state: f(X) = X^2, whose quotient at z is (X^2 - z^2) / (X - z) = X + z.
-        let kzg = Kzg::mainnet();
-        let bytes: Vec<u8> = kzg
-            .blob_roots_brp
+        let scheme = &Kzg::mainnet().blobs;
+        let bytes: Vec<u8> = scheme
+            .roots_brp
             .iter()
             .flat_map(|root| root.square().to_bytes_be())
             .collect();
         let blob = Blob::from_bytes(&bytes).unwrap();
 
         // z = omega_3 is on the domain, so the quotient entry at omega_3 needs the special case.
-        let z = kzg.blob_domain.roots()[3];
-        let (proof, y) = kzg.open(&blob, &z);
+        let z = Domain::new(12).roots()[3];
+        let (proof, y) = scheme.open(&blob, &z);
         assert_eq!(y, z.square());
 
         // The quotient X + z commits to [s] + z [1].
-        let expected =
-            G1Projective::from(kzg.setup.g1_monomial[1]) + G1Projective::GENERATOR.mul_vartime(&z);
+        let s = TrustedSetup::mainnet().g1_monomial.points()[1];
+        let expected = G1Projective::from(s) + G1Projective::GENERATOR.mul_vartime(&z);
         assert_eq!(proof, expected);
-    }
-
-    #[test]
-    fn lengths_must_match_the_first_list() {
-        // The second list of three, the first of two, is the reported mismatch.
-        assert_eq!(
-            check_lengths(2, &[2, 3]),
-            Err(KzgError::LengthMismatch {
-                expected: 2,
-                actual: 3
-            })
-        );
-        assert_eq!(check_lengths(2, &[2, 2]), Ok(()));
     }
 }

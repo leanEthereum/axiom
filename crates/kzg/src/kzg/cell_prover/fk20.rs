@@ -35,9 +35,8 @@
 use axiom_bls12_381::{G1Affine, G1Projective, Scalar};
 
 use crate::{
-    CELLS_PER_EXT_BLOB, FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL,
-    fft::{Domain, bit_reverse_permute},
-    parallel,
+    CELLS_PER_EXT_BLOB, FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL, basis::Basis,
+    fft::Domain, parallel::Threads,
 };
 
 /// Number of 64-coefficient blocks in a blob polynomial, CELLS_PER_BLOB in c-kzg-4844.
@@ -50,7 +49,9 @@ const CIRCULANT: usize = 2 * BLOCKS;
 
 /// The precomputed FFTs of the setup vectors, one per coefficient offset u.
 #[derive(Clone, Debug)]
-pub(crate) struct Fk20 {
+pub(super) struct Fk20 {
+    /// The 128-th roots of unity, both the circulant size and the proof count.
+    domain: Domain,
     /// Row j holds, for u = 0..63, entry j of the FFT of the u-th setup vector.
     ///
     /// The transposed layout makes each row the point list of one multi-scalar multiplication.
@@ -63,18 +64,20 @@ impl Fk20 {
     /// # Performance
     ///
     /// 64 G1 FFTs of size 128, about 20000 scalar multiplications, spread over all cores.
-    pub(crate) fn new(g1_monomial: &[G1Affine], domain: &Domain) -> Self {
+    pub(super) fn new(g1_monomial: &Basis) -> Self {
+        let domain = Domain::new(CIRCULANT.trailing_zeros());
         let offsets: Vec<usize> = (0..FIELD_ELEMENTS_PER_CELL).collect();
 
         // Phase 1: for each offset u, transform the vector x_u reversed against the Toeplitz rows.
         //
         //     x_u[i] = [s^{u + 64 (62 - i)}]    for i = 0..62
         //     x_u[i] = 0                        for i = 63..127  (circulant padding)
-        let columns: Vec<Vec<G1Projective>> = parallel::map(&offsets, |&u| {
+        let columns: Vec<Vec<G1Projective>> = Threads::available().map(&offsets, |&u| {
             let mut x = vec![G1Projective::IDENTITY; CIRCULANT];
             for (i, slot) in x.iter_mut().take(BLOCKS - 1).enumerate() {
-                *slot =
-                    G1Projective::from(g1_monomial[u + FIELD_ELEMENTS_PER_CELL * (BLOCKS - 2 - i)]);
+                *slot = G1Projective::from(
+                    g1_monomial.points()[u + FIELD_ELEMENTS_PER_CELL * (BLOCKS - 2 - i)],
+                );
             }
             domain.fft(&mut x);
             x
@@ -90,12 +93,10 @@ impl Fk20 {
                     .collect()
             })
             .collect();
-        Self { rows }
+        Self { domain, rows }
     }
 
     /// Computes the proofs of all 128 cells of a polynomial of degree below 4096.
-    ///
-    /// The domain of size 128 serves twice: as the circulant size and as the proof count.
     ///
     /// # Returns
     ///
@@ -104,21 +105,13 @@ impl Fk20 {
     /// # Panics
     ///
     /// Panics when the polynomial does not have exactly 4096 coefficients.
-    pub(crate) fn cell_proofs(
-        &self,
-        coefficients: &[Scalar],
-        domain: &Domain,
-    ) -> Vec<G1Projective> {
+    pub(super) fn cell_proofs(&self, coefficients: &[Scalar]) -> Vec<G1Projective> {
         assert_eq!(
             coefficients.len(),
             FIELD_ELEMENTS_PER_BLOB,
             "one blob of coefficients"
         );
-        assert_eq!(
-            domain.size(),
-            CIRCULANT,
-            "the domain of the 128-th roots of unity"
-        );
+        let domain = &self.domain;
 
         // Phase 1: for each offset u, the FFT of the circulant column of the u-th Toeplitz matrix.
         // The Toeplitz entries are c_t = f_{64 t + u}, laid out so the circulant product computes h_m:
@@ -148,7 +141,7 @@ impl Fk20 {
         // Phase 2: the circulant products, summed over u, pointwise in the FFT domain.
         // Entry j is one MSM of 64 points: sum_u FFT(e_u)[j] * FFT(x_u)[j].
         let row_indices: Vec<usize> = (0..CIRCULANT).collect();
-        let mut h = parallel::map(&row_indices, |&j| {
+        let mut h: Vec<G1Projective> = Threads::available().map(&row_indices, |&j| {
             G1Projective::multi_exp(&self.rows[j], &transposed[j])
         });
 
@@ -161,7 +154,7 @@ impl Fk20 {
         // The proof for cell k sits at a_k = w^{64 rev_7(k)}, so a bit reversal puts cells in order.
         let mut proofs = h;
         domain.fft_parallel(&mut proofs);
-        bit_reverse_permute(&mut proofs);
+        domain.bit_reversal().permute(&mut proofs);
         debug_assert_eq!(proofs.len(), CELLS_PER_EXT_BLOB);
         proofs
     }
@@ -172,19 +165,21 @@ mod tests {
     use proptest::{collection::vec, prelude::*};
 
     use super::*;
-    use crate::{
-        Kzg,
-        fft::{reverse_bits, tests::arb_scalar},
-    };
+    use crate::{Kzg, bit_reversal::BitReversal, fft::tests::arb_scalar};
+
+    /// The FK20 tables of the shared mainnet context, built once for every test.
+    fn tables() -> &'static Fk20 {
+        Kzg::mainnet().cell_prover.fk20()
+    }
 
     /// The spec's naive proof for one cell: divide by X^64 - h^64, then commit in the monomial basis.
     ///
     /// See compute_kzg_proof_multi_impl in the Fulu polynomial commitments sampling spec.
-    fn naive_cell_proof(kzg: &Kzg, coefficients: &[Scalar], cell: usize) -> G1Projective {
+    fn naive_cell_proof(coefficients: &[Scalar], cell: usize) -> G1Projective {
         // The coset of cell k is h_k G_64 with h_k = w^{rev_7(k)}, w of order 8192.
         // Its vanishing polynomial is X^64 - h_k^64.
         let w = Scalar::root_of_unity(13).unwrap();
-        let h = w.pow_vartime(&[reverse_bits(cell, 7) as u64]);
+        let h = w.pow_vartime(&[BitReversal::new(7).index(cell) as u64]);
         let a = h.pow_vartime(&[FIELD_ELEMENTS_PER_CELL as u64]);
 
         // Synthetic division by X^64 - a, from the top coefficient down.
@@ -199,7 +194,7 @@ mod tests {
         }
 
         // Commit to the quotient of degree below 4032 with the first 4032 powers of s.
-        G1Projective::multi_exp(&kzg.setup.g1_monomial[..quotient.len()], &quotient)
+        Kzg::mainnet().cell_prover.monomial.commit(&quotient)
     }
 
     proptest! {
@@ -212,16 +207,15 @@ mod tests {
         ) {
             // Fixture state: up to 31 random coefficients at random degrees, the rest zero.
             // Sparse inputs land in random blocks and offsets of the Toeplitz layout.
-            let kzg = Kzg::mainnet();
             let mut coefficients = vec![Scalar::ZERO; FIELD_ELEMENTS_PER_BLOB];
             for (degree, value) in sparse {
                 coefficients[degree] = value;
             }
 
             // Three random cells per case pin FK20 against the spec's quadratic method.
-            let proofs = kzg.fk20().cell_proofs(&coefficients, &kzg.cell_count_domain);
+            let proofs = tables().cell_proofs(&coefficients);
             for cell in cells {
-                prop_assert_eq!(proofs[cell], naive_cell_proof(kzg, &coefficients, cell));
+                prop_assert_eq!(proofs[cell], naive_cell_proof(&coefficients, cell));
             }
         }
     }
@@ -229,17 +223,14 @@ mod tests {
     #[test]
     fn dense_polynomial_matches_naive_proofs() {
         // Fixture state: every coefficient is nonzero, f_i = i + 1.
-        let kzg = Kzg::mainnet();
         let coefficients: Vec<Scalar> = (1..=FIELD_ELEMENTS_PER_BLOB as u64)
             .map(Scalar::from_u64)
             .collect();
-        let proofs = kzg
-            .fk20()
-            .cell_proofs(&coefficients, &kzg.cell_count_domain);
+        let proofs = tables().cell_proofs(&coefficients);
 
         // The first and last cell of each half: original data, then extension.
         for cell in [0, 63, 64, 127] {
-            assert_eq!(proofs[cell], naive_cell_proof(kzg, &coefficients, cell));
+            assert_eq!(proofs[cell], naive_cell_proof(&coefficients, cell));
         }
     }
 }

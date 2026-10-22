@@ -14,14 +14,11 @@
 //!
 //! The specs store evaluations in bit-reversal order, so the transforms pair with a permutation.
 
-use std::{
-    iter,
-    ops::{Add, Sub},
-};
+use std::ops::{Add, Sub};
 
 use axiom_bls12_381::{G1Projective, Scalar};
 
-use crate::parallel;
+use crate::{bit_reversal::BitReversal, parallel::Threads, powers::Powers};
 
 /// A value the transforms can process: an element of a module over the scalar field.
 ///
@@ -79,9 +76,7 @@ impl Domain {
         // Successive powers of the root, and of its inverse.
         //
         //     omega^{-i} = omega^{n - i}, so the inverse table reads the forward one backwards.
-        let roots: Vec<Scalar> = iter::successors(Some(Scalar::ONE), |power| Some(power * &root))
-            .take(size)
-            .collect();
+        let roots: Vec<Scalar> = Powers::new(root).take(size).collect();
         let inverse_roots = (0..size).map(|i| roots[(size - i) % size]).collect();
 
         // n < r, so n is a nonzero field element with an inverse.
@@ -99,6 +94,11 @@ impl Domain {
     /// Number of points in the domain.
     pub(crate) const fn size(&self) -> usize {
         1 << self.log_size
+    }
+
+    /// The bit-reversal permutation of the domain's size, the order the specs store evaluations in.
+    pub(crate) const fn bit_reversal(&self) -> BitReversal {
+        BitReversal::new(self.log_size)
     }
 
     /// The inverse of the size, 1 / n.
@@ -159,7 +159,9 @@ impl Domain {
     /// ```
     pub(crate) fn coset_fft(&self, values: &mut [Scalar], shift: &Scalar) {
         // Scale a_i by shift^i, then evaluate over the plain domain.
-        scale_by_powers(values, shift);
+        for (value, power) in values.iter_mut().zip(Powers::new(*shift)) {
+            *value *= power;
+        }
         self.fft(values);
     }
 
@@ -168,7 +170,9 @@ impl Domain {
         // Interpolate the shifted polynomial f(shift X), then undo the shift on each coefficient.
         self.ifft(values);
         let shift_inverse = shift.invert().unwrap_or(Scalar::ZERO);
-        scale_by_powers(values, &shift_inverse);
+        for (value, power) in values.iter_mut().zip(Powers::new(shift_inverse)) {
+            *value *= power;
+        }
     }
 
     /// The iterative Cooley-Tukey network: a bit-reversal permutation, then log_2(n) layers.
@@ -197,7 +201,7 @@ impl Domain {
         );
 
         // Phase 1: put the inputs in bit-reversed order, so each layer works in place.
-        bit_reverse_permute(values);
+        self.bit_reversal().permute(values);
 
         // Phase 2: merge transforms of doubling size.
         let mut half = 1;
@@ -222,57 +226,11 @@ impl Domain {
             };
             if parallel {
                 let mut pairs: Vec<_> = pairs.collect();
-                parallel::for_each_mut(&mut pairs, butterfly);
+                Threads::available().for_each_mut(&mut pairs, butterfly);
             } else {
                 pairs.for_each(|mut pair| butterfly(&mut pair));
             }
             half *= 2;
-        }
-    }
-}
-
-/// Multiplies the i-th value by factor^i.
-fn scale_by_powers(values: &mut [Scalar], factor: &Scalar) {
-    // A running power avoids one exponentiation per entry.
-    let mut power = Scalar::ONE;
-    for value in values {
-        *value *= power;
-        power *= factor;
-    }
-}
-
-/// Reverses the low k bits of an index, as reverse_bits does in the Deneb spec.
-///
-/// ```text
-///     k = 3:   1 = 001  ->  100 = 4,     6 = 110  ->  011 = 3
-/// ```
-pub(crate) const fn reverse_bits(index: usize, log_size: u32) -> usize {
-    // Reverse the whole word, then drop the low bits that were the high zeros of the index.
-    if log_size == 0 {
-        0
-    } else {
-        index.reverse_bits() >> (usize::BITS - log_size)
-    }
-}
-
-/// Applies the bit-reversal permutation in place.
-///
-/// The permutation is an involution, so applying it twice restores the input.
-///
-/// # Panics
-///
-/// Panics when the length is not a power of two.
-pub(crate) fn bit_reverse_permute<T>(values: &mut [T]) {
-    assert!(
-        values.len().is_power_of_two(),
-        "bit reversal needs a power-of-two length"
-    );
-    let log_size = values.len().trailing_zeros();
-    // Swap each pair once, from its smaller index.
-    for i in 0..values.len() {
-        let j = reverse_bits(i, log_size);
-        if i < j {
-            values.swap(i, j);
         }
     }
 }
@@ -294,20 +252,6 @@ pub(crate) mod tests {
             .iter()
             .rev()
             .fold(Scalar::ZERO, |acc, coefficient| acc * x + coefficient)
-    }
-
-    #[test]
-    fn bit_reversal_of_eight() {
-        // Fixture state: n = 8, three index bits.
-        //
-        //     index   0    1    2    3    4    5    6    7
-        //     binary  000  001  010  011  100  101  110  111
-        //     reverse 000  100  010  110  001  101  011  111
-        let mut values = [0, 1, 2, 3, 4, 5, 6, 7];
-        bit_reverse_permute(&mut values);
-        assert_eq!(values, [0, 4, 2, 6, 1, 5, 3, 7]);
-        // A domain of one point has no bits to reverse.
-        assert_eq!(reverse_bits(0, 0), 0);
     }
 
     #[test]

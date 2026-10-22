@@ -64,15 +64,19 @@
 //! );
 //! ```
 
+mod basis;
+mod bit_reversal;
 mod blob;
 mod bytes;
 mod cell;
 mod error;
 mod fft;
-mod fk20;
 mod kzg;
 mod parallel;
+mod powers;
 mod setup;
+#[cfg(test)]
+mod test_vectors;
 mod transcript;
 
 pub use blob::Blob;
