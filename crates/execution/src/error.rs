@@ -3,7 +3,7 @@
 use std::fmt::Write;
 
 use axiom_http::{HttpError, StatusCode};
-use axiom_json::{HexError, ParseError};
+use axiom_json::{HexError, Json, ParseError};
 use axiom_ssz::DecodeError;
 use thiserror::Error;
 
@@ -93,6 +93,25 @@ impl WireError {
         Self {
             path: Vec::new(),
             kind,
+        }
+    }
+
+    /// The error for a value of the wrong JSON type.
+    pub(crate) const fn wrong_type(expected: &'static str, found: &Json) -> Self {
+        Self::new(WireErrorKind::Type {
+            expected,
+            found: found.kind(),
+        })
+    }
+
+    /// The error for a malformed QUANTITY or DATA string.
+    pub(crate) const fn hex(error: HexError) -> Self {
+        match error {
+            // A DATA of the wrong size is a length problem, not an encoding one.
+            HexError::WrongLength { expected, actual } => {
+                Self::new(WireErrorKind::WrongLength { expected, actual })
+            }
+            other => Self::new(WireErrorKind::Hex(other)),
         }
     }
 

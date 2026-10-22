@@ -18,10 +18,7 @@ use std::fmt;
 use axiom_json::{Json, Object, data};
 use thiserror::Error;
 
-use super::{
-    base64url,
-    hmac::{constant_time_eq, hmac_sha256},
-};
+use super::{base64url::Base64Url, hmac::HmacSha256};
 
 /// The encoded header every token carries: `{"alg":"HS256","typ":"JWT"}`.
 const HEADER: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
@@ -70,12 +67,12 @@ impl JwtSecret {
         // The claims are a single member object, serialized compactly.
         let mut claims = Object::new();
         claims.insert("iat", Json::from(issued_at));
-        let claims = base64url::encode(Json::Object(claims).to_string().as_bytes());
+        let claims = Json::Object(claims).to_string();
 
         // Sign the ASCII of "header.claims" and append the signature as a third segment.
-        let signing_input = format!("{HEADER}.{claims}");
-        let signature = hmac_sha256(&self.0, signing_input.as_bytes());
-        format!("{signing_input}.{}", base64url::encode(&signature))
+        let signing_input = format!("{HEADER}.{}", Base64Url(claims.as_bytes()));
+        let signature = HmacSha256::new(&self.0).mac(signing_input.as_bytes());
+        format!("{signing_input}.{}", Base64Url(&signature))
     }
 
     /// Checks a token's signature and freshness against a clock reading.
@@ -86,20 +83,11 @@ impl JwtSecret {
     ///
     /// Fails on a malformed token, any algorithm but HS256, a bad signature, or a stale issued-at.
     pub fn verify(&self, token: &str, now: u64) -> Result<Claims, JwtError> {
-        // Exactly three dot-separated segments.
-        let mut segments = token.split('.');
-        let (Some(header), Some(claims), Some(signature), None) = (
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next(),
-        ) else {
-            return Err(JwtError::Malformed);
-        };
+        let token = Token::split(token)?;
 
         // The header must name HS256.
         // "none" in particular is refused, as the authentication spec requires.
-        let header = decode_segment(header)?;
+        let header = token.header.json()?;
         match header.get("alg").and_then(Json::as_str) {
             Some("HS256") => {}
             Some(other) => return Err(JwtError::UnsupportedAlgorithm(other.to_owned())),
@@ -107,16 +95,14 @@ impl JwtSecret {
         }
 
         // Recompute the MAC over the first two segments as sent, then compare in constant time.
-        let signing_input = &token[..token.len() - signature.len() - 1];
-        let expected = hmac_sha256(&self.0, signing_input.as_bytes());
-        let signature = base64url::decode(signature).ok_or(JwtError::Malformed)?;
-        if !constant_time_eq(&signature, &expected) {
+        let signature = token.signature.bytes()?;
+        if !HmacSha256::new(&self.0).verify(token.signing_input.as_bytes(), &signature) {
             return Err(JwtError::BadSignature);
         }
 
         // Only an authentic token's claims are read.
         // Unknown claims, such as "id" and "clv", are ignored as the spec requires.
-        let claims = decode_segment(claims)?;
+        let claims = token.claims.json()?;
         let issued_at = claims
             .get("iat")
             .and_then(Json::as_u64)
@@ -134,10 +120,55 @@ impl fmt::Debug for JwtSecret {
     }
 }
 
-/// Decodes one JSON segment of a token.
-fn decode_segment(segment: &str) -> Result<Json, JwtError> {
-    let bytes = base64url::decode(segment).ok_or(JwtError::Malformed)?;
-    Json::parse(bytes).map_err(|_| JwtError::Malformed)
+/// A token cut into its three segments, none of them checked yet.
+#[derive(Clone, Copy, Debug)]
+struct Token<'a> {
+    /// The header and claims segments with the dot between them, as signed.
+    signing_input: &'a str,
+    /// The encoded header.
+    header: Segment<'a>,
+    /// The encoded claims.
+    claims: Segment<'a>,
+    /// The encoded signature.
+    signature: Segment<'a>,
+}
+
+impl<'a> Token<'a> {
+    /// Splits a token at its dots.
+    fn split(token: &'a str) -> Result<Self, JwtError> {
+        // Exactly three dot-separated segments.
+        let mut segments = token.split('.');
+        let (Some(header), Some(claims), Some(signature), None) = (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next(),
+        ) else {
+            return Err(JwtError::Malformed);
+        };
+        Ok(Self {
+            signing_input: &token[..token.len() - signature.len() - 1],
+            header: Segment(header),
+            claims: Segment(claims),
+            signature: Segment(signature),
+        })
+    }
+}
+
+/// One base64url segment of a token.
+#[derive(Clone, Copy, Debug)]
+struct Segment<'a>(&'a str);
+
+impl Segment<'_> {
+    /// The bytes the segment encodes.
+    fn bytes(self) -> Result<Vec<u8>, JwtError> {
+        Base64Url::decode(self.0).ok_or(JwtError::Malformed)
+    }
+
+    /// The JSON value the segment encodes.
+    fn json(self) -> Result<Json, JwtError> {
+        Json::parse(self.bytes()?).map_err(|_| JwtError::Malformed)
+    }
 }
 
 /// The claims of a verified token.
@@ -195,7 +226,7 @@ mod tests {
     #[test]
     fn header_constant_encodes_hs256() {
         // The precomputed header decodes to the exact JSON the scheme prescribes.
-        let header = base64url::decode(HEADER).unwrap();
+        let header = Base64Url::decode(HEADER).unwrap();
         assert_eq!(header, br#"{"alg":"HS256","typ":"JWT"}"#);
     }
 
@@ -239,13 +270,13 @@ mod tests {
         );
 
         // Swapping in claims with a later iat breaks the signature.
-        let forged_claims = base64url::encode(br#"{"iat":1050}"#);
+        let forged_claims = Base64Url(br#"{"iat":1050}"#);
         let parts: Vec<&str> = token.split('.').collect();
         let forged = format!("{}.{forged_claims}.{}", parts[0], parts[2]);
         assert_eq!(secret().verify(&forged, 1000), Err(JwtError::BadSignature));
 
         // An unsigned token with alg "none" is refused before any MAC is computed.
-        let none_header = base64url::encode(br#"{"alg":"none"}"#);
+        let none_header = Base64Url(br#"{"alg":"none"}"#);
         let unsigned = format!("{none_header}.{}.", parts[1]);
         assert_eq!(
             secret().verify(&unsigned, 1000),

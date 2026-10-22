@@ -6,14 +6,13 @@
 use std::{
     io,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axiom_http::{Method, Request, Response, Router, Server, ServerConfig, StatusCode};
 use axiom_json::{Json, Object};
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use crate::{JwtSecret, RpcError};
+use crate::{JwtSecret, RpcError, client::unix_now};
 
 /// A scripted engine on a loopback port.
 ///
@@ -58,6 +57,21 @@ enum Reply {
     Result(Json),
     /// A JSON-RPC error object.
     Error(RpcError),
+}
+
+impl Reply {
+    /// The JSON-RPC response envelope inside a 200 reply, echoing a request id.
+    fn into_response(self, id: Json) -> Response {
+        let mut envelope = Object::new();
+        envelope.insert("jsonrpc", Json::from("2.0"));
+        envelope.insert("id", id);
+        match self {
+            Self::Result(result) => envelope.insert("result", result),
+            Self::Error(error) => envelope.insert("error", error.to_json()),
+        };
+        let body = Json::Object(envelope).to_string().into_bytes();
+        Response::new(StatusCode::OK).with_body("application/json", body)
+    }
 }
 
 /// State shared between the handle and the server task.
@@ -128,7 +142,7 @@ impl MockEngine {
     /// The authenticated calls received so far, in arrival order.
     #[must_use]
     pub fn calls(&self) -> Vec<RecordedCall> {
-        lock(&self.state.calls).clone()
+        self.state.calls().clone()
     }
 
     /// Stops the server and waits for it to drain.
@@ -143,7 +157,21 @@ impl MockEngine {
 impl MockState {
     /// Stores a canned reply.
     fn set(&self, method: &str, reply: Reply) {
-        lock(&self.replies).push((method.to_owned(), reply));
+        self.replies().push((method.to_owned(), reply));
+    }
+
+    /// The canned replies, locked.
+    ///
+    /// Poisoning is ignored: a panicking test thread leaves the list intact.
+    fn replies(&self) -> MutexGuard<'_, Vec<(String, Reply)>> {
+        self.replies.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The recorded calls, locked.
+    ///
+    /// Poisoning is ignored: a panicking test thread leaves the list intact.
+    fn calls(&self) -> MutexGuard<'_, Vec<RecordedCall>> {
+        self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Serves one HTTP request.
@@ -153,10 +181,7 @@ impl MockState {
             .headers
             .get("authorization")
             .and_then(|value| value.strip_prefix("Bearer "));
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs());
-        let claims = match token.map(|token| self.secret.verify(token, now)) {
+        let claims = match token.map(|token| self.secret.verify(token, unix_now())) {
             Some(Ok(claims)) => claims,
             Some(Err(error)) => return unauthorized(&error.to_string()),
             None => return unauthorized("missing bearer token"),
@@ -164,17 +189,13 @@ impl MockState {
 
         // Phase 2: read the JSON-RPC request.
         let Ok(call) = Json::parse(&request.body) else {
-            return rpc_reply(
-                Json::Null,
-                Reply::Error(RpcError::new(RpcError::PARSE_ERROR, "Parse error")),
-            );
+            return Reply::Error(RpcError::new(RpcError::PARSE_ERROR, "Parse error"))
+                .into_response(Json::Null);
         };
         let id = call.get("id").cloned().unwrap_or_default();
         let Some(method) = call.get("method").and_then(Json::as_str) else {
-            return rpc_reply(
-                id,
-                Reply::Error(RpcError::new(RpcError::INVALID_REQUEST, "Invalid Request")),
-            );
+            return Reply::Error(RpcError::new(RpcError::INVALID_REQUEST, "Invalid Request"))
+                .into_response(id);
         };
         let params = call
             .get("params")
@@ -183,12 +204,13 @@ impl MockState {
             .unwrap_or_default();
 
         // Phase 3: record the call, then answer from the script.
-        lock(&self.calls).push(RecordedCall {
+        self.calls().push(RecordedCall {
             method: method.to_owned(),
             params,
             issued_at: claims.issued_at,
         });
-        let reply = lock(&self.replies)
+        let reply = self
+            .replies()
             .iter()
             .rev()
             .find(|(name, _)| name == method)
@@ -201,29 +223,11 @@ impl MockState {
                 },
                 |(_, reply)| reply.clone(),
             );
-        rpc_reply(id, reply)
+        reply.into_response(id)
     }
-}
-
-/// Locks a mutex, ignoring poisoning: a panicking test thread leaves the data intact.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The 401 a real engine sends for a missing or invalid token.
 fn unauthorized(reason: &str) -> Response {
     Response::new(StatusCode::UNAUTHORIZED).with_body("text/plain", reason.as_bytes().to_vec())
-}
-
-/// A JSON-RPC response envelope inside a 200 reply.
-fn rpc_reply(id: Json, reply: Reply) -> Response {
-    let mut envelope = Object::new();
-    envelope.insert("jsonrpc", Json::from("2.0"));
-    envelope.insert("id", id);
-    match reply {
-        Reply::Result(result) => envelope.insert("result", result),
-        Reply::Error(error) => envelope.insert("error", error.to_json()),
-    };
-    let body = Json::Object(envelope).to_string().into_bytes();
-    Response::new(StatusCode::OK).with_body("application/json", body)
 }

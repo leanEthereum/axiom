@@ -7,41 +7,15 @@
 //!     lists and vectors          array      element by element
 //! ```
 
-use axiom_json::{HexError, Json, data, quantity};
+use axiom_json::{Json, data, quantity};
 use axiom_ssz::{ByteList, ByteVector, Length, List, U256, Vector};
 use axiom_types::{
     Bytes32, ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, ValidatorIndex,
     VersionedHash, WithdrawalIndex,
 };
 
-use super::{JsonCodec, wrong_type};
+use super::{JsonCodec, Reader};
 use crate::{WireError, WireErrorKind};
-
-/// The text of a value that must be a string.
-fn text(value: &Json) -> Result<&str, WireError> {
-    value.as_str().ok_or_else(|| wrong_type("string", value))
-}
-
-/// Maps a hex error into the wire error that describes it best.
-const fn hex_error(error: HexError) -> WireError {
-    match error {
-        // A DATA of the wrong size is a length problem, not an encoding one.
-        HexError::WrongLength { expected, actual } => {
-            WireError::new(WireErrorKind::WrongLength { expected, actual })
-        }
-        other => WireError::new(WireErrorKind::Hex(other)),
-    }
-}
-
-/// Reads a QUANTITY of up to 64 bits.
-fn read_quantity(value: &Json) -> Result<u64, WireError> {
-    quantity::decode(text(value)?).map_err(hex_error)
-}
-
-/// Reads a DATA of exactly N bytes.
-pub(crate) fn read_fixed<const N: usize>(value: &Json) -> Result<[u8; N], WireError> {
-    data::decode_array::<N>(text(value)?).map_err(hex_error)
-}
 
 impl JsonCodec for u64 {
     fn to_json(&self) -> Json {
@@ -49,7 +23,7 @@ impl JsonCodec for u64 {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_quantity(value)
+        Reader::new(value).quantity()
     }
 }
 
@@ -59,7 +33,7 @@ impl JsonCodec for U256 {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        quantity::decode_u256(text(value)?).map_err(hex_error)
+        quantity::decode_u256(Reader::new(value).text()?).map_err(WireError::hex)
     }
 }
 
@@ -69,7 +43,9 @@ impl JsonCodec for bool {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        value.as_bool().ok_or_else(|| wrong_type("boolean", value))
+        value
+            .as_bool()
+            .ok_or_else(|| WireError::wrong_type("boolean", value))
     }
 }
 
@@ -79,7 +55,7 @@ impl JsonCodec for String {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        text(value).map(str::to_owned)
+        Reader::new(value).text().map(str::to_owned)
     }
 }
 
@@ -89,7 +65,7 @@ impl JsonCodec for Gwei {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_quantity(value).map(Self)
+        Reader::new(value).quantity().map(Self)
     }
 }
 
@@ -99,7 +75,7 @@ impl JsonCodec for WithdrawalIndex {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_quantity(value).map(Self)
+        Reader::new(value).quantity().map(Self)
     }
 }
 
@@ -109,7 +85,7 @@ impl JsonCodec for ValidatorIndex {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_quantity(value).map(Self)
+        Reader::new(value).quantity().map(Self)
     }
 }
 
@@ -119,7 +95,7 @@ impl JsonCodec for Hash32 {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -129,7 +105,7 @@ impl JsonCodec for Bytes32 {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -139,7 +115,7 @@ impl JsonCodec for Root {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -149,7 +125,7 @@ impl JsonCodec for ExecutionAddress {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -159,7 +135,7 @@ impl JsonCodec for VersionedHash {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -169,7 +145,7 @@ impl JsonCodec for KzgCommitment {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -179,7 +155,7 @@ impl JsonCodec for KzgProof {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -190,7 +166,22 @@ impl JsonCodec for Vec<u8> {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        data::decode(text(value)?).map_err(hex_error)
+        Reader::new(value).bytes()
+    }
+}
+
+impl<T: JsonCodec> JsonCodec for Option<T> {
+    /// The value, or null when absent.
+    fn to_json(&self) -> Json {
+        self.as_ref().map_or(Json::Null, JsonCodec::to_json)
+    }
+
+    /// Null reads as absent; anything else must be the value.
+    fn from_json(value: &Json) -> Result<Self, WireError> {
+        match value {
+            Json::Null => Ok(None),
+            value => T::from_json(value).map(Some),
+        }
     }
 }
 
@@ -200,7 +191,7 @@ impl<N: Length> JsonCodec for ByteVector<N> {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        let text = text(value)?;
+        let text = Reader::new(value).text()?;
         // Check the length from the text before decoding a 128 KiB blob that cannot fit.
         let expected_text = 2 + 2 * N::LEN;
         if text.len() != expected_text && text.starts_with("0x") && text.len() % 2 == 0 {
@@ -209,7 +200,7 @@ impl<N: Length> JsonCodec for ByteVector<N> {
                 actual: (text.len() - 2) / 2,
             }));
         }
-        let bytes = data::decode(text).map_err(hex_error)?;
+        let bytes = data::decode(text).map_err(WireError::hex)?;
         Self::try_from(bytes.as_slice()).map_err(|_| {
             WireError::new(WireErrorKind::WrongLength {
                 expected: N::LEN,
@@ -225,7 +216,7 @@ impl<N: Length> JsonCodec for ByteList<N> {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        let bytes = data::decode(text(value)?).map_err(hex_error)?;
+        let bytes = Reader::new(value).bytes()?;
         let actual = bytes.len();
         Self::try_from(bytes).map_err(|_| {
             WireError::new(WireErrorKind::TooLong {
@@ -242,7 +233,7 @@ impl<T: JsonCodec, N: Length> JsonCodec for List<T, N> {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        let items = value.as_array().ok_or_else(|| wrong_type("array", value))?;
+        let items = Reader::new(value).items()?;
         // Refuse an oversized list before decoding any element of it.
         if items.len() > N::LEN {
             return Err(WireError::new(WireErrorKind::TooLong {
@@ -250,7 +241,7 @@ impl<T: JsonCodec, N: Length> JsonCodec for List<T, N> {
                 actual: items.len(),
             }));
         }
-        let decoded = decode_items(items)?;
+        let decoded = items.decode()?;
         // The length is checked above, so the conversion cannot fail.
         Self::try_from(decoded).map_err(|_| {
             WireError::new(WireErrorKind::TooLong {
@@ -267,7 +258,7 @@ impl<T: JsonCodec, N: Length> JsonCodec for Vector<T, N> {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        let items = value.as_array().ok_or_else(|| wrong_type("array", value))?;
+        let items = Reader::new(value).items()?;
         // A vector's length is exact.
         if items.len() != N::LEN {
             return Err(WireError::new(WireErrorKind::WrongLength {
@@ -275,7 +266,7 @@ impl<T: JsonCodec, N: Length> JsonCodec for Vector<T, N> {
                 actual: items.len(),
             }));
         }
-        let decoded = decode_items(items)?;
+        let decoded = items.decode()?;
         Self::try_from(decoded).map_err(|_| {
             WireError::new(WireErrorKind::WrongLength {
                 expected: N::LEN,
@@ -285,17 +276,9 @@ impl<T: JsonCodec, N: Length> JsonCodec for Vector<T, N> {
     }
 }
 
-/// Decodes array elements, locating any error by its index.
-fn decode_items<T: JsonCodec>(items: &[Json]) -> Result<Vec<T>, WireError> {
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| T::from_json(item).map_err(|error| error.at_index(index)))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use axiom_json::HexError;
     use axiom_ssz::Const;
 
     use super::*;
@@ -316,6 +299,17 @@ mod tests {
                 found: "number"
             }))
         );
+    }
+
+    #[test]
+    fn options_map_to_null() {
+        // None is null, and null reads back as None.
+        assert_eq!(None::<u64>.to_json(), Json::Null);
+        assert_eq!(Option::<u64>::from_json(&Json::Null), Ok(None));
+
+        // Some(5) is the bare QUANTITY "0x5", and reads back the same.
+        assert_eq!(Some(5_u64).to_json(), Json::from("0x5"));
+        assert_eq!(Option::<u64>::from_json(&Json::from("0x5")), Ok(Some(5)));
     }
 
     #[test]

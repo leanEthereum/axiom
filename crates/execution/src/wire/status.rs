@@ -13,7 +13,7 @@ use std::fmt;
 use axiom_json::Json;
 use axiom_types::Hash32;
 
-use super::{Fields, JsonCodec, nullable, object, wrong_type};
+use super::{Fields, JsonCodec, object};
 use crate::{WireError, WireErrorKind};
 
 /// The five verdicts the engine API defines.
@@ -71,7 +71,7 @@ impl JsonCodec for PayloadStatusKind {
             Some(other) => Err(WireError::new(WireErrorKind::UnknownStatus(
                 other.to_owned(),
             ))),
-            None => Err(wrong_type("string", value)),
+            None => Err(WireError::wrong_type("string", value)),
         }
     }
 }
@@ -118,8 +118,8 @@ impl JsonCodec for PayloadStatus {
     fn to_json(&self) -> Json {
         object([
             ("status", self.status.to_json()),
-            ("latestValidHash", nullable(self.latest_valid_hash.as_ref())),
-            ("validationError", nullable(self.validation_error.as_ref())),
+            ("latestValidHash", self.latest_valid_hash.to_json()),
+            ("validationError", self.validation_error.to_json()),
         ])
     }
 
