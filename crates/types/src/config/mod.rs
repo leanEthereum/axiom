@@ -13,7 +13,7 @@ pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
 pub use yaml::ConfigError;
 
-use crate::{Epoch, ExecutionAddress, Gwei, Version};
+use crate::{Epoch, ExecutionAddress, ForkData, ForkDigest, Gwei, Root, Version};
 
 /// Every runtime parameter of a beacon chain network.
 ///
@@ -355,6 +355,34 @@ impl ChainConfig {
         self.fork_version(self.fork_at(epoch))
     }
 
+    /// The digest that separates the gossip topics and peers of a fork.
+    ///
+    /// From Fulu on, the current blob limit is mixed in.
+    /// Nodes then split whenever the limit changes, even without a full fork.
+    /// See `compute_fork_digest` in the Fulu beacon chain spec and EIP-7892.
+    #[must_use]
+    pub fn fork_digest(&self, genesis_validators_root: Root, epoch: Epoch) -> ForkDigest {
+        let base = ForkData::root(self.fork_version_at(epoch), genesis_validators_root);
+        let mut digest = [0; 4];
+        if epoch < self.fulu_fork_epoch {
+            digest.copy_from_slice(&base.0[..4]);
+            return ForkDigest(digest);
+        }
+
+        // Mask the base with the hash of the blob parameters in force.
+        //
+        //     digest = (base xor sha256(le64(epoch) || le64(max_blobs)))[..4]
+        let parameters = self.blob_parameters(epoch);
+        let mut preimage = [0; 16];
+        preimage[..8].copy_from_slice(&parameters.epoch.0.to_le_bytes());
+        preimage[8..].copy_from_slice(&parameters.max_blobs_per_block.to_le_bytes());
+        let mask = Root::sha256(&preimage);
+        for (index, byte) in digest.iter_mut().enumerate() {
+            *byte = base.0[index] ^ mask.0[index];
+        }
+        ForkDigest(digest)
+    }
+
     /// Blob limit and the epoch it started at, for an epoch.
     ///
     /// Before the first schedule entry, the Electra limit applies.
@@ -371,6 +399,39 @@ impl ChainConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_digests_match_the_executable_spec() {
+        // Mainnet's genesis validators root.
+        let root = Root([
+            0x4b, 0x36, 0x3d, 0xb9, 0x4e, 0x28, 0x61, 0x20, 0xd7, 0x6e, 0xb9, 0x05, 0x34, 0x0f,
+            0xdd, 0x4e, 0x54, 0xbf, 0xe9, 0xf0, 0x6b, 0xf3, 0x3f, 0xf6, 0xcf, 0x5a, 0xd2, 0x7f,
+            0x51, 0x1b, 0xfe, 0x95,
+        ]);
+        let config = ChainConfig::mainnet();
+
+        // Expected digests from the pyspec's compute_fork_digest at v1.7.0-beta.4.
+        //
+        //     epoch 0           phase0                   b5303f2a
+        //     epoch 364032      Electra                  ad532ceb
+        //     epoch 411392      Fulu, Electra blob cap   cc2c5cdb
+        //     epoch 421392      Fulu, second blob bump   8c9f62fe
+        //     epoch 10000000    same parameters          8c9f62fe
+        let cases = [
+            (0, [0xb5, 0x30, 0x3f, 0x2a]),
+            (364_032, [0xad, 0x53, 0x2c, 0xeb]),
+            (411_392, [0xcc, 0x2c, 0x5c, 0xdb]),
+            (421_392, [0x8c, 0x9f, 0x62, 0xfe]),
+            (10_000_000, [0x8c, 0x9f, 0x62, 0xfe]),
+        ];
+        for (epoch, expected) in cases {
+            assert_eq!(
+                config.fork_digest(root, Epoch(epoch)),
+                ForkDigest(expected),
+                "epoch {epoch}"
+            );
+        }
+    }
 
     #[test]
     fn mainnet_fork_schedule_resolves_by_epoch() {
