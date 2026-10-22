@@ -41,6 +41,7 @@
 mod charset;
 mod client;
 mod connection;
+mod cors;
 mod date;
 mod endpoint;
 mod error;
@@ -57,6 +58,7 @@ mod stream;
 mod wire;
 
 pub use client::{Client, ClientConfig};
+pub use cors::Cors;
 pub use endpoint::Endpoint;
 pub use error::{HttpError, ProtocolError};
 pub use headers::Headers;
