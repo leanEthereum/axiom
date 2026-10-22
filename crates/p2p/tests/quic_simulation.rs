@@ -60,6 +60,7 @@ const CLEAR: Weather = Weather {
 struct Node {
     address: SocketAddr,
     keypair: Keypair,
+    identity: Arc<TlsIdentity>,
     endpoint: Endpoint,
     connections: BTreeMap<ConnectionHandle, Connection>,
     events: Vec<(ConnectionHandle, Event)>,
@@ -75,7 +76,8 @@ impl Node {
         );
         Self {
             address: SocketAddr::from(([10, 0, 0, secret], port)),
-            endpoint: Endpoint::new(Arc::new(config(identity)), [secret; 32]),
+            endpoint: Endpoint::new(Arc::new(config(Arc::clone(&identity))), [secret; 32]),
+            identity,
             keypair,
             connections: BTreeMap::new(),
             events: Vec::new(),
@@ -612,6 +614,27 @@ fn keep_alive_holds_an_idle_connection_open() {
     let (mut network, mut client, mut server) = pair(CLEAR, 8);
     handshake(&mut network, &mut client, &mut server);
     // A minute of silence, twice the idle timeout: keep-alive PINGs every 10 s hold it.
+    run(
+        &mut network,
+        &mut client,
+        &mut server,
+        Duration::from_secs(60),
+        |_, _| false,
+    );
+    assert!(client.only().is_established() && server.only().is_established());
+}
+
+#[test]
+fn keep_alive_beats_a_shorter_idle_timeout_of_the_peer() {
+    // The server allows only 6 s of silence, less than the client's 10 s keep-alive.
+    let (mut network, mut client, mut server) = pair(CLEAR, 13);
+    let identity = Arc::clone(&server.identity);
+    let mut config = QuicConfig::new(identity);
+    config.idle_timeout = Duration::from_secs(6);
+    config.keep_alive = None;
+    server.endpoint = Endpoint::new(Arc::new(config), [2; 32]);
+    handshake(&mut network, &mut client, &mut server);
+    // A minute of silence: the client's keep-alive drops to 3 s and holds both ends open.
     run(
         &mut network,
         &mut client,

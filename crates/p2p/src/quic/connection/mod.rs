@@ -1149,8 +1149,11 @@ impl Connection {
     }
 
     /// When the next keep-alive PING falls due.
+    ///
+    /// A peer may negotiate an idle timeout shorter than the keep-alive interval.
+    /// The interval then shrinks to half the timeout, so a PING always beats it.
     fn keep_alive_deadline(&self) -> Option<Duration> {
-        let interval = self.config.keep_alive?;
+        let interval = self.config.keep_alive?.min(self.idle_timeout / 2);
         self.is_established()
             .then(|| self.last_ack_eliciting_sent.max(self.last_activity) + interval)
     }
