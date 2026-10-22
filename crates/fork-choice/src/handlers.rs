@@ -240,6 +240,14 @@ impl<P: Preset> Store<P> {
         }
     }
 
+    /// Records that the engine validated a block's payload, after an optimistic import.
+    ///
+    /// A valid payload implies valid ancestors, so they turn valid too.
+    /// See the Bellatrix optimistic sync spec.
+    pub fn on_valid_payload(&mut self, root: Root) {
+        self.blocks.mark_valid(root);
+    }
+
     /// Records the validators an attester slashing proves to have equivocated.
     ///
     /// Their votes stop counting immediately, before any block includes the slashing.

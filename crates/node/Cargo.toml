@@ -1,0 +1,29 @@
+[package]
+name = "axiom-node"
+description = "Node orchestration: the chain service, the clock, the engine, and the beacon API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-execution.workspace = true
+axiom-fork-choice.workspace = true
+axiom-http.workspace = true
+axiom-json.workspace = true
+axiom-ssz.workspace = true
+axiom-state-transition.workspace = true
+axiom-store.workspace = true
+axiom-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -17,6 +17,8 @@ impl StatusCode {
     pub const ACCEPTED: Self = Self(202);
     /// 204: the request succeeded with nothing to return.
     pub const NO_CONTENT: Self = Self(204);
+    /// 206: part of the resource, or in the beacon API, a node still syncing.
+    pub const PARTIAL_CONTENT: Self = Self(206);
     /// 400: the request is malformed.
     pub const BAD_REQUEST: Self = Self(400);
     /// 401: the request lacks valid credentials.
@@ -27,6 +29,8 @@ impl StatusCode {
     pub const NOT_FOUND: Self = Self(404);
     /// 405: the resource exists but not for this method.
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
+    /// 406: no representation matches what the client accepts.
+    pub const NOT_ACCEPTABLE: Self = Self(406);
     /// 408: the request took too long to arrive.
     pub const REQUEST_TIMEOUT: Self = Self(408);
     /// 413: the body is larger than the server accepts.
@@ -88,6 +92,7 @@ impl StatusCode {
             403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            406 => "Not Acceptable",
             408 => "Request Timeout",
             413 => "Content Too Large",
             415 => "Unsupported Media Type",

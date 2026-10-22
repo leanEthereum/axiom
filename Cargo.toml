@@ -82,6 +82,7 @@ axiom-das = { path = "crates/das" }
 axiom-light-client = { path = "crates/light-client" }
 axiom-gossip = { path = "crates/gossip" }
 axiom-store = { path = "crates/store" }
+axiom-node = { path = "crates/node" }
 axiom-json = { path = "crates/json" }
 axiom-http = { path = "crates/http" }
 axiom-execution = { path = "crates/execution" }
@@ -89,9 +90,12 @@ axiom-execution = { path = "crates/execution" }
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"
 
-# Async runtime for the adapters at the edge: sockets, timers, and tasks.
-# Only the features the HTTP stack needs are enabled.
-tokio = { version = "1", default-features = false, features = ["net", "io-util", "time", "rt", "sync"] }
+# Async runtime for the adapters at the edge: sockets, timers, tasks, and signals.
+# The pure layers never see it.
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "time", "rt", "rt-multi-thread", "sync", "signal"] }
+
+# Structured logging facade; the node and binary emit events, pure crates never do.
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Test-only.
 proptest = "1.7"
