@@ -82,9 +82,16 @@ axiom-das = { path = "crates/das" }
 axiom-light-client = { path = "crates/light-client" }
 axiom-gossip = { path = "crates/gossip" }
 axiom-store = { path = "crates/store" }
+axiom-json = { path = "crates/json" }
+axiom-http = { path = "crates/http" }
+axiom-execution = { path = "crates/execution" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"
+
+# Async runtime for the adapters at the edge: sockets, timers, and tasks.
+# Only the features the HTTP stack needs are enabled.
+tokio = { version = "1", default-features = false, features = ["net", "io-util", "time", "rt", "sync"] }
 
 # Test-only.
 proptest = "1.7"
