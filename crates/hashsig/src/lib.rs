@@ -51,6 +51,7 @@ mod parallel;
 mod poseidon;
 mod prf;
 mod scheme;
+mod signer;
 mod tweak_hash;
 mod words;
 
@@ -63,4 +64,5 @@ pub use keys::{LeafEpoch, PublicKey, SecretKey, Signature};
 pub use one_time::{BottomTree, Preparation};
 pub use poseidon::{POSEIDON1_16, POSEIDON1_24, Poseidon1};
 pub use scheme::Scheme;
+pub use signer::{EpochLedger, SignerError, StatefulSigner};
 pub use words::{Digest, PublicParameter, Randomness, Words};
