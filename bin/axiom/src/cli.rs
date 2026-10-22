@@ -8,7 +8,9 @@ use std::{
 };
 
 use axiom_discv5::Enr;
-use axiom_node::{AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
+use axiom_node::{
+    AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig, PortMappingSettings,
+};
 use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
@@ -39,6 +41,7 @@ OPTIONS:
     --no-quic                    listen and dial over TCP only
     --boot-node <MULTIADDR>      peer to dial at startup, repeatable
     --target-peers <COUNT>       peers to keep connected [default: 64]
+    --nat                        map the ports on the gateway, over NAT-PMP or UPnP
     --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
     --discovery-port <PORT>      discv5 UDP port [default: the libp2p port]
     --enr-address <IP>           public IPv4 address announced in the node record
@@ -169,6 +172,8 @@ pub(crate) struct Cli {
     boot_nodes: Vec<Multiaddr>,
     /// Peers to keep connected.
     target_peers: Option<usize>,
+    /// Gateway port mapping.
+    port_mapping: PortMappingSettings,
     /// Custody groups to keep.
     custody_groups: Option<u64>,
     /// Whether the network is off.
@@ -243,6 +248,7 @@ impl Cli {
                     let text = value("--target-peers")?;
                     cli.target_peers = Some(Self::parsed("--target-peers", text)?);
                 }
+                "--nat" => cli.port_mapping.enabled = true,
                 "--boot-node" => {
                     let text = value("--boot-node")?;
                     cli.boot_nodes.push(Self::parsed("--boot-node", text)?);
@@ -310,6 +316,7 @@ impl Cli {
                 quic_port,
                 boot_nodes: self.boot_nodes,
                 target_peers: self.target_peers.unwrap_or(DEFAULT_TARGET_PEERS),
+                port_mapping: self.port_mapping,
                 discovery,
                 // Every node keeps at least the spec's minimum.
                 custody_group_count: self
@@ -450,6 +457,7 @@ mod tests {
                     quic_port: Some(9001),
                     boot_nodes: Vec::new(),
                     target_peers: 64,
+                    port_mapping: PortMappingSettings::default(),
                     custody_group_count: 4,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9000,
@@ -490,6 +498,7 @@ mod tests {
             "9101",
             "--target-peers",
             "32",
+            "--nat",
             "--boot-node",
             "/ip4/10.0.0.1/tcp/9000",
             "--custody-groups",
@@ -520,6 +529,7 @@ mod tests {
                     quic_port: Some(9101),
                     boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
                     target_peers: 32,
+                    port_mapping: PortMappingSettings { enabled: true },
                     custody_group_count: 128,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9002,

@@ -2,7 +2,7 @@
 //! The tests drive them through the beacon API and the network.
 
 use std::{
-    env, fs,
+    array, env, fs,
     net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process,
@@ -29,7 +29,7 @@ use axiom_light_client::{
 };
 use axiom_node::{
     AnchorSource, DiscoverySettings, EngineConfig, ManualClock, NetworkSettings, Node, NodeConfig,
-    NodeError,
+    NodeError, PortMappingSettings,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
@@ -433,12 +433,16 @@ fn free_address() -> SocketAddr {
         .expect("a local port is free")
 }
 
-/// A free local UDP port, released for discovery to bind.
-fn free_udp_port() -> u16 {
-    UdpSocket::bind("127.0.0.1:0")
-        .and_then(|socket| socket.local_addr())
-        .expect("a local port is free")
-        .port()
+/// Distinct free local UDP ports, held together while found so no two coincide.
+fn free_udp_ports<const N: usize>() -> [u16; N] {
+    let sockets: [UdpSocket; N] =
+        array::from_fn(|_| UdpSocket::bind("127.0.0.1:0").expect("a local port is free"));
+    sockets.map(|socket| {
+        socket
+            .local_addr()
+            .expect("a bound socket has an address")
+            .port()
+    })
 }
 
 /// Waits until a node reports a head, or gives up after about ten seconds.
@@ -554,10 +558,11 @@ fn range_sync(quic: bool) {
         //     A: genesis -> 1 -> 2        B: genesis
         //     B dials A, the status handshake shows A ahead, B fetches slots 1 and 2.
         let a_address = free_address();
-        let a_quic = free_udp_port();
+        let [a_quic, b_quic] = free_udp_ports();
         let settings = |listen_address, quic_port, boot_nodes| NetworkSettings {
             quic_port,
             target_peers: 64,
+            port_mapping: PortMappingSettings::default(),
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -583,7 +588,7 @@ fn range_sync(quic: bool) {
         }
         .parse()
         .expect("a valid multiaddr");
-        let b_quic = quic.then(free_udp_port);
+        let b_quic = quic.then_some(b_quic);
         let b = TestNode::start(&fixture, Some(settings(free_address(), b_quic, vec![boot]))).await;
 
         // Wait for B to reach A's head, over real sockets.
@@ -620,18 +625,22 @@ fn a_node_finds_its_peer_through_discovery() {
         // 2. B dials A over QUIC, the record's preferred transport.
         // 3. The two nodes exchange status.
         // 4. B range-syncs from A.
-        let discovery = |boot_enrs| DiscoverySettings {
-            udp_port: free_udp_port(),
-            enr_address: Some(Ipv4Addr::LOCALHOST),
-            boot_enrs,
-        };
-        let settings = |boot_enrs| NetworkSettings {
-            quic_port: Some(free_udp_port()),
-            target_peers: 64,
-            listen_address: free_address(),
-            boot_nodes: Vec::new(),
-            custody_group_count: 4,
-            discovery: Some(discovery(boot_enrs)),
+        // Discovery and QUIC each need a UDP port, found together so they never coincide.
+        let settings = |boot_enrs| {
+            let [udp_port, quic_port] = free_udp_ports();
+            NetworkSettings {
+                quic_port: Some(quic_port),
+                target_peers: 64,
+                port_mapping: PortMappingSettings::default(),
+                listen_address: free_address(),
+                boot_nodes: Vec::new(),
+                custody_group_count: 4,
+                discovery: Some(DiscoverySettings {
+                    udp_port,
+                    enr_address: Some(Ipv4Addr::LOCALHOST),
+                    boot_enrs,
+                }),
+            }
         };
         let a = TestNode::start(&fixture, Some(settings(Vec::new()))).await;
         for name in BLOCKS {
@@ -738,6 +747,7 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
         let settings = |listen_address, boot_nodes| NetworkSettings {
             quic_port: None,
  target_peers: 64,
+ port_mapping: PortMappingSettings::default(),
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -910,6 +920,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
         let settings = |listen_address, boot_nodes| NetworkSettings {
             quic_port: None,
             target_peers: 64,
+            port_mapping: PortMappingSettings::default(),
             listen_address,
             boot_nodes,
             custody_group_count: 4,
@@ -1248,6 +1259,7 @@ fn publish_blobs_and_sync(fork: ForkName) {
             let network = NetworkSettings {
                 quic_port: None,
                 target_peers: 64,
+                port_mapping: PortMappingSettings::default(),
                 listen_address,
                 boot_nodes,
                 custody_group_count: 4,

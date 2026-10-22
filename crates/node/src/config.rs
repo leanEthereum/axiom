@@ -29,7 +29,7 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainHandle, DiscoverySettings, ExecutionLayer, NodeError,
-    NodeKey, ProposerService, Publisher,
+    NodeKey, PortMappingSettings, ProposerService, Publisher,
     network::{NetworkIdentity, NodeIdentity},
 };
 
@@ -74,6 +74,8 @@ pub struct NetworkSettings {
     pub boot_nodes: Vec<Multiaddr>,
     /// Peers the node aims to keep connected.
     pub target_peers: usize,
+    /// Port mapping on the gateway, NAT-PMP then UPnP.
+    pub port_mapping: PortMappingSettings,
     /// Custody groups to keep, at least the spec's custody requirement.
     pub custody_group_count: u64,
     /// Peer discovery; none relies on boot nodes alone.

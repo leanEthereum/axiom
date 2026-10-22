@@ -16,8 +16,8 @@ use crate::{
     ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey,
     ProposerService, ProposerSettings, Publisher,
     network::{
-        AttestationSubnets, Discovery, ForkDigests, NetworkIdentity, NetworkService, NetworkSetup,
-        NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
+        AttestationSubnets, Discovery, ForkDigests, NatMetrics, NetworkIdentity, NetworkService,
+        NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
     },
     race::Either,
     tasks::{EngineFollower, PayloadPreparer, Ticker},
@@ -85,6 +85,7 @@ impl<P: Preset> StartedChain<'_, P> {
             clock,
             metrics,
             peer_metrics,
+            nat,
         } = services;
         // The record is stated for the wall clock's epoch, not the anchor's.
         let epoch = self.slots.slot_at(clock.now_ms()).epoch::<P>();
@@ -113,13 +114,15 @@ impl<P: Preset> StartedChain<'_, P> {
                     attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),
                     custody_group_count: identity.custody_group_count,
                 };
-                let started = Discovery::start(&key, discovery, &config, record)
+                let (mut started, events) = Discovery::start(&key, discovery, &config, record)
                     .await
                     .map_err(|error| NodeError::Io {
                         context: "starting discovery",
                         error,
                     })?;
-                Some(started)
+                // Port mapping runs only when the operator turned it on.
+                started.start_nat(settings.port_mapping, nat);
+                Some((started, events))
             }
             None => None,
         };
@@ -162,6 +165,26 @@ struct SharedServices {
     metrics: NodeMetrics,
     /// Peer management metrics.
     peer_metrics: PeerMetrics,
+    /// The port mapping and external address metrics.
+    nat: NatMetrics,
+}
+
+impl SharedServices {
+    /// The shared services, with the network's own metrics registered beside the node's.
+    fn new(
+        execution: Arc<ExecutionLayer>,
+        clock: Arc<dyn Clock>,
+        metrics: NodeMetrics,
+        registry: &Registry,
+    ) -> Result<Self, NodeError> {
+        Ok(Self {
+            execution,
+            clock,
+            metrics,
+            peer_metrics: PeerMetrics::register(registry).map_err(NodeError::Metrics)?,
+            nat: NatMetrics::register(registry).map_err(NodeError::Metrics)?,
+        })
+    }
 }
 
 /// A beacon node for one preset.
@@ -237,12 +260,12 @@ impl<P: Preset> Node<P> {
                     handle: &handle,
                     slots,
                 };
-                let services = SharedServices {
-                    execution: Arc::clone(&execution),
-                    clock: Arc::clone(&clock),
+                let services = SharedServices::new(
+                    Arc::clone(&execution),
+                    Arc::clone(&clock),
                     metrics,
-                    peer_metrics: PeerMetrics::register(&registry).map_err(NodeError::Metrics)?,
-                };
+                    &registry,
+                )?;
                 let (key, identity) = identity;
                 // The network's start holds every service's state; boxing keeps this future small.
                 let starting = Box::pin(started.start_network(key, identity, settings, services));

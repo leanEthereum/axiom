@@ -19,6 +19,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     NodeKey,
+    nat::{ListenPorts, NatMetrics, NatTraversal, PortMappingSettings},
     record::{LocalRecord, RecordEntries},
 };
 
@@ -131,6 +132,8 @@ pub(crate) struct Discovery {
     rng: Csprng,
     /// Whether this node speaks QUIC, so records' QUIC endpoints come first.
     quic: bool,
+    /// The external endpoint, from port mapping and peers' votes.
+    nat: NatTraversal,
 }
 
 impl Discovery {
@@ -174,6 +177,7 @@ impl Discovery {
                 dialed: HashSet::new(),
                 rng: Csprng::from_seed(seed),
                 quic: setup.quic_port.is_some(),
+                nat: NatTraversal::new(settings.enr_address.is_some()),
             },
             events,
         ))
@@ -226,7 +230,46 @@ impl Discovery {
                 peers.iter().filter_map(|enr| self.dialable(enr)).collect()
             }
             Event::Discovered(enr) => self.dialable(&enr).into_iter().collect(),
+            Event::ExternalAddress { address, votes } => {
+                info!(%address, votes, "peers confirmed the external address");
+                self.nat.on_vote(address, votes);
+                Vec::new()
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Exports the NAT metrics, and starts port mapping for the record's ports when enabled.
+    ///
+    /// The ports are the local ones the record states at startup.
+    pub(crate) fn start_nat(&mut self, settings: PortMappingSettings, metrics: NatMetrics) {
+        let endpoints = self.record.enr().endpoints();
+        let ports = ListenPorts {
+            tcp: endpoints.tcp4,
+            quic: endpoints.quic4,
+            discovery: endpoints.udp4,
+        };
+        self.nat.start(settings, ports, metrics);
+    }
+
+    /// Re-signs the record when the confirmed external endpoint differs from the one it states.
+    ///
+    /// An address the operator configured is never replaced.
+    pub(crate) async fn publish_external(&mut self) {
+        let Some(endpoint) = self.nat.endpoint() else {
+            return;
+        };
+        match self.record.set_endpoint(endpoint, &self.key) {
+            Ok(false) => {}
+            Ok(true) => match self.discv5.set_local_enr(self.record.enr().clone()).await {
+                Ok(()) => {
+                    let text = self.record.enr().to_string();
+                    info!(enr = %text, "discovery record states the external address");
+                    self.published.send_replace(text);
+                }
+                Err(error) => warn!(%error, "could not update the discovery record"),
+            },
+            Err(error) => warn!(%error, "could not sign the discovery record"),
         }
     }
 
