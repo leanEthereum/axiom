@@ -1,6 +1,5 @@
 //! The beacon namespace: genesis, blocks, headers, and state summaries.
 
-use axiom_fork_choice::DataAvailability;
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_ssz::Ssz;
@@ -9,14 +8,14 @@ use axiom_types::{
     BeaconBlockHeader, BeaconState, Checkpoint, Preset, Root, SignedBeaconBlock,
     SignedBlockContents,
 };
-use tracing::info;
+use tracing::warn;
 
 use super::{
     ApiContext,
     ids::{BlockId, StateId},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::Chain;
+use crate::{Chain, ChainStopped, PublishError, Published};
 
 /// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`.
 #[derive(Clone, Copy, Debug)]
@@ -137,35 +136,31 @@ impl BeaconRoutes {
             .await
     }
 
-    /// Imports a block a validator proposed, with its blobs.
+    /// Publishes a block a validator proposed, with its blobs.
     ///
     /// # Overview
     ///
-    /// | outcome                      | status |
-    /// |------------------------------|--------|
-    /// | imported                     | 200    |
-    /// | body not SSZ                 | 415    |
-    /// | body malformed or refused    | 400    |
+    /// | outcome                               | status |
+    /// |---------------------------------------|--------|
+    /// | broadcast and imported                | 200    |
+    /// | broadcast, but this node's import failed | 202 |
+    /// | body not SSZ                          | 415    |
+    /// | malformed, wrong blob data, or invalid | 400   |
     async fn publish<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         if !Reply::sends_ssz(&request) {
             return Err(ApiError::unsupported_media_type());
         }
         let contents = SignedBlockContents::<P>::decode(&request.body)
             .map_err(|error| ApiError::bad_request(format!("malformed block contents: {error}")))?;
-        let availability = Self::availability(&contents);
-        let SignedBlockContents { signed_block, .. } = contents;
-
-        // Ask the engine first: its verdict is an input of the import.
-        let payload = context.execution.verdict(&signed_block.message).await;
-        let root = context
-            .query(move |chain| {
-                chain
-                    .import_block(&signed_block, availability, payload)
-                    .map_err(|error| ApiError::bad_request(error.to_string()))
-            })
-            .await?;
-        info!(%root, "published block imported");
-        Ok(Response::new(StatusCode::OK))
+        match context.publisher.publish(contents).await {
+            Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
+            Ok(Published::BroadcastOnly(error)) => {
+                warn!(%error, "published block was broadcast but not imported");
+                Ok(Response::new(StatusCode::ACCEPTED))
+            }
+            Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
+            Err(error) => Err(ApiError::bad_request(error.to_string())),
+        }
     }
 
     /// The root of a state.
@@ -233,26 +228,6 @@ impl BeaconRoutes {
                 ))
             })
             .await
-    }
-
-    /// Whether a published block's blobs are all present.
-    ///
-    /// A proposer holds every blob, so availability needs no sampling.
-    /// Each blob must come with one proof per cell of its extension.
-    fn availability<P: Preset>(contents: &SignedBlockContents<P>) -> DataAvailability {
-        let commitments = contents
-            .signed_block
-            .message
-            .body
-            .blob_kzg_commitments
-            .len();
-        let complete = contents.blobs.len() == commitments
-            && contents.kzg_proofs.len() as u64 == commitments as u64 * P::CELLS_PER_EXT_BLOB;
-        if complete {
-            DataAvailability::Available
-        } else {
-            DataAvailability::Unavailable
-        }
     }
 
     /// The block identifier in the path.
@@ -324,57 +299,5 @@ impl BeaconRoutes {
             ("epoch", Reply::number(checkpoint.epoch.0)),
             ("root", Reply::text(&checkpoint.root)),
         ])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axiom_types::{Blob, KzgCommitment, KzgProof, Minimal};
-
-    use super::*;
-
-    #[test]
-    fn a_published_block_is_available_only_with_every_blob_and_proof() {
-        // Fixture state: a block committing to one blob.
-        let mut contents = SignedBlockContents::<Minimal>::default();
-        contents
-            .signed_block
-            .message
-            .body
-            .blob_kzg_commitments
-            .push(KzgCommitment::ZERO)
-            .unwrap();
-
-        // No blob yet: unavailable.
-        assert_eq!(
-            BeaconRoutes::availability(&contents),
-            DataAvailability::Unavailable
-        );
-
-        // The blob alone still lacks its 128 cell proofs.
-        contents.blobs.push(Blob::<Minimal>::default()).unwrap();
-        assert_eq!(
-            BeaconRoutes::availability(&contents),
-            DataAvailability::Unavailable
-        );
-
-        // One blob with 128 proofs is complete.
-        for _ in 0..128 {
-            contents.kzg_proofs.push(KzgProof::default()).unwrap();
-        }
-        assert_eq!(
-            BeaconRoutes::availability(&contents),
-            DataAvailability::Available
-        );
-    }
-
-    #[test]
-    fn a_block_without_blobs_is_available() {
-        let contents = SignedBlockContents::<Minimal>::default();
-
-        assert_eq!(
-            BeaconRoutes::availability(&contents),
-            DataAvailability::Available
-        );
     }
 }

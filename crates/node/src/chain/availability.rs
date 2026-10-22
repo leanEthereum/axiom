@@ -17,6 +17,16 @@ pub enum Submission {
     Waiting(Root),
 }
 
+impl Submission {
+    /// The block's root, whatever became of it.
+    #[must_use]
+    pub const fn root(self) -> Root {
+        match self {
+            Self::Imported(root) | Self::Waiting(root) => root,
+        }
+    }
+}
+
 /// A block ready for import, with the engine's verdict on its payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReadyBlock<P: Preset> {

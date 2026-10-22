@@ -26,7 +26,7 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, ExecutionLayer,
-    NetworkIdentity, NetworkService, NetworkSetup, NodeError, NodeKey,
+    NetworkIdentity, NetworkService, NetworkSetup, NodeError, NodeKey, Publisher,
 };
 
 /// How many times per slot the fork choice clock advances.
@@ -143,10 +143,6 @@ impl<P: Preset> Node<P> {
         let execution =
             Arc::new(Self::open_engine(config.engine.as_ref())?.with_metrics(metrics.clone()));
 
-        // Every server watches one shutdown signal.
-        let (stop, stopped) = watch::channel(false);
-        let servers = Self::start_servers(&config, &handle, &execution, registry, &stopped).await?;
-
         // The network, when configured, runs its own event loop.
         let network = match (identity, &config.network) {
             (Some(identity), Some(settings)) => {
@@ -159,6 +155,18 @@ impl<P: Preset> Node<P> {
             }
             _ => None,
         };
+
+        // Proposed blocks go out on the network, when there is one, before import.
+        let publisher = Arc::new(Publisher::new(
+            handle.clone(),
+            Arc::clone(&execution),
+            Arc::clone(&clock),
+            network.as_ref().map(|(p2p, _)| p2p.clone()),
+        ));
+
+        // Every server watches one shutdown signal.
+        let (stop, stopped) = watch::channel(false);
+        let servers = Self::start_servers(&config, &handle, publisher, registry, &stopped).await?;
 
         // Background loops run until aborted.
         let ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
@@ -197,13 +205,13 @@ impl<P: Preset> Node<P> {
     async fn start_servers(
         config: &NodeConfig,
         handle: &ChainHandle<P>,
-        execution: &Arc<ExecutionLayer>,
+        publisher: Arc<Publisher<P>>,
         registry: Registry,
         stopped: &watch::Receiver<bool>,
     ) -> Result<Vec<JoinHandle<()>>, NodeError> {
         let mut servers = Vec::new();
         if let Some(address) = config.http_address {
-            let router = BeaconApi::router(handle.clone(), Arc::clone(execution));
+            let router = BeaconApi::router(handle.clone(), publisher);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Io {

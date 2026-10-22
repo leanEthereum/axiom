@@ -23,22 +23,22 @@ use self::{
     node::NodeRoutes,
     reply::{ApiError, Freshness, Routes},
 };
-use crate::{Chain, ChainHandle, ExecutionLayer};
+use crate::{Chain, ChainHandle, Publisher};
 
 /// What every route can reach: the chain and the engine.
 #[derive(Debug)]
 pub(crate) struct ApiContext<P: Preset> {
     /// The chain thread.
     chain: ChainHandle<P>,
-    /// The engine, for judging published blocks.
-    execution: Arc<ExecutionLayer>,
+    /// Publishes proposed blocks.
+    publisher: Arc<Publisher<P>>,
 }
 
 impl<P: Preset> Clone for ApiContext<P> {
     fn clone(&self) -> Self {
         Self {
             chain: self.chain.clone(),
-            execution: Arc::clone(&self.execution),
+            publisher: Arc::clone(&self.publisher),
         }
     }
 }
@@ -82,8 +82,9 @@ pub struct BeaconApi;
 
 impl BeaconApi {
     /// The router serving every supported route.
-    pub fn router<P: Preset>(chain: ChainHandle<P>, execution: Arc<ExecutionLayer>) -> Router {
-        let routes = Routes::new(Router::new(), ApiContext { chain, execution });
+    #[must_use]
+    pub fn router<P: Preset>(chain: ChainHandle<P>, publisher: Arc<Publisher<P>>) -> Router {
+        let routes = Routes::new(Router::new(), ApiContext { chain, publisher });
         let routes = NodeRoutes::register(routes);
         let routes = BeaconRoutes::register(routes);
         DebugRoutes::register(routes).finish()
