@@ -21,8 +21,7 @@ mod messages;
 mod protocol;
 
 pub use codec::{
-    MAX_ERROR_MESSAGE_LEN, ResponseChunk, ResponseCode, ResponseDecoder, decode_request,
-    encode_request, encode_response_chunk,
+    MAX_ERROR_MESSAGE_LEN, RequestDecoder, ResponseChunk, ResponseCode, ResponseDecoder,
 };
 pub use error::ReqRespError;
 pub use limiter::{Quota, RateLimited, RateLimiter};

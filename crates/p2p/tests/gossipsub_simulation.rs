@@ -8,7 +8,7 @@ use std::{
 
 use axiom_p2p::{
     PeerId, PublicKey,
-    eth::encode_gossip,
+    eth::GossipEncoding,
     gossipsub::{
         GossipsubConfig, GossipsubEvent, MessageId, PeerScoreParams, PeerScoreThresholds,
         ProtocolVersion, Router, Rpc, Topic, TopicScoreParams, ValidationOutcome,
@@ -237,7 +237,7 @@ fn messages_reach_every_node_and_meshes_stay_in_bounds() {
     let mut published = Vec::new();
     for k in 0..30u64 {
         let publisher = network.rng.below(50) as usize;
-        let payload = encode_gossip(format!("block {k}").as_bytes());
+        let payload = GossipEncoding::default().encode(format!("block {k}").as_bytes());
         network.schedule(
             10_000 + k * 200,
             Action::Publish(publisher, payload.clone()),

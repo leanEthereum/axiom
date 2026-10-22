@@ -2,9 +2,7 @@
 
 use crate::{
     identity::PublicKey,
-    protobuf::{
-        FieldReader, ProtoMessage, ProtobufError, encode_bytes_field, encode_message_field,
-    },
+    protobuf::{FieldReader, FieldWriter, ProtoMessage, ProtobufError},
 };
 
 /// Optional capabilities announced during the handshake.
@@ -25,11 +23,12 @@ pub struct NoiseExtensions {
 
 impl ProtoMessage for NoiseExtensions {
     fn encode_to(&self, out: &mut Vec<u8>) {
+        let mut fields = FieldWriter::new(out);
         for hash in &self.webtransport_certhashes {
-            encode_bytes_field(1, hash, out);
+            fields.bytes(1, hash);
         }
         for muxer in &self.stream_muxers {
-            encode_bytes_field(2, muxer.as_bytes(), out);
+            fields.bytes(2, muxer.as_bytes());
         }
     }
 
@@ -70,14 +69,15 @@ pub struct NoiseHandshakePayload {
 
 impl ProtoMessage for NoiseHandshakePayload {
     fn encode_to(&self, out: &mut Vec<u8>) {
+        let mut fields = FieldWriter::new(out);
         if let Some(key) = &self.identity_key {
-            encode_message_field(1, key, out);
+            fields.message(1, key);
         }
         if let Some(signature) = &self.identity_sig {
-            encode_bytes_field(2, signature, out);
+            fields.bytes(2, signature);
         }
         if let Some(extensions) = &self.extensions {
-            encode_message_field(4, extensions, out);
+            fields.message(4, extensions);
         }
     }
 

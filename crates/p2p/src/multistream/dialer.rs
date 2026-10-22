@@ -3,8 +3,8 @@
 use std::{collections::VecDeque, mem};
 
 use super::{
-    LIST, NOT_AVAILABLE, Negotiated, NegotiationError, PROTOCOL_HEADER, decode_list,
-    decode_message, decode_raw_message, encode_message,
+    LIST, NOT_AVAILABLE, Negotiated, NegotiationError,
+    message::{MessageReader, MessageWriter},
 };
 
 /// Proposes protocols in preference order until the listener accepts one.
@@ -16,12 +16,10 @@ pub struct Dialer {
     remaining: VecDeque<String>,
     /// The proposal awaiting an answer.
     proposed: String,
-    /// Whether the listener's header has arrived.
-    header_received: bool,
-    /// Bytes waiting to be written.
-    outbound: Vec<u8>,
-    /// Bytes received but not yet parsed.
-    inbound: Vec<u8>,
+    /// Messages waiting to be written.
+    outbound: MessageWriter,
+    /// Messages received, header first.
+    inbound: MessageReader,
 }
 
 impl Dialer {
@@ -36,21 +34,19 @@ impl Dialer {
             .pop_front()
             .ok_or(NegotiationError::NothingToPropose)?;
         // Pipeline the header and the first proposal into one write.
-        let mut outbound = Vec::new();
-        encode_message(PROTOCOL_HEADER, &mut outbound);
-        encode_message(&proposed, &mut outbound);
+        let mut outbound = MessageWriter::with_header();
+        outbound.push(&proposed);
         Ok(Self {
             remaining,
             proposed,
-            header_received: false,
             outbound,
-            inbound: Vec::new(),
+            inbound: MessageReader::new(),
         })
     }
 
     /// Takes the bytes to write to the stream.
     pub fn take_output(&mut self) -> Vec<u8> {
-        mem::take(&mut self.outbound)
+        self.outbound.take()
     }
 
     /// Feeds bytes read from the stream.
@@ -59,89 +55,71 @@ impl Dialer {
     ///
     /// The agreement once the listener echoes a proposal, or nothing while it is pending.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<Option<Negotiated>, NegotiationError> {
-        self.inbound.extend_from_slice(bytes);
-        // Process every complete message in the buffer.
-        while let Some((text, consumed)) = decode_message(&self.inbound)? {
-            // Phase 1: the listener's header must come first.
-            if !self.header_received {
-                if text != PROTOCOL_HEADER {
-                    return Err(NegotiationError::InvalidHeader(text.to_owned()));
-                }
-                self.header_received = true;
-            }
-            // Phase 2: an echo of the proposal settles the negotiation.
-            else if text == self.proposed {
+        self.inbound.feed(bytes);
+        // Process every complete message after the listener's header.
+        while let Some(text) = self.inbound.next_text()? {
+            // Phase 1: an echo of the proposal settles the negotiation.
+            if text == self.proposed {
                 let protocol = mem::take(&mut self.proposed);
-                let remainder = self.inbound.split_off(consumed);
+                let remainder = self.inbound.take_remainder();
                 return Ok(Some(Negotiated {
                     protocol,
                     remainder,
                 }));
             }
-            // Phase 3: a refusal moves on to the next proposal.
-            else if text == NOT_AVAILABLE {
-                self.proposed = self
-                    .remaining
-                    .pop_front()
-                    .ok_or(NegotiationError::NoCommonProtocol)?;
-                encode_message(&self.proposed, &mut self.outbound);
-            } else {
+            // Phase 2: a refusal moves on to the next proposal.
+            if text != NOT_AVAILABLE {
                 return Err(NegotiationError::UnexpectedResponse(text.to_owned()));
             }
-            self.inbound.drain(..consumed);
+            self.proposed = self
+                .remaining
+                .pop_front()
+                .ok_or(NegotiationError::NoCommonProtocol)?;
+            self.outbound.push(&self.proposed);
         }
         Ok(None)
     }
 }
 
 /// Asks a listener for every protocol it supports.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Lister {
-    /// Whether the listener's header has arrived.
-    header_received: bool,
-    /// Bytes waiting to be written.
-    outbound: Vec<u8>,
-    /// Bytes received but not yet parsed.
-    inbound: Vec<u8>,
+    /// Messages waiting to be written.
+    outbound: MessageWriter,
+    /// Messages received, header first.
+    inbound: MessageReader,
 }
 
 impl Lister {
     /// Starts a listing request.
     #[must_use]
     pub fn new() -> Self {
-        let mut outbound = Vec::new();
-        encode_message(PROTOCOL_HEADER, &mut outbound);
-        encode_message(LIST, &mut outbound);
+        let mut outbound = MessageWriter::with_header();
+        outbound.push(LIST);
         Self {
-            header_received: false,
             outbound,
-            inbound: Vec::new(),
+            inbound: MessageReader::new(),
         }
     }
 
     /// Takes the bytes to write to the stream.
     pub fn take_output(&mut self) -> Vec<u8> {
-        mem::take(&mut self.outbound)
+        self.outbound.take()
     }
 
     /// Feeds bytes read from the stream, returning the list once it is complete.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<Option<Vec<String>>, NegotiationError> {
-        self.inbound.extend_from_slice(bytes);
-        // The header arrives first, as text.
-        if !self.header_received {
-            let Some((text, consumed)) = decode_message(&self.inbound)? else {
-                return Ok(None);
-            };
-            if text != PROTOCOL_HEADER {
-                return Err(NegotiationError::InvalidHeader(text.to_owned()));
-            }
-            self.header_received = true;
-            self.inbound.drain(..consumed);
-        }
+        self.inbound.feed(bytes);
         // The answer is one message whose body nests one message per protocol.
-        match decode_raw_message(&self.inbound)? {
-            Some((body, _)) => decode_list(body).map(Some),
+        match self.inbound.next_body()? {
+            Some(body) => MessageReader::parse_list(body).map(Some),
             None => Ok(None),
         }
+    }
+}
+
+impl Default for Lister {
+    fn default() -> Self {
+        Self::new()
     }
 }

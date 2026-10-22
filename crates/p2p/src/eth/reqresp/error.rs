@@ -39,6 +39,15 @@ pub enum ReqRespError {
     #[error("invalid snappy frames: {0}")]
     Snappy(#[from] SnappyError),
 
+    /// The request stream exceeds the largest framed request of its method.
+    #[error("request of {len} bytes exceeds the framed bound of {max}")]
+    RequestTooLarge {
+        /// Bytes received.
+        len: usize,
+        /// Largest framed request.
+        max: usize,
+    },
+
     /// Bytes follow a complete request.
     #[error("bytes after the end of the payload")]
     TrailingBytes,
