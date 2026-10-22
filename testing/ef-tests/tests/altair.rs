@@ -2,6 +2,7 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
+//! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
     Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
@@ -10,187 +11,316 @@ use axiom_ef_tests::{
 };
 use axiom_types::{Mainnet, Minimal};
 
+/// Every container type the static SSZ vectors of this fork cover.
+const CONTAINERS: [&str; 38] = [
+    "AggregateAndProof",
+    "Attestation",
+    "AttestationData",
+    "AttesterSlashing",
+    "BeaconBlock",
+    "BeaconBlockBody",
+    "BeaconBlockHeader",
+    "BeaconState",
+    "Checkpoint",
+    "ContributionAndProof",
+    "Deposit",
+    "DepositData",
+    "DepositMessage",
+    "Eth1Block",
+    "Eth1Data",
+    "Fork",
+    "ForkData",
+    "HistoricalBatch",
+    "IndexedAttestation",
+    "LightClientBootstrap",
+    "LightClientFinalityUpdate",
+    "LightClientHeader",
+    "LightClientOptimisticUpdate",
+    "LightClientUpdate",
+    "ProposerSlashing",
+    "SignedAggregateAndProof",
+    "SignedBeaconBlock",
+    "SignedBeaconBlockHeader",
+    "SignedContributionAndProof",
+    "SignedVoluntaryExit",
+    "SigningData",
+    "SyncAggregate",
+    "SyncAggregatorSelectionData",
+    "SyncCommittee",
+    "SyncCommitteeContribution",
+    "SyncCommitteeMessage",
+    "Validator",
+    "VoluntaryExit",
+];
+
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(
-        &SszStatic::<Minimal, Altair>::default(),
-        "minimal",
-        "altair",
-    );
+    let runner = SszStatic::<Minimal, Altair>::default();
+    let expected = CONTAINERS.map(|container| (container, 123));
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(
-        &SszStatic::<Mainnet, Altair>::default(),
-        "mainnet",
-        "altair",
-    );
+    let runner = SszStatic::<Mainnet, Altair>::default();
+    let expected = CONTAINERS.map(|container| (container, 5));
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn operations_minimal() {
-    Suite::run(
-        &Operations::<Minimal, Altair>::default(),
-        "minimal",
-        "altair",
-    );
+    let runner = Operations::<Minimal, Altair>::default();
+    let expected = [
+        ("attestation", 41),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("deposit", 21),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 24),
+        ("voluntary_exit", 10),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(
-        &Operations::<Mainnet, Altair>::default(),
-        "mainnet",
-        "altair",
-    );
+    let runner = Operations::<Mainnet, Altair>::default();
+    let expected = [
+        ("attestation", 41),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("deposit", 21),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 26),
+        ("voluntary_exit", 9),
+    ];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(
-        &EpochProcessing::<Minimal, Altair>::default(),
-        "minimal",
-        "altair",
-    );
+    let runner = EpochProcessing::<Minimal, Altair>::default();
+    let expected = [
+        ("effective_balance_updates", 1),
+        ("eth1_data_reset", 2),
+        ("historical_roots_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 12),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 15),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+        ("sync_committee_updates", 5),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(
-        &EpochProcessing::<Mainnet, Altair>::default(),
-        "mainnet",
-        "altair",
-    );
+    let runner = EpochProcessing::<Mainnet, Altair>::default();
+    let expected = [
+        ("effective_balance_updates", 1),
+        ("eth1_data_reset", 2),
+        ("historical_roots_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 10),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 11),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+    ];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(&Blocks::<Minimal, Altair>::sanity(), "minimal", "altair");
+    let runner = Blocks::<Minimal, Altair>::sanity();
+    let expected = [("blocks", 54), ("slots", 7)];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Altair>::sanity(), "mainnet", "altair");
+    let runner = Blocks::<Mainnet, Altair>::sanity();
+    let expected = [("blocks", 49), ("slots", 7)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(&Blocks::<Minimal, Altair>::finality(), "minimal", "altair");
+    let runner = Blocks::<Minimal, Altair>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Altair>::finality(), "mainnet", "altair");
+    let runner = Blocks::<Mainnet, Altair>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(&Blocks::<Minimal, Altair>::random(), "minimal", "altair");
+    let runner = Blocks::<Minimal, Altair>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Altair>::random(), "mainnet", "altair");
+    let runner = Blocks::<Mainnet, Altair>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(&Rewards::<Minimal, Altair>::default(), "minimal", "altair");
+    let runner = Rewards::<Minimal, Altair>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(&Rewards::<Mainnet, Altair>::default(), "mainnet", "altair");
+    let runner = Rewards::<Mainnet, Altair>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(&Fork::<Minimal, Altair>::default(), "minimal", "altair");
+    let runner = Fork::<Minimal, Altair>::default();
+    let expected = [("fork", 19)];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(&Fork::<Mainnet, Altair>::default(), "mainnet", "altair");
+    let runner = Fork::<Mainnet, Altair>::default();
+    let expected = [("fork", 17)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn transition_minimal() {
-    Suite::run(
-        &Transition::<Minimal, Phase0, Altair>::default(),
-        "minimal",
-        "altair",
-    );
+    let runner = Transition::<Minimal, Phase0, Altair>::default();
+    let expected = [("core", 26)];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(
-        &Transition::<Mainnet, Phase0, Altair>::default(),
-        "mainnet",
-        "altair",
-    );
+    let runner = Transition::<Mainnet, Phase0, Altair>::default();
+    let expected = [("core", 22)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn networking_minimal() {
-    Suite::run(
-        &Networking::<Minimal, Altair>::default(),
-        "minimal",
-        "altair",
-    );
+    let runner = Networking::<Minimal, Altair>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 20),
+        ("gossip_beacon_attestation", 16),
+        ("gossip_beacon_block", 12),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 14),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 12),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(
-        &Networking::<Mainnet, Altair>::default(),
-        "mainnet",
-        "altair",
-    );
+    let runner = Networking::<Mainnet, Altair>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 21),
+        ("gossip_beacon_attestation", 16),
+        ("gossip_beacon_block", 12),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 15),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 12),
+    ];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn light_client_minimal() {
     let runner = LightClient::<Minimal, Altair>::default();
-    if let Some(report) = Suite::run(&runner, "minimal", "altair") {
-        // Cases: sync 8, update ranking 1, merkle proofs 3, data collection 1.
-        assert_eq!((report.passed, report.skipped.len()), (13, 0));
-    }
+    let expected = [
+        ("data_collection", 1),
+        ("single_merkle_proof", 3),
+        ("sync", 8),
+        ("update_ranking", 1),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn light_client_mainnet() {
     let runner = LightClient::<Mainnet, Altair>::default();
-    if let Some(report) = Suite::run(&runner, "mainnet", "altair") {
-        // Cases: merkle proofs 3.
-        assert_eq!((report.passed, report.skipped.len()), (3, 0));
-    }
+    let expected = [("single_merkle_proof", 3)];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Altair>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "minimal", "altair") {
-        // Cases: ex ante 3, get head 11, proposer head 3, on block 23, reorg 8, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (50, 0));
-    }
+    let expected = [
+        ("ex_ante", 3),
+        ("get_head", 11),
+        ("get_proposer_head", 3),
+        ("on_block", 23),
+        ("reorg", 8),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Altair>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "mainnet", "altair") {
-        // Cases: ex ante 5, get head 7, proposer head 3, on block 6.
-        assert_eq!((report.passed, report.skipped.len()), (21, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 7),
+        ("get_proposer_head", 3),
+        ("on_block", 6),
+    ];
+    Suite::check(&runner, "mainnet", "altair", &expected);
 }
 
 #[test]
 fn fast_confirmation_minimal() {
     let runner = StoreReplay::<Minimal, Altair>::fast_confirmation();
-    if let Some(report) = Suite::run(&runner, "minimal", "altair") {
-        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 10, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
-        assert_eq!((report.passed, report.skipped.len()), (175, 0));
-    }
+    let expected = [
+        ("basic", 3),
+        ("current_epoch", 22),
+        ("empty_slots", 5),
+        ("ffg", 2),
+        ("is_one_confirmed", 10),
+        ("previous_epoch", 108),
+        ("reconfirmation", 3),
+        ("restart_gu", 6),
+        ("revert_finality", 8),
+        ("variables", 8),
+    ];
+    Suite::check(&runner, "minimal", "altair", &expected);
 }

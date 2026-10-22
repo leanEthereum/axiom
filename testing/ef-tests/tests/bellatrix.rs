@@ -2,6 +2,7 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
+//! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
     Blocks, EpochProcessing, Fork, LightClient, Networking, Operations, Rewards, SszStatic,
@@ -10,245 +11,338 @@ use axiom_ef_tests::{
 };
 use axiom_types::{Mainnet, Minimal};
 
+/// Every container type the static SSZ vectors of this fork cover.
+const CONTAINERS: [&str; 42] = [
+    "AggregateAndProof",
+    "Attestation",
+    "AttestationData",
+    "AttesterSlashing",
+    "BeaconBlock",
+    "BeaconBlockBody",
+    "BeaconBlockHeader",
+    "BeaconState",
+    "Checkpoint",
+    "ContributionAndProof",
+    "Deposit",
+    "DepositData",
+    "DepositMessage",
+    "Eth1Block",
+    "Eth1Data",
+    "ExecutionPayload",
+    "ExecutionPayloadHeader",
+    "Fork",
+    "ForkData",
+    "HistoricalBatch",
+    "IndexedAttestation",
+    "LightClientBootstrap",
+    "LightClientFinalityUpdate",
+    "LightClientHeader",
+    "LightClientOptimisticUpdate",
+    "LightClientUpdate",
+    "NewPayloadRequest",
+    "PowBlock",
+    "ProposerSlashing",
+    "SignedAggregateAndProof",
+    "SignedBeaconBlock",
+    "SignedBeaconBlockHeader",
+    "SignedContributionAndProof",
+    "SignedVoluntaryExit",
+    "SigningData",
+    "SyncAggregate",
+    "SyncAggregatorSelectionData",
+    "SyncCommittee",
+    "SyncCommitteeContribution",
+    "SyncCommitteeMessage",
+    "Validator",
+    "VoluntaryExit",
+];
+
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(
-        &SszStatic::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = SszStatic::<Minimal, Bellatrix>::default();
+    let expected = CONTAINERS.map(|container| (container, 123));
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(
-        &SszStatic::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = SszStatic::<Mainnet, Bellatrix>::default();
+    let expected = CONTAINERS.map(|container| (container, 5));
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn operations_minimal() {
-    Suite::run(
-        &Operations::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Operations::<Minimal, Bellatrix>::default();
+    let expected = [
+        ("attestation", 41),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("deposit", 22),
+        ("execution_payload", 26),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 24),
+        ("voluntary_exit", 16),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(
-        &Operations::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Operations::<Mainnet, Bellatrix>::default();
+    let expected = [
+        ("attestation", 41),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("deposit", 22),
+        ("execution_payload", 26),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 26),
+        ("voluntary_exit", 15),
+    ];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(
-        &EpochProcessing::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = EpochProcessing::<Minimal, Bellatrix>::default();
+    let expected = [
+        ("effective_balance_updates", 1),
+        ("eth1_data_reset", 2),
+        ("historical_roots_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 12),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 15),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+        ("sync_committee_updates", 5),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(
-        &EpochProcessing::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = EpochProcessing::<Mainnet, Bellatrix>::default();
+    let expected = [
+        ("effective_balance_updates", 1),
+        ("eth1_data_reset", 2),
+        ("historical_roots_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 10),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 11),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+    ];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(
-        &Blocks::<Minimal, Bellatrix>::sanity(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Blocks::<Minimal, Bellatrix>::sanity();
+    let expected = [("blocks", 57), ("slots", 7)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(
-        &Blocks::<Mainnet, Bellatrix>::sanity(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Blocks::<Mainnet, Bellatrix>::sanity();
+    let expected = [("blocks", 52), ("slots", 7)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(
-        &Blocks::<Minimal, Bellatrix>::finality(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Blocks::<Minimal, Bellatrix>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(
-        &Blocks::<Mainnet, Bellatrix>::finality(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Blocks::<Mainnet, Bellatrix>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(
-        &Blocks::<Minimal, Bellatrix>::random(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Blocks::<Minimal, Bellatrix>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(
-        &Blocks::<Mainnet, Bellatrix>::random(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Blocks::<Mainnet, Bellatrix>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(
-        &Rewards::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Rewards::<Minimal, Bellatrix>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(
-        &Rewards::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Rewards::<Mainnet, Bellatrix>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(
-        &Fork::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Fork::<Minimal, Bellatrix>::default();
+    let expected = [("fork", 17)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(
-        &Fork::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Fork::<Mainnet, Bellatrix>::default();
+    let expected = [("fork", 15)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn transition_minimal() {
-    Suite::run(
-        &Transition::<Minimal, Altair, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Transition::<Minimal, Altair, Bellatrix>::default();
+    let expected = [("core", 26)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(
-        &Transition::<Mainnet, Altair, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Transition::<Mainnet, Altair, Bellatrix>::default();
+    let expected = [("core", 22)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn networking_minimal() {
-    Suite::run(
-        &Networking::<Minimal, Bellatrix>::default(),
-        "minimal",
-        "bellatrix",
-    );
+    let runner = Networking::<Minimal, Bellatrix>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 20),
+        ("gossip_beacon_attestation", 16),
+        ("gossip_beacon_block", 20),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 14),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 12),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(
-        &Networking::<Mainnet, Bellatrix>::default(),
-        "mainnet",
-        "bellatrix",
-    );
+    let runner = Networking::<Mainnet, Bellatrix>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 21),
+        ("gossip_beacon_attestation", 16),
+        ("gossip_beacon_block", 20),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 15),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 12),
+    ];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn light_client_minimal() {
     let runner = LightClient::<Minimal, Bellatrix>::default();
-    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
-        // Cases: sync 11, update ranking 1, merkle proofs 3, data collection 3.
-        assert_eq!((report.passed, report.skipped.len()), (18, 0));
-    }
+    let expected = [
+        ("data_collection", 3),
+        ("single_merkle_proof", 3),
+        ("sync", 11),
+        ("update_ranking", 1),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn light_client_mainnet() {
     let runner = LightClient::<Mainnet, Bellatrix>::default();
-    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
-        // Cases: merkle proofs 3.
-        assert_eq!((report.passed, report.skipped.len()), (3, 0));
-    }
+    let expected = [("single_merkle_proof", 3)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Bellatrix>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
-        // Cases: ex ante 3, get head 11, proposer head 3, on block 23, on merge block 4, reorg 8, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (54, 0));
-    }
+    let expected = [
+        ("ex_ante", 3),
+        ("get_head", 11),
+        ("get_proposer_head", 3),
+        ("on_block", 23),
+        ("on_merge_block", 4),
+        ("reorg", 8),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Bellatrix>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
-        // Cases: ex ante 5, get head 7, proposer head 3, on block 6, on merge block 4.
-        assert_eq!((report.passed, report.skipped.len()), (25, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 7),
+        ("get_proposer_head", 3),
+        ("on_block", 6),
+        ("on_merge_block", 4),
+    ];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }
 
 #[test]
 fn fast_confirmation_minimal() {
     let runner = StoreReplay::<Minimal, Bellatrix>::fast_confirmation();
-    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
-        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 10, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
-        assert_eq!((report.passed, report.skipped.len()), (175, 0));
-    }
+    let expected = [
+        ("basic", 3),
+        ("current_epoch", 22),
+        ("empty_slots", 5),
+        ("ffg", 2),
+        ("is_one_confirmed", 10),
+        ("previous_epoch", 108),
+        ("reconfirmation", 3),
+        ("restart_gu", 6),
+        ("revert_finality", 8),
+        ("variables", 8),
+    ];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn sync_minimal() {
     let runner = StoreReplay::<Minimal, Bellatrix>::sync();
-    if let Some(report) = Suite::run(&runner, "minimal", "bellatrix") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "minimal", "bellatrix", &expected);
 }
 
 #[test]
 fn sync_mainnet() {
     let runner = StoreReplay::<Mainnet, Bellatrix>::sync();
-    if let Some(report) = Suite::run(&runner, "mainnet", "bellatrix") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "mainnet", "bellatrix", &expected);
 }

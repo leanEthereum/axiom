@@ -102,13 +102,18 @@ impl ProcessStat {
 }
 
 /// A sampled value, kept exact until written.
+///
+/// Only Linux samples process values, so other platforms never build one.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only Linux samples process values")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProcessValue {
     /// A whole number.
     Integer(u64),
 
     /// Hundredths of a second, as the kernel counts CPU time.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Ticks(u64),
 }
 

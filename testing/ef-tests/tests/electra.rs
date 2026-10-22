@@ -2,6 +2,7 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
+//! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
     Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
@@ -10,239 +11,382 @@ use axiom_ef_tests::{
 };
 use axiom_types::{Mainnet, Minimal};
 
+/// Every container type the static SSZ vectors of this fork cover.
+const CONTAINERS: [&str; 55] = [
+    "AggregateAndProof",
+    "Attestation",
+    "AttestationData",
+    "AttesterSlashing",
+    "BLSToExecutionChange",
+    "BeaconBlock",
+    "BeaconBlockBody",
+    "BeaconBlockHeader",
+    "BeaconState",
+    "BlobIdentifier",
+    "BlobSidecar",
+    "Checkpoint",
+    "ConsolidationRequest",
+    "ContributionAndProof",
+    "Deposit",
+    "DepositData",
+    "DepositMessage",
+    "DepositRequest",
+    "Eth1Block",
+    "Eth1Data",
+    "ExecutionPayload",
+    "ExecutionPayloadHeader",
+    "ExecutionRequests",
+    "Fork",
+    "ForkData",
+    "HistoricalSummary",
+    "IndexedAttestation",
+    "LightClientBootstrap",
+    "LightClientFinalityUpdate",
+    "LightClientHeader",
+    "LightClientOptimisticUpdate",
+    "LightClientUpdate",
+    "NewPayloadRequest",
+    "PendingConsolidation",
+    "PendingDeposit",
+    "PendingPartialWithdrawal",
+    "PowBlock",
+    "ProposerSlashing",
+    "SignedAggregateAndProof",
+    "SignedBLSToExecutionChange",
+    "SignedBeaconBlock",
+    "SignedBeaconBlockHeader",
+    "SignedContributionAndProof",
+    "SignedVoluntaryExit",
+    "SigningData",
+    "SingleAttestation",
+    "SyncAggregate",
+    "SyncAggregatorSelectionData",
+    "SyncCommittee",
+    "SyncCommitteeContribution",
+    "SyncCommitteeMessage",
+    "Validator",
+    "VoluntaryExit",
+    "Withdrawal",
+    "WithdrawalRequest",
+];
+
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(
-        &SszStatic::<Minimal, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = SszStatic::<Minimal, Electra>::default();
+    let expected = CONTAINERS.map(|container| (container, 123));
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(
-        &SszStatic::<Mainnet, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = SszStatic::<Mainnet, Electra>::default();
+    let expected = CONTAINERS.map(|container| (container, 5));
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn operations_minimal() {
-    Suite::run(
-        &Operations::<Minimal, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = Operations::<Minimal, Electra>::default();
+    let expected = [
+        ("attestation", 49),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("consolidation_request", 37),
+        ("deposit", 23),
+        ("deposit_request", 14),
+        ("execution_payload", 39),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 24),
+        ("voluntary_exit", 21),
+        ("withdrawal_request", 29),
+        ("withdrawals", 81),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(
-        &Operations::<Mainnet, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = Operations::<Mainnet, Electra>::default();
+    let expected = [
+        ("attestation", 45),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("consolidation_request", 10),
+        ("deposit", 23),
+        ("deposit_request", 14),
+        ("execution_payload", 39),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 26),
+        ("voluntary_exit", 25),
+        ("withdrawal_request", 19),
+        ("withdrawals", 80),
+    ];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(
-        &EpochProcessing::<Minimal, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = EpochProcessing::<Minimal, Electra>::default();
+    let expected = [
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 12),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 46),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 23),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+        ("sync_committee_updates", 5),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(
-        &EpochProcessing::<Mainnet, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = EpochProcessing::<Mainnet, Electra>::default();
+    let expected = [
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 10),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 45),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 16),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+    ];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(&Blocks::<Minimal, Electra>::sanity(), "minimal", "electra");
+    let runner = Blocks::<Minimal, Electra>::sanity();
+    let expected = [("blocks", 103), ("slots", 15)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Electra>::sanity(), "mainnet", "electra");
+    let runner = Blocks::<Mainnet, Electra>::sanity();
+    let expected = [("blocks", 91), ("slots", 15)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(
-        &Blocks::<Minimal, Electra>::finality(),
-        "minimal",
-        "electra",
-    );
+    let runner = Blocks::<Minimal, Electra>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(
-        &Blocks::<Mainnet, Electra>::finality(),
-        "mainnet",
-        "electra",
-    );
+    let runner = Blocks::<Mainnet, Electra>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(&Blocks::<Minimal, Electra>::random(), "minimal", "electra");
+    let runner = Blocks::<Minimal, Electra>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Electra>::random(), "mainnet", "electra");
+    let runner = Blocks::<Mainnet, Electra>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(
-        &Rewards::<Minimal, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = Rewards::<Minimal, Electra>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(
-        &Rewards::<Mainnet, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = Rewards::<Mainnet, Electra>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(&Fork::<Minimal, Electra>::default(), "minimal", "electra");
+    let runner = Fork::<Minimal, Electra>::default();
+    let expected = [("fork", 24)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(&Fork::<Mainnet, Electra>::default(), "mainnet", "electra");
+    let runner = Fork::<Mainnet, Electra>::default();
+    let expected = [("fork", 22)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn transition_minimal() {
-    Suite::run(
-        &Transition::<Minimal, Deneb, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = Transition::<Minimal, Deneb, Electra>::default();
+    let expected = [("core", 33)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(
-        &Transition::<Mainnet, Deneb, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = Transition::<Mainnet, Deneb, Electra>::default();
+    let expected = [("core", 27)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn networking_minimal() {
-    Suite::run(
-        &Networking::<Minimal, Electra>::default(),
-        "minimal",
-        "electra",
-    );
+    let runner = Networking::<Minimal, Electra>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 33),
+        ("gossip_beacon_attestation", 23),
+        ("gossip_beacon_block", 20),
+        ("gossip_blob_sidecar", 16),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 14),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(
-        &Networking::<Mainnet, Electra>::default(),
-        "mainnet",
-        "electra",
-    );
+    let runner = Networking::<Mainnet, Electra>::default();
+    let expected = [
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 33),
+        ("gossip_beacon_attestation", 23),
+        ("gossip_beacon_block", 20),
+        ("gossip_blob_sidecar", 16),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 15),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn light_client_minimal() {
     let runner = LightClient::<Minimal, Electra>::default();
-    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
-        // Cases: sync 5, update ranking 1, merkle proofs 4, data collection 1.
-        assert_eq!((report.passed, report.skipped.len()), (11, 0));
-    }
+    let expected = [
+        ("data_collection", 1),
+        ("single_merkle_proof", 4),
+        ("sync", 5),
+        ("update_ranking", 1),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn light_client_mainnet() {
     let runner = LightClient::<Mainnet, Electra>::default();
-    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
-        // Cases: merkle proofs 4.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn merkle_proof_minimal() {
     let runner = MerkleProofs::<Minimal, Electra>::merkle_proof();
-    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
-        // Cases: four blob commitment proofs into the block body.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn merkle_proof_mainnet() {
     let runner = MerkleProofs::<Mainnet, Electra>::merkle_proof();
-    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
-        // Cases: four blob commitment proofs into the block body.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Electra>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
-        // Cases: deposit with reorg 1, ex ante 3, get head 11, proposer head 3, on block 28, reorg 8, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (56, 0));
-    }
+    let expected = [
+        ("deposit_with_reorg", 1),
+        ("ex_ante", 3),
+        ("get_head", 11),
+        ("get_proposer_head", 3),
+        ("on_block", 28),
+        ("reorg", 8),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Electra>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
-        // Cases: ex ante 5, get head 7, proposer head 3, on block 11.
-        assert_eq!((report.passed, report.skipped.len()), (26, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 7),
+        ("get_proposer_head", 3),
+        ("on_block", 11),
+    ];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }
 
 #[test]
 fn fast_confirmation_minimal() {
     let runner = StoreReplay::<Minimal, Electra>::fast_confirmation();
-    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
-        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 19, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
-        assert_eq!((report.passed, report.skipped.len()), (184, 0));
-    }
+    let expected = [
+        ("basic", 3),
+        ("current_epoch", 22),
+        ("empty_slots", 5),
+        ("ffg", 2),
+        ("is_one_confirmed", 19),
+        ("previous_epoch", 108),
+        ("reconfirmation", 3),
+        ("restart_gu", 6),
+        ("revert_finality", 8),
+        ("variables", 8),
+    ];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn sync_minimal() {
     let runner = StoreReplay::<Minimal, Electra>::sync();
-    if let Some(report) = Suite::run(&runner, "minimal", "electra") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "minimal", "electra", &expected);
 }
 
 #[test]
 fn sync_mainnet() {
     let runner = StoreReplay::<Mainnet, Electra>::sync();
-    if let Some(report) = Suite::run(&runner, "mainnet", "electra") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "mainnet", "electra", &expected);
 }

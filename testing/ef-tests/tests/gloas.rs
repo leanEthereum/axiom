@@ -2,6 +2,7 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
+//! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use std::{collections::HashMap, fs};
 
@@ -17,110 +18,290 @@ use axiom_types::{
 };
 use axiom_yaml::Yaml;
 
+/// Every container type the static SSZ vectors of this fork cover.
+const CONTAINERS: [&str; 73] = [
+    "AggregateAndProof",
+    "Attestation",
+    "AttestationData",
+    "AttesterSlashing",
+    "BLSToExecutionChange",
+    "BeaconBlock",
+    "BeaconBlockBody",
+    "BeaconBlockHeader",
+    "BeaconState",
+    "Builder",
+    "BuilderDepositRequest",
+    "BuilderExitRequest",
+    "BuilderPendingPayment",
+    "BuilderPendingWithdrawal",
+    "Checkpoint",
+    "ConsolidationRequest",
+    "ContributionAndProof",
+    "DataColumnSidecar",
+    "DataColumnsByRootIdentifier",
+    "Deposit",
+    "DepositData",
+    "DepositMessage",
+    "DepositRequest",
+    "Eth1Block",
+    "Eth1Data",
+    "ExecutionPayload",
+    "ExecutionPayloadBid",
+    "ExecutionPayloadEnvelope",
+    "ExecutionRequests",
+    "Fork",
+    "ForkData",
+    "HistoricalSummary",
+    "IndexedAttestation",
+    "IndexedPayloadAttestation",
+    "LightClientBootstrap",
+    "LightClientFinalityUpdate",
+    "LightClientHeader",
+    "LightClientOptimisticUpdate",
+    "LightClientUpdate",
+    "MatrixEntry",
+    "NewPayloadRequest",
+    "PartialDataColumnGroupID",
+    "PartialDataColumnPartsMetadata",
+    "PartialDataColumnSidecar",
+    "PayloadAttestation",
+    "PayloadAttestationData",
+    "PayloadAttestationMessage",
+    "PendingConsolidation",
+    "PendingDeposit",
+    "PendingPartialWithdrawal",
+    "PowBlock",
+    "ProposerPreferences",
+    "ProposerSlashing",
+    "SignedAggregateAndProof",
+    "SignedBLSToExecutionChange",
+    "SignedBeaconBlock",
+    "SignedBeaconBlockHeader",
+    "SignedContributionAndProof",
+    "SignedExecutionPayloadBid",
+    "SignedExecutionPayloadEnvelope",
+    "SignedProposerPreferences",
+    "SignedVoluntaryExit",
+    "SigningData",
+    "SingleAttestation",
+    "SyncAggregate",
+    "SyncAggregatorSelectionData",
+    "SyncCommittee",
+    "SyncCommitteeContribution",
+    "SyncCommitteeMessage",
+    "Validator",
+    "VoluntaryExit",
+    "Withdrawal",
+    "WithdrawalRequest",
+];
+
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(&SszStatic::<Minimal, Gloas>::default(), "minimal", "gloas");
+    let runner = SszStatic::<Minimal, Gloas>::default();
+    let expected = CONTAINERS.map(|container| (container, 123));
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(&SszStatic::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+    let runner = SszStatic::<Mainnet, Gloas>::default();
+    let expected = CONTAINERS.map(|container| (container, 5));
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(&Fork::<Minimal, Gloas>::default(), "minimal", "gloas");
+    let runner = Fork::<Minimal, Gloas>::default();
+    let expected = [("fork", 37)];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(&Fork::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+    let runner = Fork::<Mainnet, Gloas>::default();
+    let expected = [("fork", 35)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn operations_minimal() {
-    Suite::run(&Operations::<Minimal, Gloas>::default(), "minimal", "gloas");
+    let runner = Operations::<Minimal, Gloas>::default();
+    let expected = [
+        ("attestation", 66),
+        ("attester_slashing", 31),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("builder_deposit_request", 28),
+        ("builder_exit_request", 7),
+        ("consolidation_request", 37),
+        ("deposit_request", 16),
+        ("execution_payload_bid", 20),
+        ("parent_execution_payload", 24),
+        ("payload_attestation", 11),
+        ("proposer_slashing", 39),
+        ("sync_aggregate", 24),
+        ("voluntary_exit", 22),
+        ("voluntary_exit_churn", 3),
+        ("withdrawal_request", 29),
+        ("withdrawals", 86),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(
-        &EpochProcessing::<Minimal, Gloas>::default(),
-        "minimal",
-        "gloas",
-    );
+    let runner = EpochProcessing::<Minimal, Gloas>::default();
+    let expected = [
+        ("builder_pending_payments", 7),
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 12),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 45),
+        ("pending_deposits_churn", 4),
+        ("proposer_lookahead", 4),
+        ("ptc_window", 1),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 23),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+        ("sync_committee_updates", 5),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(&Blocks::<Minimal, Gloas>::sanity(), "minimal", "gloas");
+    let runner = Blocks::<Minimal, Gloas>::sanity();
+    let expected = [("blocks", 96), ("slots", 17)];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(&Blocks::<Minimal, Gloas>::finality(), "minimal", "gloas");
+    let runner = Blocks::<Minimal, Gloas>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(&Blocks::<Minimal, Gloas>::random(), "minimal", "gloas");
+    let runner = Blocks::<Minimal, Gloas>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(&Rewards::<Minimal, Gloas>::default(), "minimal", "gloas");
+    let runner = Rewards::<Minimal, Gloas>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn transition_minimal() {
-    Suite::run(
-        &Transition::<Minimal, Fulu, Gloas>::default(),
-        "minimal",
-        "gloas",
-    );
+    let runner = Transition::<Minimal, Fulu, Gloas>::default();
+    let expected = [("core", 34)];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(&Operations::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+    let runner = Operations::<Mainnet, Gloas>::default();
+    let expected = [
+        ("attestation", 61),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("builder_deposit_request", 28),
+        ("builder_exit_request", 7),
+        ("consolidation_request", 10),
+        ("deposit_request", 16),
+        ("execution_payload_bid", 20),
+        ("parent_execution_payload", 24),
+        ("payload_attestation", 9),
+        ("proposer_slashing", 39),
+        ("sync_aggregate", 26),
+        ("voluntary_exit", 26),
+        ("voluntary_exit_churn", 1),
+        ("withdrawal_request", 19),
+        ("withdrawals", 85),
+    ];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(
-        &EpochProcessing::<Mainnet, Gloas>::default(),
-        "mainnet",
-        "gloas",
-    );
+    let runner = EpochProcessing::<Mainnet, Gloas>::default();
+    let expected = [
+        ("builder_pending_payments", 7),
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 10),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 44),
+        ("pending_deposits_churn", 1),
+        ("proposer_lookahead", 4),
+        ("ptc_window", 1),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 16),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+    ];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Gloas>::sanity(), "mainnet", "gloas");
+    let runner = Blocks::<Mainnet, Gloas>::sanity();
+    let expected = [("blocks", 81), ("slots", 17)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Gloas>::finality(), "mainnet", "gloas");
+    let runner = Blocks::<Mainnet, Gloas>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Gloas>::random(), "mainnet", "gloas");
+    let runner = Blocks::<Mainnet, Gloas>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(&Rewards::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+    let runner = Rewards::<Mainnet, Gloas>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(
-        &Transition::<Mainnet, Fulu, Gloas>::default(),
-        "mainnet",
-        "gloas",
-    );
+    let runner = Transition::<Mainnet, Fulu, Gloas>::default();
+    let expected = [("core", 28)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
@@ -268,55 +449,126 @@ fn envelopes_verify_against_their_block_state() {
 
 #[test]
 fn networking_minimal() {
-    Suite::run(&Networking::<Minimal, Gloas>::default(), "minimal", "gloas");
+    let runner = Networking::<Minimal, Gloas>::default();
+    let expected = [
+        ("compute_columns_for_custody_group", 5),
+        ("get_custody_groups", 11),
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 39),
+        ("gossip_beacon_attestation", 30),
+        ("gossip_beacon_block", 46),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_data_column_sidecar", 10),
+        ("gossip_execution_payload_bid", 44),
+        ("gossip_execution_payload_envelope", 20),
+        ("gossip_partial_data_column_sidecar", 5),
+        ("gossip_payload_attestation_message", 13),
+        ("gossip_proposer_preferences", 26),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 14),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(&Networking::<Mainnet, Gloas>::default(), "mainnet", "gloas");
+    let runner = Networking::<Mainnet, Gloas>::default();
+    let expected = [
+        ("compute_columns_for_custody_group", 5),
+        ("get_custody_groups", 11),
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 39),
+        ("gossip_beacon_attestation", 30),
+        ("gossip_beacon_block", 46),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_data_column_sidecar", 10),
+        ("gossip_execution_payload_bid", 44),
+        ("gossip_execution_payload_envelope", 20),
+        ("gossip_partial_data_column_sidecar", 5),
+        ("gossip_payload_attestation_message", 13),
+        ("gossip_proposer_preferences", 26),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 15),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn light_client_minimal() {
     let runner = LightClient::<Minimal, Gloas>::default();
-    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
-        // Cases: sync 4, update ranking 1, merkle proofs 4, data collection 1.
-        assert_eq!((report.passed, report.skipped.len()), (10, 0));
-    }
+    let expected = [
+        ("data_collection", 1),
+        ("single_merkle_proof", 4),
+        ("sync", 4),
+        ("update_ranking", 1),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn light_client_mainnet() {
     let runner = LightClient::<Mainnet, Gloas>::default();
-    if let Some(report) = Suite::run(&runner, "mainnet", "gloas") {
-        // Cases: merkle proofs 4.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Gloas>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
-        // Cases: deposit with reorg 1, ex ante 3, filter node tree variants 3, get head 12, parent payload status 1, on attestation 5, on block 25, on envelope 15, on payload attestation 7, payload data availability 3, payload timeliness 3, reorg 8, should apply proposer boost 4, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (92, 0));
-    }
+    let expected = [
+        ("deposit_with_reorg", 1),
+        ("ex_ante", 3),
+        ("filter_node_tree_variants", 3),
+        ("get_head", 12),
+        ("get_parent_payload_status", 1),
+        ("on_attestation", 5),
+        ("on_block", 25),
+        ("on_execution_payload_envelope", 15),
+        ("on_payload_attestation_message", 7),
+        ("payload_data_availability", 3),
+        ("payload_timeliness", 3),
+        ("reorg", 8),
+        ("should_apply_proposer_boost", 4),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Gloas>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "mainnet", "gloas") {
-        // Cases: ex ante 5, get head 8, parent payload status 1, on attestation 5, on block 8, on envelope 15, on payload attestation 7, payload data availability 3, payload timeliness 3.
-        assert_eq!((report.passed, report.skipped.len()), (55, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 8),
+        ("get_parent_payload_status", 1),
+        ("on_attestation", 5),
+        ("on_block", 8),
+        ("on_execution_payload_envelope", 15),
+        ("on_payload_attestation_message", 7),
+        ("payload_data_availability", 3),
+        ("payload_timeliness", 3),
+    ];
+    Suite::check(&runner, "mainnet", "gloas", &expected);
 }
 
 #[test]
 fn fast_confirmation_minimal() {
     let runner = StoreReplay::<Minimal, Gloas>::fast_confirmation();
-    if let Some(report) = Suite::run(&runner, "minimal", "gloas") {
-        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 20, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
-        assert_eq!((report.passed, report.skipped.len()), (185, 0));
-    }
+    let expected = [
+        ("basic", 3),
+        ("current_epoch", 22),
+        ("empty_slots", 5),
+        ("ffg", 2),
+        ("is_one_confirmed", 20),
+        ("previous_epoch", 108),
+        ("reconfirmation", 3),
+        ("restart_gu", 6),
+        ("revert_finality", 8),
+        ("variables", 8),
+    ];
+    Suite::check(&runner, "minimal", "gloas", &expected);
 }

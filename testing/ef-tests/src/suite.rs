@@ -1,6 +1,7 @@
 //! Locating the vectors, and running every case of a runner in parallel.
 
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -90,6 +91,8 @@ impl Vectors {
 pub struct Report {
     /// Cases that passed.
     pub passed: usize,
+    /// Cases that passed, counted per handler, in name order.
+    pub per_handler: BTreeMap<String, usize>,
     /// Cases deliberately not run, with their reason.
     pub skipped: Vec<(String, &'static str)>,
     /// Cases that failed, with why.
@@ -108,10 +111,13 @@ enum Outcome {
 }
 
 impl Report {
-    /// Tallies one case.
-    fn record(&mut self, label: String, outcome: Outcome) {
+    /// Tallies one case of a handler.
+    fn record(&mut self, handler: &str, label: String, outcome: Outcome) {
         match outcome {
-            Outcome::Passed => self.passed += 1,
+            Outcome::Passed => {
+                self.passed += 1;
+                *self.per_handler.entry(handler.to_owned()).or_default() += 1;
+            }
             Outcome::Skipped(reason) => self.skipped.push((label, reason)),
             Outcome::Failed(failure) => self.failed.push((label, failure)),
         }
@@ -129,6 +135,10 @@ pub struct Suite {
 
 impl Suite {
     /// The suite of a runner, or nothing when the vectors are absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the runner is missing and `AXIOM_REQUIRE_VECTORS` is set, as in CI.
     #[must_use]
     pub fn new(preset: &str, fork: &str, runner: &str) -> Option<Self> {
         let dir = Vectors::locate()?
@@ -136,7 +146,13 @@ impl Suite {
             .join(preset)
             .join(fork)
             .join(runner);
-        dir.is_dir().then_some(Self { dir, handler: None })
+        let found = dir.is_dir();
+        assert!(
+            found || env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+            "vectors required but {} is missing; run `make -C testing/ef-tests`",
+            dir.display()
+        );
+        found.then_some(Self { dir, handler: None })
     }
 
     /// One handler of a runner from the general vectors, or nothing when they are absent.
@@ -178,15 +194,42 @@ impl Suite {
         Some(report)
     }
 
+    /// Runs every case, then pins each handler's case count.
+    ///
+    /// The expected counts list every handler once, in name order.
+    /// A lost, added, or shrunken handler directory fails, and so does any skipped case.
+    /// Nothing is checked when the vectors are absent and not required.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a case fails or is skipped, or when the counts differ.
+    pub fn check(runner: &impl Runner, preset: &str, fork: &str, expected: &[(&str, usize)]) {
+        let Some(report) = Self::run(runner, preset, fork) else {
+            return;
+        };
+        let label = format!("{preset}/{fork}/{}", runner.name());
+        assert!(
+            report.skipped.is_empty(),
+            "{label}: skipped {:?}",
+            report.skipped
+        );
+        let actual: Vec<(&str, usize)> = report
+            .per_handler
+            .iter()
+            .map(|(handler, passed)| (handler.as_str(), *passed))
+            .collect();
+        assert_eq!(actual, expected, "{label}: cases per handler");
+    }
+
     /// Runs every case, panicking with a report when any fails.
     ///
-    /// Returns the tally, so a test can pin the number of cases, or nothing when the vectors are absent.
+    /// Returns the tally, or nothing when the vectors are absent.
     ///
     /// # Panics
     ///
     /// Panics when a case fails, listing every failure.
     #[expect(clippy::print_stderr, reason = "the report is the test's output")]
-    pub fn run(runner: &impl Runner, preset: &str, fork: &str) -> Option<Report> {
+    fn run(runner: &impl Runner, preset: &str, fork: &str) -> Option<Report> {
         let Some(suite) = Self::new(preset, fork, runner.name()) else {
             eprintln!(
                 "skipping {preset}/{fork}/{}: vectors not found, run `make -C testing/ef-tests`",
@@ -246,7 +289,7 @@ impl Suite {
                             },
                         };
                         if let Ok(mut report) = report.lock() {
-                            report.record(label, outcome);
+                            report.record(handler, label, outcome);
                         }
                     }
                 });

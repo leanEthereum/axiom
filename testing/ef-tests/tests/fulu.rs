@@ -2,236 +2,431 @@
 //!
 //! Each test runs one runner over every handler and case it finds.
 //! A handler this client does not know fails the test, so no vector is skipped silently.
+//! Each test pins every handler's case count, so a lost vector directory fails too.
 
 use axiom_ef_tests::{
     Blocks, ChainReplay, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations,
-    Rewards, Shuffling, SszStatic, StoreReplay, Suite, Transition,
+    Rewards, SszStatic, StoreReplay, Suite, Transition,
     forks::{Electra, Fulu},
 };
 use axiom_types::{Mainnet, Minimal};
 
+/// Every container type the static SSZ vectors of this fork cover.
+const CONTAINERS: [&str; 60] = [
+    "AggregateAndProof",
+    "Attestation",
+    "AttestationData",
+    "AttesterSlashing",
+    "BLSToExecutionChange",
+    "BeaconBlock",
+    "BeaconBlockBody",
+    "BeaconBlockHeader",
+    "BeaconState",
+    "Checkpoint",
+    "ConsolidationRequest",
+    "ContributionAndProof",
+    "DataColumnSidecar",
+    "DataColumnsByRootIdentifier",
+    "Deposit",
+    "DepositData",
+    "DepositMessage",
+    "DepositRequest",
+    "Eth1Block",
+    "Eth1Data",
+    "ExecutionPayload",
+    "ExecutionPayloadHeader",
+    "ExecutionRequests",
+    "Fork",
+    "ForkData",
+    "HistoricalSummary",
+    "IndexedAttestation",
+    "LightClientBootstrap",
+    "LightClientFinalityUpdate",
+    "LightClientHeader",
+    "LightClientOptimisticUpdate",
+    "LightClientUpdate",
+    "MatrixEntry",
+    "NewPayloadRequest",
+    "PartialDataColumnGroupID",
+    "PartialDataColumnHeader",
+    "PartialDataColumnPartsMetadata",
+    "PartialDataColumnSidecar",
+    "PendingConsolidation",
+    "PendingDeposit",
+    "PendingPartialWithdrawal",
+    "PowBlock",
+    "ProposerSlashing",
+    "SignedAggregateAndProof",
+    "SignedBLSToExecutionChange",
+    "SignedBeaconBlock",
+    "SignedBeaconBlockHeader",
+    "SignedContributionAndProof",
+    "SignedVoluntaryExit",
+    "SigningData",
+    "SingleAttestation",
+    "SyncAggregate",
+    "SyncAggregatorSelectionData",
+    "SyncCommittee",
+    "SyncCommitteeContribution",
+    "SyncCommitteeMessage",
+    "Validator",
+    "VoluntaryExit",
+    "Withdrawal",
+    "WithdrawalRequest",
+];
+
 #[test]
 fn ssz_static_minimal() {
-    Suite::run(&SszStatic::<Minimal, Fulu>::default(), "minimal", "fulu");
+    let runner = SszStatic::<Minimal, Fulu>::default();
+    let expected = CONTAINERS.map(|container| (container, 123));
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn ssz_static_mainnet() {
-    Suite::run(&SszStatic::<Mainnet, Fulu>::default(), "mainnet", "fulu");
+    let runner = SszStatic::<Mainnet, Fulu>::default();
+    let expected = CONTAINERS.map(|container| (container, 5));
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn operations_minimal() {
-    Suite::run(&Operations::<Minimal, Fulu>::default(), "minimal", "fulu");
+    let runner = Operations::<Minimal, Fulu>::default();
+    let expected = [
+        ("attestation", 49),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("consolidation_request", 37),
+        ("deposit_request", 13),
+        ("execution_payload", 39),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 24),
+        ("voluntary_exit", 21),
+        ("withdrawal_request", 29),
+        ("withdrawals", 81),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn operations_mainnet() {
-    Suite::run(&Operations::<Mainnet, Fulu>::default(), "mainnet", "fulu");
+    let runner = Operations::<Mainnet, Fulu>::default();
+    let expected = [
+        ("attestation", 45),
+        ("attester_slashing", 30),
+        ("block_header", 6),
+        ("bls_to_execution_change", 14),
+        ("consolidation_request", 10),
+        ("deposit_request", 13),
+        ("execution_payload", 39),
+        ("proposer_slashing", 28),
+        ("sync_aggregate", 26),
+        ("voluntary_exit", 25),
+        ("withdrawal_request", 19),
+        ("withdrawals", 80),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn epoch_processing_minimal() {
-    Suite::run(
-        &EpochProcessing::<Minimal, Fulu>::default(),
-        "minimal",
-        "fulu",
-    );
+    let runner = EpochProcessing::<Minimal, Fulu>::default();
+    let expected = [
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 12),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 44),
+        ("proposer_lookahead", 2),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 23),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+        ("sync_committee_updates", 5),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn epoch_processing_mainnet() {
-    Suite::run(
-        &EpochProcessing::<Mainnet, Fulu>::default(),
-        "mainnet",
-        "fulu",
-    );
+    let runner = EpochProcessing::<Mainnet, Fulu>::default();
+    let expected = [
+        ("effective_balance_updates", 2),
+        ("eth1_data_reset", 2),
+        ("historical_summaries_update", 1),
+        ("inactivity_updates", 21),
+        ("justification_and_finalization", 10),
+        ("participation_flag_updates", 10),
+        ("pending_consolidations", 13),
+        ("pending_deposits", 43),
+        ("proposer_lookahead", 2),
+        ("randao_mixes_reset", 1),
+        ("registry_updates", 16),
+        ("rewards_and_penalties", 15),
+        ("slashings", 5),
+        ("slashings_reset", 1),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn sanity_minimal() {
-    Suite::run(&Blocks::<Minimal, Fulu>::sanity(), "minimal", "fulu");
+    let runner = Blocks::<Minimal, Fulu>::sanity();
+    let expected = [("blocks", 88), ("slots", 15)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn sanity_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Fulu>::sanity(), "mainnet", "fulu");
+    let runner = Blocks::<Mainnet, Fulu>::sanity();
+    let expected = [("blocks", 76), ("slots", 15)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn finality_minimal() {
-    Suite::run(&Blocks::<Minimal, Fulu>::finality(), "minimal", "fulu");
+    let runner = Blocks::<Minimal, Fulu>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn finality_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Fulu>::finality(), "mainnet", "fulu");
+    let runner = Blocks::<Mainnet, Fulu>::finality();
+    let expected = [("finality", 5)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn random_minimal() {
-    Suite::run(&Blocks::<Minimal, Fulu>::random(), "minimal", "fulu");
+    let runner = Blocks::<Minimal, Fulu>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn random_mainnet() {
-    Suite::run(&Blocks::<Mainnet, Fulu>::random(), "mainnet", "fulu");
+    let runner = Blocks::<Mainnet, Fulu>::random();
+    let expected = [("random", 16)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn rewards_minimal() {
-    Suite::run(&Rewards::<Minimal, Fulu>::default(), "minimal", "fulu");
+    let runner = Rewards::<Minimal, Fulu>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn rewards_mainnet() {
-    Suite::run(&Rewards::<Mainnet, Fulu>::default(), "mainnet", "fulu");
+    let runner = Rewards::<Mainnet, Fulu>::default();
+    let expected = [
+        ("basic", 11),
+        ("inactivity_scores", 12),
+        ("leak", 13),
+        ("random", 10),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn fork_minimal() {
-    Suite::run(&Fork::<Minimal, Fulu>::default(), "minimal", "fulu");
+    let runner = Fork::<Minimal, Fulu>::default();
+    let expected = [("fork", 20)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn fork_mainnet() {
-    Suite::run(&Fork::<Mainnet, Fulu>::default(), "mainnet", "fulu");
+    let runner = Fork::<Mainnet, Fulu>::default();
+    let expected = [("fork", 18)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn transition_minimal() {
-    Suite::run(
-        &Transition::<Minimal, Electra, Fulu>::default(),
-        "minimal",
-        "fulu",
-    );
+    let runner = Transition::<Minimal, Electra, Fulu>::default();
+    let expected = [("core", 31)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(
-        &Transition::<Mainnet, Electra, Fulu>::default(),
-        "mainnet",
-        "fulu",
-    );
-}
-
-#[test]
-fn shuffling_minimal() {
-    // Shuffling vectors exist only under phase0, and the shuffle never changed since.
-    Suite::run(&Shuffling::<Minimal>::default(), "minimal", "phase0");
-}
-
-#[test]
-fn shuffling_mainnet() {
-    Suite::run(&Shuffling::<Mainnet>::default(), "mainnet", "phase0");
+    let runner = Transition::<Mainnet, Electra, Fulu>::default();
+    let expected = [("core", 25)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn fork_choice_minimal() {
     let runner = StoreReplay::<Minimal, Fulu>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: deposit with reorg 1, ex ante 3, get head 11, proposer head 3, on block 40, reorg 8, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (68, 0));
-    }
+    let expected = [
+        ("deposit_with_reorg", 1),
+        ("ex_ante", 3),
+        ("get_head", 11),
+        ("get_proposer_head", 3),
+        ("on_block", 40),
+        ("reorg", 8),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn fork_choice_mainnet() {
     let runner = StoreReplay::<Mainnet, Fulu>::fork_choice();
-    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
-        // Cases: ex ante 5, get head 7, proposer head 3, on block 23.
-        assert_eq!((report.passed, report.skipped.len()), (38, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 7),
+        ("get_proposer_head", 3),
+        ("on_block", 23),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn chain_replay_minimal() {
+    // The fork choice vectors, replayed through the node's chain.
     let runner = ChainReplay::<Minimal, Fulu>::new();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: the fork choice cases, through the node: deposit with reorg 1, ex ante 3, get head 11, proposer head 3, on block 40, reorg 8, withholding 2.
-        assert_eq!((report.passed, report.skipped.len()), (68, 0));
-    }
+    let expected = [
+        ("deposit_with_reorg", 1),
+        ("ex_ante", 3),
+        ("get_head", 11),
+        ("get_proposer_head", 3),
+        ("on_block", 40),
+        ("reorg", 8),
+        ("withholding", 2),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn chain_replay_mainnet() {
+    // The fork choice vectors, replayed through the node's chain.
     let runner = ChainReplay::<Mainnet, Fulu>::new();
-    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
-        // Cases: the fork choice cases, through the node: ex ante 5, get head 7, proposer head 3, on block 23.
-        assert_eq!((report.passed, report.skipped.len()), (38, 0));
-    }
+    let expected = [
+        ("ex_ante", 5),
+        ("get_head", 7),
+        ("get_proposer_head", 3),
+        ("on_block", 23),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn networking_minimal() {
-    Suite::run(&Networking::<Minimal, Fulu>::default(), "minimal", "fulu");
+    let runner = Networking::<Minimal, Fulu>::default();
+    let expected = [
+        ("compute_columns_for_custody_group", 5),
+        ("get_custody_groups", 11),
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 33),
+        ("gossip_beacon_attestation", 23),
+        ("gossip_beacon_block", 23),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_data_column_sidecar", 17),
+        ("gossip_partial_data_column_sidecar", 24),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 14),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn networking_mainnet() {
-    Suite::run(&Networking::<Mainnet, Fulu>::default(), "mainnet", "fulu");
+    let runner = Networking::<Mainnet, Fulu>::default();
+    let expected = [
+        ("compute_columns_for_custody_group", 5),
+        ("get_custody_groups", 11),
+        ("gossip_attester_slashing", 12),
+        ("gossip_beacon_aggregate_and_proof", 33),
+        ("gossip_beacon_attestation", 23),
+        ("gossip_beacon_block", 23),
+        ("gossip_bls_to_execution_change", 6),
+        ("gossip_data_column_sidecar", 17),
+        ("gossip_partial_data_column_sidecar", 24),
+        ("gossip_proposer_slashing", 9),
+        ("gossip_sync_committee_contribution_and_proof", 15),
+        ("gossip_sync_committee_message", 7),
+        ("gossip_voluntary_exit", 14),
+    ];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn merkle_proof_minimal() {
     let runner = MerkleProofs::<Minimal, Fulu>::merkle_proof();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: four blob commitment proofs into the block body.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn merkle_proof_mainnet() {
     let runner = MerkleProofs::<Mainnet, Fulu>::merkle_proof();
-    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
-        // Cases: four blob commitment proofs into the block body.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn light_client_minimal() {
     let runner = LightClient::<Minimal, Fulu>::default();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: sync 6, update ranking 1, merkle proofs 4, data collection 1.
-        assert_eq!((report.passed, report.skipped.len()), (12, 0));
-    }
+    let expected = [
+        ("data_collection", 1),
+        ("single_merkle_proof", 4),
+        ("sync", 6),
+        ("update_ranking", 1),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn light_client_mainnet() {
     let runner = LightClient::<Mainnet, Fulu>::default();
-    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
-        // Cases: merkle proofs 4.
-        assert_eq!((report.passed, report.skipped.len()), (4, 0));
-    }
+    let expected = [("single_merkle_proof", 4)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
 
 #[test]
 fn fast_confirmation_minimal() {
     let runner = StoreReplay::<Minimal, Fulu>::fast_confirmation();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 19, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
-        assert_eq!((report.passed, report.skipped.len()), (184, 0));
-    }
+    let expected = [
+        ("basic", 3),
+        ("current_epoch", 22),
+        ("empty_slots", 5),
+        ("ffg", 2),
+        ("is_one_confirmed", 19),
+        ("previous_epoch", 108),
+        ("reconfirmation", 3),
+        ("restart_gu", 6),
+        ("revert_finality", 8),
+        ("variables", 8),
+    ];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn sync_minimal() {
     let runner = StoreReplay::<Minimal, Fulu>::sync();
-    if let Some(report) = Suite::run(&runner, "minimal", "fulu") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "minimal", "fulu", &expected);
 }
 
 #[test]
 fn sync_mainnet() {
     let runner = StoreReplay::<Mainnet, Fulu>::sync();
-    if let Some(report) = Suite::run(&runner, "mainnet", "fulu") {
-        // Cases: optimistic 1.
-        assert_eq!((report.passed, report.skipped.len()), (1, 0));
-    }
+    let expected = [("optimistic", 1)];
+    Suite::check(&runner, "mainnet", "fulu", &expected);
 }
