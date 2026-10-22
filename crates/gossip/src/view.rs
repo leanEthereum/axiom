@@ -141,7 +141,7 @@ impl<'a, P: Preset> ChainView<'a, P> {
     ///
     /// See `is_future_slot` in the phase0 p2p spec.
     #[must_use]
-    pub fn is_future_slot(&self, slot: Slot, now_ms: u64) -> bool {
+    pub const fn is_future_slot(&self, slot: Slot, now_ms: u64) -> bool {
         now_ms + self.config().maximum_gossip_clock_disparity_ms < self.slot_start_ms(slot)
     }
 
