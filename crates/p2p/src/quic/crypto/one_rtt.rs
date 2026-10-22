@@ -28,7 +28,10 @@ use axiom_crypto::AeadError;
 
 use super::{HeaderKey, PacketKey, TAG_LEN};
 use crate::{
-    quic::packet::PacketNumber,
+    quic::{
+        DecodeError,
+        packet::{PacketNumber, PlainPacket},
+    },
     tls::{CipherSuite, Secrets, TrafficSecret},
 };
 
@@ -63,6 +66,17 @@ pub(crate) enum Opened {
     Updated,
 }
 
+/// A received payload with its header and tag, to open in place.
+#[derive(Debug)]
+pub(crate) struct Protected<'a> {
+    /// The unprotected header, the associated data.
+    pub(crate) header: &'a [u8],
+    /// The ciphertext, decrypted in place.
+    pub(crate) payload: &'a mut [u8],
+    /// The tag.
+    pub(crate) tag: &'a [u8; TAG_LEN],
+}
+
 /// How far the peer has acknowledged the current sending generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Acknowledgment {
@@ -74,37 +88,158 @@ enum Acknowledgment {
     Confirmed,
 }
 
+/// This side's sending generation.
+#[derive(Debug)]
+struct SendGeneration {
+    /// The generation's secret.
+    secret: TrafficSecret,
+    /// The payload key.
+    key: PacketKey,
+    /// The phase bit sent.
+    phase: bool,
+    /// Whether the peer acknowledged the generation; no update may start before.
+    acknowledgment: Acknowledgment,
+    /// Packets sealed under the key.
+    sealed: u64,
+}
+
+impl SendGeneration {
+    /// The first generation.
+    fn new(secret: &TrafficSecret) -> Self {
+        Self {
+            key: PacketKey::new(secret),
+            secret: secret.clone(),
+            phase: false,
+            acknowledgment: Acknowledgment::Unused,
+            sealed: 0,
+        }
+    }
+
+    /// Seals a payload, counting it against the key.
+    fn seal(&mut self, pn: PacketNumber, header: &[u8], payload: &mut [u8]) -> [u8; TAG_LEN] {
+        if self.acknowledgment == Acknowledgment::Unused {
+            self.acknowledgment = Acknowledgment::Pending(pn);
+        }
+        self.sealed += 1;
+        self.key.seal(pn, header, payload)
+    }
+
+    /// Moves to the next generation.
+    fn advance(&mut self) {
+        self.secret = self.secret.derive(b"quic ku");
+        self.key = PacketKey::new(&self.secret);
+        self.phase = !self.phase;
+        self.acknowledgment = Acknowledgment::Unused;
+        self.sealed = 0;
+    }
+}
+
+/// The peer's generations, as this side opens them.
+#[derive(Debug)]
+struct ReceiveGenerations {
+    /// The secret of the peer's current generation.
+    secret: TrafficSecret,
+    /// The key of the current generation.
+    current: PacketKey,
+    /// The phase bit of the current generation.
+    phase: bool,
+    /// The next generation's key, derived ahead.
+    next: PacketKey,
+    /// The previous generation's key, and when it is dropped.
+    previous: Option<(PacketKey, Duration)>,
+    /// The lowest packet number received in the current generation.
+    first_in_phase: Option<PacketNumber>,
+    /// Payloads that failed to open, over the whole connection.
+    failures: u64,
+}
+
+impl ReceiveGenerations {
+    /// The first generation.
+    fn new(secret: &TrafficSecret) -> Self {
+        Self {
+            current: PacketKey::new(secret),
+            next: PacketKey::new(&secret.derive(b"quic ku")),
+            secret: secret.clone(),
+            phase: false,
+            previous: None,
+            first_in_phase: None,
+            failures: 0,
+        }
+    }
+
+    /// Opens a payload under the generation its phase bit and number point to.
+    fn open(
+        &mut self,
+        pn: PacketNumber,
+        phase: bool,
+        packet: Protected<'_>,
+        now: Duration,
+        retain: Duration,
+    ) -> Result<Opened, AeadError> {
+        // The previous generation expires once reordered packets can no longer arrive.
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|(_, until)| *until <= now)
+        {
+            self.previous = None;
+        }
+        let Protected {
+            header,
+            payload,
+            tag,
+        } = packet;
+        let outcome = if phase == self.phase {
+            self.current
+                .open(pn, header, payload, tag)
+                .map(|()| Opened::Current)
+        } else if let Some((previous, _)) = self
+            .previous
+            .as_ref()
+            .filter(|_| self.first_in_phase.is_some_and(|first| pn < first))
+        {
+            // A packet older than the current phase began: it belongs to the previous one.
+            previous
+                .open(pn, header, payload, tag)
+                .map(|()| Opened::Current)
+        } else {
+            self.next
+                .open(pn, header, payload, tag)
+                .map(|()| Opened::Updated)
+        };
+        match outcome {
+            Ok(Opened::Updated) => self.advance(pn, now + retain),
+            Ok(Opened::Current) => {
+                if phase == self.phase && self.first_in_phase.is_none_or(|first| pn < first) {
+                    self.first_in_phase = Some(pn);
+                }
+            }
+            Err(AeadError) => self.failures += 1,
+        }
+        outcome
+    }
+
+    /// Moves to the next generation, keeping the current key as the previous one for a while.
+    fn advance(&mut self, pn: PacketNumber, drop_previous_at: Duration) {
+        self.secret = self.secret.derive(b"quic ku");
+        let after_next = PacketKey::new(&self.secret.derive(b"quic ku"));
+        let current = mem::replace(&mut self.next, after_next);
+        let previous = mem::replace(&mut self.current, current);
+        self.previous = Some((previous, drop_previous_at));
+        self.phase = !self.phase;
+        self.first_in_phase = Some(pn);
+    }
+}
+
 /// The payload keys of the application level and their update state.
 #[derive(Debug)]
 pub(crate) struct OneRttKeys {
-    /// The secret of this side's current sending generation.
-    local_secret: TrafficSecret,
-    /// The sending key.
-    local: PacketKey,
-    /// The phase bit this side sends.
-    local_phase: bool,
-    /// The secret of the peer's current generation.
-    remote_secret: TrafficSecret,
-    /// The key of the peer's current generation.
-    remote: PacketKey,
-    /// The phase bit of the peer's current generation.
-    remote_phase: bool,
-    /// The key of the peer's next generation, derived ahead.
-    next_remote: PacketKey,
-    /// The previous generation's key, and when it is dropped.
-    previous_remote: Option<(PacketKey, Duration)>,
-    /// The lowest packet number received in the peer's current generation.
-    first_in_phase: Option<PacketNumber>,
-    /// Whether the peer acknowledged the current sending generation.
-    ///
-    /// No update may start until it has.
-    acknowledgment: Acknowledgment,
-    /// Packets sealed with the current sending key.
-    sealed: u64,
-    /// Payloads that failed to open, over the whole connection.
-    failures: u64,
+    /// This side's sending generation.
+    send: SendGeneration,
+    /// The peer's generations.
+    receive: ReceiveGenerations,
     /// The header key for sending.
-    pub(crate) local_header: HeaderKey,
+    local_header: HeaderKey,
     /// The header key for receiving.
     pub(crate) remote_header: HeaderKey,
 }
@@ -112,20 +247,9 @@ pub(crate) struct OneRttKeys {
 impl OneRttKeys {
     /// The first generation, from the handshake's application secrets.
     pub(crate) fn new(secrets: &Secrets) -> Self {
-        let next_remote = PacketKey::new(&secrets.remote.derive(b"quic ku"));
         Self {
-            local: PacketKey::new(&secrets.local),
-            local_secret: secrets.local.clone(),
-            local_phase: false,
-            remote: PacketKey::new(&secrets.remote),
-            remote_secret: secrets.remote.clone(),
-            remote_phase: false,
-            next_remote,
-            previous_remote: None,
-            first_in_phase: None,
-            acknowledgment: Acknowledgment::Unused,
-            sealed: 0,
-            failures: 0,
+            send: SendGeneration::new(&secrets.local),
+            receive: ReceiveGenerations::new(&secrets.remote),
             local_header: HeaderKey::new(&secrets.local),
             remote_header: HeaderKey::new(&secrets.remote),
         }
@@ -133,21 +257,21 @@ impl OneRttKeys {
 
     /// The phase bit to send.
     pub(crate) const fn phase(&self) -> bool {
-        self.local_phase
+        self.send.phase
     }
 
-    /// Seals a payload with the current sending key.
-    pub(crate) fn seal(
+    /// Seals a short-header packet into a datagram.
+    pub(crate) fn seal_packet(
         &mut self,
-        pn: PacketNumber,
-        header: &[u8],
-        payload: &mut [u8],
-    ) -> [u8; TAG_LEN] {
-        if self.acknowledgment == Acknowledgment::Unused {
-            self.acknowledgment = Acknowledgment::Pending(pn);
-        }
-        self.sealed += 1;
-        self.local.seal(pn, header, payload)
+        packet: PlainPacket,
+        out: &mut Vec<u8>,
+    ) -> Result<(), DecodeError> {
+        let send = &mut self.send;
+        packet.seal(
+            |pn, header, payload| send.seal(pn, header, payload),
+            &self.local_header,
+            out,
+        )
     }
 
     /// Opens a payload under the generation its phase bit names.
@@ -161,120 +285,58 @@ impl OneRttKeys {
         &mut self,
         pn: PacketNumber,
         phase: bool,
-        header: &[u8],
-        payload: &mut [u8],
-        tag: &[u8; TAG_LEN],
+        packet: Protected<'_>,
         now: Duration,
         retain: Duration,
     ) -> Result<Opened, AeadError> {
-        // The previous generation expires once reordered packets can no longer arrive.
-        if self
-            .previous_remote
-            .as_ref()
-            .is_some_and(|(_, until)| *until <= now)
-        {
-            self.previous_remote = None;
-        }
-        let outcome = if phase == self.remote_phase {
-            self.remote
-                .open(pn, header, payload, tag)
-                .map(|()| Opened::Current)
-        } else if let Some((previous, _)) = self
-            .previous_remote
-            .as_ref()
-            .filter(|_| self.first_in_phase.is_some_and(|first| pn < first))
-        {
-            // A packet older than the current phase began: it belongs to the previous one.
-            previous
-                .open(pn, header, payload, tag)
-                .map(|()| Opened::Current)
-        } else {
-            self.next_remote
-                .open(pn, header, payload, tag)
-                .map(|()| Opened::Updated)
-        };
-        match outcome {
-            Ok(Opened::Updated) => self.advance_remote(pn, now + retain),
-            Ok(Opened::Current) => {
-                if phase == self.remote_phase && self.first_in_phase.is_none_or(|first| pn < first)
-                {
-                    self.first_in_phase = Some(pn);
-                }
-            }
-            Err(AeadError) => self.failures += 1,
+        let outcome = self.receive.open(pn, phase, packet, now, retain);
+        // The peer started an update: answer it by updating the sending side too.
+        if outcome == Ok(Opened::Updated) && self.send.phase != self.receive.phase {
+            self.send.advance();
         }
         outcome
     }
 
-    /// Moves to the peer's next generation, and this side's too if it has not already.
-    fn advance_remote(&mut self, pn: PacketNumber, drop_previous_at: Duration) {
-        let next_secret = self.remote_secret.derive(b"quic ku");
-        let after_next = PacketKey::new(&next_secret.derive(b"quic ku"));
-        let current = mem::replace(&mut self.next_remote, after_next);
-        let previous = mem::replace(&mut self.remote, current);
-        self.previous_remote = Some((previous, drop_previous_at));
-        self.remote_secret = next_secret;
-        self.remote_phase = !self.remote_phase;
-        self.first_in_phase = Some(pn);
-        // The peer started the update: answer it by updating the sending side too.
-        if self.local_phase != self.remote_phase {
-            self.advance_local();
-        }
-    }
-
-    /// Moves this side's sending key to the next generation.
-    fn advance_local(&mut self) {
-        self.local_secret = self.local_secret.derive(b"quic ku");
-        self.local = PacketKey::new(&self.local_secret);
-        self.local_phase = !self.local_phase;
-        self.acknowledgment = Acknowledgment::Unused;
-        self.sealed = 0;
-    }
-
     /// Notes that the peer acknowledged packets up to a number.
     pub(crate) fn on_acked(&mut self, largest: PacketNumber) {
-        if let Acknowledgment::Pending(first) = self.acknowledgment
+        if let Acknowledgment::Pending(first) = self.send.acknowledgment
             && largest >= first
         {
-            self.acknowledgment = Acknowledgment::Confirmed;
+            self.send.acknowledgment = Acknowledgment::Confirmed;
         }
     }
 
     /// Starts an update when the sending key nears its confidentiality limit.
-    ///
-    /// An update needs the handshake confirmed and the current generation acknowledged.
     pub(crate) fn update_if_due(&mut self) -> bool {
-        let limit = confidentiality_limit(self.local_secret.suite());
+        let limit = confidentiality_limit(self.send.secret.suite());
         // Threshold: update at three quarters of the limit, leaving room for the confirmation.
-        if self.sealed < limit / 4 * 3 || !self.can_update() {
+        if self.send.sealed < limit / 4 * 3 {
             return false;
         }
-        self.advance_local();
-        true
+        self.force_update()
     }
 
     /// Starts an update now, if the rules of RFC 9001, section 6.1, allow one.
+    ///
+    /// The peer must have acknowledged the current generation, and answered any update in progress.
     pub(crate) fn force_update(&mut self) -> bool {
-        if !self.can_update() {
+        if self.send.phase != self.receive.phase
+            || self.send.acknowledgment != Acknowledgment::Confirmed
+        {
             return false;
         }
-        self.advance_local();
+        self.send.advance();
         true
     }
 
-    /// Whether this side may start an update.
-    fn can_update(&self) -> bool {
-        self.local_phase == self.remote_phase && self.acknowledgment == Acknowledgment::Confirmed
-    }
-
     /// Whether the failed decryptions reached the integrity limit.
-    pub(crate) fn integrity_exhausted(&self) -> bool {
-        self.failures >= integrity_limit(self.remote_secret.suite())
+    pub(crate) const fn integrity_exhausted(&self) -> bool {
+        self.receive.failures >= integrity_limit(self.receive.secret.suite())
     }
 
     /// Whether the sending key reached its confidentiality limit without an update.
-    pub(crate) fn confidentiality_exhausted(&self) -> bool {
-        self.sealed >= confidentiality_limit(self.local_secret.suite())
+    pub(crate) const fn confidentiality_exhausted(&self) -> bool {
+        self.send.sealed >= confidentiality_limit(self.send.secret.suite())
     }
 }
 
@@ -297,20 +359,34 @@ mod tests {
         (client, server)
     }
 
+    /// Opens a payload at one second, keeping previous keys for three.
+    fn open(
+        keys: &mut OneRttKeys,
+        pn: u64,
+        phase: bool,
+        payload: &mut [u8],
+        tag: &[u8; TAG_LEN],
+    ) -> Result<Opened, AeadError> {
+        let packet = Protected {
+            header: b"h",
+            payload,
+            tag,
+        };
+        keys.open(
+            PacketNumber(pn),
+            phase,
+            packet,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+    }
+
     /// Seals one payload on one side and opens it on the other.
     fn deliver(from: &mut OneRttKeys, to: &mut OneRttKeys, pn: u64) -> Result<Opened, AeadError> {
         let mut payload = *b"data";
         let phase = from.phase();
-        let tag = from.seal(PacketNumber(pn), b"h", &mut payload);
-        to.open(
-            PacketNumber(pn),
-            phase,
-            b"h",
-            &mut payload,
-            &tag,
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        )
+        let tag = from.send.seal(PacketNumber(pn), b"h", &mut payload);
+        open(to, pn, phase, &mut payload, &tag)
     }
 
     #[test]
@@ -331,7 +407,10 @@ mod tests {
 
         // The client receives the server's flipped packet under its already-derived next key.
         assert_eq!(deliver(&mut server, &mut client, 1), Ok(Opened::Updated));
-        assert_eq!(client.local_phase, client.remote_phase);
+        assert_eq!(client.send.phase, client.receive.phase);
+
+        // Until the server acknowledges a phase 1 packet, no further update may start.
+        assert!(!client.force_update());
     }
 
     #[test]
@@ -340,22 +419,16 @@ mod tests {
 
         // Packet 5 is sealed in phase 0 but delayed.
         let mut late = *b"late";
-        let late_tag = client.seal(PacketNumber(5), b"h", &mut late);
+        let late_tag = client.send.seal(PacketNumber(5), b"h", &mut late);
         client.on_acked(PacketNumber(5));
         assert!(client.force_update());
         assert_eq!(deliver(&mut client, &mut server, 6), Ok(Opened::Updated));
 
         // Packet 5 carries phase 0 and a lower number, so the previous key opens it.
-        let opened = server.open(
-            PacketNumber(5),
-            false,
-            b"h",
-            &mut late,
-            &late_tag,
-            Duration::from_secs(2),
-            Duration::from_secs(3),
+        assert_eq!(
+            open(&mut server, 5, false, &mut late, &late_tag),
+            Ok(Opened::Current)
         );
-        assert_eq!(opened, Ok(Opened::Current));
         assert_eq!(&late, b"late");
     }
 
@@ -363,17 +436,11 @@ mod tests {
     fn forged_flip_changes_nothing() {
         let (_, mut server) = pair(CipherSuite::Aes128GcmSha256);
         let mut payload = *b"junk";
-        let opened = server.open(
-            PacketNumber(3),
-            true,
-            b"h",
-            &mut payload,
-            &[0; TAG_LEN],
-            Duration::ZERO,
-            Duration::from_secs(3),
+        assert_eq!(
+            open(&mut server, 3, true, &mut payload, &[0; TAG_LEN]),
+            Err(AeadError)
         );
-        assert_eq!(opened, Err(AeadError));
         assert!(!server.phase());
-        assert_eq!(server.failures, 1);
+        assert_eq!(server.receive.failures, 1);
     }
 }

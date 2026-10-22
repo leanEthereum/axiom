@@ -36,16 +36,6 @@ impl RecvBuffer {
         self.delivered
     }
 
-    /// The final size, once known.
-    pub(crate) const fn final_size(&self) -> Option<u64> {
-        self.final_size
-    }
-
-    /// Bytes waiting behind a gap.
-    pub(crate) const fn pending_bytes(&self) -> usize {
-        self.pending_bytes
-    }
-
     /// Whether every byte up to the final size has been delivered.
     pub(crate) fn is_finished(&self) -> bool {
         self.final_size == Some(self.delivered)
@@ -146,7 +136,7 @@ mod tests {
         // "world" arrives first, at offset 6: nothing is ready.
         buffer.insert(6, b"world", true).unwrap();
         assert_eq!(buffer.take_ready(), None);
-        assert_eq!(buffer.pending_bytes(), 5);
+        assert_eq!(buffer.pending_bytes, 5);
 
         // "hello " overlapping "w" arrives: both are ready, "w" counted once.
         buffer.insert(0, b"hello w", false).unwrap();
@@ -190,7 +180,7 @@ mod tests {
             error("final size below data already received")
         );
         assert_eq!(buffer.reset(25), Ok(()));
-        assert_eq!(buffer.final_size(), Some(25));
+        assert_eq!(buffer.final_size, Some(25));
         assert_eq!(buffer.highest(), 25);
     }
 
@@ -225,7 +215,7 @@ mod tests {
             }
             prop_assert_eq!(out, data);
             prop_assert!(buffer.is_finished());
-            prop_assert_eq!(buffer.pending_bytes(), 0);
+            prop_assert_eq!(buffer.pending_bytes, 0);
         }
     }
 }

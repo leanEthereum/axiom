@@ -14,7 +14,11 @@
 //! See `libp2p/specs/quic/README.md`.
 
 mod cid;
+mod config;
+mod connection;
 mod crypto;
+mod endpoint;
+mod entropy;
 mod error;
 mod event;
 mod frame;
@@ -30,6 +34,10 @@ mod transport_parameters;
 mod varint;
 
 pub use cid::ConnectionId;
+pub use config::QuicConfig;
+pub use connection::{Connection, Transmit};
+pub use endpoint::{ConnectionHandle, DatagramEvent, Endpoint};
+pub use entropy::Entropy;
 pub use error::{ConnectionError, DecodeError, QuicError, TransportError, TransportErrorCode};
 pub use event::Event;
 pub use stream::{Side, StreamId, StreamLimits};

@@ -222,76 +222,26 @@ impl<'a> Frame<'a> {
                 }
                 Self::NewToken(token)
             }
-            types::STREAM..=types::STREAM_LAST => {
-                let id = StreamId(reader.varint()?.get());
-                let offset = if frame_type & STREAM_OFF == 0 {
-                    0
-                } else {
-                    reader.varint()?.get()
-                };
-                let data = if frame_type & STREAM_LEN == 0 {
-                    reader.rest()
-                } else {
-                    reader.length_prefixed()?
-                };
-                if offset + data.len() as u64 > VarInt::MAX.get() {
-                    return Err(malformed("stream data ends beyond 2^62 - 1"));
-                }
-                Self::Stream {
-                    id,
-                    offset,
-                    data,
-                    fin: frame_type & STREAM_FIN != 0,
-                }
-            }
+            types::STREAM..=types::STREAM_LAST => Self::decode_stream(reader, frame_type)?,
             types::MAX_DATA => Self::MaxData(reader.varint()?.get()),
             types::MAX_STREAM_DATA => Self::MaxStreamData {
                 id: StreamId(reader.varint()?.get()),
                 max: reader.varint()?.get(),
             },
-            types::MAX_STREAMS_BIDI | types::MAX_STREAMS_UNI => {
-                let max = reader.varint()?.get();
-                if max > MAX_STREAM_COUNT {
-                    return Err(malformed("stream count above 2^60"));
-                }
-                Self::MaxStreams {
-                    bidi: frame_type == types::MAX_STREAMS_BIDI,
-                    max,
-                }
-            }
+            types::MAX_STREAMS_BIDI | types::MAX_STREAMS_UNI => Self::MaxStreams {
+                bidi: frame_type == types::MAX_STREAMS_BIDI,
+                max: Self::stream_count(reader, frame_type)?,
+            },
             types::DATA_BLOCKED => Self::DataBlocked(reader.varint()?.get()),
             types::STREAM_DATA_BLOCKED => Self::StreamDataBlocked {
                 id: StreamId(reader.varint()?.get()),
                 limit: reader.varint()?.get(),
             },
-            types::STREAMS_BLOCKED_BIDI | types::STREAMS_BLOCKED_UNI => {
-                let limit = reader.varint()?.get();
-                if limit > MAX_STREAM_COUNT {
-                    return Err(malformed("stream count above 2^60"));
-                }
-                Self::StreamsBlocked {
-                    bidi: frame_type == types::STREAMS_BLOCKED_BIDI,
-                    limit,
-                }
-            }
-            types::NEW_CONNECTION_ID => {
-                let sequence = reader.varint()?.get();
-                let retire_prior_to = reader.varint()?.get();
-                if retire_prior_to > sequence {
-                    return Err(malformed("retire prior to exceeds the sequence number"));
-                }
-                let len = usize::from(reader.u8()?);
-                if !(1..=ConnectionId::MAX_LEN).contains(&len) {
-                    return Err(malformed("connection id length outside 1 to 20"));
-                }
-                let id = ConnectionId::new(reader.bytes(len)?)?;
-                Self::NewConnectionId {
-                    sequence,
-                    retire_prior_to,
-                    id,
-                    reset_token: reader.array()?,
-                }
-            }
+            types::STREAMS_BLOCKED_BIDI | types::STREAMS_BLOCKED_UNI => Self::StreamsBlocked {
+                bidi: frame_type == types::STREAMS_BLOCKED_BIDI,
+                limit: Self::stream_count(reader, frame_type)?,
+            },
+            types::NEW_CONNECTION_ID => Self::decode_new_connection_id(reader)?,
             types::RETIRE_CONNECTION_ID => Self::RetireConnectionId(reader.varint()?.get()),
             types::PATH_CHALLENGE => Self::PathChallenge(reader.array()?),
             types::PATH_RESPONSE => Self::PathResponse(reader.array()?),
@@ -314,9 +264,72 @@ impl<'a> Frame<'a> {
         Ok(frame)
     }
 
+    /// Decodes a STREAM frame body, whose type bits say which fields are present.
+    fn decode_stream(reader: &mut Reader<'a>, frame_type: u64) -> Result<Self, DecodeError> {
+        let id = StreamId(reader.varint()?.get());
+        let offset = if frame_type & STREAM_OFF == 0 {
+            0
+        } else {
+            reader.varint()?.get()
+        };
+        let data = if frame_type & STREAM_LEN == 0 {
+            reader.rest()
+        } else {
+            reader.length_prefixed()?
+        };
+        if offset + data.len() as u64 > VarInt::MAX.get() {
+            return Err(DecodeError::MalformedFrame {
+                frame_type,
+                rule: "stream data ends beyond 2^62 - 1",
+            });
+        }
+        Ok(Self::Stream {
+            id,
+            offset,
+            data,
+            fin: frame_type & STREAM_FIN != 0,
+        })
+    }
+
+    /// Decodes a NEW_CONNECTION_ID frame body.
+    fn decode_new_connection_id(reader: &mut Reader<'a>) -> Result<Self, DecodeError> {
+        let malformed = |rule| DecodeError::MalformedFrame {
+            frame_type: types::NEW_CONNECTION_ID,
+            rule,
+        };
+        let sequence = reader.varint()?.get();
+        let retire_prior_to = reader.varint()?.get();
+        if retire_prior_to > sequence {
+            return Err(malformed("retire prior to exceeds the sequence number"));
+        }
+        let len = usize::from(reader.u8()?);
+        if !(1..=ConnectionId::MAX_LEN).contains(&len) {
+            return Err(malformed("connection id length outside 1 to 20"));
+        }
+        let id = ConnectionId::new(reader.bytes(len)?)?;
+        Ok(Self::NewConnectionId {
+            sequence,
+            retire_prior_to,
+            id,
+            reset_token: reader.array()?,
+        })
+    }
+
+    /// Decodes a stream count, which may not exceed 2^60.
+    fn stream_count(reader: &mut Reader<'a>, frame_type: u64) -> Result<u64, DecodeError> {
+        let count = reader.varint()?.get();
+        if count > MAX_STREAM_COUNT {
+            return Err(DecodeError::MalformedFrame {
+                frame_type,
+                rule: "stream count above 2^60",
+            });
+        }
+        Ok(count)
+    }
+
     /// The type value this frame is written with.
     #[must_use]
-    pub(crate) fn frame_type(&self) -> u64 {
+    pub(crate) const fn frame_type(&self) -> u64 {
         match self {
             Self::Padding(_) => types::PADDING,
             Self::Ping => types::PING,
@@ -433,15 +446,14 @@ impl<'a> Frame<'a> {
                 varint(data.len() as u64, out);
                 out.extend_from_slice(data);
             }
-            Self::MaxData(value) | Self::DataBlocked(value) | Self::RetireConnectionId(value) => {
-                varint(*value, out);
-            }
+            Self::MaxData(value)
+            | Self::DataBlocked(value)
+            | Self::RetireConnectionId(value)
+            | Self::MaxStreams { max: value, .. }
+            | Self::StreamsBlocked { limit: value, .. } => varint(*value, out),
             Self::MaxStreamData { id, max: value }
             | Self::StreamDataBlocked { id, limit: value } => {
                 varint(id.0, out);
-                varint(*value, out);
-            }
-            Self::MaxStreams { max: value, .. } | Self::StreamsBlocked { limit: value, .. } => {
                 varint(*value, out);
             }
             Self::NewConnectionId {
@@ -473,7 +485,7 @@ impl<'a> Frame<'a> {
 
     /// Bytes of the header of a STREAM frame, before its data.
     #[must_use]
-    pub(crate) fn stream_header_len(id: StreamId, offset: u64, data_len: usize) -> usize {
+    pub(crate) const fn stream_header_len(id: StreamId, offset: u64, data_len: usize) -> usize {
         let offset_len = if offset == 0 {
             0
         } else {
@@ -486,7 +498,7 @@ impl<'a> Frame<'a> {
 
     /// Bytes of the header of a CRYPTO frame, before its data.
     #[must_use]
-    pub(crate) fn crypto_header_len(offset: u64, data_len: usize) -> usize {
+    pub(crate) const fn crypto_header_len(offset: u64, data_len: usize) -> usize {
         1 + VarInt::saturating(offset).encoded_len()
             + VarInt::saturating(data_len as u64).encoded_len()
     }
@@ -751,11 +763,9 @@ mod tests {
     proptest! {
         #[test]
         fn garbage_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..300)) {
-            for frame in FrameIter::new(&bytes) {
-                if let Ok(frame) = frame {
-                    let mut out = Vec::new();
-                    frame.encode(&mut out);
-                }
+            for frame in FrameIter::new(&bytes).flatten() {
+                let mut out = Vec::new();
+                frame.encode(&mut out);
             }
         }
 

@@ -162,7 +162,7 @@ mod tests {
             let bytes = hex(encoded);
             let mut input = bytes.as_slice();
             assert_eq!(VarInt::decode(&mut input), Ok(VarInt(value)));
-            assert!(input.is_empty());
+            assert_eq!(input, []);
         }
 
         // Encoding is shortest-form, so 37 comes back as the single byte only.

@@ -242,15 +242,13 @@ impl<'a> ProtectedPacket<'a> {
         scid: ConnectionId,
     ) -> Result<(Self, &'a [u8]), DecodeError> {
         let list = reader.rest();
-        if list.is_empty() || list.len() % 4 != 0 {
+        if list.is_empty() || !list.len().is_multiple_of(4) {
             return Err(DecodeError::MalformedHeader {
                 rule: "version list is empty or not a multiple of four bytes",
             });
         }
-        let versions = list
-            .chunks_exact(4)
-            .map(|chunk| u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
+        let (words, _) = list.as_chunks::<4>();
+        let versions = words.iter().map(|word| u32::from_be_bytes(*word)).collect();
         let packet = Self {
             header: Header::VersionNegotiation {
                 dcid,
@@ -264,7 +262,7 @@ impl<'a> ProtectedPacket<'a> {
     }
 
     /// A Retry packet: a token, then the integrity tag, to the end.
-    fn parse_retry(
+    const fn parse_retry(
         datagram: &'a [u8],
         mut reader: Reader<'a>,
         dcid: ConnectionId,
@@ -335,7 +333,7 @@ mod tests {
         );
         assert_eq!(packet.pn_offset, 18);
         assert_eq!(packet.bytes.len(), 1200);
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
     }
 
     #[test]
@@ -362,7 +360,7 @@ mod tests {
             }
         );
         assert_eq!(third.pn_offset, 9);
-        assert!(rest.is_empty());
+        assert_eq!(rest, []);
     }
 
     #[test]

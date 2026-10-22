@@ -57,11 +57,13 @@ impl NewReno {
     }
 
     /// The congestion window.
+    #[cfg(test)]
     pub(crate) const fn window(&self) -> u64 {
         self.window
     }
 
     /// Bytes in flight.
+    #[cfg(test)]
     pub(crate) const fn in_flight(&self) -> u64 {
         self.in_flight
     }
@@ -121,7 +123,7 @@ impl NewReno {
     }
 
     /// Collapses the window after persistent congestion, per RFC 9002, section 7.6.2.
-    pub(crate) fn on_persistent_congestion(&mut self) {
+    pub(crate) const fn on_persistent_congestion(&mut self) {
         self.window = self.min_window();
         self.recovery_start = None;
         self.avoidance_credit = 0;

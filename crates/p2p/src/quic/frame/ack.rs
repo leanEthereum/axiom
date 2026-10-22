@@ -110,6 +110,8 @@ impl AckFrame {
 
 #[cfg(test)]
 mod tests {
+    use std::iter;
+
     use super::*;
 
     #[test]
@@ -131,7 +133,7 @@ mod tests {
 
         let mut reader = Reader::new(&out[1..]);
         assert_eq!(AckFrame::decode(&mut reader, ACK), Ok(frame));
-        assert!(reader.is_empty());
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
@@ -180,7 +182,7 @@ mod tests {
     #[test]
     fn carries_ecn_counts() {
         let frame = AckFrame {
-            ranges: vec![3..4],
+            ranges: iter::once(3..4).collect(),
             delay: 0,
             ecn: Some([1, 2, 3]),
         };

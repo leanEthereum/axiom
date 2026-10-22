@@ -28,6 +28,20 @@ pub(crate) struct Chunk {
     pub(crate) fin: bool,
 }
 
+/// The progress of a stream's end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Fin {
+    /// The owner may still write.
+    #[default]
+    Open,
+    /// The owner finished; the FIN must go out, for the first time or again.
+    Due,
+    /// A frame carrying the FIN is in flight.
+    Sent,
+    /// The peer acknowledged the FIN.
+    Acked,
+}
+
 /// Bytes written to a stream and not yet acknowledged.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SendBuffer {
@@ -41,41 +55,32 @@ pub(crate) struct SendBuffer {
     lost: RangeSet,
     /// Acknowledged ranges above the base.
     acked: RangeSet,
-    /// Whether the owner finished the stream.
-    finished: bool,
-    /// Whether a frame carrying the FIN is in flight or acknowledged.
-    fin_sent: bool,
-    /// Whether the FIN was declared lost and must be sent again.
-    fin_lost: bool,
-    /// Whether the peer acknowledged the FIN.
-    fin_acked: bool,
+    /// Where the stream's end stands.
+    fin: Fin,
 }
 
 impl SendBuffer {
     /// Appends bytes to the stream.
     pub(crate) fn write(&mut self, bytes: &[u8]) {
-        debug_assert!(!self.finished, "write after finish");
+        debug_assert!(self.fin == Fin::Open, "write after finish");
         self.data.extend(bytes);
     }
 
     /// Marks the end of the stream after the bytes written so far.
-    pub(crate) const fn finish(&mut self) {
-        self.finished = true;
+    pub(crate) fn finish(&mut self) {
+        if self.fin == Fin::Open {
+            self.fin = Fin::Due;
+        }
     }
 
     /// Whether the owner finished the stream.
-    pub(crate) const fn is_finished(&self) -> bool {
-        self.finished
+    pub(crate) fn is_finished(&self) -> bool {
+        self.fin != Fin::Open
     }
 
     /// The offset one past the last byte written.
     pub(crate) fn end(&self) -> u64 {
         self.base + self.data.len() as u64
-    }
-
-    /// Bytes held: written and not yet acknowledged as a contiguous prefix.
-    pub(crate) fn buffered(&self) -> usize {
-        self.data.len()
     }
 
     /// Bytes written but never sent.
@@ -85,7 +90,7 @@ impl SendBuffer {
 
     /// Whether every byte and the FIN, if any, are acknowledged.
     pub(crate) fn is_complete(&self) -> bool {
-        self.finished && self.fin_acked && self.data.is_empty()
+        self.fin == Fin::Acked && self.data.is_empty()
     }
 
     /// Whether something waits to be sent below a flow control limit.
@@ -95,7 +100,7 @@ impl SendBuffer {
 
     /// Whether the FIN must go out in a frame of its own or with the last bytes.
     fn fin_due(&self) -> bool {
-        self.finished && self.unsent == self.end() && (!self.fin_sent || self.fin_lost)
+        self.fin == Fin::Due && self.unsent == self.end()
     }
 
     /// Chooses the next chunk to send, lost bytes first.
@@ -115,9 +120,9 @@ impl SendBuffer {
                 self.lost.insert(range.start + len..range.end);
             }
             // A resent final chunk carries the FIN again when that was lost too.
-            let fin = self.finished && range.start + len == self.end() && self.fin_lost;
+            let fin = self.fin_due() && range.start + len == self.end();
             if fin {
-                self.fin_lost = false;
+                self.fin = Fin::Sent;
             }
             return Some(Chunk {
                 offset: range.start,
@@ -130,8 +135,7 @@ impl SendBuffer {
             .saturating_sub(self.unsent)
             .min(self.end() - self.unsent);
         let len = room.min(max_len as u64);
-        let fin =
-            self.finished && self.unsent + len == self.end() && (!self.fin_sent || self.fin_lost);
+        let fin = self.fin == Fin::Due && self.unsent + len == self.end();
         if len == 0 && !fin {
             return None;
         }
@@ -143,8 +147,7 @@ impl SendBuffer {
         };
         self.unsent += len;
         if fin {
-            self.fin_sent = true;
-            self.fin_lost = false;
+            self.fin = Fin::Sent;
         }
         Some(chunk)
     }
@@ -169,8 +172,7 @@ impl SendBuffer {
     pub(crate) fn on_acked(&mut self, chunk: Chunk) {
         let range = chunk.offset..chunk.offset + chunk.len as u64;
         if chunk.fin {
-            self.fin_acked = true;
-            self.fin_lost = false;
+            self.fin = Fin::Acked;
         }
         if range.is_empty() || range.end <= self.base {
             return;
@@ -196,8 +198,8 @@ impl SendBuffer {
                 self.lost.insert(gap);
             }
         }
-        if chunk.fin && !self.fin_acked {
-            self.fin_lost = true;
+        if chunk.fin && self.fin == Fin::Sent {
+            self.fin = Fin::Due;
         }
     }
 
@@ -264,7 +266,8 @@ mod tests {
         // The second chunk is lost and the third acknowledged.
         buffer.on_lost(second);
         buffer.on_acked(third);
-        assert_eq!(buffer.acked.iter().collect::<Vec<_>>(), [20..30]);
+        assert_eq!(buffer.acked.iter().next(), Some(20..30));
+        assert_eq!(buffer.acked.range_count(), 1);
         assert_eq!(
             buffer.next_chunk(4, 100),
             Some(Chunk {
@@ -276,11 +279,11 @@ mod tests {
 
         // The first chunk's ack frees bytes 0..10 only: 10..20 are still unacknowledged.
         buffer.on_acked(first);
-        assert_eq!(buffer.buffered(), 20);
+        assert_eq!(buffer.data.len(), 20);
 
         // A late ack of the lost chunk frees everything and cancels its retransmission.
         buffer.on_acked(second);
-        assert_eq!(buffer.buffered(), 0);
+        assert_eq!(buffer.data.len(), 0);
         assert_eq!(buffer.next_chunk(10, 100), None);
     }
 

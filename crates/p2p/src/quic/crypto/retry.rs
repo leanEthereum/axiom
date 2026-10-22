@@ -37,11 +37,6 @@ impl RetryTag {
         Self(Aes128Gcm::new(&KEY).seal_in_place_detached(&NONCE, &pseudo, &mut []))
     }
 
-    /// The tag bytes.
-    pub(crate) const fn to_bytes(self) -> [u8; RETRY_TAG_LEN] {
-        self.0
-    }
-
     /// Whether a received tag matches.
     ///
     /// The tag is public, so a variable-time comparison leaks nothing.
@@ -63,7 +58,7 @@ mod tests {
         let original = ConnectionId::new(&hex("8394c8f03e515708")).unwrap();
         let (body, tag) = packet.split_at(packet.len() - RETRY_TAG_LEN);
         let expected: [u8; RETRY_TAG_LEN] = tag.try_into().unwrap();
-        assert_eq!(RetryTag::compute(&original, body).to_bytes(), expected);
+        assert_eq!(RetryTag::compute(&original, body).0, expected);
         assert!(RetryTag::compute(&original, body).matches(&expected));
 
         // Another original dcid gives another tag, so a forged Retry fails.

@@ -154,7 +154,7 @@ pub(crate) struct Streams {
     /// Local limits.
     limits: StreamLimits,
     /// Live streams.
-    streams: BTreeMap<StreamId, Stream>,
+    map: BTreeMap<StreamId, Stream>,
     /// Streams that may have frames to send.
     ready: BTreeSet<StreamId>,
     /// Index of the next stream this side opens.
@@ -162,7 +162,7 @@ pub(crate) struct Streams {
     /// Streams this side may open in all, as the peer allows.
     local_limit: u64,
     /// Whether a STREAMS_BLOCKED report is due.
-    streams_blocked_due: bool,
+    blocked_due: bool,
     /// Index of the next stream the peer may open.
     next_remote: u64,
     /// Peer streams that ended, which raise the peer's stream allowance.
@@ -191,15 +191,15 @@ pub(crate) struct Streams {
 
 impl Streams {
     /// No streams, with limits that wait for the peer's transport parameters.
-    pub(crate) fn new(side: Side, limits: StreamLimits) -> Self {
+    pub(crate) const fn new(side: Side, limits: StreamLimits) -> Self {
         Self {
             side,
             limits,
-            streams: BTreeMap::new(),
+            map: BTreeMap::new(),
             ready: BTreeSet::new(),
             next_local: 0,
             local_limit: 0,
-            streams_blocked_due: false,
+            blocked_due: false,
             next_remote: 0,
             remote_closed: 0,
             remote_limit: limits.max_inbound_streams,
@@ -237,7 +237,7 @@ impl Streams {
     /// Opens a stream.
     pub(crate) fn open(&mut self) -> Result<StreamId, QuicError> {
         if self.next_local >= self.local_limit {
-            self.streams_blocked_due = true;
+            self.blocked_due = true;
             return Err(QuicError::StreamLimit {
                 max: self.local_limit,
             });
@@ -250,7 +250,7 @@ impl Streams {
 
     /// Adds a stream with a send credit.
     fn insert(&mut self, id: StreamId, send_window: u64) {
-        self.streams.insert(
+        self.map.insert(
             id,
             Stream {
                 send: SendHalf::Open(SendBuffer::default()),
@@ -264,7 +264,7 @@ impl Streams {
 
     /// The stream as the owner sees it.
     fn visible(&mut self, id: StreamId) -> Result<&mut Stream, QuicError> {
-        self.streams
+        self.map
             .get_mut(&id)
             .filter(|stream| stream.visible)
             .ok_or(QuicError::UnknownStream(id))
@@ -298,7 +298,7 @@ impl Streams {
 
     /// Bytes a stream accepts before its send buffer is full, or zero when it cannot be written.
     pub(crate) fn writable(&self, id: StreamId) -> usize {
-        match self.streams.get(&id) {
+        match self.map.get(&id) {
             Some(Stream {
                 send: SendHalf::Open(buffer),
                 visible: true,
@@ -313,12 +313,12 @@ impl Streams {
 
     /// Whether the owner sees the stream as open.
     pub(crate) fn is_open(&self, id: StreamId) -> bool {
-        self.streams.get(&id).is_some_and(|stream| stream.visible)
+        self.map.get(&id).is_some_and(|stream| stream.visible)
     }
 
     /// Credits consumed bytes to the stream and the connection.
     pub(crate) fn consume(&mut self, id: StreamId, len: usize) {
-        if let Some(stream) = self.streams.get_mut(&id) {
+        if let Some(stream) = self.map.get_mut(&id) {
             stream.recv_credit.consume(len as u64);
             if stream.recv_credit.is_update_due() {
                 self.ready.insert(id);
@@ -387,7 +387,7 @@ impl Streams {
                 )
                 .on_frame(frame_type));
             }
-            return Ok(self.streams.get_mut(&id));
+            return Ok(self.map.get_mut(&id));
         }
         if id.index() >= self.remote_limit {
             return Err(TransportError::new(
@@ -403,7 +403,7 @@ impl Streams {
             self.insert(opened, self.peer_window_remote);
             self.events.push_back(Event::InboundStream(opened));
         }
-        Ok(self.streams.get_mut(&id))
+        Ok(self.map.get_mut(&id))
     }
 
     /// Handles a stream-related frame from the peer.
@@ -446,7 +446,7 @@ impl Streams {
             }
             Frame::MaxData(max) => {
                 self.connection_send.raise(max);
-                self.ready.extend(self.streams.keys().copied());
+                self.ready.extend(self.map.keys().copied());
                 Ok(())
             }
             Frame::MaxStreams { bidi: true, max } => {
@@ -506,7 +506,7 @@ impl Streams {
 
     /// Reports the bytes of a stream that became contiguous, and its end.
     fn deliver(&mut self, id: StreamId) {
-        let Some(stream) = self.streams.get_mut(&id) else {
+        let Some(stream) = self.map.get_mut(&id) else {
             return;
         };
         let RecvHalf::Open(buffer) = &mut stream.recv else {
@@ -579,10 +579,10 @@ impl Streams {
 
     /// Drops a finished stream, raising the peer's allowance when it was a peer stream.
     fn forget_if_done(&mut self, id: StreamId) {
-        if !self.streams.get(&id).is_some_and(Stream::is_done) {
+        if !self.map.get(&id).is_some_and(Stream::is_done) {
             return;
         }
-        self.streams.remove(&id);
+        self.map.remove(&id);
         self.ready.remove(&id);
         if id.initiator() != self.side {
             self.remote_closed += 1;
@@ -595,7 +595,7 @@ impl Streams {
     pub(crate) fn has_pending(&self) -> bool {
         !self.ready.is_empty()
             || self.remote_limit_due
-            || self.streams_blocked_due
+            || self.blocked_due
             || self.connection_recv.is_update_due()
     }
 
@@ -648,8 +648,8 @@ impl Streams {
                 limit: self.remote_limit,
             });
         }
-        if out.len() + 9 <= max && self.streams_blocked_due {
-            self.streams_blocked_due = false;
+        if out.len() + 9 <= max && self.blocked_due {
+            self.blocked_due = false;
             Frame::StreamsBlocked {
                 bidi: true,
                 limit: self.local_limit,
@@ -677,7 +677,7 @@ impl Streams {
             .connection_send
             .limit()
             .saturating_sub(self.connection_sent);
-        let Some(stream) = self.streams.get_mut(&id) else {
+        let Some(stream) = self.map.get_mut(&id) else {
             self.ready.remove(&id);
             return;
         };
@@ -782,7 +782,7 @@ impl Streams {
                 if let Some(Stream {
                     send: SendHalf::Open(buffer),
                     ..
-                }) = self.streams.get_mut(&id)
+                }) = self.map.get_mut(&id)
                 {
                     buffer.on_acked(chunk);
                 }
@@ -792,7 +792,7 @@ impl Streams {
                 if let Some(Stream {
                     send: SendHalf::Reset { acked, .. },
                     ..
-                }) = self.streams.get_mut(&id)
+                }) = self.map.get_mut(&id)
                 {
                     *acked = true;
                 }
@@ -813,7 +813,7 @@ impl Streams {
                 if let Some(Stream {
                     send: SendHalf::Open(buffer),
                     ..
-                }) = self.streams.get_mut(&id)
+                }) = self.map.get_mut(&id)
                 {
                     buffer.on_lost(chunk);
                     self.ready.insert(id);
@@ -823,7 +823,7 @@ impl Streams {
                 if let Some(Stream {
                     send: SendHalf::Reset { due, acked, .. },
                     ..
-                }) = self.streams.get_mut(&id)
+                }) = self.map.get_mut(&id)
                     && !*acked
                 {
                     *due = true;
@@ -834,14 +834,14 @@ impl Streams {
                 if let Some(Stream {
                     recv: RecvHalf::Stopped { due },
                     ..
-                }) = self.streams.get_mut(&id)
+                }) = self.map.get_mut(&id)
                 {
                     *due = true;
                     self.ready.insert(id);
                 }
             }
             StreamRecord::MaxStreamData { id, limit } => {
-                if let Some(stream) = self.streams.get_mut(&id) {
+                if let Some(stream) = self.map.get_mut(&id) {
                     stream.recv_credit.on_update_lost(limit);
                     self.ready.insert(id);
                 }
@@ -854,11 +854,6 @@ impl Streams {
             }
             StreamRecord::Blocked => {}
         }
-    }
-
-    /// Live streams, including those the owner aborted but the peer has not yet acknowledged.
-    pub(crate) fn len(&self) -> usize {
-        self.streams.len()
     }
 }
 
@@ -948,7 +943,7 @@ mod tests {
                 Event::StreamFinished(id)
             ]
         );
-        assert_eq!((client.len(), server.len()), (0, 0));
+        assert_eq!((client.map.len(), server.map.len()), (0, 0));
     }
 
     #[test]
@@ -1032,8 +1027,8 @@ mod tests {
 
         // The server's own reset completes the exchange, and both forget the stream.
         pump(&mut server, &mut client).unwrap();
-        assert_eq!((client.len(), server.len()), (0, 0));
-        assert!(events(&mut client).is_empty());
+        assert_eq!((client.map.len(), server.map.len()), (0, 0));
+        assert_eq!(events(&mut client), []);
     }
 
     #[test]

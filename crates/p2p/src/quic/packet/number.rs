@@ -20,7 +20,7 @@ impl PacketNumber {
         }
         .max(1);
         // Bits to represent 2 * unacked values: ceil(log2(2 * unacked)).
-        let bits = u64::BITS - (2 * unacked - 1).leading_zeros();
+        let bits = (2 * unacked - 1).bit_width();
         (bits as usize).div_ceil(8).clamp(1, 4)
     }
 

@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(packet, hex("4cfe4189655e5cd55c41f69080575d7999c25a5bfb"));
 
         // Unprotecting restores the header and yields the three-byte number.
-        assert_eq!(keys.header.unprotect(&mut packet, 1), Ok((3, 0x00bf_f4)));
+        assert_eq!(keys.header.unprotect(&mut packet, 1), Ok((3, 0xbff4)));
         let (header, rest) = packet.split_at_mut(4);
         let (payload, tag) = rest.split_at_mut(1);
         let tag: [u8; TAG_LEN] = (&*tag).try_into().unwrap();

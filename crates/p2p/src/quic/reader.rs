@@ -31,7 +31,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Takes a number of bytes.
-    pub(crate) fn bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+    pub(crate) const fn bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
         if self.rest.len() < len {
             return Err(DecodeError::Truncated {
                 needed: len,
@@ -53,11 +53,6 @@ impl<'a> Reader<'a> {
     /// Takes one byte.
     pub(crate) fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(self.array::<1>()?[0])
-    }
-
-    /// Takes a big-endian 16-bit integer.
-    pub(crate) fn u16(&mut self) -> Result<u16, DecodeError> {
-        Ok(u16::from_be_bytes(self.array()?))
     }
 
     /// Takes a big-endian 32-bit integer.
@@ -91,7 +86,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Takes everything left.
-    pub(crate) fn rest(&mut self) -> &'a [u8] {
+    pub(crate) const fn rest(&mut self) -> &'a [u8] {
         let rest = self.rest;
         self.rest = &[];
         rest
@@ -104,19 +99,16 @@ mod tests {
 
     #[test]
     fn reads_in_order() {
-        // One byte, a 16-bit and a 32-bit integer, a varint 37, then a 2-byte prefixed field.
-        let input = [
-            0xaa, 0x01, 0x02, 0x00, 0x00, 0x00, 0x05, 0x25, 0x02, 0xbe, 0xef, 0x99,
-        ];
+        // One byte, a 32-bit integer, a varint 37, then a 2-byte prefixed field.
+        let input = [0xaa, 0x00, 0x00, 0x00, 0x05, 0x25, 0x02, 0xbe, 0xef, 0x99];
         let mut reader = Reader::new(&input);
         assert_eq!(reader.u8(), Ok(0xaa));
-        assert_eq!(reader.u16(), Ok(0x0102));
         assert_eq!(reader.u32(), Ok(5));
         assert_eq!(reader.varint(), Ok(VarInt::from(37_u8)));
         assert_eq!(reader.length_prefixed(), Ok(&[0xbe, 0xef][..]));
         assert_eq!(reader.remaining(), 1);
         assert_eq!(reader.rest(), &[0x99]);
-        assert!(reader.is_empty());
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]

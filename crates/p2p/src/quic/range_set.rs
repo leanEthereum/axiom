@@ -35,11 +35,6 @@ impl RangeSet {
         self.ranges.first_key_value().map(|(start, _)| *start)
     }
 
-    /// The largest value.
-    pub(crate) fn max(&self) -> Option<u64> {
-        self.ranges.last_key_value().map(|(_, end)| end - 1)
-    }
-
     /// Whether a value is in the set.
     pub(crate) fn contains(&self, value: u64) -> bool {
         self.ranges
@@ -158,7 +153,8 @@ mod tests {
         assert!(set.insert(10..15));
         // Touching at 5 merges, overlap at 9..11 bridges into one range.
         assert!(set.insert(5..11));
-        assert_eq!(set.iter().collect::<Vec<_>>(), [0..15]);
+        assert_eq!(set.iter().next(), Some(0..15));
+        assert_eq!(set.range_count(), 1);
         // Fully covered: nothing new.
         assert!(!set.insert(3..7));
 
@@ -167,7 +163,7 @@ mod tests {
         assert_eq!(set.iter().collect::<Vec<_>>(), [0..4, 6..15]);
         set.remove_below(2);
         assert_eq!(set.iter().collect::<Vec<_>>(), [2..4, 6..15]);
-        assert_eq!((set.min(), set.max()), (Some(2), Some(14)));
+        assert_eq!(set.min(), Some(2));
         assert!(set.contains(3) && !set.contains(4) && set.contains(14) && !set.contains(15));
         assert_eq!(set.gaps(0..20), [0..2, 4..6, 15..20]);
         assert_eq!(set.pop_min(), Some(2..4));

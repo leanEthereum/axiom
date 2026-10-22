@@ -137,89 +137,96 @@ impl TransportParameters {
             if server_only && sender == Side::Client {
                 return Err(invalid("a client may not send it"));
             }
-            match id {
-                ids::ORIGINAL_DESTINATION_CONNECTION_ID => {
-                    params.original_destination_connection_id = Some(ConnectionId::new(value)?);
-                }
-                ids::MAX_IDLE_TIMEOUT => {
-                    params.max_idle_timeout = Duration::from_millis(Self::integer(id, value)?);
-                }
-                ids::STATELESS_RESET_TOKEN => {
-                    let token = value
-                        .try_into()
-                        .map_err(|_| invalid("reset token is not 16 bytes"))?;
-                    params.stateless_reset_token = Some(token);
-                }
-                ids::MAX_UDP_PAYLOAD_SIZE => {
-                    params.max_udp_payload_size = Self::integer(id, value)?;
-                    if params.max_udp_payload_size < MIN_UDP_PAYLOAD_SIZE {
-                        return Err(invalid("below 1200 bytes"));
-                    }
-                }
-                ids::INITIAL_MAX_DATA => params.initial_max_data = Self::integer(id, value)?,
-                ids::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
-                    params.initial_max_stream_data_bidi_local = Self::integer(id, value)?;
-                }
-                ids::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE => {
-                    params.initial_max_stream_data_bidi_remote = Self::integer(id, value)?;
-                }
-                ids::INITIAL_MAX_STREAM_DATA_UNI => {
-                    params.initial_max_stream_data_uni = Self::integer(id, value)?;
-                }
-                ids::INITIAL_MAX_STREAMS_BIDI | ids::INITIAL_MAX_STREAMS_UNI => {
-                    let count = Self::integer(id, value)?;
-                    if count > MAX_STREAMS {
-                        return Err(invalid("stream count above 2^60"));
-                    }
-                    if id == ids::INITIAL_MAX_STREAMS_BIDI {
-                        params.initial_max_streams_bidi = count;
-                    } else {
-                        params.initial_max_streams_uni = count;
-                    }
-                }
-                ids::ACK_DELAY_EXPONENT => {
-                    params.ack_delay_exponent = Self::integer(id, value)?;
-                    if params.ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
-                        return Err(invalid("ack delay exponent above 20"));
-                    }
-                }
-                ids::MAX_ACK_DELAY => {
-                    let millis = Self::integer(id, value)?;
-                    if millis >= MAX_ACK_DELAY_BOUND {
-                        return Err(invalid("max ack delay of 2^14 ms or more"));
-                    }
-                    params.max_ack_delay = Duration::from_millis(millis);
-                }
-                ids::DISABLE_ACTIVE_MIGRATION => {
-                    if !value.is_empty() {
-                        return Err(invalid("disable_active_migration carries a value"));
-                    }
-                    params.disable_active_migration = true;
-                }
-                ids::PREFERRED_ADDRESS => {
-                    // Addresses, a connection id and a token: at least 41 bytes.
-                    if value.len() < 41 {
-                        return Err(invalid("preferred address too short"));
-                    }
-                    params.preferred_address = true;
-                }
-                ids::ACTIVE_CONNECTION_ID_LIMIT => {
-                    params.active_connection_id_limit = Self::integer(id, value)?;
-                    if params.active_connection_id_limit < 2 {
-                        return Err(invalid("active connection id limit below 2"));
-                    }
-                }
-                ids::INITIAL_SOURCE_CONNECTION_ID => {
-                    params.initial_source_connection_id = Some(ConnectionId::new(value)?);
-                }
-                ids::RETRY_SOURCE_CONNECTION_ID => {
-                    params.retry_source_connection_id = Some(ConnectionId::new(value)?);
-                }
-                // Unknown parameters, GREASE included, are ignored.
-                _ => {}
-            }
+            params.set(id, value)?;
         }
         Ok(params)
+    }
+
+    /// Sets one parameter from its encoded value, checking its range.
+    fn set(&mut self, id: u64, value: &[u8]) -> Result<(), DecodeError> {
+        let invalid = |rule| DecodeError::TransportParameter { id, rule };
+        match id {
+            ids::ORIGINAL_DESTINATION_CONNECTION_ID => {
+                self.original_destination_connection_id = Some(ConnectionId::new(value)?);
+            }
+            ids::MAX_IDLE_TIMEOUT => {
+                self.max_idle_timeout = Duration::from_millis(Self::integer(id, value)?);
+            }
+            ids::STATELESS_RESET_TOKEN => {
+                let token = value
+                    .try_into()
+                    .map_err(|_| invalid("reset token is not 16 bytes"))?;
+                self.stateless_reset_token = Some(token);
+            }
+            ids::MAX_UDP_PAYLOAD_SIZE => {
+                self.max_udp_payload_size = Self::integer(id, value)?;
+                if self.max_udp_payload_size < MIN_UDP_PAYLOAD_SIZE {
+                    return Err(invalid("below 1200 bytes"));
+                }
+            }
+            ids::INITIAL_MAX_DATA => self.initial_max_data = Self::integer(id, value)?,
+            ids::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
+                self.initial_max_stream_data_bidi_local = Self::integer(id, value)?;
+            }
+            ids::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE => {
+                self.initial_max_stream_data_bidi_remote = Self::integer(id, value)?;
+            }
+            ids::INITIAL_MAX_STREAM_DATA_UNI => {
+                self.initial_max_stream_data_uni = Self::integer(id, value)?;
+            }
+            ids::INITIAL_MAX_STREAMS_BIDI | ids::INITIAL_MAX_STREAMS_UNI => {
+                let count = Self::integer(id, value)?;
+                if count > MAX_STREAMS {
+                    return Err(invalid("stream count above 2^60"));
+                }
+                if id == ids::INITIAL_MAX_STREAMS_BIDI {
+                    self.initial_max_streams_bidi = count;
+                } else {
+                    self.initial_max_streams_uni = count;
+                }
+            }
+            ids::ACK_DELAY_EXPONENT => {
+                self.ack_delay_exponent = Self::integer(id, value)?;
+                if self.ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
+                    return Err(invalid("ack delay exponent above 20"));
+                }
+            }
+            ids::MAX_ACK_DELAY => {
+                let millis = Self::integer(id, value)?;
+                if millis >= MAX_ACK_DELAY_BOUND {
+                    return Err(invalid("max ack delay of 2^14 ms or more"));
+                }
+                self.max_ack_delay = Duration::from_millis(millis);
+            }
+            ids::DISABLE_ACTIVE_MIGRATION => {
+                if !value.is_empty() {
+                    return Err(invalid("disable_active_migration carries a value"));
+                }
+                self.disable_active_migration = true;
+            }
+            ids::PREFERRED_ADDRESS => {
+                // Addresses, a connection id and a token: at least 41 bytes.
+                if value.len() < 41 {
+                    return Err(invalid("preferred address too short"));
+                }
+                self.preferred_address = true;
+            }
+            ids::ACTIVE_CONNECTION_ID_LIMIT => {
+                self.active_connection_id_limit = Self::integer(id, value)?;
+                if self.active_connection_id_limit < 2 {
+                    return Err(invalid("active connection id limit below 2"));
+                }
+            }
+            ids::INITIAL_SOURCE_CONNECTION_ID => {
+                self.initial_source_connection_id = Some(ConnectionId::new(value)?);
+            }
+            ids::RETRY_SOURCE_CONNECTION_ID => {
+                self.retry_source_connection_id = Some(ConnectionId::new(value)?);
+            }
+            // Unknown parameters, GREASE included, are ignored.
+            _ => {}
+        }
+        Ok(())
     }
 
     /// A parameter value that must be exactly one varint.
@@ -356,7 +363,7 @@ mod tests {
                 initial_max_stream_data_bidi_local: 0xffff,
                 initial_max_stream_data_uni: 0xffff,
                 initial_max_streams_bidi: 16,
-                max_idle_timeout: Duration::from_millis(30_000),
+                max_idle_timeout: Duration::from_secs(30),
                 initial_max_streams_uni: 16,
                 initial_source_connection_id: Some(
                     ConnectionId::new(&hex("8394c8f03e515708")).unwrap()

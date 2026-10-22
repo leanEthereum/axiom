@@ -36,21 +36,6 @@ impl Default for RttEstimator {
 }
 
 impl RttEstimator {
-    /// The most recent sample.
-    pub(crate) const fn latest(&self) -> Duration {
-        self.latest
-    }
-
-    /// The smoothed RTT.
-    pub(crate) const fn smoothed(&self) -> Duration {
-        self.smoothed
-    }
-
-    /// The RTT variation.
-    pub(crate) const fn variance(&self) -> Duration {
-        self.variance
-    }
-
     /// Whether any sample has arrived.
     pub(crate) const fn has_sample(&self) -> bool {
         self.sampled
@@ -82,10 +67,9 @@ impl RttEstimator {
             return;
         }
         self.min = self.min.min(latest);
-        let adjusted = if latest >= self.min + ack_delay {
-            latest - ack_delay
-        } else {
-            latest
+        let adjusted = match latest.checked_sub(ack_delay) {
+            Some(adjusted) if adjusted >= self.min => adjusted,
+            _ => latest,
         };
         let deviation = self.smoothed.abs_diff(adjusted);
         self.variance = (self.variance * 3 + deviation) / 4;
@@ -117,10 +101,10 @@ mod tests {
     fn first_sample_seeds_the_estimate() {
         let mut rtt = RttEstimator::default();
         // Before any sample: 333 ms, variance 166.5 ms, PTO 333 + 666 = 999 ms.
-        assert_eq!(rtt.pto_base(), Duration::from_micros(999_000));
+        assert_eq!(rtt.pto_base(), Duration::from_millis(999));
         rtt.update(100 * MS, 20 * MS);
         // The first sample ignores the ack delay.
-        assert_eq!((rtt.smoothed(), rtt.variance()), (100 * MS, 50 * MS));
+        assert_eq!((rtt.smoothed, rtt.variance), (100 * MS, 50 * MS));
         assert_eq!(rtt.pto_base(), 300 * MS);
     }
 
@@ -130,14 +114,14 @@ mod tests {
         rtt.update(100 * MS, Duration::ZERO);
         // 140 ms with 20 ms of delay: adjusted 120, deviation 20.
         rtt.update(140 * MS, 20 * MS);
-        assert_eq!(rtt.variance(), Duration::from_micros(42_500));
-        assert_eq!(rtt.smoothed(), Duration::from_micros(102_500));
+        assert_eq!(rtt.variance, Duration::from_micros(42_500));
+        assert_eq!(rtt.smoothed, Duration::from_micros(102_500));
 
         // 105 ms with 20 ms of delay would fall below the 100 ms minimum: no adjustment.
         rtt.update(105 * MS, 20 * MS);
-        assert_eq!(rtt.latest(), 105 * MS);
+        assert_eq!(rtt.latest, 105 * MS);
         assert_eq!(
-            rtt.smoothed(),
+            rtt.smoothed,
             Duration::from_micros(102_812) + Duration::from_nanos(500)
         );
     }

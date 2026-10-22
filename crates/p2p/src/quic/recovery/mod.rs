@@ -20,7 +20,7 @@ mod sent;
 use std::{collections::BTreeMap, mem, time::Duration};
 
 pub(crate) use congestion::NewReno;
-pub(crate) use rtt::{GRANULARITY, RttEstimator};
+pub(crate) use rtt::RttEstimator;
 pub(crate) use sent::{SentFrame, SentPacket};
 
 use super::{TransportError, frame::AckFrame, packet::PacketNumber, space::Space};
@@ -69,14 +69,18 @@ pub(crate) struct AckOutcome {
 /// What the loss detection timer asks for when it fires.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum TimerAction {
-    /// Packets passed the time threshold and are lost.
-    Lost(Vec<SentPacket>),
+    /// Packets of a space passed the time threshold and are lost.
+    Lost(Space, Vec<SentPacket>),
     /// Send one or two ack-eliciting probes in a space.
     Probe(Space),
 }
 
 /// The facts about the connection that steer the timer, per RFC 9002, appendix A.8.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts of the pseudocode, each a yes or no"
+)]
 pub(crate) struct TimerContext {
     /// Whether the handshake is confirmed, which unlocks probes of 1-RTT data.
     pub(crate) handshake_confirmed: bool,
@@ -118,11 +122,6 @@ impl Recovery {
     /// Records the peer's max_ack_delay from its transport parameters.
     pub(crate) const fn set_max_ack_delay(&mut self, delay: Duration) {
         self.max_ack_delay = delay;
-    }
-
-    /// Consecutive probe timeouts so far.
-    pub(crate) const fn pto_count(&self) -> u32 {
-        self.pto_count
     }
 
     /// The current probe timeout with the peer's ack delay, without backoff.
@@ -286,7 +285,7 @@ impl Recovery {
             let acked_between = acked
                 .iter()
                 .any(|packet| packet.time_sent > first && packet.time_sent < last);
-            if last - first >= duration && !acked_between {
+            if last.saturating_sub(first) >= duration && !acked_between {
                 self.congestion.on_persistent_congestion();
             }
         }
@@ -364,7 +363,7 @@ impl Recovery {
         if let Some((_, space)) = self.earliest_loss_time() {
             let lost = self.detect_lost(space, now);
             self.on_packets_lost(&lost, &[], now);
-            return Some(TimerAction::Lost(lost));
+            return Some(TimerAction::Lost(space, lost));
         }
         let (_, space) = self.pto_time(context, now)?;
         self.pto_count += 1;
@@ -393,7 +392,7 @@ impl Recovery {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{iter, ops::Range};
 
     use super::*;
     use crate::quic::TransportErrorCode;
@@ -418,9 +417,10 @@ mod tests {
         }
     }
 
-    fn ack(ranges: Vec<Range<u64>>) -> AckFrame {
+    /// An acknowledgment of one range.
+    fn ack(range: Range<u64>) -> AckFrame {
         AckFrame {
-            ranges,
+            ranges: iter::once(range).collect(),
             delay: 0,
             ecn: None,
         }
@@ -438,13 +438,7 @@ mod tests {
         }
         // Acknowledging 3 and 4 at 30 ms: packets 0 and 1 trail by three or more, 2 by two.
         let outcome = recovery
-            .on_ack(
-                Space::Data,
-                &ack(vec![3..5]),
-                Duration::ZERO,
-                30 * MS,
-                CONTEXT,
-            )
+            .on_ack(Space::Data, &ack(3..5), Duration::ZERO, 30 * MS, CONTEXT)
             .unwrap();
         assert_eq!(numbers(&outcome.acked), [3, 4]);
         assert_eq!(numbers(&outcome.lost), [0, 1]);
@@ -456,7 +450,7 @@ mod tests {
             recovery
                 .on_timeout(CONTEXT, timer)
                 .map(|action| match action {
-                    TimerAction::Lost(lost) => numbers(&lost),
+                    TimerAction::Lost(_, lost) => numbers(&lost),
                     TimerAction::Probe(_) => Vec::new(),
                 }),
             Some(vec![2])
@@ -469,13 +463,7 @@ mod tests {
         recovery.on_sent(Space::Initial, packet(0, Duration::ZERO));
         assert_eq!(
             recovery
-                .on_ack(
-                    Space::Initial,
-                    &ack(vec![0..2]),
-                    Duration::ZERO,
-                    MS,
-                    CONTEXT
-                )
+                .on_ack(Space::Initial, &ack(0..2), Duration::ZERO, MS, CONTEXT)
                 .map_err(|error| error.code),
             Err(TransportErrorCode::PROTOCOL_VIOLATION)
         );
@@ -494,7 +482,7 @@ mod tests {
         );
         // The second timeout doubles: 2048 ms after the send.
         assert_eq!(recovery.timer(CONTEXT, 1024 * MS), Some(2048 * MS));
-        assert_eq!(recovery.pto_count(), 1);
+        assert_eq!(recovery.pto_count, 1);
     }
 
     #[test]
@@ -527,13 +515,7 @@ mod tests {
         // An RTT sample of 10 ms from packet 0.
         recovery.on_sent(Space::Data, packet(0, Duration::ZERO));
         recovery
-            .on_ack(
-                Space::Data,
-                &ack(vec![0..1]),
-                Duration::ZERO,
-                10 * MS,
-                CONTEXT,
-            )
+            .on_ack(Space::Data, &ack(0..1), Duration::ZERO, 10 * MS, CONTEXT)
             .unwrap();
         // Packets 1 to 4 sent across 400 ms, then packet 5 acknowledged.
         for number in 1..5 {
@@ -541,13 +523,7 @@ mod tests {
         }
         recovery.on_sent(Space::Data, packet(5, 500 * MS));
         let outcome = recovery
-            .on_ack(
-                Space::Data,
-                &ack(vec![5..6]),
-                Duration::ZERO,
-                510 * MS,
-                CONTEXT,
-            )
+            .on_ack(Space::Data, &ack(5..6), Duration::ZERO, 510 * MS, CONTEXT)
             .unwrap();
         // Losses from 100 to 400 ms span 300 ms, beyond 3 * (10 + 20) ms.
         // The window collapses to 2400, then slow start credits packet 5's 1200 bytes.
