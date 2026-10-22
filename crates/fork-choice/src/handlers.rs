@@ -88,6 +88,7 @@ impl<P: Preset> Store<P> {
                 slot: block.slot,
                 parent_root: block.parent_root,
                 proposer_index: block.proposer_index,
+                execution_block_hash: block.body.execution_payload.block_hash,
             },
         );
         self.block_states.insert(root, state);

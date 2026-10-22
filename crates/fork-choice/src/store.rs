@@ -105,6 +105,7 @@ impl<P: Preset> Store<P> {
                     slot: anchor_block.slot,
                     parent_root: anchor_block.parent_root,
                     proposer_index: anchor_block.proposer_index,
+                    execution_block_hash: anchor_block.body.execution_payload.block_hash,
                 },
             ),
             block_states: HashMap::from([(anchor_root, state.clone())]),

@@ -3,7 +3,7 @@
 use std::{fmt::Debug, marker::PhantomData};
 
 use axiom_das::ColumnSidecar;
-use axiom_fork_choice::{DataAvailability, Store};
+use axiom_fork_choice::{DataAvailability, FastConfirmation, Store};
 use axiom_state_transition::{KnownVerdict, Verification};
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconState, Checkpoint, DataColumnSidecar, Epoch,
@@ -14,18 +14,111 @@ use axiom_yaml::Yaml;
 use super::config_of;
 use crate::{Case, Failure, Runner};
 
-/// Replays the case's steps on a store, and checks it wherever the case asks.
-#[derive(Debug, Default)]
-pub struct ForkChoice<P>(PhantomData<P>);
+/// Check keys that belong to the fast confirmation rule rather than the store.
+const FAST_CONFIRMATION_KEYS: [&str; 7] = [
+    "previous_epoch_observed_justified_checkpoint",
+    "current_epoch_observed_justified_checkpoint",
+    "previous_epoch_greatest_unrealized_checkpoint",
+    "previous_slot_head",
+    "current_slot_head",
+    "confirmed_root",
+    "safe_execution_block_hash",
+];
 
-impl<P: Preset> ForkChoice<P> {
+/// Replays the case's steps on a store, and checks it wherever the case asks.
+///
+/// The fork choice and fast confirmation runners share this format.
+#[derive(Debug)]
+pub struct StoreReplay<P> {
+    /// The runner directory these vectors live under.
+    runner: &'static str,
+    /// The preset.
+    preset: PhantomData<P>,
+}
+
+impl<P: Preset> StoreReplay<P> {
+    /// The fork choice runner.
+    #[must_use]
+    pub const fn fork_choice() -> Self {
+        Self {
+            runner: "fork_choice",
+            preset: PhantomData,
+        }
+    }
+
+    /// The fast confirmation runner.
+    #[must_use]
+    pub const fn fast_confirmation() -> Self {
+        Self {
+            runner: "fast_confirmation",
+            preset: PhantomData,
+        }
+    }
+
+    /// Runs the fast confirmation rule when a check asks for its outputs, then compares them.
+    ///
+    /// The vector generator runs the rule once per slot and records its outputs right after.
+    fn fast_confirmation_checks(
+        store: &mut Store<P>,
+        confirmation: &mut FastConfirmation,
+        checks: &Yaml,
+    ) -> Result<(), Failure> {
+        if !FAST_CONFIRMATION_KEYS
+            .iter()
+            .any(|key| checks.get(key).is_some())
+        {
+            return Ok(());
+        }
+        confirmation
+            .on_fast_confirmation(store)
+            .map_err(|error| Failure(format!("fast confirmation failed: {error}")))?;
+        let checkpoints = [
+            (
+                "previous_epoch_observed_justified_checkpoint",
+                confirmation.previous_epoch_observed_justified_checkpoint,
+            ),
+            (
+                "current_epoch_observed_justified_checkpoint",
+                confirmation.current_epoch_observed_justified_checkpoint,
+            ),
+            (
+                "previous_epoch_greatest_unrealized_checkpoint",
+                confirmation.previous_epoch_greatest_unrealized_checkpoint,
+            ),
+        ];
+        for (key, actual) in checkpoints {
+            if let Some(expected) = checks.get(key) {
+                Self::expect_eq(key, &Self::checkpoint(expected)?, &actual)?;
+            }
+        }
+        let roots = [
+            ("previous_slot_head", confirmation.previous_slot_head),
+            ("current_slot_head", confirmation.current_slot_head),
+            ("confirmed_root", confirmation.confirmed_root),
+            (
+                "safe_execution_block_hash",
+                Root(confirmation.safe_execution_block_hash(store).0),
+            ),
+        ];
+        for (key, actual) in roots {
+            if let Some(expected) = checks.get(key) {
+                let expected = expected
+                    .as_hex_array::<32>()
+                    .map(Root)
+                    .ok_or_else(|| Failure(format!("{key} is not hex")))?;
+                Self::expect_eq(key, &expected, &actual)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Applies one block step, deciding data availability from the step's columns.
     fn block_step(
         store: &mut Store<P>,
         case: &Case,
         step: &Yaml,
         verification: Verification,
-    ) -> Result<bool, Failure> {
+    ) -> Result<Result<(), String>, Failure> {
         let name = step
             .get("block")
             .and_then(Yaml::as_str)
@@ -54,10 +147,10 @@ impl<P: Preset> ForkChoice<P> {
             }
         };
 
-        let accepted = store
+        let outcome = store
             .on_block(&block, availability, verification, &KnownVerdict(true))
-            .is_ok();
-        if accepted {
+            .map_err(|error| error.to_string());
+        if outcome.is_ok() {
             // Votes and slashings inside the block feed the fork choice too.
             for attestation in &block.message.body.attestations {
                 let _ = store.on_attestation(attestation, true, verification);
@@ -66,7 +159,7 @@ impl<P: Preset> ForkChoice<P> {
                 let _ = store.on_attester_slashing(slashing, verification);
             }
         }
-        Ok(accepted)
+        Ok(outcome)
     }
 
     /// Compares the store with every check of a checks step.
@@ -134,6 +227,7 @@ impl<P: Preset> ForkChoice<P> {
                         .map_err(|error| Failure(format!("proposer head failed: {error}")))?;
                     Self::expect_eq("proposer head", &Root(expected), &proposer_head)?;
                 }
+                key if FAST_CONFIRMATION_KEYS.contains(&key) => {}
                 other => return Err(Failure(format!("unsupported check {other}"))),
             }
         }
@@ -188,9 +282,9 @@ impl<P: Preset> ForkChoice<P> {
     }
 }
 
-impl<P: Preset> Runner for ForkChoice<P> {
+impl<P: Preset> Runner for StoreReplay<P> {
     fn name(&self) -> &'static str {
-        "fork_choice"
+        self.runner
     }
 
     fn run_case(&self, _handler: &str, case: &Case) -> Result<(), Failure> {
@@ -204,6 +298,7 @@ impl<P: Preset> Runner for ForkChoice<P> {
         let anchor_block = case.ssz::<BeaconBlock<P>>("anchor_block")?;
         let mut store = Store::new(config_of::<P>(), anchor_state, &anchor_block)
             .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
+        let mut confirmation = FastConfirmation::new(&store);
 
         let steps = case.yaml("steps.yaml")?;
         let steps = steps
@@ -215,7 +310,13 @@ impl<P: Preset> Runner for ForkChoice<P> {
                 store.on_tick(Self::scalar(tick)?.saturating_mul(1000));
                 true
             } else if step.get("block").is_some() {
-                Self::block_step(&mut store, case, step, verification)?
+                let outcome = Self::block_step(&mut store, case, step, verification)?;
+                if let Err(error) = &outcome
+                    && expected_valid
+                {
+                    return Err(Failure(format!("step {number}: block rejected: {error}")));
+                }
+                outcome.is_ok()
             } else if let Some(name) = step.get("attestation").and_then(Yaml::as_str) {
                 let attestation = case.ssz::<Attestation<P>>(name)?;
                 store
@@ -225,7 +326,8 @@ impl<P: Preset> Runner for ForkChoice<P> {
                 let slashing = case.ssz::<AttesterSlashing<P>>(name)?;
                 store.on_attester_slashing(&slashing, verification).is_ok()
             } else if let Some(checks) = step.get("checks") {
-                Self::checks(&mut store, checks)
+                Self::fast_confirmation_checks(&mut store, &mut confirmation, checks)
+                    .and_then(|()| Self::checks(&mut store, checks))
                     .map_err(|failure| Failure(format!("step {number}: {failure}")))?;
                 true
             } else {

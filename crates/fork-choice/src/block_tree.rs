@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use axiom_types::{Root, Slot, ValidatorIndex};
+use axiom_types::{Hash32, Root, Slot, ValidatorIndex};
 
 /// What the fork choice keeps of a block.
 ///
@@ -15,6 +15,8 @@ pub struct BlockNode {
     pub parent_root: Root,
     /// Validator that proposed the block.
     pub proposer_index: ValidatorIndex,
+    /// Hash of the block's execution payload, which the engine knows the block by.
+    pub execution_block_hash: Hash32,
 }
 
 /// Every block the store accepted, indexed by root, with their children.
@@ -117,6 +119,7 @@ mod tests {
             slot: Slot(slot),
             parent_root: root(parent),
             proposer_index: ValidatorIndex(0),
+            execution_block_hash: Hash32::ZERO,
         }
     }
 

@@ -14,6 +14,7 @@
 
 mod block_tree;
 mod error;
+mod fast_confirmation;
 mod handlers;
 mod head;
 mod proposer_head;
@@ -22,6 +23,7 @@ mod votes;
 
 pub use block_tree::{BlockNode, BlockTree};
 pub use error::ForkChoiceError;
+pub use fast_confirmation::FastConfirmation;
 pub use handlers::DataAvailability;
 pub use store::Store;
 pub use votes::{LatestMessage, Votes};

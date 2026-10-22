@@ -4,8 +4,8 @@
 //! A handler this client does not know fails the test, so no vector is skipped silently.
 
 use axiom_ef_tests::{
-    Blocks, EpochProcessing, Fork, ForkChoice, LightClient, MerkleProofs, Networking, Operations,
-    Rewards, Shuffling, SszStatic, Suite, Transition,
+    Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
+    Shuffling, SszStatic, StoreReplay, Suite, Transition,
 };
 use axiom_types::{Mainnet, Minimal};
 
@@ -112,12 +112,12 @@ fn shuffling_mainnet() {
 
 #[test]
 fn fork_choice_minimal() {
-    Suite::run(&ForkChoice::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(&StoreReplay::<Minimal>::fork_choice(), "minimal", "fulu");
 }
 
 #[test]
 fn fork_choice_mainnet() {
-    Suite::run(&ForkChoice::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(&StoreReplay::<Mainnet>::fork_choice(), "mainnet", "fulu");
 }
 
 #[test]
@@ -148,4 +148,13 @@ fn light_client_minimal() {
 #[test]
 fn light_client_mainnet() {
     Suite::run(&LightClient::<Mainnet>::default(), "mainnet", "fulu");
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    Suite::run(
+        &StoreReplay::<Minimal>::fast_confirmation(),
+        "minimal",
+        "fulu",
+    );
 }
