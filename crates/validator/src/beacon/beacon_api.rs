@@ -4,7 +4,7 @@ use axiom_http::{Method, Request};
 use axiom_json::{Data, Json};
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BlsPubkey, ForkName, Preset,
+    BlsPubkey, ForkName, Preset, Root,
     altair::SyncCommitteeMessage,
     capella::SignedBlsToExecutionChange,
     gloas::{PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
@@ -15,7 +15,7 @@ use crate::{
     beacon::{
         BeaconClient, BeaconError, Genesis, PoolAttestation, SignedProposal, ValidatorSummary,
     },
-    json::ApiJson,
+    json::{ApiJson, Fields},
 };
 
 /// The beacon namespace of one beacon node.
@@ -41,6 +41,22 @@ impl<'a> BeaconEndpoints<'a> {
     pub async fn genesis(self) -> Result<Genesis, BeaconError> {
         let json = self.client.get_json("/eth/v1/beacon/genesis").await?;
         BeaconClient::data(&json)
+    }
+
+    /// The root of the node's head block.
+    ///
+    /// See `getBlockRoot` in the beacon API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the node is unreachable or answers malformed data.
+    pub async fn head_root(self) -> Result<Root, BeaconError> {
+        let json = self
+            .client
+            .get_json("/eth/v1/beacon/blocks/head/root")
+            .await?;
+        let data = Fields::of(&json)?;
+        Ok(Fields::of(data.raw("data")?)?.get("root")?)
     }
 
     /// The registry entries of the given keys in the head state; unknown keys are left out.
