@@ -1,10 +1,11 @@
 //! Reading a configuration from the YAML files the consensus specs and networks publish.
 
+use axiom_ssz::U256;
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
 use super::{BlobParameters, BlobSchedule, ChainConfig};
-use crate::{Epoch, ExecutionAddress, Gwei, Version};
+use crate::{Epoch, ExecutionAddress, Gwei, Hash32, Version};
 
 /// A configuration file that does not describe a valid configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -190,6 +191,22 @@ impl<'a> ConfigEntry<'a> {
             "ELECTRA_FORK_VERSION" => config.electra_fork_version = Version(bytes4()?),
             "FULU_FORK_VERSION" => config.fulu_fork_version = Version(bytes4()?),
             "GLOAS_FORK_VERSION" => config.gloas_fork_version = Version(bytes4()?),
+            "TERMINAL_TOTAL_DIFFICULTY" => {
+                config.terminal_total_difficulty = value
+                    .as_str()
+                    .and_then(U256::from_decimal)
+                    .ok_or_else(|| invalid("a decimal below 2^256"))?;
+            }
+            "TERMINAL_BLOCK_HASH" => {
+                config.terminal_block_hash = Hash32(
+                    value
+                        .as_hex_array::<32>()
+                        .ok_or_else(|| invalid("32 hex bytes"))?,
+                );
+            }
+            "TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH" => {
+                config.terminal_block_hash_activation_epoch = Epoch(number()?);
+            }
             "MESSAGE_DOMAIN_INVALID_SNAPPY" => config.message_domain_invalid_snappy = bytes4()?,
             "MESSAGE_DOMAIN_VALID_SNAPPY" => config.message_domain_valid_snappy = bytes4()?,
             "DEPOSIT_CONTRACT_ADDRESS" => {

@@ -179,6 +179,34 @@ impl<P: Preset> BeaconState<P> {
             Self::Gloas(state) => Some(state.latest_block_hash),
         }
     }
+
+    /// Whether the chain has accepted its first execution payload.
+    ///
+    /// Before Bellatrix there is none, and Gloas starts long after the merge.
+    /// See `is_merge_transition_complete` in the Bellatrix beacon chain spec.
+    #[must_use]
+    pub fn is_merge_transition_complete(&self) -> bool {
+        match self {
+            Self::Phase0(_) | Self::Altair(_) => false,
+            Self::Bellatrix(state) => {
+                state.latest_execution_payload_header
+                    != bellatrix::ExecutionPayloadHeader::default()
+            }
+            Self::Capella(state) => {
+                state.latest_execution_payload_header != capella::ExecutionPayloadHeader::default()
+            }
+            Self::Deneb(state) => {
+                state.latest_execution_payload_header != deneb::ExecutionPayloadHeader::default()
+            }
+            Self::Electra(state) => {
+                state.latest_execution_payload_header != electra::ExecutionPayloadHeader::default()
+            }
+            Self::Fulu(state) => {
+                state.latest_execution_payload_header != fulu::ExecutionPayloadHeader::default()
+            }
+            Self::Gloas(_) => true,
+        }
+    }
 }
 
 impl<P: Preset> CoreState for BeaconState<P> {

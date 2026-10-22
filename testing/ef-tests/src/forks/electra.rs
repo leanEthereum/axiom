@@ -6,7 +6,10 @@ use axiom_state_transition::{
     KnownVerdict,
     electra::block::{BridgeDeposit, Exit, PayloadExecution, PayloadWithdrawals, RequestedDeposit},
 };
-use axiom_types::{ForkName, Preset, electra};
+use axiom_types::{
+    ForkName, Preset, electra,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Capella, Deneb, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -65,6 +68,18 @@ impl SpecFork for Electra {
     type SignedBeaconBlock<P: Preset> = electra::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = electra::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = electra::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = electra::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

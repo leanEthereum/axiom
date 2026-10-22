@@ -1,11 +1,11 @@
 //! The proposer's choice of parent: building on the head, or reorging a late, weak one.
 
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use axiom_state_transition::EpochCommittees;
-use axiom_types::{CommitteeIndex, Gwei, Preset, Root, Slot, accessors::CoreState};
+use axiom_types::{Gwei, Preset, Root, Slot};
 
-use crate::{BlockNode, Ghost};
+use crate::{BlockNode, ForkChoiceNode, Ghost};
 
 /// A late head and its parent, weighed by a proposer deciding which one to build on.
 ///
@@ -18,7 +18,8 @@ use crate::{BlockNode, Ghost};
 /// Every condition must hold for that reorg:
 ///
 /// - the head was late,
-/// - its FFG information matches its parent's,
+/// - before Fulu, the proposal is not at an epoch boundary,
+/// - the head's FFG information matches its parent's,
 /// - finality is recent,
 /// - the proposer is on time,
 /// - the reorg spans one slot,
@@ -26,47 +27,45 @@ use crate::{BlockNode, Ghost};
 ///
 /// A head that equivocated in the previous slot is reorged more eagerly.
 ///
-/// See `get_proposer_head` in the Fulu fork choice spec.
+/// By default the head drew under 20% of a committee, and its parent over 160%.
+/// Honest attesters that voted on time therefore already sit on the parent.
+/// So an adversary cannot use the rule to undo a block the honest majority saw in time.
+///
+/// The single-slot and finality bounds keep a buggy or attacked proposer from long reorgs.
+///
+/// See `get_proposer_head` in the phase0, Fulu, and Gloas fork choice specs.
 #[derive(Debug)]
 pub(crate) struct LateHeadReorg<'a, P: Preset> {
     /// The store, seen through its justified state.
-    ghost: Ghost<'a, P>,
-    /// The head's root.
-    head: Root,
+    pub(crate) ghost: Ghost<'a, P>,
+    /// The head node.
+    pub(crate) head: ForkChoiceNode,
     /// The head's block.
-    head_block: BlockNode,
+    pub(crate) head_block: BlockNode,
+    /// The parent node the head builds on.
+    pub(crate) parent: ForkChoiceNode,
     /// The head's parent block.
-    parent_block: BlockNode,
+    pub(crate) parent_block: BlockNode,
     /// The committees of the head's epoch, by the head's shuffling.
-    head_committees: Arc<EpochCommittees>,
+    pub(crate) head_committees: &'a EpochCommittees,
+    /// Whether a reorg at an epoch boundary could change the proposer, as before Fulu.
+    pub(crate) boundary_sensitive: bool,
 }
 
-impl<'a, P: Preset> LateHeadReorg<'a, P> {
-    /// The decision for a head, its parent, and the committees of the head's epoch.
-    pub(crate) const fn new(
-        ghost: Ghost<'a, P>,
-        head: Root,
-        head_block: BlockNode,
-        parent_block: BlockNode,
-        head_committees: Arc<EpochCommittees>,
-    ) -> Self {
-        Self {
-            ghost,
-            head,
-            head_block,
-            parent_block,
-            head_committees,
-        }
-    }
-
-    /// The block a proposer at a slot should build on.
-    pub(crate) fn parent_for(&self, slot: Slot) -> Root {
+impl<P: Preset> LateHeadReorg<'_, P> {
+    /// The node a proposer at a slot should build on.
+    pub(crate) fn parent_for(&self, slot: Slot) -> ForkChoiceNode {
         let store = self.ghost.store();
-        let head = self.head;
-        let parent_root = self.head_block.parent_root;
+        let head = self.head.root;
+        let parent_root = self.parent.root;
         let config = store.config();
 
-        let head_late = !store.block_timeliness.get(&head).copied().unwrap_or(false);
+        let head_late = !store
+            .block_timeliness
+            .get(&head)
+            .is_some_and(|timeliness| timeliness.attestation);
+        // Before Fulu, a reorg at an epoch boundary could change the slot's proposer.
+        let shuffling_stable = !self.boundary_sensitive || !slot.is_epoch_start::<P>();
         let ffg_competitive = store.unrealized_justifications.get(&head)
             == store.unrealized_justifications.get(&parent_root);
         let finalization_ok = slot.epoch::<P>() - store.finalized_checkpoint().epoch
@@ -80,11 +79,14 @@ impl<'a, P: Preset> LateHeadReorg<'a, P> {
 
         // Both thresholds weigh the same votes, so the scores are computed once.
         let scores = self.ghost.attestation_scores();
-        let head_weak = self.is_head_weak(&scores);
+        let head_weak =
+            self.ghost
+                .is_weak(&scores, head, self.head_block.slot, self.head_committees);
         let parent_strong = self.is_parent_strong(&scores, parent_root);
         let proposer_equivocation = store.blocks.has_proposer_equivocation(head);
 
         let reorg = head_late
+            && shuffling_stable
             && ffg_competitive
             && finalization_ok
             && proposing_on_time
@@ -92,45 +94,15 @@ impl<'a, P: Preset> LateHeadReorg<'a, P> {
             && head_weak
             && parent_strong;
         if reorg || (head_weak && current_time_ok && proposer_equivocation) {
-            parent_root
+            self.parent
         } else {
-            head
+            self.head
         }
     }
 
-    /// Whether the head's support is below the reorg threshold.
+    /// Whether the parent's support is above the reorg threshold, whatever its payload status.
     ///
-    /// Equivocators in the head slot's committees count toward the head.
-    /// More votes can then only make the head stronger, which keeps the rule monotonic.
-    ///
-    /// See `is_head_weak` in the phase0 fork choice spec.
-    fn is_head_weak(&self, scores: &HashMap<Root, Gwei>) -> bool {
-        let store = self.ghost.store();
-        let balance_source = self.ghost.balance_source();
-        let threshold = self
-            .ghost
-            .committee_fraction(store.config().reorg_head_weight_threshold);
-
-        let mut weight = scores.get(&self.head).copied().unwrap_or_default();
-        let head_slot = self.head_block.slot;
-        let committees = &self.head_committees;
-        for index in 0..committees.committees_per_slot() {
-            let committee = committees
-                .committee(head_slot, CommitteeIndex(index))
-                .unwrap_or(&[]);
-            let equivocating: Gwei = committee
-                .iter()
-                .filter(|validator| store.votes.is_equivocating(**validator))
-                .map(|validator| {
-                    balance_source.validators()[validator.as_usize()].effective_balance
-                })
-                .sum();
-            weight += equivocating;
-        }
-        weight < threshold
-    }
-
-    /// Whether the parent's support is above the reorg threshold.
+    /// See `is_parent_strong` in the phase0 and Gloas fork choice specs.
     fn is_parent_strong(&self, scores: &HashMap<Root, Gwei>, parent: Root) -> bool {
         let threshold = self
             .ghost

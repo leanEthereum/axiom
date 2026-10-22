@@ -1,6 +1,6 @@
 //! The 256-bit unsigned integer.
 
-use std::fmt;
+use std::{cmp::Ordering, fmt};
 
 use crate::{DecodeError, Root, Ssz};
 
@@ -8,6 +8,7 @@ use crate::{DecodeError, Root, Ssz};
 ///
 /// Consensus code mostly carries these values, such as an execution base fee.
 /// The only arithmetic it needs is counting node identifiers upward, so that is all there is.
+/// Values compare as numbers, which the merge's total difficulty threshold needs.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct U256(pub [u8; 32]);
 
@@ -20,6 +21,19 @@ impl U256 {
     pub fn from_u64(value: u64) -> Self {
         let mut bytes = [0; 32];
         bytes[..8].copy_from_slice(&value.to_le_bytes());
+        Self(bytes)
+    }
+
+    /// The value of a 128-bit integer.
+    #[must_use]
+    pub const fn from_u128(value: u128) -> Self {
+        let low = value.to_le_bytes();
+        let mut bytes = [0; 32];
+        let mut index = 0;
+        while index < 16 {
+            bytes[index] = low[index];
+            index += 1;
+        }
         Self(bytes)
     }
 
@@ -72,6 +86,19 @@ impl U256 {
 impl From<u64> for U256 {
     fn from(value: u64) -> Self {
         Self::from_u64(value)
+    }
+}
+
+impl Ord for U256 {
+    /// Compares as numbers: the most significant byte, stored last, decides first.
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.iter().rev().cmp(other.0.iter().rev())
+    }
+}
+
+impl PartialOrd for U256 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -139,6 +166,22 @@ mod tests {
 
         assert_eq!(U256::from_u64(255).wrapping_increment(), U256(expected));
         assert_eq!(U256::MAX.wrapping_increment(), U256::ZERO);
+    }
+
+    #[test]
+    fn a_128_bit_value_fills_the_low_half() {
+        // 2^64 sets the lowest bit of byte 8.
+        let mut expected = [0; 32];
+        expected[8] = 1;
+        assert_eq!(U256::from_u128(1 << 64), U256(expected));
+    }
+
+    #[test]
+    fn values_compare_as_numbers() {
+        // 256 = 0x0100 has a zero low byte, yet exceeds 255 = 0xff.
+        assert!(U256::from(256) > U256::from(255));
+        assert!(U256::from(7) < U256::MAX);
+        assert_eq!(U256::from(9).cmp(&U256::from(9)), Ordering::Equal);
     }
 
     #[test]

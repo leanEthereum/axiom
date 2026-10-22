@@ -11,9 +11,10 @@ use std::{
 
 use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
-use axiom_state_transition::EpochCommittees;
+use axiom_ssz::Ssz;
+use axiom_state_transition::{EpochCommittees, Fork};
 use axiom_types::{
-    BlsSignature, ChainConfig, CommitteeIndex, ForkName, Hash32, Preset,
+    BlsSignature, CommitteeIndex, Hash32, Preset, combined,
     fulu::{
         Attestation, AttesterSlashing, BeaconBlock, BeaconState, SignedBeaconBlock,
         SingleAttestation,
@@ -21,8 +22,57 @@ use axiom_types::{
 };
 use axiom_yaml::Yaml;
 
-use super::StoreReplay;
-use crate::{Case, Failure, Meta, Runner};
+use super::{
+    StoreReplay,
+    fork_choice::{checkpoint, expect_eq, number, payload_status, root, scalar},
+};
+use crate::{
+    Case, Failure, Meta, Runner,
+    forks::{Fulu, SpecFork},
+};
+
+/// A fork whose blocks the node imports, with its containers as the node names them.
+///
+/// The node runs Fulu, and the later forks once node integration reaches them.
+/// Each conversion is the identity for the fork the node was built on.
+pub trait NodeFork: SpecFork {
+    /// A state of the fork, as the node anchors on it.
+    fn node_state<P: Preset>(state: Self::State<P>) -> BeaconState<P>;
+
+    /// An unsigned block of the fork, as the node anchors on it.
+    fn node_anchor<P: Preset>(block: <Self::State<P> as Fork>::Block) -> BeaconBlock<P>;
+
+    /// A signed block of the fork, as the node imports it.
+    fn node_block<P: Preset>(block: Self::SignedBeaconBlock<P>) -> SignedBeaconBlock<P>;
+
+    /// An attestation of the fork, as the node counts it.
+    fn node_attestation<P: Preset>(attestation: Self::Attestation<P>) -> Attestation<P>;
+
+    /// An attester slashing of the fork, as the node applies it.
+    fn node_slashing<P: Preset>(slashing: Self::AttesterSlashing<P>) -> AttesterSlashing<P>;
+}
+
+impl NodeFork for Fulu {
+    fn node_state<P: Preset>(state: Self::State<P>) -> BeaconState<P> {
+        state
+    }
+
+    fn node_anchor<P: Preset>(block: <Self::State<P> as Fork>::Block) -> BeaconBlock<P> {
+        block
+    }
+
+    fn node_block<P: Preset>(block: Self::SignedBeaconBlock<P>) -> SignedBeaconBlock<P> {
+        block
+    }
+
+    fn node_attestation<P: Preset>(attestation: Self::Attestation<P>) -> Attestation<P> {
+        attestation
+    }
+
+    fn node_slashing<P: Preset>(slashing: Self::AttesterSlashing<P>) -> AttesterSlashing<P> {
+        slashing
+    }
+}
 
 /// Distinguishes the database directories of cases running in parallel.
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -40,17 +90,17 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 ///
 /// Only head and checkpoint checks apply: the chain does not expose the store's internals.
 #[derive(Debug)]
-pub struct ChainReplay<P> {
-    /// The preset.
-    preset: PhantomData<P>,
+pub struct ChainReplay<P, F> {
+    /// The preset and the fork.
+    marker: PhantomData<(P, F)>,
 }
 
-impl<P: Preset> ChainReplay<P> {
+impl<P: Preset, F: NodeFork> ChainReplay<P, F> {
     /// The runner.
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            preset: PhantomData,
+            marker: PhantomData,
         }
     }
 
@@ -62,28 +112,20 @@ impl<P: Preset> ChainReplay<P> {
             .map_err(|error| Failure(format!("head update failed: {error}")))?;
         let head = chain.head();
         if let Some(expected) = checks.get("head") {
-            StoreReplay::<P>::expect_eq(
-                "head root",
-                &StoreReplay::<P>::root(expected, "root")?,
-                &head.root,
-            )?;
-            StoreReplay::<P>::expect_eq(
-                "head slot",
-                &StoreReplay::<P>::number(expected, "slot")?,
-                &head.slot.0,
-            )?;
+            expect_eq("head root", &root(expected, "root")?, &head.root)?;
+            expect_eq("head slot", &number(expected, "slot")?, &head.slot.0)?;
         }
         if let Some(expected) = checks.get("justified_checkpoint") {
-            StoreReplay::<P>::expect_eq(
+            expect_eq(
                 "justified checkpoint",
-                &StoreReplay::<P>::checkpoint(expected)?,
+                &checkpoint(expected)?,
                 &head.justified,
             )?;
         }
         if let Some(expected) = checks.get("finalized_checkpoint") {
-            StoreReplay::<P>::expect_eq(
+            expect_eq(
                 "finalized checkpoint",
-                &StoreReplay::<P>::checkpoint(expected)?,
+                &checkpoint(expected)?,
                 &head.finalized,
             )?;
         }
@@ -132,18 +174,20 @@ impl<P: Preset> ChainReplay<P> {
         for (number, step) in steps.iter().enumerate() {
             let expected_valid = step.get("valid").and_then(Yaml::as_bool).unwrap_or(true);
             let accepted = if let Some(tick) = step.get("tick") {
-                let time_ms = StoreReplay::<P>::scalar(tick)?.saturating_mul(1000);
+                let time_ms = scalar(tick)?.saturating_mul(1000);
                 chain.on_tick(time_ms).is_ok()
             } else if let Some(name) = step.get("block").and_then(Yaml::as_str) {
-                let block = case.ssz::<SignedBeaconBlock<P>>(name)?;
-                let availability = StoreReplay::<P>::availability(case, step)?;
+                let block = F::node_block(case.ssz::<F::SignedBeaconBlock<P>>(name)?);
+                let any_block = combined::BeaconBlock::decode(&block.message.encode(), F::FORK)
+                    .map_err(|error| Failure(format!("{name}: {error}")))?;
+                let availability = StoreReplay::<P, F>::availability(case, step, &any_block)?;
                 let payload = payload_statuses
                     .get(&block.message.body.execution_payload.block_hash)
                     .copied()
                     .unwrap_or(PayloadStatus::Valid);
                 chain.import_block(&block, availability, payload).is_ok()
             } else if let Some(name) = step.get("attestation").and_then(Yaml::as_str) {
-                let attestation = case.ssz::<Attestation<P>>(name)?;
+                let attestation = F::node_attestation(case.ssz::<F::Attestation<P>>(name)?);
                 // A valid vote with one participant takes the gossip path for single votes.
                 match Self::single(&chain, &attestation).filter(|_| expected_valid) {
                     Some(single) => chain.on_single_attestation(&single).is_ok(),
@@ -151,7 +195,9 @@ impl<P: Preset> ChainReplay<P> {
                 }
             } else if let Some(name) = step.get("attester_slashing").and_then(Yaml::as_str) {
                 chain
-                    .on_attester_slashing(&case.ssz::<AttesterSlashing<P>>(name)?)
+                    .on_attester_slashing(&F::node_slashing(
+                        case.ssz::<F::AttesterSlashing<P>>(name)?,
+                    ))
                     .is_ok()
             } else if let Some(hash) = step.get("block_hash") {
                 let hash = hash
@@ -161,7 +207,7 @@ impl<P: Preset> ChainReplay<P> {
                 let status = step
                     .get("payload_status")
                     .ok_or_else(|| Failure::new("payload step without status"))?;
-                payload_statuses.insert(hash, StoreReplay::<P>::payload_status(status)?);
+                payload_statuses.insert(hash, payload_status(status)?);
                 true
             } else if let Some(checks) = step.get("checks") {
                 Self::checks(&mut chain, checks)
@@ -180,13 +226,13 @@ impl<P: Preset> ChainReplay<P> {
     }
 }
 
-impl<P: Preset> Default for ChainReplay<P> {
+impl<P: Preset, F: NodeFork> Default for ChainReplay<P, F> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: Preset> Runner for ChainReplay<P> {
+impl<P: Preset, F: NodeFork> Runner for ChainReplay<P, F> {
     fn name(&self) -> &'static str {
         "fork_choice"
     }
@@ -201,12 +247,13 @@ impl<P: Preset> Runner for ChainReplay<P> {
 
     fn run_case(&self, _handler: &str, case: &Case) -> Result<(), Failure> {
         let directory = TempDirectory::new();
-        let anchor_state = case.ssz::<BeaconState<P>>("anchor_state")?;
-        let anchor_block = case.ssz::<BeaconBlock<P>>("anchor_block")?;
+        let anchor_state = F::node_state(case.ssz::<F::State<P>>("anchor_state")?);
+        let anchor_block =
+            F::node_anchor(case.ssz::<<F::State<P> as Fork>::Block>("anchor_block")?);
         let database = ChainDatabase::open(&directory.0)
             .map_err(|error| Failure(format!("database: {error}")))?;
         let chain = Chain::from_anchor(
-            ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu),
+            case.config::<P>(F::FORK)?,
             anchor_state,
             &SignedBeaconBlock {
                 message: anchor_block,
@@ -223,12 +270,9 @@ impl<P: Preset> Runner for ChainReplay<P> {
         // A restart resumes from the last finalized block, whatever came after it.
         let database = ChainDatabase::<P>::open(&directory.0)
             .map_err(|error| Failure(format!("reopening the database: {error}")))?;
-        let resumed = Chain::resume(
-            ChainConfig::for_preset::<P>().with_forks_at_genesis(ForkName::Fulu),
-            database,
-        )
-        .map_err(|error| Failure(format!("resume failed: {error}")))?;
-        StoreReplay::<P>::expect_eq("resumed anchor", &finalized.root, &resumed.head().root)
+        let resumed = Chain::resume(case.config::<P>(F::FORK)?, database)
+            .map_err(|error| Failure(format!("resume failed: {error}")))?;
+        expect_eq("resumed anchor", &finalized.root, &resumed.head().root)
     }
 }
 

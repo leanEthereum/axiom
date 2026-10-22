@@ -5,7 +5,7 @@
 
 use axiom_ef_tests::{
     Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations, Rewards,
-    SszStatic, Suite, Transition,
+    SszStatic, StoreReplay, Suite, Transition,
     forks::{Capella, Deneb},
 };
 use axiom_types::{Mainnet, Minimal};
@@ -160,4 +160,49 @@ fn transition_mainnet() {
         "mainnet",
         "deneb",
     );
+}
+
+#[test]
+fn fork_choice_minimal() {
+    let runner = StoreReplay::<Minimal, Deneb>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "minimal", "deneb") {
+        // Cases: ex ante 3, get head 11, proposer head 3, on block 28, reorg 8, withholding 2.
+        assert_eq!((report.passed, report.skipped.len()), (55, 0));
+    }
+}
+
+#[test]
+fn fork_choice_mainnet() {
+    let runner = StoreReplay::<Mainnet, Deneb>::fork_choice();
+    if let Some(report) = Suite::run(&runner, "mainnet", "deneb") {
+        // Cases: ex ante 5, get head 7, proposer head 3, on block 11.
+        assert_eq!((report.passed, report.skipped.len()), (26, 0));
+    }
+}
+
+#[test]
+fn fast_confirmation_minimal() {
+    let runner = StoreReplay::<Minimal, Deneb>::fast_confirmation();
+    if let Some(report) = Suite::run(&runner, "minimal", "deneb") {
+        // Cases: basic 3, current epoch 22, empty slots 5, ffg 2, is one confirmed 10, previous epoch 108, reconfirmation 3, restart 6, revert finality 8, variables 8.
+        assert_eq!((report.passed, report.skipped.len()), (175, 0));
+    }
+}
+
+#[test]
+fn sync_minimal() {
+    let runner = StoreReplay::<Minimal, Deneb>::sync();
+    if let Some(report) = Suite::run(&runner, "minimal", "deneb") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
+    }
+}
+
+#[test]
+fn sync_mainnet() {
+    let runner = StoreReplay::<Mainnet, Deneb>::sync();
+    if let Some(report) = Suite::run(&runner, "mainnet", "deneb") {
+        // Cases: optimistic 1.
+        assert_eq!((report.passed, report.skipped.len()), (1, 0));
+    }
 }

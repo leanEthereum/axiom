@@ -2,7 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axiom_types::{Epoch, Hash32, Preset, Root, Slot, ValidatorIndex};
+use axiom_types::{Epoch, Hash32, Preset, Root, Slot, ValidatorIndex, combined};
+
+use crate::{ForkChoiceNode, LatestMessage, NodePayload};
 
 /// What the execution engine said about a block's payload.
 ///
@@ -18,9 +20,22 @@ pub enum ExecutionStatus {
     Invalid,
 }
 
+/// Where a block's execution payload is, as far as the store knows.
+///
+/// See `is_payload_verified` in the Gloas fork choice spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadArrival {
+    /// The payload rides inside the block, as before Gloas.
+    Embedded,
+    /// The block commits to a bid, and its envelope has not verified yet.
+    Awaited,
+    /// The block's envelope arrived and verified.
+    Revealed,
+}
+
 /// What the fork choice keeps of a block.
 ///
-/// Only the fields the rules read: its place in the tree, its slot, and its proposer.
+/// Only the fields the rules read: its place in the tree, its slot, its proposer, and its payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockNode {
     /// Slot the block was proposed in.
@@ -29,10 +44,58 @@ pub struct BlockNode {
     pub parent_root: Root,
     /// Validator that proposed the block.
     pub proposer_index: ValidatorIndex,
-    /// Hash of the block's execution payload, which the engine knows the block by.
+    /// Hash of the execution block the block builds on, zero before the merge.
+    pub parent_block_hash: Hash32,
+    /// Hash of the execution block the block commits to, zero before the merge.
     pub execution_block_hash: Hash32,
     /// Validity of the payload, as far as the engine has told.
     pub status: ExecutionStatus,
+    /// Where the block's payload is.
+    pub payload: PayloadArrival,
+}
+
+impl BlockNode {
+    /// The node of a block of any fork, with what the engine said of its payload.
+    ///
+    /// A block from Gloas on commits to a bid, and its payload is awaited.
+    #[must_use]
+    pub const fn of<P: Preset>(block: &combined::BeaconBlock<P>, status: ExecutionStatus) -> Self {
+        let hashes = block.execution_hashes();
+        Self {
+            slot: block.slot(),
+            parent_root: block.parent_root(),
+            proposer_index: block.proposer_index(),
+            parent_block_hash: hashes.parent_block_hash,
+            execution_block_hash: hashes.block_hash,
+            status,
+            payload: if block.fork_name().separates_payloads() {
+                PayloadArrival::Awaited
+            } else {
+                PayloadArrival::Embedded
+            },
+        }
+    }
+
+    /// Whether the block's payload is in hand: embedded, or revealed and verified.
+    ///
+    /// See `is_payload_verified` in the Gloas fork choice spec.
+    #[must_use]
+    pub const fn is_payload_verified(&self) -> bool {
+        !matches!(self.payload, PayloadArrival::Awaited)
+    }
+
+    /// The execution block a confirmed block makes safe.
+    ///
+    /// Before Gloas that is the block's own payload.
+    /// From Gloas on, only the parent payload the bid builds on is known to have run.
+    /// See `get_safe_execution_block_hash` in the Bellatrix and Gloas fast confirmation specs.
+    #[must_use]
+    pub const fn safe_execution_block_hash(&self) -> Hash32 {
+        match self.payload {
+            PayloadArrival::Embedded => self.execution_block_hash,
+            PayloadArrival::Awaited | PayloadArrival::Revealed => self.parent_block_hash,
+        }
+    }
 }
 
 /// Every block the store accepted, indexed by root, with their children.
@@ -228,6 +291,117 @@ impl BlockTree {
             > 1
     }
 
+    /// Records that a block's envelope arrived and verified.
+    pub fn reveal_payload(&mut self, root: Root) {
+        if let Some(node) = self.nodes.get_mut(&root)
+            && node.payload == PayloadArrival::Awaited
+        {
+            node.payload = PayloadArrival::Revealed;
+        }
+    }
+
+    /// Whether a block builds on its parent's payload or on its parent alone.
+    ///
+    /// A Gloas bid names the execution block it builds on.
+    /// It builds on the parent's payload when that is the payload the parent's bid promised.
+    /// A parent from before Gloas carries its payload, so every child builds on it.
+    ///
+    /// Returns nothing for a block whose parent is outside the tree.
+    /// See `get_parent_payload_status` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn parent_payload(&self, root: &Root) -> Option<NodePayload> {
+        let node = self.nodes.get(root)?;
+        self.extended_variant(&node.parent_root, node.parent_block_hash)
+    }
+
+    /// The variant of a parent that a block building on an execution block extends.
+    ///
+    /// Returns nothing when the parent is outside the tree.
+    /// See `get_parent_payload_status` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn extended_variant(
+        &self,
+        parent: &Root,
+        parent_block_hash: Hash32,
+    ) -> Option<NodePayload> {
+        let parent = self.nodes.get(parent)?;
+        let full = parent.payload == PayloadArrival::Embedded
+            || parent_block_hash == parent.execution_block_hash;
+        Some(if full {
+            NodePayload::Full
+        } else {
+            NodePayload::Empty
+        })
+    }
+
+    /// The node at a slot on a node's chain, keeping the payload status of each step.
+    ///
+    /// Each step up to a parent takes the payload status its child builds on.
+    /// The anchor stands for every slot before it, as in the block form.
+    /// See `get_ancestor` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn ancestor_node(&self, node: ForkChoiceNode, slot: Slot) -> Option<ForkChoiceNode> {
+        let mut current = node;
+        loop {
+            let block = self.nodes.get(&current.root)?;
+            if block.slot <= slot {
+                return Some(current);
+            }
+            match self.parent_payload(&current.root) {
+                Some(payload) => {
+                    current = ForkChoiceNode {
+                        root: block.parent_root,
+                        payload,
+                    };
+                }
+                // The anchor's parent is gone, so the anchor answers for earlier slots.
+                None => return Some(current),
+            }
+        }
+    }
+
+    /// Whether one node descends from another, or is it.
+    ///
+    /// A pending ancestor matches any payload status of its block.
+    /// See `is_ancestor` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn is_ancestor_node(&self, node: ForkChoiceNode, ancestor: ForkChoiceNode) -> bool {
+        let Some(ancestor_block) = self.nodes.get(&ancestor.root) else {
+            return false;
+        };
+        self.ancestor_node(node, ancestor_block.slot)
+            .is_some_and(|found| {
+                found.root == ancestor.root
+                    && (found.payload == ancestor.payload
+                        || ancestor.payload == NodePayload::Pending)
+            })
+    }
+
+    /// The node a vote supports.
+    ///
+    /// A vote from the block's own slot cannot have seen the payload, so it supports the block.
+    /// A later vote supports the variant whose payload it claims to have seen.
+    /// A block from before Gloas has only its full variant, whatever the vote says.
+    /// See `get_supported_node` in the Gloas fork choice spec.
+    #[must_use]
+    pub fn supported_node(&self, message: &LatestMessage) -> Option<ForkChoiceNode> {
+        let block = self.nodes.get(&message.root)?;
+        let payload = match block.payload {
+            PayloadArrival::Embedded => NodePayload::Full,
+            PayloadArrival::Awaited | PayloadArrival::Revealed if block.slot >= message.slot => {
+                NodePayload::Pending
+            }
+            PayloadArrival::Awaited | PayloadArrival::Revealed if message.payload_present => {
+                NodePayload::Full
+            }
+            PayloadArrival::Awaited | PayloadArrival::Revealed => NodePayload::Empty,
+        };
+        Some(ForkChoiceNode {
+            root: message.root,
+            payload,
+        })
+    }
+
     /// Invalidates the optimistic blocks an invalid payload condemns.
     ///
     /// The engine names the latest valid ancestor of the invalid payload.
@@ -271,8 +445,19 @@ mod tests {
             slot: Slot(slot),
             parent_root: root(parent),
             proposer_index: ValidatorIndex(0),
+            parent_block_hash: Hash32::ZERO,
             execution_block_hash: Hash32::ZERO,
             status: ExecutionStatus::Valid,
+            payload: PayloadArrival::Embedded,
+        }
+    }
+
+    fn bid_node(slot: u64, parent: u8, builds_on: u8, promises: u8) -> BlockNode {
+        BlockNode {
+            parent_block_hash: Hash32([builds_on; 32]),
+            execution_block_hash: Hash32([promises; 32]),
+            payload: PayloadArrival::Awaited,
+            ..node(slot, parent)
         }
     }
 
@@ -351,6 +536,73 @@ mod tests {
         assert_eq!(kept, [root(2), root(3), root(4)]);
         assert_eq!(tree.children(&root(2)), [root(3), root(4)]);
         assert_eq!(tree.children(&root(1)), []);
+    }
+
+    #[test]
+    fn gloas_ancestors_keep_the_payload_status_of_each_step() {
+        // Fixture state: Gloas block a(0) promising payload 0xa0, then two children.
+        //
+        //     b(1) builds on 0xa0, the payload a promised: b extends full a.
+        //     c(1) builds on 0x99, the payload before a: c extends empty a.
+        let mut tree = BlockTree::new(root(1), bid_node(0, 0, 0x99, 0xa0));
+        tree.insert(root(2), bid_node(1, 1, 0xa0, 0xb0));
+        tree.insert(root(3), bid_node(1, 1, 0x99, 0xc0));
+
+        assert_eq!(tree.parent_payload(&root(2)), Some(NodePayload::Full));
+        assert_eq!(tree.parent_payload(&root(3)), Some(NodePayload::Empty));
+
+        // Walking from pending b back to slot 0 lands on full a.
+        let full_a = ForkChoiceNode {
+            root: root(1),
+            payload: NodePayload::Full,
+        };
+        let b = ForkChoiceNode::pending(root(2));
+        assert_eq!(tree.ancestor_node(b, Slot(0)), Some(full_a));
+
+        // So b descends from full a and pending a, but not from empty a.
+        let empty_a = ForkChoiceNode {
+            payload: NodePayload::Empty,
+            ..full_a
+        };
+        assert!(tree.is_ancestor_node(b, full_a));
+        assert!(tree.is_ancestor_node(b, ForkChoiceNode::pending(root(1))));
+        assert!(!tree.is_ancestor_node(b, empty_a));
+    }
+
+    #[test]
+    fn a_vote_supports_the_variant_it_saw() {
+        // Fixture state: Gloas block a at slot 0, and an embedded block e at slot 0.
+        let mut tree = BlockTree::new(root(1), bid_node(0, 0, 0x99, 0xa0));
+        tree.insert(root(5), node(0, 9));
+        let vote = |slot, tag, payload_present| LatestMessage {
+            slot: Slot(slot),
+            root: root(tag),
+            payload_present,
+        };
+        let at = |tag, payload| ForkChoiceNode {
+            root: root(tag),
+            payload,
+        };
+
+        // A vote in a's own slot supports pending a, whatever it claims.
+        assert_eq!(
+            tree.supported_node(&vote(0, 1, true)),
+            Some(at(1, NodePayload::Pending))
+        );
+        // A vote one slot later supports the variant it claims.
+        assert_eq!(
+            tree.supported_node(&vote(1, 1, true)),
+            Some(at(1, NodePayload::Full))
+        );
+        assert_eq!(
+            tree.supported_node(&vote(1, 1, false)),
+            Some(at(1, NodePayload::Empty))
+        );
+        // An embedded block only has its full variant.
+        assert_eq!(
+            tree.supported_node(&vote(0, 5, false)),
+            Some(at(5, NodePayload::Full))
+        );
     }
 
     #[test]

@@ -19,7 +19,6 @@ mod detail;
 mod error;
 mod fork;
 mod partial_column;
-mod payload_head;
 mod seen;
 mod signers;
 mod signing_claim;

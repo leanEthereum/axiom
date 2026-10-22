@@ -3,8 +3,8 @@
 use axiom_ssz::{BYTES_PER_LENGTH_OFFSET, DecodeError, Root, Ssz};
 
 use crate::{
-    BlsSignature, ChainConfig, ForkName, Preset, Slot, altair, bellatrix, capella, deneb, electra,
-    fulu, gloas, phase0,
+    BlsSignature, ChainConfig, ForkName, Preset, Slot, altair, bellatrix, capella,
+    combined::BeaconBlock, deneb, electra, fulu, gloas, phase0,
 };
 
 /// Bytes before the block in a signed block's encoding: the block's offset and the signature.
@@ -105,6 +105,21 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => signed.message.hash_tree_root(),
             Self::Electra(signed) | Self::Fulu(signed) => signed.message.hash_tree_root(),
             Self::Gloas(signed) => signed.message.hash_tree_root(),
+        }
+    }
+
+    /// The unsigned block, copied out of its signed wrapper.
+    #[must_use]
+    pub fn message(&self) -> BeaconBlock<P> {
+        match self {
+            Self::Phase0(signed) => BeaconBlock::Phase0(signed.message.clone()),
+            Self::Altair(signed) => BeaconBlock::Altair(signed.message.clone()),
+            Self::Bellatrix(signed) => BeaconBlock::Bellatrix(signed.message.clone()),
+            Self::Capella(signed) => BeaconBlock::Capella(signed.message.clone()),
+            Self::Deneb(signed) => BeaconBlock::Deneb(signed.message.clone()),
+            Self::Electra(signed) => BeaconBlock::Electra(signed.message.clone()),
+            Self::Fulu(signed) => BeaconBlock::Fulu(signed.message.clone()),
+            Self::Gloas(signed) => BeaconBlock::Gloas(signed.message.clone()),
         }
     }
 

@@ -8,7 +8,10 @@ use axiom_state_transition::{
     capella::block::PayloadWithdrawals,
     deneb::block::{Exit, PayloadExecution, UnboundedAttestation},
 };
-use axiom_types::{ForkName, Preset, deneb};
+use axiom_types::{
+    ForkName, Preset, deneb, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Capella, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -58,6 +61,18 @@ impl SpecFork for Deneb {
     type SignedBeaconBlock<P: Preset> = deneb::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = deneb::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = phase0::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = phase0::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

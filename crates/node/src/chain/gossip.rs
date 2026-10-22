@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use axiom_fork_choice::{BlockNode, ExecutionStatus};
+use axiom_fork_choice::{BlockNode, ExecutionStatus, PayloadArrival};
 use axiom_gossip::Seen;
 use axiom_types::{Preset, Root, Slot, fulu::SignedBeaconBlock};
 
@@ -52,8 +52,10 @@ impl GossipMemory {
                 slot: message.slot,
                 parent_root: message.parent_root,
                 proposer_index: message.proposer_index,
+                parent_block_hash: message.body.execution_payload.parent_hash,
                 execution_block_hash: message.body.execution_payload.block_hash,
                 status: ExecutionStatus::Invalid,
+                payload: PayloadArrival::Embedded,
             },
         );
         // A consensus failure leaves the payload unjudged; only the engine can condemn it.

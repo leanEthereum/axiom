@@ -9,6 +9,8 @@ use axiom_types::{
     BlsPubkey, BlsSignature, ChainConfig, ColumnIndex, Domain, Epoch, Gwei, Preset, Root, Slot,
     SubnetId, ValidatorIndex,
     accessors::{CoreState, ForkState},
+    altair::{SignedContributionAndProof, SyncCommitteeContribution, SyncCommitteeMessage},
+    capella::SignedBlsToExecutionChange,
     combined::BeaconState,
     constants::{
         BLS_WITHDRAWAL_PREFIX, BUILDER_INDEX_SELF_BUILD, DOMAIN_BEACON_BUILDER,
@@ -19,14 +21,15 @@ use axiom_types::{
     },
     deneb::BlobSidecar,
     fulu::{
-        AttestationData, BeaconBlockHeader, DataColumnSidecar, PartialDataColumnGroupId,
-        PartialDataColumnHeader, PartialDataColumnSidecar, ProposerSlashing,
-        SignedBlsToExecutionChange, SignedContributionAndProof, SignedVoluntaryExit,
-        SyncCommitteeContribution, SyncCommitteeMessage, Validator,
+        DataColumnSidecar, PartialDataColumnGroupId, PartialDataColumnHeader,
+        PartialDataColumnSidecar,
     },
     gloas::{
         self, Builder, ExecutionPayloadBid, PayloadAttestationMessage, SignedExecutionPayloadBid,
         SignedExecutionPayloadEnvelope, SignedProposerPreferences,
+    },
+    phase0::{
+        AttestationData, BeaconBlockHeader, ProposerSlashing, SignedVoluntaryExit, Validator,
     },
 };
 
@@ -36,7 +39,6 @@ use crate::{
     blob_sidecar::CheckedBlob,
     fork::{Bounded, BuilderFunds, ExecutionRequestLimits, GasTarget, Ptc, Verdict},
     partial_column::{PartialCells, PartialHeader},
-    payload_head::{NodePayload, PayloadHead},
     signers::Signers,
     signing_claim::SigningClaim,
     vote::{Aggregate, SignedAggregate, SlashingEvidence, SubnetVote},
@@ -1807,33 +1809,29 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         &mut self,
         bid: &ExecutionPayloadBid,
     ) -> Result<bool, GossipError> {
-        let head = PayloadHead::of(self.view)
-            .map_err(|error| {
-                GossipError::ignore("head state is unavailable").with(Self::missing_block(&error))
-            })?
-            .head();
-        let head_block = self.view.block(&head.root);
-        let head_bid = self.view.bids.get(&head.root);
-        let (Some(head_block), Some(head_bid)) = (head_block, head_bid) else {
+        let store = &mut *self.view.store;
+        let head = store.head().map_err(|error| {
+            GossipError::ignore("head state is unavailable").with(Self::missing_block(&error))
+        })?;
+        // The store holds the head, and the head block's node carries its bid's hashes.
+        let Some(head_block) = store.blocks().get(&head.root).copied() else {
             return Ok(false);
         };
         let builds_on_parent_block = bid.parent_block_root == head_block.parent_root;
-        let builds_on_parent_payload = bid.parent_block_hash == head_bid.parent_block_hash;
+        let builds_on_parent_payload = bid.parent_block_hash == head_block.parent_block_hash;
         if builds_on_parent_block && builds_on_parent_payload {
             return Ok(true);
         }
         if bid.parent_block_root != head.root {
             return Ok(false);
         }
-        // Without timeliness votes, the head builds on its payload exactly when its node is full.
-        // See should_build_on_full in the Gloas fork choice spec.
-        let on_full = if head_block.slot + 1 == bid.slot {
-            head.payload == NodePayload::Full && self.view.is_payload_verified(&head.root)
-        } else {
-            head.payload == NodePayload::Full
-        };
+        let on_full = store
+            .should_build_on_full(head, bid.slot)
+            .map_err(|error| {
+                GossipError::ignore("head block is unknown").with(Self::missing_block(&error))
+            })?;
         if on_full {
-            Ok(bid.parent_block_hash == head_bid.block_hash)
+            Ok(bid.parent_block_hash == head_block.execution_block_hash)
         } else {
             Ok(builds_on_parent_payload)
         }
@@ -1872,11 +1870,9 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     ///
     /// See `is_valid_dependent_root` in the Gloas fork choice spec.
     fn is_valid_dependent_root(&mut self, root: Root, slot: Slot) -> Result<bool, GossipError> {
-        let head = PayloadHead::of(self.view)
-            .map_err(|error| {
-                GossipError::ignore("head state is unavailable").with(Self::missing_block(&error))
-            })?
-            .head();
+        let head = self.view.store.head().map_err(|error| {
+            GossipError::ignore("head state is unavailable").with(Self::missing_block(&error))
+        })?;
         if head.root == root {
             return Ok(true);
         }

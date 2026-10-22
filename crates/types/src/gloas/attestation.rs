@@ -12,6 +12,7 @@ use axiom_ssz::{
 use crate::{
     BlsSignature, CommitteeIndex, Preset, ValidatorIndex,
     gloas::{AttestationData, CommitteeBits},
+    vote::{CommitteeVote, ConflictingVotes, IndexedVote, PayloadClaim},
 };
 
 /// Participation bits of every committee in an attestation, concatenated in committee order.
@@ -73,6 +74,20 @@ impl<P: Preset> Attestation<P> {
             .filter(|(_, bit)| *bit)
             .map(|(index, _)| CommitteeIndex::from(index))
     }
+
+    /// The vote reduced to the fields every fork shares.
+    ///
+    /// The data index states whether the voter saw the payload, see EIP-7732.
+    #[must_use]
+    pub fn committee_vote(&self) -> CommitteeVote {
+        CommitteeVote {
+            data: self.data.clone(),
+            signature: self.signature,
+            committees: self.committee_indices().collect(),
+            bits: self.aggregation_bits.iter().collect(),
+            payload: PayloadClaim::of_index(self.data.index),
+        }
+    }
 }
 
 /// An attestation with its participants listed by validator index.
@@ -113,6 +128,18 @@ impl Container for IndexedAttestation {
     }
 }
 
+impl IndexedAttestation {
+    /// The vote reduced to the fields every fork shares.
+    #[must_use]
+    pub fn indexed_vote(&self) -> IndexedVote {
+        IndexedVote {
+            indices: self.attesting_indices.iter().copied().collect(),
+            data: self.data.clone(),
+            signature: self.signature,
+        }
+    }
+}
+
 /// Two attestations that violate a Casper FFG commandment.
 ///
 /// They either vote for two targets in one epoch, or one surrounds the other.
@@ -145,6 +172,15 @@ impl Container for AttesterSlashing {
 }
 
 impl AttesterSlashing {
+    /// The two votes reduced to the fields every fork shares.
+    #[must_use]
+    pub fn conflicting_votes(&self) -> ConflictingVotes {
+        ConflictingVotes {
+            first: self.attestation_1.indexed_vote(),
+            second: self.attestation_2.indexed_vote(),
+        }
+    }
+
     /// Validators that signed both attestations, in the first attestation's order.
     ///
     /// Only these validators can be slashed by the evidence.

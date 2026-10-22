@@ -2,7 +2,10 @@
 
 use axiom_gossip::GossipValidator;
 use axiom_state_transition::altair::block::{FlaggedAttestation, ParticipantDeposit};
-use axiom_types::{ForkName, Preset, altair};
+use axiom_types::{
+    ForkName, Preset, altair, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Phase0, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -48,6 +51,18 @@ impl SpecFork for Altair {
     type SignedBeaconBlock<P: Preset> = altair::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = altair::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = phase0::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = phase0::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

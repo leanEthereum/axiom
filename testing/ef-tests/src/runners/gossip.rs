@@ -9,8 +9,10 @@ use axiom_state_transition::{Fork, KnownVerdict, State, Verification};
 use axiom_types::{
     Epoch, Preset, SubnetId,
     accessors::ForkState,
-    fulu::{Checkpoint, PartialDataColumnHeader, ProposerSlashing, SignedVoluntaryExit},
+    combined,
+    fulu::PartialDataColumnHeader,
     gloas::{ExecutionPayloadBid, ExecutionPayloadEnvelope, SignedExecutionPayloadEnvelope},
+    phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
 };
 use axiom_yaml::Yaml;
 
@@ -207,15 +209,10 @@ impl<'c, P: Preset, F: SpecFork> GossipCase<'c, P, F> {
             .ok_or_else(|| Failure::new("meta.yaml has no anchor block"))?;
         let anchor = self.case.ssz::<SignedBlockOf<F, P>>(anchor_name)?;
         let (anchor_block, _) = F::State::<P>::split_block(&anchor);
-        let anchor_header = F::State::<P>::block_header(anchor_block);
+        let anchor_block = Self::any_block(anchor_block)?;
         let anchor_state = State::new(self.case.ssz::<F::State<P>>("state")?.into_any());
-        let store = Store::anchored(
-            config.clone(),
-            anchor_state,
-            &anchor_header,
-            F::State::<P>::execution_block_hash(anchor_block),
-        )
-        .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
+        let store = Store::new(config.clone(), anchor_state, &anchor_block)
+            .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
         let mut chain = Chain {
             store,
             unimported: HashMap::new(),
@@ -242,7 +239,8 @@ impl<'c, P: Preset, F: SpecFork> GossipCase<'c, P, F> {
                 chain.bids.insert(root, bid.clone());
             }
             // Only Gloas blocks have their payload arrive apart, in an envelope.
-            if let Some(envelope) = entry.get("payload").and_then(Yaml::as_str) {
+            let envelope = entry.get("payload").and_then(Yaml::as_str);
+            if let Some(envelope) = envelope {
                 let signed = self
                     .case
                     .ssz::<SignedExecutionPayloadEnvelope<P>>(envelope)?;
@@ -251,13 +249,7 @@ impl<'c, P: Preset, F: SpecFork> GossipCase<'c, P, F> {
             if chain.store.blocks().contains(&root) {
                 continue;
             }
-            let node = BlockNode {
-                slot: header.slot,
-                parent_root: header.parent_root,
-                proposer_index: header.proposer_index,
-                execution_block_hash: F::State::<P>::execution_block_hash(block),
-                status: ExecutionStatus::Optimistic,
-            };
+            let node = BlockNode::of(&Self::any_block(block)?, ExecutionStatus::Optimistic);
             let flag = |key: &str| entry.get(key).and_then(Yaml::as_bool).unwrap_or(false);
             if flag("failed") || flag("pending") {
                 chain.unimported.insert(root, node);
@@ -276,8 +268,19 @@ impl<'c, P: Preset, F: SpecFork> GossipCase<'c, P, F> {
                 ..node
             };
             chain.store.insert_validated_node(root, imported, state);
+            if envelope.is_some() {
+                chain.store.insert_validated_payload(root);
+            }
         }
         Ok(chain)
+    }
+
+    /// A block of the case's fork, as a block of any fork.
+    fn any_block(
+        block: &<F::State<P> as Fork>::Block,
+    ) -> Result<combined::BeaconBlock<P>, Failure> {
+        combined::BeaconBlock::decode(&block.encode(), F::FORK)
+            .map_err(|error| Failure(format!("block does not re-decode: {error}")))
     }
 
     /// The seen state the case starts from: empty, or with partial column headers it names.

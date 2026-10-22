@@ -7,7 +7,10 @@ use axiom_state_transition::{
     electra::block::{Exit, PayloadWithdrawals},
     fulu::block::{PayloadExecution, QueuedDeposit},
 };
-use axiom_types::{ColumnIndex, ForkName, Preset, fulu};
+use axiom_types::{
+    ColumnIndex, ForkName, Preset, electra, fulu,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Capella, Electra, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -67,6 +70,18 @@ impl SpecFork for Fulu {
     type SignedBeaconBlock<P: Preset> = fulu::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = fulu::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = electra::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = electra::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

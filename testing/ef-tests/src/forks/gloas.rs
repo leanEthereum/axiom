@@ -7,7 +7,10 @@ use axiom_state_transition::{
     fulu::block::QueuedDeposit,
     gloas::block::{CommittedWithdrawals, IncludedAttestation, ParentPayload},
 };
-use axiom_types::{ColumnIndex, ForkName, Preset, gloas};
+use axiom_types::{
+    ColumnIndex, ForkName, Preset, gloas,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Capella, Fulu, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -75,6 +78,18 @@ impl SpecFork for Gloas {
     type SignedBeaconBlock<P: Preset> = gloas::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = gloas::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = gloas::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = gloas::AttesterSlashing;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

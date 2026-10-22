@@ -13,6 +13,6 @@ mod block;
 mod signed_block;
 mod state;
 
-pub use block::BeaconBlock;
+pub use block::{BeaconBlock, ExecutionHashes};
 pub use signed_block::SignedBeaconBlock;
 pub use state::BeaconState;

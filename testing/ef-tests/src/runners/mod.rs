@@ -18,7 +18,7 @@ mod ssz_static;
 mod transition;
 
 pub use blocks::Blocks;
-pub use chain::ChainReplay;
+pub use chain::{ChainReplay, NodeFork};
 pub use epoch_processing::EpochProcessing;
 pub use fork::Fork;
 pub use fork_choice::StoreReplay;

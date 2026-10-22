@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
 
-use crate::{Preset, ValidatorIndex, electra::IndexedAttestation};
+use crate::{Preset, ValidatorIndex, electra::IndexedAttestation, vote::ConflictingVotes};
 
 /// Two attestations that violate a Casper FFG commandment.
 ///
@@ -38,6 +38,15 @@ impl<P: Preset> Container for AttesterSlashing<P> {
 }
 
 impl<P: Preset> AttesterSlashing<P> {
+    /// The two votes reduced to the fields every fork shares.
+    #[must_use]
+    pub fn conflicting_votes(&self) -> ConflictingVotes {
+        ConflictingVotes {
+            first: self.attestation_1.indexed_vote(),
+            second: self.attestation_2.indexed_vote(),
+        }
+    }
+
     /// Validators that signed both attestations, in the first attestation's order.
     ///
     /// Only these validators can be slashed by the evidence.
