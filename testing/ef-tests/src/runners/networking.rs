@@ -7,7 +7,7 @@ use axiom_ssz::U256;
 use axiom_types::Preset;
 use axiom_yaml::Yaml;
 
-use super::config_of;
+use super::{config_of, gossip::GossipCase};
 use crate::{Case, Failure, Runner};
 
 /// Checks custody assignment against the vectors.
@@ -72,13 +72,13 @@ impl<P: Preset> Runner for Networking<P> {
                 }
                 Ok(())
             }
+            gossip if gossip.starts_with("gossip_") => GossipCase::<P>::new(case)?.run(),
             other => Err(Failure(format!("unsupported handler {other}"))),
         }
     }
 
     fn skip_handler(&self, handler: &str) -> Option<&'static str> {
-        handler
-            .starts_with("gossip_")
-            .then_some("gossip validation runs in the networking stack, not yet implemented")
+        (handler == "gossip_partial_data_column_sidecar")
+            .then_some("partial data column gossip is an optional extension, not implemented")
     }
 }

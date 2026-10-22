@@ -15,6 +15,6 @@ mod suite;
 pub use case::{Case, Failure, Meta, assert_container_eq};
 pub use runners::{
     BEACON_STATE_FIELDS, Blocks, EpochProcessing, Fork, LightClient, MerkleProofs, Networking,
-    Operations, Rewards, Shuffling, SszStatic, StoreReplay, Transition, config_of,
+    Operations, Rewards, Shuffling, SszStatic, StoreReplay, Transition, case_config, config_of,
 };
 pub use suite::{Report, Runner, Suite, Vectors};

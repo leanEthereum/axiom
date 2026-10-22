@@ -44,6 +44,7 @@ dependencies = [
  "axiom-bls",
  "axiom-das",
  "axiom-fork-choice",
+ "axiom-gossip",
  "axiom-light-client",
  "axiom-snappy",
  "axiom-ssz",
@@ -60,6 +61,18 @@ dependencies = [
  "axiom-state-transition",
  "axiom-types",
  "proptest",
+]
+
+[[package]]
+name = "axiom-gossip"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-das",
+ "axiom-fork-choice",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
 ]
 
 [[package]]
@@ -101,6 +114,7 @@ name = "axiom-types"
 version = "0.1.0"
 dependencies = [
  "axiom-ssz",
+ "axiom-yaml",
  "proptest",
 ]
 

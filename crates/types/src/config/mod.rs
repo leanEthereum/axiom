@@ -7,9 +7,11 @@
 
 mod blob_schedule;
 mod fork_name;
+mod yaml;
 
 pub use blob_schedule::{BlobParameters, BlobSchedule};
 pub use fork_name::ForkName;
+pub use yaml::ConfigError;
 
 use crate::{Epoch, ExecutionAddress, Gwei, Version};
 

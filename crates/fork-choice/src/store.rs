@@ -117,6 +117,12 @@ impl<P: Preset> Store<P> {
         })
     }
 
+    /// The chain configuration.
+    #[must_use]
+    pub const fn config(&self) -> &ChainConfig {
+        &self.config
+    }
+
     /// Current time, in milliseconds since the Unix epoch.
     #[must_use]
     pub const fn time_ms(&self) -> u64 {

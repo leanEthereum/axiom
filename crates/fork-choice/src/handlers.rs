@@ -3,9 +3,11 @@
 use std::collections::HashSet;
 
 use axiom_ssz::Ssz;
-use axiom_state_transition::{BlockProcessor, EpochProcessor, EpochStep, StateError, Verification};
+use axiom_state_transition::{
+    BlockProcessor, EpochProcessor, EpochStep, State, StateError, Verification,
+};
 use axiom_types::{
-    Attestation, AttesterSlashing, Epoch, Hash32, IndexedAttestation, Preset, Root,
+    Attestation, AttesterSlashing, BeaconBlock, Epoch, Hash32, IndexedAttestation, Preset, Root,
     SignedBeaconBlock, Slot,
 };
 
@@ -107,6 +109,27 @@ impl<P: Preset> Store<P> {
         self.update_proposer_boost_root(head, root);
         self.update_checkpoints(justified, finalized);
         self.compute_pulled_up_tip(root)
+    }
+
+    /// Records a block and its post-state, skipping the timing, finality, and boost rules.
+    ///
+    /// This replays a chain whose blocks were already validated elsewhere, such as a
+    /// checkpoint sync or a spec vector's history.
+    pub fn insert_validated_block(&mut self, block: &BeaconBlock<P>, state: State<P>) {
+        let root = block.hash_tree_root();
+        let justified = state.beacon().current_justified_checkpoint;
+        self.blocks.insert(
+            root,
+            BlockNode {
+                slot: block.slot,
+                parent_root: block.parent_root,
+                proposer_index: block.proposer_index,
+                execution_block_hash: block.body.execution_payload.block_hash,
+                status: ExecutionStatus::Valid,
+            },
+        );
+        self.block_states.insert(root, state);
+        self.unrealized_justifications.insert(root, justified);
     }
 
     /// Accepts an attestation's votes.

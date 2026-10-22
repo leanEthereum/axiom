@@ -1,0 +1,22 @@
+[package]
+name = "axiom-gossip"
+description = "Gossip validation: which network messages a node accepts, ignores, or rejects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls.workspace = true
+axiom-das.workspace = true
+axiom-fork-choice.workspace = true
+axiom-ssz.workspace = true
+axiom-state-transition.workspace = true
+axiom-types.workspace = true
