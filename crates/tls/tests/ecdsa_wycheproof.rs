@@ -14,7 +14,7 @@ use std::{env, fs, path::PathBuf};
 
 use axiom_crypto::p256::PublicKey;
 use axiom_json::Json;
-use axiom_p2p::tls::EcdsaSigValue;
+use axiom_tls::EcdsaSigValue;
 use sha2::{Digest, Sha256};
 
 /// The suite file.
