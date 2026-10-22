@@ -193,7 +193,11 @@ impl GenesisSync {
 
 #[cfg(test)]
 mod tests {
+    use std::future;
+
+    use axiom_http::{Method, Response, Router, Server, ServerConfig, StatusCode};
     use axiom_types::{Minimal, Slot, phase0};
+    use tokio::{runtime::Builder, task};
 
     use super::*;
 
@@ -268,6 +272,58 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_download_must_match_the_published_digest() {
+        // Fixture state: a server answering the genesis route with a minimal phase0 state.
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let state = genesis(1_606_824_023);
+        let bytes = state.encode();
+        let checksum = Hash32(Sha256::digest(&bytes).into());
+        let served = bytes.clone();
+        let router =
+            Router::new().route(
+                Method::Get,
+                "/eth/v2/debug/beacon/states/genesis",
+                move |_| {
+                    let body = served.clone();
+                    async move {
+                        Response::new(StatusCode::OK).with_body("application/octet-stream", body)
+                    }
+                },
+            );
+
+        runtime.block_on(async {
+            let server = Server::bind("127.0.0.1:0", router, ServerConfig::default())
+                .await
+                .unwrap();
+            let url = format!("http://{}", server.local_addr().unwrap());
+            let serving = task::spawn(server.serve(future::pending()));
+            let download = |checksum| {
+                GenesisState::Download(GenesisDownload {
+                    url: url.clone(),
+                    checksum,
+                    timeout: Duration::from_secs(5),
+                })
+            };
+
+            // The published digest admits the state, decoded whole.
+            let config = ChainConfig::minimal();
+            let loaded = download(checksum).load::<Minimal>(&config).await.unwrap();
+            assert_eq!(loaded, state);
+
+            // One flipped digest bit refuses the same bytes, naming both digests.
+            let mut wrong = checksum;
+            wrong.0[0] ^= 1;
+            let refused = download(wrong).load::<Minimal>(&config).await;
+            assert!(matches!(
+                refused,
+                Err(NodeError::Checkpoint(CheckpointError::Checksum { expected, actual, .. }))
+                    if expected == wrong && actual == checksum
+            ));
+            serving.abort();
+        });
     }
 
     #[test]

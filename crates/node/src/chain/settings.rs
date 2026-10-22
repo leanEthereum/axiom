@@ -97,7 +97,50 @@ impl SidecarPruning {
 
 #[cfg(test)]
 mod tests {
+    use axiom_types::{
+        BlsSignature, ChainConfig, CommitteeIndex, Minimal, combined,
+        phase0::{self, AttestationData},
+        vote::{CommitteeVote, PayloadClaim},
+    };
+
     use super::*;
+    use crate::{Chain, ChainDatabase};
+
+    #[test]
+    fn the_chain_refuses_votes_past_the_skip_bound() {
+        // Fixture state: an empty phase0 genesis, its block at slot 0, and a bound of 8 slots.
+        let config = ChainConfig::minimal();
+        let genesis = combined::BeaconState::Phase0(phase0::BeaconState::<Minimal>::default());
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let settings = ChainSettings {
+            max_skip_slots: Some(8),
+            ..ChainSettings::default()
+        };
+        let mut chain = Chain::from_genesis(config, genesis, database)
+            .unwrap()
+            .with_settings(settings);
+
+        // A vote at slot 9 for the genesis block skips nine slots, one past the bound.
+        let vote = CommitteeVote {
+            data: AttestationData {
+                slot: Slot(9),
+                beacon_block_root: chain.head().root,
+                ..AttestationData::default()
+            },
+            signature: BlsSignature::default(),
+            committees: vec![CommitteeIndex(0)],
+            bits: vec![true],
+            payload: PayloadClaim::Silent,
+        };
+        assert!(matches!(
+            chain.on_vote(&vote),
+            Err(ChainError::TooManySkippedSlots {
+                vote_slot: Slot(9),
+                block_slot: Slot(0),
+                max: 8,
+            })
+        ));
+    }
 
     #[test]
     fn votes_may_skip_at_most_the_bound() {

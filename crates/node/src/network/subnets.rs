@@ -116,6 +116,18 @@ mod tests {
     }
 
     #[test]
+    fn every_subnet_sets_one_bit() {
+        // 64 subnets fill the field; 16 fill its low half; none leaves it empty.
+        let with = |count| ChainConfig {
+            attestation_subnet_count: count,
+            ..ChainConfig::mainnet()
+        };
+        assert_eq!(AttestationSubnets::all(&with(64)), u64::MAX);
+        assert_eq!(AttestationSubnets::all(&with(16)), 0xffff);
+        assert_eq!(AttestationSubnets::all(&with(0)), 0);
+    }
+
+    #[test]
     fn subnets_match_the_executable_spec() {
         // Expected pairs from the pyspec's compute_subscribed_subnets, mainnet, v1.7.0-beta.4.
         let mut high = [0; 32];

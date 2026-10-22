@@ -228,6 +228,42 @@ mod tests {
     }
 
     #[test]
+    fn subscribing_to_all_joins_every_vote_subnet() {
+        // Fixture state: mainnet with Fulu from genesis, node zero, no custody columns.
+        let config = ChainConfig::mainnet().with_forks_at_genesis(ForkName::Fulu);
+        let mut subscriptions =
+            Subscriptions::new(NodeId(U256::ZERO), config, Root::ZERO, &BTreeSet::new())
+                .subscribing_all();
+
+        // 9 global topics, all 64 attestation subnets, and all 4 sync committee subnets.
+        let change = subscriptions.update::<Mainnet>(Epoch(10));
+        assert_eq!(change.join.len(), 9 + 64 + 4);
+        assert_eq!(change.attnets, u64::MAX);
+        let sync = change
+            .join
+            .iter()
+            .filter(|topic| matches!(topic.kind, GossipKind::SyncCommittee(_)))
+            .count();
+        assert_eq!(sync, 4);
+    }
+
+    #[test]
+    fn phase0_has_no_sync_subnets_to_join() {
+        // Fixture state: minimal phase0, where sync committees do not exist yet.
+        let mut subscriptions = Subscriptions::new(
+            NodeId(U256::ZERO),
+            ChainConfig::minimal(),
+            Root::ZERO,
+            &BTreeSet::new(),
+        )
+        .subscribing_all();
+
+        // 5 global topics and all 64 attestation subnets.
+        let change = subscriptions.update::<Minimal>(Epoch(0));
+        assert_eq!(change.join.len(), 5 + 64);
+    }
+
+    #[test]
     fn a_fork_is_joined_early_and_left_late() {
         // Fixture state: minimal phase0, Altair at epoch 4, no custody columns.
         let config = ChainConfig::minimal().with_fork_epoch(ForkName::Altair, Epoch(4));
