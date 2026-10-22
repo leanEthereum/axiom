@@ -41,7 +41,8 @@ impl<'a> ValidatorEndpoints<'a> {
 
     /// Every proposer of an epoch.
     ///
-    /// See `getProposerDuties` in the beacon API.
+    /// The dependent root is the shuffling's, one epoch back, which proposer preferences commit to.
+    /// See `getProposerDutiesV2` in the beacon API, and `get_shuffling_dependent_root` in the spec.
     ///
     /// # Errors
     ///
@@ -49,7 +50,7 @@ impl<'a> ValidatorEndpoints<'a> {
     pub async fn proposer_duties(self, epoch: Epoch) -> Result<Duties<ProposerDuty>, BeaconError> {
         let json = self
             .client
-            .get_json(&format!("/eth/v1/validator/duties/proposer/{}", epoch.0))
+            .get_json(&format!("/eth/v2/validator/duties/proposer/{}", epoch.0))
             .await?;
         Ok(Duties::from_json(&json)?)
     }

@@ -2,7 +2,7 @@
 
 use axiom_beacon_json::ApiJsonError;
 use axiom_http::{HttpError, StatusCode};
-use axiom_json::ParseError;
+use axiom_json::{Json, ParseError};
 use axiom_ssz::DecodeError;
 use axiom_types::combined::BlindedBlockError;
 use thiserror::Error;
@@ -18,7 +18,7 @@ pub enum BeaconError {
     Status {
         /// The HTTP status.
         status: StatusCode,
-        /// The node's message, or the raw body.
+        /// The node's message with each refused item's reason, or the raw body.
         message: String,
     },
     /// The answer is not JSON.
@@ -66,4 +66,68 @@ pub enum BeaconError {
     /// No beacon node is configured.
     #[error("no beacon node configured")]
     NoNodes,
+}
+
+impl BeaconError {
+    /// The error an error status carries, read from the API's error object.
+    ///
+    /// A list submission's object names each refused item and why.
+    /// Anything that is not an error object is shown raw.
+    /// See `ErrorMessage` and `IndexedErrorMessage` in the beacon API.
+    pub(crate) fn from_reply(status: StatusCode, body: &[u8]) -> Self {
+        let json = Json::parse(body).ok();
+        let Some(mut message) = json
+            .as_ref()
+            .and_then(|json| json.get("message"))
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+        else {
+            return Self::Status {
+                status,
+                message: String::from_utf8_lossy(body).into_owned(),
+            };
+        };
+        let failures = json
+            .as_ref()
+            .and_then(|json| json.get("failures"))
+            .and_then(Json::as_array)
+            .unwrap_or_default();
+        message.extend(failures.iter().map(|failure| {
+            let index = failure
+                .get("index")
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let reason = failure
+                .get("message")
+                .and_then(Json::as_str)
+                .unwrap_or_default();
+            format!("; item {index}: {reason}")
+        }));
+        Self::Status { status, message }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_indexed_error_names_each_refused_item() {
+        // Fixture state: the node refused items 0 and 2 of a list of three.
+        let body = br#"{"code":400,"message":"2 of the submitted items were refused","failures":[{"index":0,"message":"unknown block"},{"index":2,"message":"too late"}]}"#;
+        let error = BeaconError::from_reply(StatusCode::BAD_REQUEST, body);
+        assert_eq!(
+            error.to_string(),
+            "beacon node answered 400 Bad Request: 2 of the submitted items were refused; item 0: unknown block; item 2: too late"
+        );
+    }
+
+    #[test]
+    fn a_body_without_an_error_object_is_shown_raw() {
+        let error = BeaconError::from_reply(StatusCode::NOT_FOUND, b"no route");
+        assert_eq!(
+            error.to_string(),
+            "beacon node answered 404 Not Found: no route"
+        );
+    }
 }

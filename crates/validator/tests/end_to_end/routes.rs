@@ -116,7 +116,7 @@ impl Routes {
     fn duties(self) -> Self {
         self.add(
             Method::Get,
-            "/eth/v1/validator/duties/proposer/{epoch}",
+            "/eth/v2/validator/duties/proposer/{epoch}",
             |chain, request| async move {
                 let epoch = Epoch(number(request.param("epoch")));
                 let duties = lock(&chain).proposer_duties(epoch);
@@ -347,7 +347,7 @@ impl Routes {
             |chain, request| async move {
                 let preferences = Vec::<SignedProposerPreferences>::from_json(&body(&request))
                     .expect("signed preferences");
-                lock(&chain).tally.preferences += preferences.len() as u64;
+                lock(&chain).receive_preferences(&preferences);
                 ok()
             },
         )

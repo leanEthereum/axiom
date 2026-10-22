@@ -15,10 +15,6 @@ use axiom_types::{
 /// A block on a builder's payload is blinded: it holds the payload's header.
 /// See `produceBlockV3` and `produceBlockV4` in the beacon API.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one block per proposal, signed and published once"
-)]
 pub enum ProducedBlock<P: Preset> {
     /// A block alone.
     Block(combined::BeaconBlock<P>),
@@ -148,10 +144,6 @@ impl<P: Preset> ProducedBlock<P> {
 /// A blinded block goes to its own route, for the builder to reveal its payload.
 /// See `publishBlockV2` and `publishBlindedBlockV2` in the beacon API.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one proposal per slot, published once"
-)]
 pub enum SignedProposal<P: Preset> {
     /// A signed block alone.
     Block(combined::SignedBeaconBlock<P>),
@@ -279,9 +271,11 @@ mod tests {
     #[test]
     fn a_signed_blinded_proposal_goes_to_the_blinded_route() {
         // Fixture state: a blinded Electra block at slot 9 by validator 5.
-        let mut block = electra::BlindedBeaconBlock::<Minimal>::default();
-        block.slot = Slot(9);
-        block.proposer_index = ValidatorIndex(5);
+        let block = electra::BlindedBeaconBlock::<Minimal> {
+            slot: Slot(9),
+            proposer_index: ValidatorIndex(5),
+            ..electra::BlindedBeaconBlock::default()
+        };
         let produced = ProducedBlock::Blinded(combined::BlindedBeaconBlock::Electra(block));
         let header = produced.header();
 

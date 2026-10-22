@@ -75,15 +75,7 @@ impl BeaconClient {
         if response.status.is_success() {
             return Ok(response);
         }
-        // The API's error object carries a message; anything else is shown raw.
-        let message = Json::parse(&response.body)
-            .ok()
-            .and_then(|json| Fields::of(&json).ok()?.required::<String>("message").ok())
-            .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
-        Err(BeaconError::Status {
-            status: response.status,
-            message,
-        })
+        Err(BeaconError::from_reply(response.status, &response.body))
     }
 
     /// A GET answered in JSON.

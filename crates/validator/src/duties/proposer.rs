@@ -42,6 +42,11 @@ impl<P: Preset> BlockProposer<P> {
 
     /// Proposes every block this client owes at a slot.
     pub async fn propose(&self, slot: Slot) {
+        // Invariant: the genesis block fills slot 0, so no proposer is owed a block there.
+        // Duties still name a proposer for it, since the shuffling covers every slot of epoch 0.
+        if slot == Slot(0) {
+            return;
+        }
         let duties: Vec<ProposerDuty> = self
             .context
             .book()

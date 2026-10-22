@@ -138,14 +138,24 @@ impl TestChain {
         state
     }
 
-    /// The root an epoch's shuffling depends on: the block root before the previous epoch.
-    fn dependent_root(&self, epoch: Epoch) -> Root {
+    /// The root an epoch's shuffling depends on, the last block before the previous epoch.
+    pub(crate) fn shuffling_root(&self, epoch: Epoch) -> Root {
         let beacon = self.builder.state().beacon();
-        let start = epoch.start_slot::<Minimal>().0;
+        let start = epoch.0.saturating_sub(1) * Minimal::SLOTS_PER_EPOCH;
         start
             .checked_sub(1)
             .and_then(|slot| beacon.block_root_at_slot(Slot(slot)))
             .unwrap_or(Root::ZERO)
+    }
+
+    /// Counts signed proposer preferences, each committed to its proposal's shuffling.
+    pub(crate) fn receive_preferences(&mut self, preferences: &[gloas::SignedProposerPreferences]) {
+        for signed in preferences {
+            // Invariant: preferences commit to the shuffling one epoch before the proposal.
+            let epoch = signed.message.proposal_slot.epoch::<Minimal>();
+            assert_eq!(signed.message.dependent_root, self.shuffling_root(epoch));
+        }
+        self.tally.preferences += preferences.len() as u64;
     }
 
     /// Registry entries of the given keys.
@@ -185,7 +195,7 @@ impl TestChain {
             })
             .collect();
         Duties {
-            dependent_root: Some(self.dependent_root(epoch)),
+            dependent_root: Some(self.shuffling_root(epoch)),
             execution_optimistic: false,
             data,
         }
@@ -225,7 +235,7 @@ impl TestChain {
             }
         }
         Duties {
-            dependent_root: Some(self.dependent_root(Epoch(epoch.0.saturating_sub(1)))),
+            dependent_root: Some(self.shuffling_root(epoch)),
             execution_optimistic: false,
             data,
         }
