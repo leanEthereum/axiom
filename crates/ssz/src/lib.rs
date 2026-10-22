@@ -18,6 +18,7 @@ mod error;
 mod length;
 mod merkle;
 mod offset;
+mod persistent;
 mod root;
 mod ssz;
 mod uint256;
@@ -31,6 +32,10 @@ pub use container::{Container, FieldDecoder, FieldVisitor, Merkleization};
 pub use error::DecodeError;
 pub use length::{Const, Length};
 pub use merkle::{GeneralizedIndex, MerkleProof, Merkleizer, ProgressiveMerkleizer, ZeroHashes};
+pub use persistent::{
+    Iter, IterMut, PersistentList, PersistentProgressiveList, PersistentVector, Sequence,
+    SequenceMut,
+};
 pub use root::Root;
 pub use ssz::{BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, Ssz};
 pub use uint256::U256;

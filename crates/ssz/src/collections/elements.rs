@@ -1,6 +1,6 @@
 //! Encoding, decoding, and merkleization shared by vectors and lists.
 
-use std::marker::PhantomData;
+use std::{borrow::Borrow, marker::PhantomData};
 
 use crate::{
     BYTES_PER_CHUNK, BYTES_PER_LENGTH_OFFSET, DecodeError, GeneralizedIndex, MerkleProof,
@@ -65,30 +65,51 @@ impl<T: Ssz> Elements<T> {
         }
     }
 
+    /// Depth of the tree of a run of elements, sized for the limit.
+    ///
+    /// Basic elements pack into chunks, while composite elements take one leaf each.
+    pub(crate) const fn depth(limit: usize) -> usize {
+        match T::PACKED_SIZE {
+            Some(size) => Merkleizer::depth_for((limit * size).div_ceil(BYTES_PER_CHUNK)),
+            None => Merkleizer::depth_for(limit),
+        }
+    }
+
+    /// Number of leaves a run of this many elements fills.
+    pub(crate) const fn leaf_count(length: usize) -> usize {
+        match T::PACKED_SIZE {
+            Some(size) => (length * size).div_ceil(BYTES_PER_CHUNK),
+            None => length,
+        }
+    }
+
     /// Root of a run of elements, in a tree sized for the limit.
+    pub(crate) fn root(items: &[T], limit: usize) -> Root {
+        Self::subtree_root(items, Self::depth(limit))
+    }
+
+    /// Root of a run of elements, in a tree of the given depth.
     ///
     /// Basic elements pack into chunks, while composite elements contribute one root each.
-    pub(crate) fn root(items: &[T], limit: usize) -> Root {
+    /// The run starts on a leaf boundary, and leaves past its end are zero.
+    pub(crate) fn subtree_root(items: &[T], depth: usize) -> Root {
+        let mut merkleizer = Merkleizer::with_depth(depth);
         match T::PACKED_SIZE {
             Some(size) => {
-                let limit_chunks = (limit * size).div_ceil(BYTES_PER_CHUNK);
-                let mut merkleizer = Merkleizer::with_limit(limit_chunks);
-                let mut scratch = Vec::with_capacity(size);
+                // Packed values are their own encoding, laid end to end.
+                let mut packed = Vec::with_capacity(size * items.len());
                 for item in items {
-                    scratch.clear();
-                    item.encode_to(&mut scratch);
-                    merkleizer.push_bytes(&scratch);
+                    item.encode_to(&mut packed);
                 }
-                merkleizer.finish()
+                merkleizer.push_bytes(&packed);
             }
             None => {
-                let mut merkleizer = Merkleizer::with_limit(limit);
                 for item in items {
                     merkleizer.push(item.hash_tree_root());
                 }
-                merkleizer.finish()
             }
         }
+        merkleizer.finish()
     }
 
     /// Proves a node of the tree of a run of elements, sized for the limit.
@@ -96,8 +117,8 @@ impl<T: Ssz> Elements<T> {
     /// The tree's leaves are chunks of packed basic elements, or one root per composite element.
     /// A node below a composite element's leaf is proven inside the element first.
     /// Returns nothing for a node in the zero padding past the last element.
-    pub(crate) fn prove(
-        items: &[T],
+    pub(crate) fn prove<R: Borrow<T>>(
+        items: &[R],
         limit: usize,
         index: GeneralizedIndex,
     ) -> Option<(Root, MerkleProof)> {
@@ -105,7 +126,7 @@ impl<T: Ssz> Elements<T> {
             Some(size) => {
                 let mut packed = Vec::with_capacity(size * items.len());
                 for item in items {
-                    item.encode_to(&mut packed);
+                    item.borrow().encode_to(&mut packed);
                 }
                 let chunks = packed
                     .chunks(BYTES_PER_CHUNK)
@@ -115,7 +136,10 @@ impl<T: Ssz> Elements<T> {
                 (chunks, depth)
             }
             None => (
-                items.iter().map(Ssz::hash_tree_root).collect(),
+                items
+                    .iter()
+                    .map(|item| item.borrow().hash_tree_root())
+                    .collect(),
                 Merkleizer::depth_for(limit),
             ),
         };
@@ -149,7 +173,7 @@ impl<T: Ssz> Elements<T> {
         if T::PACKED_SIZE.is_some() {
             return None;
         }
-        let (leaf, mut proof) = items.get(position)?.prove(inner)?;
+        let (leaf, mut proof) = items.get(position)?.borrow().prove(inner)?;
         proof
             .branch
             .extend(MerkleProof::generate(&leaves, depth, position).branch);
