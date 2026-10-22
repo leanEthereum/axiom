@@ -29,6 +29,7 @@ pub mod protobuf;
 mod rng;
 pub mod secure;
 pub mod swarm;
+pub mod tls;
 pub mod varint;
 pub mod yamux;
 

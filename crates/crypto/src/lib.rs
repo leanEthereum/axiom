@@ -22,6 +22,7 @@ pub mod chacha20poly1305;
 pub mod hkdf;
 pub mod hmac;
 pub mod keccak;
+pub mod p256;
 pub mod secp256k1;
 pub mod x25519;
 
