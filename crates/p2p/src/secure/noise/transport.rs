@@ -8,9 +8,9 @@
 //!   34481 plaintext + 16 tag = 34497
 //! ```
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
-use super::{MAX_PLAINTEXT_LEN, NoiseCrypto, symmetric::CipherState};
+use super::{MAX_PLAINTEXT_LEN, symmetric::CipherState};
 use crate::secure::{Open, Seal, SecureError};
 
 /// Bytes of the frame length prefix.
@@ -18,16 +18,14 @@ const PREFIX_LEN: usize = 2;
 
 /// The sending half of a Noise transport.
 pub(super) struct NoiseSealer {
-    /// The primitives.
-    crypto: Arc<dyn NoiseCrypto>,
     /// The sending key and nonce.
     cipher: CipherState,
 }
 
 impl NoiseSealer {
     /// A sealer over a split cipher state.
-    pub(super) fn new(crypto: Arc<dyn NoiseCrypto>, cipher: CipherState) -> Self {
-        Self { crypto, cipher }
+    pub(super) const fn new(cipher: CipherState) -> Self {
+        Self { cipher }
     }
 }
 
@@ -45,7 +43,7 @@ impl Seal for NoiseSealer {
             // Reserve the prefix, encrypt behind it, then fill in the length.
             let start = out.len();
             out.extend_from_slice(&[0; PREFIX_LEN]);
-            self.cipher.encrypt(self.crypto.as_ref(), &[], chunk, out)?;
+            self.cipher.encrypt(&[], chunk, out)?;
             // Invariant: chunk <= 65519, so chunk + tag <= 65535 fits in a u16.
             let len = (out.len() - start - PREFIX_LEN) as u16;
             out[start..start + PREFIX_LEN].copy_from_slice(&len.to_be_bytes());
@@ -56,8 +54,6 @@ impl Seal for NoiseSealer {
 
 /// The receiving half of a Noise transport.
 pub(super) struct NoiseOpener {
-    /// The primitives.
-    crypto: Arc<dyn NoiseCrypto>,
     /// The receiving key and nonce.
     cipher: CipherState,
     /// Wire bytes of an incomplete frame.
@@ -66,9 +62,8 @@ pub(super) struct NoiseOpener {
 
 impl NoiseOpener {
     /// An opener over a split cipher state.
-    pub(super) fn new(crypto: Arc<dyn NoiseCrypto>, cipher: CipherState) -> Self {
+    pub(super) const fn new(cipher: CipherState) -> Self {
         Self {
-            crypto,
             cipher,
             buffer: Vec::new(),
         }
@@ -96,7 +91,7 @@ impl Open for NoiseOpener {
             else {
                 break;
             };
-            self.cipher.decrypt(self.crypto.as_ref(), &[], frame, out)?;
+            self.cipher.decrypt(&[], frame, out)?;
             offset += PREFIX_LEN + len;
         }
         self.buffer.drain(..offset);

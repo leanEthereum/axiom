@@ -1,9 +1,11 @@
 //! Two tokio nodes over real TCP sockets: gossip, req/resp, identify, and disconnection.
+//!
+//! The scenario runs twice: over real Noise, the production channel, and over plaintext.
 
 use std::{sync::Arc, time::Duration};
 
 use axiom_p2p::{
-    PeerId, PublicKey,
+    Keypair, PeerId,
     eth::{
         GossipKind, GossipTopic,
         reqresp::{Protocol, ResponseChunk, ResponseCode, Status},
@@ -50,12 +52,25 @@ impl Inbox {
     }
 }
 
-/// Starts a node with a plaintext identity derived from a seed byte.
-async fn node(seed: u8) -> (NetworkHandle, Inbox) {
-    let mut key = [seed; 33];
-    key[0] = 0x02;
-    let key = PublicKey::secp256k1(key);
-    let mut config = NetworkConfig::new(key.clone(), Arc::new(PlaintextConfig::new(key)));
+/// Which secure channel the nodes speak.
+#[derive(Clone, Copy, Debug)]
+enum Channel {
+    /// Noise XX with secp256k1 identities, the default.
+    Noise,
+    /// The unauthenticated test channel.
+    Plaintext,
+}
+
+/// Starts a node whose secp256k1 secret is 32 copies of a seed byte.
+async fn node(seed: u8, channel: Channel) -> (NetworkHandle, Inbox) {
+    let identity = Keypair::from_secret_bytes(&[seed; 32]).expect("seed is a valid scalar");
+    let mut config = match channel {
+        Channel::Noise => NetworkConfig::new(identity).expect("entropy available"),
+        Channel::Plaintext => {
+            let security = Arc::new(PlaintextConfig::new(identity.public_key().clone()));
+            NetworkConfig::with_security(identity, security)
+        }
+    };
     config.seed = u64::from(seed);
     let (handle, events) = swarm::start(config).await.expect("listener binds");
     (
@@ -68,14 +83,23 @@ async fn node(seed: u8) -> (NetworkHandle, Inbox) {
 }
 
 #[test]
-fn gossip_and_status_over_tcp() {
-    // A single-threaded runtime: every task interleaves on one thread.
+fn gossip_and_status_over_noise() {
+    run(Channel::Noise);
+}
+
+#[test]
+fn gossip_and_status_over_plaintext() {
+    run(Channel::Plaintext);
+}
+
+/// Runs the scenario on a single-threaded runtime, where every task interleaves on one thread.
+fn run(channel: Channel) {
     let runtime = Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime builds");
     runtime.block_on(async {
-        timeout(Duration::from_secs(20), scenario())
+        timeout(Duration::from_secs(20), scenario(channel))
             .await
             .expect("scenario completes in time");
     });
@@ -94,23 +118,23 @@ struct Pair {
 }
 
 /// The whole exchange between two nodes, phase by phase.
-async fn scenario() {
-    let mut pair = connect().await;
+async fn scenario(channel: Channel) {
+    let mut pair = connect(channel).await;
     gossip(&mut pair).await;
     status(&mut pair).await;
     identify_and_disconnect(&mut pair).await;
 }
 
 /// Phase 1: alice dials bob and both see the connection.
-async fn connect() -> Pair {
-    let (alice, mut alice_events) = node(1).await;
-    let (bob, mut bob_events) = node(2).await;
+async fn connect(channel: Channel) -> Pair {
+    let (alice, mut alice_events) = node(1, channel).await;
+    let (bob, mut bob_events) = node(2, channel).await;
     let alice_id = alice.local_peer().clone();
     let bob_id = bob.local_peer().clone();
 
     // Phase 1: alice dials bob's address, naming his identity in a /p2p layer.
     let address = bob.listen_addr().clone().with(Layer::P2p(bob_id.clone()));
-    alice.dial(address).expect("dial queued");
+    alice.dial(address).await.expect("dial queued");
     let connected = alice_events
         .wait_for(|event| match event {
             NetworkEvent::PeerConnected { peer, outbound, .. } => Some((peer.clone(), *outbound)),
@@ -149,8 +173,13 @@ async fn gossip(pair: &mut Pair) {
         kind: GossipKind::BeaconBlock,
     }
     .topic();
-    alice.subscribe(topic.clone()).expect("subscribe queued");
-    bob.subscribe(topic.clone()).expect("subscribe queued");
+    alice
+        .subscribe(topic.clone())
+        .await
+        .expect("subscribe queued");
+    bob.subscribe(topic.clone())
+        .await
+        .expect("subscribe queued");
 
     // Alice publishes once she has heard bob's subscription; until then nobody is eligible.
     let block = b"a signed beacon block, as SSZ".repeat(20);
@@ -177,6 +206,7 @@ async fn gossip(pair: &mut Pair) {
         .await;
     assert_eq!((received, &source, &data), (id, &alice_id, &block));
     bob.report_validation(received, ValidationOutcome::Accept)
+        .await
         .expect("verdict queued");
 }
 
@@ -205,6 +235,7 @@ async fn status(pair: &mut Pair) {
     };
     let request = alice
         .send_request(bob_id.clone(), Protocol::StatusV2, alice_status.encode())
+        .await
         .expect("request queued");
 
     let (inbound, payload) = bob_events
@@ -223,6 +254,7 @@ async fn status(pair: &mut Pair) {
         inbound,
         vec![ResponseChunk::success(None, bob_status.encode())],
     )
+    .await
     .expect("response queued");
 
     // Alice gets exactly one success chunk, then the end of the response.
@@ -247,6 +279,7 @@ async fn status(pair: &mut Pair) {
     // A malformed Ping (3 bytes instead of 8) is answered with InvalidRequest.
     let bad = alice
         .send_request(bob_id.clone(), Protocol::PingV1, vec![1, 2, 3])
+        .await
         .expect("request queued");
     let chunk = alice_events
         .wait_for(|event| match event {
@@ -282,7 +315,10 @@ async fn identify_and_disconnect(pair: &mut Pair) {
     );
 
     // Alice disconnects; bob notices.
-    alice.disconnect(bob_id.clone()).expect("disconnect queued");
+    alice
+        .disconnect(bob_id.clone())
+        .await
+        .expect("disconnect queued");
     let gone = bob_events
         .wait_for(|event| match event {
             NetworkEvent::PeerDisconnected { peer } => Some(peer.clone()),
@@ -290,6 +326,6 @@ async fn identify_and_disconnect(pair: &mut Pair) {
         })
         .await;
     assert_eq!(gone, alice_id);
-    alice.shutdown().expect("shutdown queued");
-    bob.shutdown().expect("shutdown queued");
+    alice.shutdown().await.expect("shutdown queued");
+    bob.shutdown().await.expect("shutdown queued");
 }

@@ -58,7 +58,9 @@ struct Stream {
     send_window: u32,
     /// Bytes the peer may still send before this side grants more credit.
     recv_window: u32,
-    /// Bytes received since the last credit was granted.
+    /// Bytes received but not yet consumed by the owner.
+    unconsumed: u32,
+    /// Bytes consumed since the last credit was granted.
     consumed: u32,
     /// Bytes written by the owner but held back by the send window.
     pending: VecDeque<u8>,
@@ -78,6 +80,7 @@ impl Stream {
         Self {
             send_window: INITIAL_WINDOW,
             recv_window: INITIAL_WINDOW,
+            unconsumed: 0,
             consumed: 0,
             pending: VecDeque::new(),
             owed_flags,
@@ -101,8 +104,9 @@ impl Stream {
 /// Stream operations queue frames, and peer actions queue events.
 /// Nothing here blocks, reads a clock, or touches a socket.
 ///
-/// Received data is credited back to the peer as soon as it is reported.
-/// Backpressure therefore comes from the owner draining events, not from this machine.
+/// Received data is credited back to the peer only once the owner reports it consumed.
+/// A slow owner therefore stalls the peer at the receive window.
+/// Outbound data held back by the peer's window is capped per stream.
 #[derive(Debug)]
 pub struct Session {
     /// Which identifier parity this side opens.
@@ -193,7 +197,12 @@ impl Session {
     }
 
     /// Queues data on a stream, sending what the window allows right away.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the stream is not open for writing, or its send buffer is full.
     pub fn send(&mut self, id: StreamId, data: &[u8]) -> Result<(), YamuxError> {
+        let max_send_buffer = self.config.max_send_buffer;
         let stream = self
             .streams
             .get_mut(&id)
@@ -201,9 +210,43 @@ impl Session {
         if !matches!(stream.write, WriteState::Open) {
             return Err(YamuxError::StreamClosed(id));
         }
+        // Threshold: an idle stream takes any write; a backed-up one only up to the cap.
+        if !stream.pending.is_empty() && stream.pending.len() + data.len() > max_send_buffer {
+            return Err(YamuxError::SendBufferFull(id));
+        }
         stream.pending.extend(data);
         self.flush_stream(id);
         Ok(())
+    }
+
+    /// Bytes a stream accepts before its send buffer is full, or zero when it cannot be written.
+    #[must_use]
+    pub fn writable(&self, id: StreamId) -> usize {
+        self.streams
+            .get(&id)
+            .filter(|stream| matches!(stream.write, WriteState::Open))
+            .map_or(0, |stream| {
+                self.config
+                    .max_send_buffer
+                    .saturating_sub(stream.pending.len())
+            })
+    }
+
+    /// Reports that the owner consumed bytes of a stream's data, so the peer may send more.
+    ///
+    /// Credit is granted in batches of half a window.
+    /// Bytes beyond those received and not yet consumed are ignored.
+    pub fn consume(&mut self, id: StreamId, len: usize) {
+        let Some(stream) = self.streams.get_mut(&id) else {
+            return;
+        };
+        // Never credit more than the peer actually sent.
+        let len = u32::try_from(len)
+            .unwrap_or(u32::MAX)
+            .min(stream.unconsumed);
+        stream.unconsumed -= len;
+        stream.consumed += len;
+        self.grant_credit(id);
     }
 
     /// Half-closes a stream once its queued data has been sent.
@@ -395,14 +438,14 @@ impl Session {
             _ => {
                 // Invariant: the window check ran before the body was buffered.
                 stream.recv_window -= header.length;
-                stream.consumed += header.length;
+                // Credit waits until the owner consumes the bytes.
+                stream.unconsumed += header.length;
                 if !body.is_empty() {
                     self.events.push_back(SessionEvent::Data {
                         stream: id,
                         data: body,
                     });
                 }
-                self.grant_credit(id);
             }
         }
 
@@ -456,7 +499,7 @@ impl Session {
         self.write_frame(FrameType::WindowUpdate, flags, id, extra, &[]);
     }
 
-    /// Grants the peer fresh credit once half the window has been consumed.
+    /// Grants the peer fresh credit once the owner has consumed half the window.
     fn grant_credit(&mut self, id: StreamId) {
         let threshold = self.config.receive_window / 2;
         let Some(stream) = self.streams.get_mut(&id) else {
@@ -613,8 +656,19 @@ mod tests {
         assert_eq!(server.stream_count(), 0);
     }
 
+    /// Total data bytes among events.
+    fn data_len(events: &[SessionEvent]) -> usize {
+        events
+            .iter()
+            .map(|event| match event {
+                SessionEvent::Data { data, .. } => data.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
     #[test]
-    fn flow_control_holds_data_until_credit_arrives() {
+    fn credit_waits_for_the_owner_to_consume() {
         let mut client = Session::new(Mode::Client, Config::default());
         let mut server = Session::new(Mode::Server, Config::default());
         let id = client.open_stream().unwrap();
@@ -629,17 +683,63 @@ mod tests {
         // 16 frames of 16 KiB each, plus the 12-byte SYN frame.
         assert_eq!(first.len(), 12 + 16 * (12 + 16 * 1024));
 
-        // The server consumes it and returns credit after the 128 KiB mark.
+        // The server reads it all but consumes nothing: only its 12-byte ACK goes back.
         server.receive(&first).unwrap();
         pump(&mut client, &mut server);
-        let received: usize = events(&mut server)
-            .iter()
-            .map(|event| match event {
-                SessionEvent::Data { data, .. } => data.len(),
-                _ => 0,
-            })
-            .sum();
-        assert_eq!(received, payload.len());
+        assert_eq!(data_len(&events(&mut server)), 256 * 1024);
+        assert_eq!(
+            client.writable(id),
+            Config::default().max_send_buffer - 44 * 1024
+        );
+
+        // Consuming 100 KiB stays under the 128 KiB threshold: still no credit.
+        server.consume(id, 100 * 1024);
+        assert_eq!(server.take_output(), []);
+
+        // 28 KiB more crosses it: one update grants all 128 KiB consumed.
+        server.consume(id, 28 * 1024);
+        let update = server.take_output();
+        assert_eq!(update.len(), 12);
+        assert_eq!(&update[8..12], &(128 * 1024u32).to_be_bytes());
+
+        // The client sends the 44 KiB it held back.
+        client.receive(&update).unwrap();
+        pump(&mut client, &mut server);
+        assert_eq!(data_len(&events(&mut server)), 44 * 1024);
+    }
+
+    #[test]
+    fn consume_never_credits_more_than_received() {
+        let mut client = Session::new(Mode::Client, Config::default());
+        let mut server = Session::new(Mode::Server, Config::default());
+        let id = client.open_stream().unwrap();
+        client.send(id, &[1; 1000]).unwrap();
+        pump(&mut client, &mut server);
+
+        // Mutation: the owner claims 1 MiB consumed after receiving 1000 bytes.
+        // The claim is capped at 1000, below the 128 KiB threshold, so nothing is granted.
+        server.consume(id, 1024 * 1024);
+        assert_eq!(server.take_output(), []);
+    }
+
+    #[test]
+    fn send_buffer_is_bounded_per_stream() {
+        let config = Config {
+            max_send_buffer: 1000,
+            ..Config::default()
+        };
+        let mut client = Session::new(Mode::Client, config);
+        let id = client.open_stream().unwrap();
+
+        // Fixture state: the peer never grants credit, so 256 KiB drain and the rest waits.
+        // An idle stream takes 256 KiB + 600 bytes in one write; 600 stay held back.
+        client.send(id, &vec![0; 256 * 1024 + 600]).unwrap();
+        assert_eq!(client.writable(id), 400);
+
+        // 400 more fit exactly; one byte beyond fails.
+        client.send(id, &[0; 400]).unwrap();
+        assert_eq!(client.writable(id), 0);
+        assert_eq!(client.send(id, &[0]), Err(YamuxError::SendBufferFull(id)));
     }
 
     #[test]

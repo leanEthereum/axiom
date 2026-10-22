@@ -12,7 +12,7 @@
 //!                      │   identify, ping                         │
 //!                      ├──────────────────────────────────────────┤
 //!                      │ yamux streams, multistream per stream    │
-//!                      │ secure channel (plaintext, noise seam)   │
+//!                      │ Noise secure channel (plaintext: tests)  │
 //!                      │ multistream-select                       │
 //!                      │ TCP                                      │
 //!                      └──────────────────────────────────────────┘
@@ -51,5 +51,5 @@ pub mod yamux;
 #[cfg(test)]
 mod testing;
 
-pub use identity::{KeyType, PeerId, PeerIdError, PublicKey};
+pub use identity::{KeyType, Keypair, PeerId, PeerIdError, PublicKey};
 pub use multiaddr::{Multiaddr, MultiaddrError, Protocol};

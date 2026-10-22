@@ -16,7 +16,8 @@
 //!
 //! Each stream starts with a 256 KiB receive window per direction.
 //! A sender may only have that many unacknowledged data bytes in flight.
-//! The receiver grants more with window update frames as it consumes data.
+//! The receiver grants more with window update frames as its application consumes data.
+//! A peer that outpaces the application therefore stalls at the window, not in memory.
 //!
 //! The protocol identifier is `/yamux/1.0.0`.
 //! See `libp2p/specs/yamux/README.md`, a copy of the hashicorp specification.
@@ -55,6 +56,12 @@ pub struct Config {
     ///
     /// Smaller frames interleave streams more fairly on one connection.
     pub max_frame_len: u32,
+
+    /// Most bytes one stream holds back while the peer withholds credit.
+    ///
+    /// A write to an idle stream is always accepted, so one message may exceed it.
+    /// Beyond it, writes fail until the peer grants credit and the queue drains.
+    pub max_send_buffer: usize,
 }
 
 impl Default for Config {
@@ -64,6 +71,8 @@ impl Default for Config {
             max_streams: 512,
             max_ack_backlog: 256,
             max_frame_len: 16 * 1024,
+            // Four default windows: a peer that stops reading costs at most this per stream.
+            max_send_buffer: 4 * INITIAL_WINDOW as usize,
         }
     }
 }
@@ -150,6 +159,9 @@ pub enum YamuxError {
 
     /// Stream identifiers of this side are exhausted.
     StreamIdsExhausted,
+
+    /// The stream already holds back as many bytes as the send buffer allows.
+    SendBufferFull(StreamId),
 }
 
 impl fmt::Display for YamuxError {
@@ -175,6 +187,7 @@ impl fmt::Display for YamuxError {
             Self::SessionClosing => f.write_str("session is going away"),
             Self::AckBacklogFull => f.write_str("too many unacknowledged streams"),
             Self::StreamIdsExhausted => f.write_str("stream identifiers exhausted"),
+            Self::SendBufferFull(id) => write!(f, "send buffer of stream {id} is full"),
         }
     }
 }

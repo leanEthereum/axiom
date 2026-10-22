@@ -1,17 +1,24 @@
 //! The swarm task: owns the router and the request tables, and routes between connections and the node.
 
-use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
 
 use tokio::{
     net::{TcpListener, TcpStream},
     spawn,
-    sync::mpsc,
+    sync::mpsc::{self, error::TrySendError},
+    task::AbortHandle,
     time::{Instant, interval, sleep},
 };
 
 use super::{
     Command, InboundRequestId, NetworkConfig, NetworkEvent, RequestError, RequestId,
     connection::{self, ConnectionEvent, ConnectionId, ConnectionInput, Shared},
+    events::{Admission, EventQueue},
     upgrade::upgrade,
 };
 use crate::{
@@ -30,6 +37,26 @@ use crate::{
 
 /// Result code for a rate-limited request: client-specific, as lighthouse uses it.
 const RATE_LIMITED: ResponseCode = ResponseCode::ClientSpecific(139);
+
+/// Inputs other than gossip that may wait for one full connection queue.
+///
+/// Threshold: a connection that falls this far behind is cut rather than buffered further.
+const CONTROL_BACKLOG: usize = 64;
+
+/// What became of an input for a connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// The connection queue took it.
+    Sent,
+    /// The queue was full: gossip is lossy, so it was discarded.
+    DroppedGossip,
+    /// The queue was full: the input waits in the backlog.
+    Deferred,
+    /// The backlog overflowed: the connection must be cut.
+    Overwhelmed,
+    /// The connection is gone.
+    Closed,
+}
 
 /// Everything the swarm task waits on, in one channel.
 #[derive(Debug)]
@@ -60,7 +87,61 @@ struct ConnectionEntry {
     /// Whether this node dialed.
     outbound: bool,
     /// The connection's input, once established.
-    commands: Option<mpsc::UnboundedSender<ConnectionInput>>,
+    commands: Option<mpsc::Sender<ConnectionInput>>,
+    /// Inputs that found the connection queue full, oldest first.
+    backlog: VecDeque<ConnectionInput>,
+    /// Cancels the connection task.
+    task: Option<AbortHandle>,
+}
+
+impl ConnectionEntry {
+    /// Hands an input to the connection without waiting, under the backpressure policy.
+    fn deliver(&mut self, input: ConnectionInput) -> Delivery {
+        let Some(commands) = &self.commands else {
+            return Delivery::Closed;
+        };
+        // Order: nothing overtakes inputs already waiting in the backlog.
+        let input = if self.backlog.is_empty() {
+            match commands.try_send(input) {
+                Ok(()) => return Delivery::Sent,
+                Err(TrySendError::Closed(_)) => return Delivery::Closed,
+                Err(TrySendError::Full(input)) => input,
+            }
+        } else {
+            input
+        };
+        // Gossip repairs itself through IHAVE and IWANT, so it never waits.
+        if matches!(input, ConnectionInput::SendGossip(_)) {
+            return Delivery::DroppedGossip;
+        }
+        if self.backlog.len() >= CONTROL_BACKLOG {
+            return Delivery::Overwhelmed;
+        }
+        self.backlog.push_back(input);
+        Delivery::Deferred
+    }
+
+    /// Moves backlogged inputs into the connection queue while it has room.
+    fn retry_backlog(&mut self) {
+        let Some(commands) = &self.commands else {
+            self.backlog.clear();
+            return;
+        };
+        while let Some(input) = self.backlog.pop_front() {
+            match commands.try_send(input) {
+                Ok(()) => {}
+                Err(TrySendError::Full(input)) => {
+                    // Still full: put it back at the head and wait for the next turn.
+                    self.backlog.push_front(input);
+                    return;
+                }
+                Err(TrySendError::Closed(_)) => {
+                    self.backlog.clear();
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// The swarm task's state.
@@ -88,9 +169,9 @@ struct Swarm {
     /// The next inbound request identifier.
     next_inbound: u64,
     /// The swarm's own input, for spawned tasks.
-    input: mpsc::UnboundedSender<SwarmInput>,
+    input: mpsc::Sender<SwarmInput>,
     /// Events for the node.
-    events: mpsc::UnboundedSender<NetworkEvent>,
+    events: Arc<EventQueue>,
 }
 
 /// Spawns the swarm, accept loop, and heartbeat tasks.
@@ -98,14 +179,14 @@ pub(super) fn spawn_swarm(
     config: NetworkConfig,
     listener: TcpListener,
     listen_addr: Multiaddr,
-    input: mpsc::UnboundedSender<SwarmInput>,
-    mut receiver: mpsc::UnboundedReceiver<SwarmInput>,
-    events: mpsc::UnboundedSender<NetworkEvent>,
+    input: mpsc::Sender<SwarmInput>,
+    mut receiver: mpsc::Receiver<SwarmInput>,
+    events: Arc<EventQueue>,
 ) {
     let identify = IdentifyInfo {
         protocol_version: "eth2/1.0.0".to_owned(),
         agent_version: config.agent_version.clone(),
-        public_key: config.local_key.clone(),
+        public_key: config.identity.public_key().clone(),
         listen_addrs: vec![listen_addr],
         observed_addr: None,
         protocols: ProtocolVersion::ALL
@@ -121,6 +202,7 @@ pub(super) fn spawn_swarm(
         max_payload_size: config.max_payload_size,
         max_gossip_frame: config.gossipsub.max_transmit_size,
         yamux: config.yamux,
+        connection_queue: config.connection_queue,
     });
     let heartbeat = config.gossipsub.heartbeat_interval;
     let mut swarm = Swarm {
@@ -145,6 +227,7 @@ pub(super) fn spawn_swarm(
         while let Ok((stream, address)) = listener.accept().await {
             if accept_input
                 .send(SwarmInput::Accepted(stream, address))
+                .await
                 .is_err()
             {
                 return;
@@ -158,7 +241,7 @@ pub(super) fn spawn_swarm(
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if input.send(SwarmInput::Heartbeat).is_err() {
+            if input.send(SwarmInput::Heartbeat).await.is_err() {
                 return;
             }
         }
@@ -169,13 +252,17 @@ pub(super) fn spawn_swarm(
                 break;
             }
             swarm.flush_router();
+            swarm.retry_backlogs();
         }
-        // Shutdown: close every connection and stop the helper tasks.
-        for entry in swarm.connections.values() {
-            if let Some(commands) = &entry.commands {
-                let _ = commands.send(ConnectionInput::Close);
+        // Shutdown: close every connection, cutting those too busy to hear it.
+        for entry in swarm.connections.values_mut() {
+            if entry.deliver(ConnectionInput::Close) != Delivery::Sent
+                && let Some(task) = &entry.task
+            {
+                task.abort();
             }
         }
+        swarm.events.finish();
         accept_task.abort();
         heartbeat_task.abort();
     });
@@ -187,9 +274,9 @@ impl Swarm {
         self.start.elapsed()
     }
 
-    /// Emits an event to the node; a dropped receiver is not an error.
+    /// Emits a control event to the node; a dropped receiver is not an error.
     fn emit(&self, event: NetworkEvent) {
-        let _ = self.events.send(event);
+        self.events.push_control(event);
     }
 
     /// Handles one input, returning false on shutdown.
@@ -269,7 +356,7 @@ impl Swarm {
                 let timeout = self.config.request_timeout;
                 spawn(async move {
                     sleep(timeout).await;
-                    let _ = input.send(SwarmInput::RequestTimeout(id));
+                    let _ = input.send(SwarmInput::RequestTimeout(id)).await;
                 });
             }
             Command::Respond { id, chunks } => {
@@ -307,7 +394,7 @@ impl Swarm {
                 Ok(stream) => SwarmInput::Dialed(id, stream, expected),
                 Err(error) => SwarmInput::DialFailed(address, error.to_string()),
             };
-            let _ = input.send(event);
+            let _ = input.send(event).await;
         });
     }
 
@@ -322,6 +409,8 @@ impl Swarm {
                 address,
                 outbound,
                 commands: None,
+                backlog: VecDeque::new(),
+                task: None,
             },
         );
         id
@@ -329,7 +418,7 @@ impl Swarm {
 
     /// Spawns the task that upgrades and then runs a connection.
     fn start_connection(
-        &self,
+        &mut self,
         id: ConnectionId,
         stream: TcpStream,
         role: Role,
@@ -343,7 +432,7 @@ impl Swarm {
             .get(&id)
             .map(|entry| entry.address.clone())
             .unwrap_or_default();
-        spawn(async move {
+        let task = spawn(async move {
             let _ = stream.set_nodelay(true);
             match upgrade(stream, role, security.as_ref(), expected).await {
                 Ok(upgraded) => {
@@ -354,13 +443,18 @@ impl Swarm {
                     connection::run(id, upgraded, mode, remote, shared, input).await;
                 }
                 Err(error) => {
-                    let _ = input.send(SwarmInput::Connection(
-                        id,
-                        ConnectionEvent::Failed(error.to_string()),
-                    ));
+                    let _ = input
+                        .send(SwarmInput::Connection(
+                            id,
+                            ConnectionEvent::Failed(error.to_string()),
+                        ))
+                        .await;
                 }
             }
         });
+        if let Some(entry) = self.connections.get_mut(&id) {
+            entry.task = Some(task.abort_handle());
+        }
     }
 
     /// Applies an event from a connection.
@@ -398,7 +492,7 @@ impl Swarm {
                         protocol,
                         payload,
                     } => {
-                        self.on_inbound_request(id, peer, stream, protocol, payload);
+                        self.on_inbound_request(id, &peer, stream, protocol, payload);
                     }
                     ConnectionEvent::ResponseChunk(request, chunk) => {
                         if self.requests.contains_key(&request) {
@@ -442,16 +536,17 @@ impl Swarm {
         &mut self,
         id: ConnectionId,
         peer: PeerId,
-        commands: mpsc::UnboundedSender<ConnectionInput>,
+        commands: mpsc::Sender<ConnectionInput>,
     ) {
         // One connection per peer: the later one is closed.
+        // Its queue is fresh and empty, so the close always fits.
         if self.peers.contains_key(&peer) {
-            let _ = commands.send(ConnectionInput::Close);
+            let _ = commands.try_send(ConnectionInput::Close);
             self.connections.remove(&id);
             return;
         }
         let Some(entry) = self.connections.get_mut(&id) else {
-            let _ = commands.send(ConnectionInput::Close);
+            let _ = commands.try_send(ConnectionInput::Close);
             return;
         };
         entry.peer = Some(peer.clone());
@@ -510,7 +605,7 @@ impl Swarm {
     fn on_inbound_request(
         &mut self,
         id: ConnectionId,
-        peer: PeerId,
+        peer: &PeerId,
         stream: StreamId,
         protocol: Protocol,
         payload: Vec<u8>,
@@ -518,7 +613,7 @@ impl Swarm {
         let now = self.now();
         if let Some(limiter) = &mut self.limiter {
             let cost = request_cost(protocol, &payload);
-            if limiter.allow(&peer, protocol, cost, now).is_err() {
+            if limiter.allow(peer, protocol, cost, now).is_err() {
                 let chunk = ResponseChunk::error(RATE_LIMITED, "rate limited");
                 self.send_to_connection(id, ConnectionInput::Respond(stream, vec![chunk]));
                 return;
@@ -526,13 +621,55 @@ impl Swarm {
         }
         let request = InboundRequestId(self.next_inbound);
         self.next_inbound += 1;
-        self.inbound.insert(request, (id, stream));
-        self.emit(NetworkEvent::Request {
-            peer,
+        let event = NetworkEvent::Request {
+            peer: peer.clone(),
             id: request,
             protocol,
             payload,
-        });
+        };
+        // Insert first, so the node never sees an identifier the swarm does not know.
+        self.inbound.insert(request, (id, stream));
+        let admission = self.events.push_traffic(peer, event);
+        if admission != Admission::Queued {
+            // The node will never see it: answer for it, then deal with the sender.
+            self.inbound.remove(&request);
+            let chunk = ResponseChunk::error(ResponseCode::ServerError, "busy");
+            self.send_to_connection(id, ConnectionInput::Respond(stream, vec![chunk]));
+            self.on_refused(peer, admission);
+        }
+    }
+
+    /// Applies the flooding policy to a peer whose traffic the queue refused.
+    fn on_refused(&mut self, peer: &PeerId, admission: Admission) {
+        // A full queue is the node's fault and costs the peer nothing; flooding costs the connection.
+        if admission == Admission::Flooding
+            && let Some(&id) = self.peers.get(peer)
+        {
+            self.cut(id);
+        }
+    }
+
+    /// Ends a connection at once, without waiting for it to drain.
+    fn cut(&mut self, id: ConnectionId) {
+        if let Some(task) = self
+            .connections
+            .get(&id)
+            .and_then(|entry| entry.task.as_ref())
+        {
+            // Aborting drops the socket; the reader task stops with it.
+            task.abort();
+        }
+        // The aborted task never reports its end, so the swarm records it here.
+        self.on_closed(id);
+    }
+
+    /// Gives every connection backlog a chance to drain.
+    fn retry_backlogs(&mut self) {
+        for entry in self.connections.values_mut() {
+            if !entry.backlog.is_empty() {
+                entry.retry_backlog();
+            }
+        }
     }
 
     /// Delivers router output: RPCs to connections, messages to the node.
@@ -547,12 +684,21 @@ impl Swarm {
             {
                 // Gossip payloads are snappy blocks; an undecodable one is invalid outright.
                 match decode_gossip(&message.data, self.config.max_payload_size) {
-                    Ok(data) => self.emit(NetworkEvent::GossipMessage {
-                        id,
-                        source,
-                        topic: message.topic,
-                        data,
-                    }),
+                    Ok(data) => {
+                        let event = NetworkEvent::GossipMessage {
+                            id,
+                            source: source.clone(),
+                            topic: message.topic,
+                            data,
+                        };
+                        let admission = self.events.push_traffic(&source, event);
+                        if admission != Admission::Queued {
+                            // Unseen by the node: release it without blaming anyone.
+                            self.router
+                                .report_validation(&id, ValidationOutcome::Ignore, now);
+                            self.on_refused(&source, admission);
+                        }
+                    }
                     Err(_) => {
                         self.router
                             .report_validation(&id, ValidationOutcome::Reject, now);
@@ -566,20 +712,19 @@ impl Swarm {
     }
 
     /// Sends an input to the connection of a peer.
-    fn send_to_peer(&self, peer: &PeerId, input: ConnectionInput) {
+    fn send_to_peer(&mut self, peer: &PeerId, input: ConnectionInput) {
         if let Some(&id) = self.peers.get(peer) {
             self.send_to_connection(id, input);
         }
     }
 
-    /// Sends an input to a connection.
-    fn send_to_connection(&self, id: ConnectionId, input: ConnectionInput) {
-        if let Some(commands) = self
-            .connections
-            .get(&id)
-            .and_then(|entry| entry.commands.as_ref())
-        {
-            let _ = commands.send(input);
+    /// Sends an input to a connection without waiting, cutting it when it cannot keep up.
+    fn send_to_connection(&mut self, id: ConnectionId, input: ConnectionInput) {
+        let Some(entry) = self.connections.get_mut(&id) else {
+            return;
+        };
+        if entry.deliver(input) == Delivery::Overwhelmed {
+            self.cut(id);
         }
     }
 }
@@ -606,4 +751,79 @@ fn request_cost(protocol: Protocol, payload: &[u8]) -> u32 {
         _ => 1,
     };
     u32::try_from(items.max(1)).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gossipsub::Rpc;
+
+    /// An established entry whose connection queue holds one input.
+    fn entry() -> (ConnectionEntry, mpsc::Receiver<ConnectionInput>) {
+        let (commands, receiver) = mpsc::channel(1);
+        let entry = ConnectionEntry {
+            peer: None,
+            address: Multiaddr::default(),
+            outbound: false,
+            commands: Some(commands),
+            backlog: VecDeque::new(),
+            task: None,
+        };
+        (entry, receiver)
+    }
+
+    #[test]
+    fn full_queue_drops_gossip_and_defers_control() {
+        let (mut entry, mut receiver) = entry();
+
+        // The single slot takes the first input.
+        assert_eq!(entry.deliver(ConnectionInput::Close), Delivery::Sent);
+
+        // Queue full: gossip is dropped, a request waits in the backlog.
+        assert_eq!(
+            entry.deliver(ConnectionInput::SendGossip(Rpc::default())),
+            Delivery::DroppedGossip
+        );
+        assert_eq!(
+            entry.deliver(ConnectionInput::CancelRequest(RequestId(7))),
+            Delivery::Deferred
+        );
+        assert_eq!(entry.backlog.len(), 1);
+
+        // The connection takes its input; the retry moves the request into the freed slot.
+        assert!(matches!(receiver.try_recv(), Ok(ConnectionInput::Close)));
+        entry.retry_backlog();
+        assert!(entry.backlog.is_empty());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(ConnectionInput::CancelRequest(RequestId(7)))
+        ));
+    }
+
+    #[test]
+    fn backlog_overflow_overwhelms_the_connection() {
+        let (mut entry, _receiver) = entry();
+        assert_eq!(entry.deliver(ConnectionInput::Close), Delivery::Sent);
+
+        // 64 inputs fill the backlog behind the full queue.
+        for request in 0..64 {
+            assert_eq!(
+                entry.deliver(ConnectionInput::CancelRequest(RequestId(request))),
+                Delivery::Deferred
+            );
+        }
+
+        // The 65th means the connection cannot keep up.
+        assert_eq!(
+            entry.deliver(ConnectionInput::CancelRequest(RequestId(64))),
+            Delivery::Overwhelmed
+        );
+    }
+
+    #[test]
+    fn closed_connection_takes_nothing() {
+        let (mut entry, receiver) = entry();
+        drop(receiver);
+        assert_eq!(entry.deliver(ConnectionInput::Close), Delivery::Closed);
+    }
 }
