@@ -13,7 +13,7 @@ use axiom_discv5::{
     service::{Config, EnrFilter, Event},
 };
 use axiom_p2p::{Multiaddr, PeerId, PublicKey};
-use axiom_types::{ChainConfig, Epoch, ForkDigest, Root};
+use axiom_types::{ChainConfig, Epoch, Root};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -198,8 +198,8 @@ impl Discovery {
         }
     }
 
-    /// Starts a lookup for peers on a fork, unless one is already running.
-    pub(crate) async fn search(&mut self, fork_digest: ForkDigest) {
+    /// Starts a lookup for peers meeting a condition, unless one is already running.
+    pub(crate) async fn search(&mut self, filter: EnrFilter) {
         // A lookup that never reports back is given up after a few upkeeps.
         if let Some(waited) = &mut self.searching {
             *waited += 1;
@@ -211,11 +211,7 @@ impl Discovery {
         self.dialed.clear();
         // A random target spreads lookups across the whole identifier space.
         let target = NodeId(self.rng.bytes());
-        match self
-            .discv5
-            .lookup(target, EnrFilter::ForkDigest(fork_digest), LOOKUP_PEERS)
-            .await
-        {
+        match self.discv5.lookup(target, filter, LOOKUP_PEERS).await {
             Ok(_) => self.searching = Some(0),
             Err(_) => warn!("discovery stopped"),
         }

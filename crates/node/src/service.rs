@@ -17,7 +17,7 @@ use crate::{
     ProposerService, ProposerSettings, Publisher,
     network::{
         AttestationSubnets, Discovery, ForkDigests, NetworkIdentity, NetworkService, NetworkSetup,
-        NodeIdentity, RecordSetup,
+        NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
     },
     race::Either,
     tasks::{EngineFollower, PayloadPreparer, Ticker},
@@ -84,6 +84,7 @@ impl<P: Preset> StartedChain<'_, P> {
             execution,
             clock,
             metrics,
+            peer_metrics,
         } = services;
         // The record is stated for the wall clock's epoch, not the anchor's.
         let epoch = self.slots.slot_at(clock.now_ms()).epoch::<P>();
@@ -134,6 +135,13 @@ impl<P: Preset> StartedChain<'_, P> {
                 execution,
                 clock,
                 metrics,
+                peer_metrics,
+                peer_limits: PeerLimits {
+                    target: settings.target_peers,
+                    // Threshold: ten percent of headroom, at least one, for new peers to come in.
+                    excess: (settings.target_peers / 10).max(1),
+                    ..PeerLimits::default()
+                },
                 discovery,
             },
         )
@@ -152,6 +160,8 @@ struct SharedServices {
     clock: Arc<dyn Clock>,
     /// The node's metrics.
     metrics: NodeMetrics,
+    /// Peer management metrics.
+    peer_metrics: PeerMetrics,
 }
 
 /// A beacon node for one preset.
@@ -231,6 +241,7 @@ impl<P: Preset> Node<P> {
                     execution: Arc::clone(&execution),
                     clock: Arc::clone(&clock),
                     metrics,
+                    peer_metrics: PeerMetrics::register(&registry).map_err(NodeError::Metrics)?,
                 };
                 let (key, identity) = identity;
                 // The network's start holds every service's state; boxing keeps this future small.

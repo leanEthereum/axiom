@@ -282,6 +282,13 @@ pub enum NetworkEvent {
         /// What went wrong.
         error: RequestError,
     },
+    /// A peer's request went over its rate limit and was refused.
+    RateLimited {
+        /// The peer.
+        peer: PeerId,
+        /// The method it overused.
+        protocol: Protocol,
+    },
     /// A peer described itself through identify.
     PeerIdentified {
         /// The peer.

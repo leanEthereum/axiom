@@ -738,6 +738,10 @@ impl Swarm {
             if limiter.allow(peer, protocol, cost, now).is_err() {
                 let chunk = ResponseChunk::error(RATE_LIMITED, "rate limited");
                 self.send_to_connection(id, ConnectionInput::Respond(stream, vec![chunk]));
+                self.emit(NetworkEvent::RateLimited {
+                    peer: peer.clone(),
+                    protocol,
+                });
                 return;
             }
         }

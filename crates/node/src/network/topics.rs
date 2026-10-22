@@ -7,7 +7,7 @@ use axiom_gossip::BlobSubnets;
 use axiom_p2p::eth::{GossipKind, GossipTopic};
 use axiom_types::{ChainConfig, ColumnIndex, Epoch, ForkName, Preset, Root};
 
-use super::subnets::AttestationSubnets;
+use super::{peers::Subnet, subnets::AttestationSubnets};
 
 /// Epochs a fork's topics are kept after the next fork starts.
 ///
@@ -98,6 +98,14 @@ impl Subscriptions {
         };
         self.joined = wanted;
         change
+    }
+
+    /// The subnets of the topics joined, which peer management keeps served.
+    pub(crate) fn needed_subnets(&self) -> BTreeSet<Subnet> {
+        self.joined
+            .iter()
+            .filter_map(|topic| Subnet::of(topic.kind))
+            .collect()
     }
 
     /// The topics of one epoch: its fork's global topics and the node's subnets, under its digest.

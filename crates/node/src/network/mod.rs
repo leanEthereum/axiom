@@ -5,6 +5,7 @@ mod forks;
 mod gossip;
 mod handshake;
 mod identity;
+mod peers;
 mod record;
 mod requests;
 mod responder;
@@ -24,14 +25,17 @@ use std::{
 };
 
 use axiom_das::NodeId;
-use axiom_discv5::driver::Discv5Events;
+use axiom_discv5::{driver::Discv5Events, service::EnrFilter};
 use axiom_p2p::{
     Multiaddr, PeerId,
-    eth::{GossipKind, GossipTopic, reqresp::StatusVersion},
-    swarm::{NetworkEvent, NetworkEvents, NetworkHandle},
+    eth::{
+        GossipKind, GossipTopic,
+        reqresp::{GoodbyeReason, Protocol, ResponseChunk, ResponseCode, StatusVersion},
+    },
+    swarm::{NetworkEvent, NetworkEvents, NetworkHandle, RequestError, RequestId},
 };
 use axiom_telemetry::NodeMetrics;
-use axiom_types::{ChainConfig, ColumnIndex, Preset, Root, SlotClock};
+use axiom_types::{ChainConfig, ColumnIndex, ForkDigest, Preset, Root, SlotClock};
 use tokio::{
     sync::{Semaphore, mpsc::UnboundedReceiver, watch},
     task, time,
@@ -42,12 +46,14 @@ pub use self::{discovery::DiscoverySettings, identity::NodeKey};
 pub(crate) use self::{
     discovery::{DialPlan, Discovery, RecordSetup},
     forks::ForkDigests,
+    peers::{PeerLimits, PeerMetrics},
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
 use self::{
     gossip::GossipHandler,
     handshake::Handshakes,
+    peers::{PeerAction, PeerManager, PeerSubnets},
     server::RequestServer,
     sync::{BatchOutcome, RangeSync},
     topics::Subscriptions,
@@ -134,8 +140,18 @@ pub(crate) struct NetworkService<P: Preset> {
     metadata: Arc<LocalMetadata>,
     /// Status requests in flight, and the version each peer speaks.
     handshakes: Handshakes,
-    /// Connected peers, for the peer count and status refreshes.
-    peers: BTreeSet<PeerId>,
+    /// Connected peers and the rules that shape the set.
+    peers: PeerManager,
+    /// Peer management metrics.
+    peer_metrics: PeerMetrics,
+    /// Goodbye requests in flight; each peer is disconnected once its goodbye is done.
+    goodbyes: HashMap<RequestId, PeerId>,
+    /// Metadata requests in flight, with the version asked.
+    metadata_requests: HashMap<RequestId, (PeerId, Protocol)>,
+    /// The chain configuration, for subnet lookups.
+    config: ChainConfig,
+    /// Which starved subnet the next lookup serves, rotating.
+    subnet_turn: usize,
     /// Peer counts and gossip outcomes.
     metrics: NodeMetrics,
     /// Peer discovery, when enabled.
@@ -173,12 +189,6 @@ const MAX_CONCURRENT_REQUESTS: usize = 32;
 /// Enough to keep the chain thread busy without letting a flood pile up tasks.
 const MAX_CONCURRENT_VALIDATIONS: usize = 256;
 
-/// Peers the node keeps looking for until it has them.
-///
-/// A mesh wants 6 to 12 peers, per the phase0 gossipsub parameters.
-/// Sixty-four peers fill every topic's mesh and leave spares.
-const TARGET_PEERS: usize = 64;
-
 /// Dials awaiting their outcome whose fallback address is remembered.
 ///
 /// A dial reports success or failure within the handshake timeout, so a few hundred cover a lookup's worth.
@@ -207,6 +217,8 @@ impl<P: Preset> NetworkService<P> {
             execution,
             clock,
             metrics,
+            peer_metrics,
+            peer_limits,
             discovery,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
@@ -246,7 +258,7 @@ impl<P: Preset> NetworkService<P> {
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
             subscriptions: Subscriptions::new(
                 identity.node_id,
-                config,
+                config.clone(),
                 genesis_validators_root,
                 &custody,
             ),
@@ -256,7 +268,12 @@ impl<P: Preset> NetworkService<P> {
             slots,
             metadata,
             handshakes: Handshakes::default(),
-            peers: BTreeSet::new(),
+            peers: PeerManager::new(peer_limits),
+            peer_metrics,
+            goodbyes: HashMap::new(),
+            metadata_requests: HashMap::new(),
+            config,
+            subnet_turn: 0,
             metrics,
             discovery,
             discovery_events,
@@ -321,9 +338,12 @@ impl<P: Preset> NetworkService<P> {
                         .as_mut()
                         .map(|discovery| discovery.on_event(event))
                         .unwrap_or_default();
+                    let now = self.now();
                     for plan in plans {
-                        // A peer already connected needs no second connection.
-                        if self.peers.contains(&plan.peer) {
+                        // A peer already connected needs no second connection; a banned one none at all.
+                        if self.peers.contains(&plan.peer)
+                            || !self.peers.may_dial(&plan.peer, &plan.primary, now)
+                        {
                             continue;
                         }
                         self.dial_plan(plan).await;
@@ -333,6 +353,7 @@ impl<P: Preset> NetworkService<P> {
                 Either::Right(Either::Left(None)) => discovered = None,
                 Either::Right(Either::Right(Either::Left(Some(outcome)))) => {
                     self.sync.on_outcome(outcome).await;
+                    self.punish_dropped().await;
                 }
                 Either::Right(Either::Right(Either::Left(None))) => outcomes = None,
                 Either::Right(Either::Right(Either::Right(_))) => self.maintain().await,
@@ -385,7 +406,7 @@ impl<P: Preset> NetworkService<P> {
         self.publish_light_client().await;
 
         // Alone, the node dials its boot nodes again: they may have been down before.
-        if self.peers.is_empty() {
+        if self.peers.len() == 0 {
             for address in &self.boot_nodes {
                 if let Err(error) = self.network.dial(address.clone()).await {
                     warn!(%error, %address, "could not dial boot node");
@@ -393,17 +414,12 @@ impl<P: Preset> NetworkService<P> {
             }
         }
 
-        // Too few peers: look for more on this fork.
-        if self.peers.len() < TARGET_PEERS
-            && let Some(discovery) = &mut self.discovery
-        {
-            discovery.search(digest).await;
-        }
+        self.manage_peers(digest).await;
 
         // Peers' heads move every slot; ask again often while behind, rarely once caught up.
         let behind = slot.0.saturating_sub(head.0) > 1;
         if behind || slot.index_in_epoch::<P>() == 0 {
-            let peers: Vec<PeerId> = self.peers.iter().cloned().collect();
+            let peers: Vec<PeerId> = self.peers.connected().cloned().collect();
             for peer in peers {
                 self.send_status(peer).await;
             }
@@ -477,15 +493,25 @@ impl<P: Preset> NetworkService<P> {
             } => {
                 // The dial succeeded: its fallback is no longer needed.
                 self.fallbacks.remove(&address);
-                self.peers.insert(peer.clone());
+                let now = self.now();
+                if let Err(reason) = self.peers.on_connected(&peer, &address, outbound, now) {
+                    debug!(%peer, %address, reason = reason.0, "refusing a peer");
+                    self.say_goodbye(peer, reason).await;
+                    return;
+                }
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 // The dialer opens the handshake; the listener answers it.
                 if outbound {
-                    self.send_status(peer).await;
+                    self.send_status(peer.clone()).await;
                 }
+                self.request_metadata(peer, Protocol::MetaDataV3).await;
             }
             NetworkEvent::PeerDisconnected { peer } => {
-                self.peers.remove(&peer);
+                let now = self.now();
+                self.peers.on_disconnected(&peer, now);
+                self.goodbyes.retain(|_, known| *known != peer);
+                self.metadata_requests
+                    .retain(|_, (known, _)| *known != peer);
                 self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 self.sync.on_disconnect(&peer).await;
@@ -527,27 +553,17 @@ impl<P: Preset> NetworkService<P> {
                 });
             }
             NetworkEvent::Response { request, chunk, .. } => {
-                if let Some((peer, status)) = self.handshakes.answered(request, &chunk) {
-                    match status {
-                        Some(status) => self.sync.on_status(peer, status).await,
-                        None => debug!(%peer, "peer sent no usable status"),
-                    }
-                } else if self.sync.owns(request) {
-                    self.sync.on_chunk(request, &chunk);
-                }
+                self.on_response(request, &chunk).await;
             }
-            NetworkEvent::ResponseEnded { request, .. } => self.sync.on_end(request).await,
+            NetworkEvent::ResponseEnded { request, .. } => self.on_response_end(request).await,
             NetworkEvent::RequestFailed {
                 request,
                 peer,
                 error,
-            } => {
-                debug!(%peer, %error, "request failed");
-                // A peer that refused the newest status version gets the older one right away.
-                if let Some(peer) = self.handshakes.failed(request, &error) {
-                    self.send_status(peer).await;
-                }
-                self.sync.on_failure(request).await;
+            } => self.on_request_failure(request, peer, error).await,
+            NetworkEvent::RateLimited { peer, protocol } => {
+                debug!(%peer, ?protocol, "peer over its rate limit");
+                self.report(&peer, PeerAction::MidTolerance).await;
             }
             NetworkEvent::ConnectionFailed { address, error } => {
                 debug!(%address, %error, "connection failed");
@@ -559,6 +575,170 @@ impl<P: Preset> NetworkService<P> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Routes a response chunk to the metadata, handshake or sync request it answers.
+    async fn on_response(&mut self, request: RequestId, chunk: &ResponseChunk) {
+        if let Some((peer, _)) = self.metadata_requests.get(&request) {
+            // A metadata response states the peer's subnets.
+            if chunk.code == ResponseCode::Success {
+                let peer = peer.clone();
+                match PeerSubnets::from_metadata::<P>(&peer, &chunk.payload, &self.config) {
+                    Some(subnets) => self.peers.set_subnets(&peer, subnets),
+                    None => self.report(&peer, PeerAction::LowTolerance).await,
+                }
+            }
+        } else if let Some((peer, status)) = self.handshakes.answered(request, chunk) {
+            match status {
+                Some(status) => self.sync.on_status(peer, status).await,
+                None => debug!(%peer, "peer sent no usable status"),
+            }
+        } else if self.sync.owns(request) {
+            self.sync.on_chunk(request, chunk);
+        }
+    }
+
+    /// Ends a request: a goodbye's end closes the connection.
+    async fn on_response_end(&mut self, request: RequestId) {
+        self.metadata_requests.remove(&request);
+        if let Some(peer) = self.goodbyes.remove(&request) {
+            let _ = self.network.disconnect(peer).await;
+            return;
+        }
+        self.sync.on_end(request).await;
+        self.punish_dropped().await;
+    }
+
+    /// Handles a failed request, scoring the peer for faults a failure reveals.
+    async fn on_request_failure(&mut self, request: RequestId, peer: PeerId, error: RequestError) {
+        debug!(%peer, %error, "request failed");
+        if let Some(peer) = self.goodbyes.remove(&request) {
+            let _ = self.network.disconnect(peer).await;
+            return;
+        }
+        if let Some((peer, protocol)) = self.metadata_requests.remove(&request) {
+            // A peer that refuses the third metadata version may speak the second.
+            if protocol == Protocol::MetaDataV3 && matches!(error, RequestError::Unsupported { .. })
+            {
+                self.request_metadata(peer, Protocol::MetaDataV2).await;
+            }
+            return;
+        }
+        if let Some(action) = Self::fault_of(&error) {
+            self.report(&peer, action).await;
+        }
+        // A peer that refused the newest status version gets the older one right away.
+        if let Some(peer) = self.handshakes.failed(request, &error) {
+            self.send_status(peer).await;
+        }
+        self.sync.on_failure(request).await;
+        self.punish_dropped().await;
+    }
+
+    /// The wall clock, as the peer manager measures time.
+    fn now(&self) -> Duration {
+        Duration::from_millis(self.clock.now_ms())
+    }
+
+    /// Keeps the peer set in shape: prunes past the target, refreshes metadata, and seeks peers.
+    ///
+    /// A lookup serves the most starved subnet first; with every subnet served, it seeks any peer.
+    async fn manage_peers(&mut self, digest: ForkDigest) {
+        let now = self.now();
+        let needed = self.subscriptions.needed_subnets();
+        let upkeep = self.peers.upkeep(&needed, now);
+        for (peer, reason) in upkeep.disconnect {
+            self.say_goodbye(peer, reason).await;
+        }
+        for peer in upkeep.metadata_due {
+            if !self
+                .metadata_requests
+                .values()
+                .any(|(known, _)| *known == peer)
+            {
+                self.request_metadata(peer, Protocol::MetaDataV3).await;
+            }
+        }
+        if let Some(discovery) = &mut self.discovery {
+            if upkeep.starved.is_empty() {
+                if upkeep.dials > 0 {
+                    discovery.search(EnrFilter::ForkDigest(digest)).await;
+                }
+            } else {
+                // Rotate, so one hard-to-serve subnet does not starve the others of lookups.
+                let subnet = upkeep.starved[self.subnet_turn % upkeep.starved.len()];
+                self.subnet_turn = self.subnet_turn.wrapping_add(1);
+                discovery
+                    .search(subnet.filter::<P>(digest, &self.config))
+                    .await;
+            }
+        }
+        self.peer_metrics.observe(self.peers.census(now));
+        for (subnet, peers) in self.peers.subnet_peers(&needed) {
+            self.peer_metrics.observe_subnet(subnet, peers);
+        }
+        self.metrics.peers.set_count(self.peers.len() as u64);
+    }
+
+    /// The fault a failed request reveals, if any.
+    ///
+    /// A timeout may be the network's doing, a malformed response rarely is.
+    /// Refusals and closed streams are the peer's right and cost nothing.
+    const fn fault_of(error: &RequestError) -> Option<PeerAction> {
+        match error {
+            RequestError::Timeout { .. } => Some(PeerAction::HighTolerance),
+            RequestError::InvalidResponse { .. } => Some(PeerAction::LowTolerance),
+            _ => None,
+        }
+    }
+
+    /// Records a fault, and says goodbye when it pushed the peer out.
+    async fn report(&mut self, peer: &PeerId, action: PeerAction) {
+        self.peer_metrics.fault(action);
+        let now = self.now();
+        if let Some(reason) = self.peers.report(peer, action, now) {
+            debug!(%peer, ?action, reason = reason.0, "peer pushed out by its score");
+            self.say_goodbye(peer.clone(), reason).await;
+        }
+    }
+
+    /// Bans the peers sync dropped for bad data.
+    async fn punish_dropped(&mut self) {
+        for peer in self.sync.take_dropped() {
+            self.report(&peer, PeerAction::Fatal).await;
+        }
+    }
+
+    /// Sends a goodbye; the connection closes once it is delivered or fails.
+    async fn say_goodbye(&mut self, peer: PeerId, reason: GoodbyeReason) {
+        self.peer_metrics.goodbye(reason.0);
+        match self
+            .network
+            .send_request(peer.clone(), Protocol::GoodbyeV1, reason.to_ssz().to_vec())
+            .await
+        {
+            Ok(request) => {
+                self.goodbyes.insert(request, peer);
+            }
+            Err(_) => {
+                let _ = self.network.disconnect(peer).await;
+            }
+        }
+    }
+
+    /// Asks a peer for its metadata, which states the subnets it serves.
+    async fn request_metadata(&mut self, peer: PeerId, protocol: Protocol) {
+        // Metadata requests carry no body.
+        match self
+            .network
+            .send_request(peer.clone(), protocol, Vec::new())
+            .await
+        {
+            Ok(request) => {
+                self.metadata_requests.insert(request, (peer, protocol));
+            }
+            Err(error) => debug!(%error, %peer, "could not request metadata"),
         }
     }
 
@@ -574,6 +754,12 @@ impl<P: Preset> NetworkService<P> {
             }
             self.fallbacks.insert(primary.clone(), fallback);
         }
+        let transport = if primary.quic_socket_addr().is_some() {
+            "quic"
+        } else {
+            "tcp"
+        };
+        self.peer_metrics.dials.with_label_values([transport]).inc();
         if let Err(error) = self.network.dial(primary.clone()).await {
             debug!(%error, address = %primary, "could not dial a discovered peer");
         }
@@ -614,6 +800,10 @@ pub(crate) struct NetworkSetup {
     pub(crate) clock: Arc<dyn Clock>,
     /// The node's metrics.
     pub(crate) metrics: NodeMetrics,
+    /// Peer management metrics.
+    pub(crate) peer_metrics: PeerMetrics,
+    /// The peer set's targets.
+    pub(crate) peer_limits: PeerLimits,
     /// Peer discovery and its events, when enabled.
     pub(crate) discovery: Option<(Discovery, Discv5Events)>,
 }

@@ -38,6 +38,7 @@ OPTIONS:
     --quic-port <PORT>           libp2p QUIC UDP port [default: the libp2p port + 1]
     --no-quic                    listen and dial over TCP only
     --boot-node <MULTIADDR>      peer to dial at startup, repeatable
+    --target-peers <COUNT>       peers to keep connected [default: 64]
     --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
     --discovery-port <PORT>      discv5 UDP port [default: the libp2p port]
     --enr-address <IP>           public IPv4 address announced in the node record
@@ -54,6 +55,12 @@ OPTIONS:
 
 /// Default address of the beacon API, the port every client uses.
 const DEFAULT_HTTP_ADDRESS: &str = "127.0.0.1:5052";
+
+/// Default peer count target.
+///
+/// A mesh wants 6 to 12 peers per topic, per the phase0 gossipsub parameters.
+/// Sixty-four peers fill every topic's mesh and leave spares.
+const DEFAULT_TARGET_PEERS: usize = 64;
 
 /// Default libp2p address, the port every client uses.
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:9000";
@@ -160,6 +167,8 @@ pub(crate) struct Cli {
     quic: QuicChoice,
     /// Peers to dial at startup.
     boot_nodes: Vec<Multiaddr>,
+    /// Peers to keep connected.
+    target_peers: Option<usize>,
     /// Custody groups to keep.
     custody_groups: Option<u64>,
     /// Whether the network is off.
@@ -230,6 +239,10 @@ impl Cli {
                     cli.quic = QuicChoice::Port(Self::parsed("--quic-port", text)?);
                 }
                 "--no-quic" => cli.quic = QuicChoice::Off,
+                "--target-peers" => {
+                    let text = value("--target-peers")?;
+                    cli.target_peers = Some(Self::parsed("--target-peers", text)?);
+                }
                 "--boot-node" => {
                     let text = value("--boot-node")?;
                     cli.boot_nodes.push(Self::parsed("--boot-node", text)?);
@@ -296,6 +309,7 @@ impl Cli {
                 listen_address,
                 quic_port,
                 boot_nodes: self.boot_nodes,
+                target_peers: self.target_peers.unwrap_or(DEFAULT_TARGET_PEERS),
                 discovery,
                 // Every node keeps at least the spec's minimum.
                 custody_group_count: self
@@ -435,6 +449,7 @@ mod tests {
                     listen_address: "0.0.0.0:9000".parse().unwrap(),
                     quic_port: Some(9001),
                     boot_nodes: Vec::new(),
+                    target_peers: 64,
                     custody_group_count: 4,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9000,
@@ -473,6 +488,8 @@ mod tests {
             "127.0.0.1:9001",
             "--quic-port",
             "9101",
+            "--target-peers",
+            "32",
             "--boot-node",
             "/ip4/10.0.0.1/tcp/9000",
             "--custody-groups",
@@ -502,6 +519,7 @@ mod tests {
                     listen_address: "127.0.0.1:9001".parse().unwrap(),
                     quic_port: Some(9101),
                     boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
+                    target_peers: 32,
                     custody_group_count: 128,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9002,

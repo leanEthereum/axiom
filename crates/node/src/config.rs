@@ -72,6 +72,8 @@ pub struct NetworkSettings {
     pub quic_port: Option<u16>,
     /// Peers to dial at startup.
     pub boot_nodes: Vec<Multiaddr>,
+    /// Peers the node aims to keep connected.
+    pub target_peers: usize,
     /// Custody groups to keep, at least the spec's custody requirement.
     pub custody_group_count: u64,
     /// Peer discovery; none relies on boot nodes alone.
