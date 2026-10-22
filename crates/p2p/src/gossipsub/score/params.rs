@@ -158,7 +158,7 @@ impl DecaySchedule {
     ///
     /// ```text
     /// decay^(time / interval) = to_zero
-    /// → decay = to_zero^(interval / time)
+    /// decay = to_zero^(interval / time)
     /// ```
     #[must_use]
     pub fn factor_over(self, time: Duration) -> f64 {
@@ -189,7 +189,8 @@ impl PeerScoreParams {
         let thresholds = PeerScoreThresholds::ethereum();
         // Ten behaviour penalties beyond the threshold bring a peer to the gossip threshold.
         //
-        //     w7 * (16 - 6)^2 = gossip_threshold  →  w7 = -4000 / 100 = -40
+        //     w7 * (16 - 6)^2 = gossip_threshold
+        //     w7 = -4000 / 100 = -40
         let behaviour_penalty_threshold = 6.0;
         let behaviour_penalty_weight = thresholds.gossip_threshold / 10.0_f64.powi(2);
         Self {
@@ -246,7 +247,8 @@ impl TopicScoreParams {
         let mesh_n = f64::from(u32::try_from(mesh_n).unwrap_or(u32::MAX));
         // A counter gaining a rate per interval converges where gain equals decay.
         //
-        //     c = c * decay + rate  →  c = rate / (1 - decay)
+        //     c = c * decay + rate
+        //     c = rate / (1 - decay)
         let steady_state = (messages_per_slot / mesh_n) / (1.0 - first_decay);
         let first_cap = 2.0 * steady_state.max(1.0);
         Self {
@@ -267,7 +269,8 @@ impl TopicScoreParams {
             mesh_failure_penalty_decay: decay.factor_over(epoch),
             // P4: ten invalid messages reach the graylist threshold.
             //
-            //     topic_weight * w4 * 10^2 = -16000  →  w4 = -160 / topic_weight
+            //     topic_weight * w4 * 10^2 = -16000
+            //     w4 = -160 / topic_weight
             invalid_message_deliveries_weight: PeerScoreThresholds::ethereum().graylist_threshold
                 / 100.0
                 / topic_weight.max(f64::EPSILON),
@@ -282,7 +285,7 @@ mod tests {
 
     #[test]
     fn decay_reaches_the_floor_on_time() {
-        // Decaying over 10 intervals: decay^10 = 0.01 → decay = 0.01^(1/10).
+        // Decaying over 10 intervals: decay^10 = 0.01, so decay = 0.01^(1/10).
         let schedule = DecaySchedule {
             interval: Duration::from_secs(12),
             to_zero: 0.01,

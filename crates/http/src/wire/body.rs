@@ -260,6 +260,32 @@ mod tests {
     }
 
     #[test]
+    fn rfc9112_grammar_cases() {
+        // RFC 9112 section 7.1 gives the grammar but no sample body, so each case exercises one rule.
+        let cases: [(&[u8], &[u8]); 6] = [
+            // HEXDIG is case-insensitive, per RFC 5234 section 2.3: "A" is ten.
+            (b"A\r\n0123456789\r\n0\r\n\r\n", b"0123456789"),
+            // The size is 1*HEXDIG, so leading zeros are allowed: "000a" is ten too.
+            (b"000a\r\n0123456789\r\n0\r\n\r\n", b"0123456789"),
+            // Section 7.1.1 allows bad whitespace around the semicolon and the equals sign.
+            (b"5 ; a = b\r\nhello\r\n0\r\n\r\n", b"hello"),
+            // Several extensions, one a quoted string holding a semicolon.
+            (b"5;a;b=c;d=\"x;y\"\r\nhello\r\n0\r\n\r\n", b"hello"),
+            // The last chunk is 1*"0" and may carry its own extension.
+            (b"5\r\nhello\r\n000;end=1\r\n\r\n", b"hello"),
+            // Section 7.1.2 trailer fields, two of them, are read and dropped.
+            (b"5\r\nhello\r\n0\r\nA: 1\r\nB: 2\r\n\r\n", b"hello"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                decode(input, 100),
+                Ok((expected.to_vec(), input.len())),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rejections() {
         // Each malformed body maps to one error.
         //

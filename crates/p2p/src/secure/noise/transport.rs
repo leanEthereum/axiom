@@ -3,7 +3,7 @@
 //! ```text
 //! wire:  [ length: u16 BE ][ ciphertext || tag ]   length <= 65535
 //!
-//! 100 000 plaintext bytes → two frames:
+//! 100 000 plaintext bytes make two frames:
 //!   65519 plaintext + 16 tag = 65535
 //!   34481 plaintext + 16 tag = 34497
 //! ```

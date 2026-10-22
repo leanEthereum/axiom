@@ -108,8 +108,9 @@ fn truncation_at_every_offset_of_the_last_batch() {
     // A crash can cut the file anywhere inside the last frame: 126 cut points.
     //
     //     | ... committed frames ... | last frame ............. |
-    //                                ^ before.len()             ^ after.len()
-    //     cut in [before.len(), after.len()) -> state before the batch
+    //
+    // The last frame starts at the length before the batch and ends at the length after it.
+    // A cut at or past the first length, but short of the second, recovers the state before the batch.
     for cut in before.len()..=after.len() {
         let dir = TempDir::new("crash-truncate");
         clone_with_segment(source.path(), dir.path(), "00000000.seg", &after[..cut]);

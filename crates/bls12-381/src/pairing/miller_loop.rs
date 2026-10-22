@@ -206,8 +206,9 @@ impl MillerLoopResult {
     /// The exponent factors into an easy part and a hard part:
     ///
     /// ```text
-    ///     (p^12 - 1) / r = (p^6 - 1) (p^2 + 1) * (p^4 - p^2 + 1) / r
-    ///                      \_______ easy ____/   \______ hard ______/
+    ///     (p^12 - 1) / r = easy * hard
+    ///     easy = (p^6 - 1) (p^2 + 1)
+    ///     hard = (p^4 - p^2 + 1) / r
     /// ```
     ///
     /// The easy part costs one inversion and Frobenius maps.

@@ -145,6 +145,9 @@ impl<N: Length> Ssz for BitVector<N> {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        // Invariant: the spec forbids zero-length bitvectors, and every bitvector type here is nonempty.
+        const { assert!(N::LEN > 0, "an SSZ bitvector has at least one bit") };
+
         if bytes.len() != Self::BYTES {
             return Err(DecodeError::InvalidLength {
                 expected: Self::BYTES,

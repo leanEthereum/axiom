@@ -156,8 +156,10 @@ impl Fragment<'_> {
     ///
     /// ```text
     /// fragment:  [ literal ........ ][ copy ][ copy ][ literal ... ][ copy ] ... [ tail ]
-    ///             next_emit      ip   <- matched bytes ->
     /// ```
+    ///
+    /// One cursor marks the start of the pending literal, and the other the scan position.
+    /// Matched bytes start at the scan position and become copies.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the low 4 bytes of a load are the word that starts there"

@@ -1,10 +1,10 @@
 //! Connection upgrade: raw TCP to an authenticated, multiplexed connection.
 //!
-//! ```text
-//! TCP ─▶ multistream-select ─▶ security handshake ─▶ multistream-select ─▶ yamux
-//!        "/noise" or                                  "/yamux/1.0.0",
-//!        "/plaintext/2.0.0"                           inside the secure channel
-//! ```
+//! 1. Open the TCP connection.
+//! 2. Agree with multistream-select on "/noise" or "/plaintext/2.0.0".
+//! 3. Run the security handshake.
+//! 4. Agree with multistream-select on "/yamux/1.0.0", inside the secure channel.
+//! 5. Start the yamux session.
 //!
 //! The state machines do the protocol work; this module only moves their bytes.
 

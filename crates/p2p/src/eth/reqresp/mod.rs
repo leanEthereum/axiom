@@ -2,13 +2,11 @@
 //!
 //! # Overview
 //!
-//! ```text
-//! requester                                            responder
-//!   ── open stream, negotiate protocol id ─────────────▶
-//!   ── request, then half-close ───────────────────────▶   read until EOF, validate
-//!   ◀──────────────────────────── chunk, chunk, ... ───    zero or more response chunks
-//!   ◀─────────────────────────────────────── close ────
-//! ```
+//! 1. The requester opens a stream and negotiates the protocol id.
+//! 2. The requester sends the request, then half-closes the stream.
+//! 3. The responder reads until EOF and validates the request.
+//! 4. The responder sends zero or more response chunks.
+//! 5. The responder closes the stream.
 //!
 //! Single-value methods answer with one chunk; list methods with one chunk per item.
 //! A non-zero result code ends the response.

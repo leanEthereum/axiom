@@ -5,33 +5,18 @@
 //! A segment file is a fixed header followed by frames.
 //! A frame is one committed batch: a header, then its entries back to back.
 //!
+//! Each field below shows its size in bytes after the colon.
+//!
 //! ```text
-//!     segment file
-//!     +-------------+---------+---------+-----+---------+
-//!     | file header | frame 0 | frame 1 | ... | frame n |
-//!     |  16 bytes   |         |         |     |         |
-//!     +-------------+---------+---------+-----+---------+
-//!
-//!     file header
-//!     +-------------------+-------------+-------------+
-//!     | magic "AXIOMSEG"  | version u32 | segment u32 |
-//!     |  8                |  4          |  4          |
-//!     +-------------------+-------------+-------------+
-//!
-//!     frame
-//!     +-----------+------------+--------------+---------+-----+---------+
-//!     | crc32c    | length u64 | count u32    | entry 0 | ... | entry k |
-//!     |  4        |  8         |  4           |         |     |         |
-//!     +-----------+------------+--------------+---------+-----+---------+
-//!       crc covers length and count; length counts the entry bytes only
-//!
-//!     entry
-//!     +--------+------+-------+-------------+---------------+-----+-------+
-//!     | crc32c | kind | table | key len u16 | value len u32 | key | value |
-//!     |  4     |  1   |  1    |  2          |  4            |     |       |
-//!     +--------+------+-------+-------------+---------------+-----+-------+
-//!       crc covers every byte after itself, key and value included
+//!     segment file  [ file header: 16 ][ frame 0 ][ frame 1 ] ... [ frame n ]
+//!     file header   [ magic "AXIOMSEG": 8 ][ version u32: 4 ][ segment u32: 4 ]
+//!     frame         [ crc32c: 4 ][ length u64: 8 ][ count u32: 4 ][ entry 0 ] ... [ entry k ]
+//!     entry         [ crc32c: 4 ][ kind: 1 ][ table: 1 ][ key len u16: 2 ][ value len u32: 4 ][ key ][ value ]
 //! ```
+//!
+//! The frame checksum covers the length and the count.
+//! The frame length counts the entry bytes only.
+//! The entry checksum covers every byte after itself, key and value included.
 //!
 //! Integers are little-endian.
 //!

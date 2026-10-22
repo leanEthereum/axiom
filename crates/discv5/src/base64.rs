@@ -128,6 +128,21 @@ mod tests {
     }
 
     #[test]
+    fn rfc4648_section9_examples() {
+        // RFC 4648 section 9 spells these in plain base64 as "FPucA9l+", "FPucA9k=", "FPucAw==".
+        // The URL-safe alphabet turns "+" into "-", and padding goes.
+        let cases: [(&[u8], &str); 3] = [
+            (&[0x14, 0xfb, 0x9c, 0x03, 0xd9, 0x7e], "FPucA9l-"),
+            (&[0x14, 0xfb, 0x9c, 0x03, 0xd9], "FPucA9k"),
+            (&[0x14, 0xfb, 0x9c, 0x03], "FPucAw"),
+        ];
+        for (bytes, text) in cases {
+            assert_eq!(Base64Url::encode(bytes), text);
+            assert_eq!(Base64Url::decode(text).as_deref(), Ok(bytes));
+        }
+    }
+
+    #[test]
     fn strictness() {
         // Padding is outside the alphabet: the first = sits at position 2.
         assert_eq!(

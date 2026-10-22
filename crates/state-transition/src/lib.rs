@@ -5,10 +5,9 @@
 //! The state transition maps a state and a signed block to the next state.
 //! It runs the empty slots up to the block, then the block itself.
 //!
-//! ```text
-//! state(slot s) --process_slots--> state(slot b) --process_block--> state'(slot b)
-//!                  epoch transitions on the way
-//! ```
+//! 1. Slot processing advances the state from slot s to the block's slot b.
+//! 2. Every epoch boundary on the way runs the epoch transition.
+//! 3. Block processing applies the block, giving the post-state at slot b.
 //!
 //! Everything here is a function of its inputs.
 //! No clock, no network, no disk: the execution engine's verdict is an input too.

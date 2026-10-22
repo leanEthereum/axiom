@@ -77,6 +77,12 @@ impl Vectors {
     pub fn bls(&self) -> PathBuf {
         self.root.join("bls12-381-tests")
     }
+
+    /// Root of the general vectors of the older release that still ships the generic SSZ runner.
+    #[must_use]
+    pub fn general(&self) -> PathBuf {
+        self.root.join("consensus-spec-general/tests/general")
+    }
 }
 
 /// The tally of one runner over one preset and fork.
@@ -117,6 +123,8 @@ impl Report {
 pub struct Suite {
     /// Directory of the runner, holding one directory per handler.
     dir: PathBuf,
+    /// The one handler to run, or every handler when empty.
+    handler: Option<String>,
 }
 
 impl Suite {
@@ -128,7 +136,46 @@ impl Suite {
             .join(preset)
             .join(fork)
             .join(runner);
-        dir.is_dir().then_some(Self { dir })
+        dir.is_dir().then_some(Self { dir, handler: None })
+    }
+
+    /// One handler of a runner from the general vectors, or nothing when they are absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the handler is missing and `AXIOM_REQUIRE_VECTORS` is set, as in CI.
+    #[must_use]
+    pub fn general(fork: &str, runner: &str, handler: &str) -> Option<Self> {
+        let dir = Vectors::locate()?.general().join(fork).join(runner);
+        let found = dir.join(handler).is_dir();
+        assert!(
+            found || env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+            "vectors required but {} is missing; run `make -C testing/ef-tests`",
+            dir.join(handler).display()
+        );
+        found.then(|| Self {
+            dir,
+            handler: Some(handler.to_owned()),
+        })
+    }
+
+    /// Runs every case of one handler of the general vectors, panicking when any fails.
+    ///
+    /// Returns the tally, so a test can pin the number of cases, or nothing when the vectors are absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics when a case fails, listing every failure.
+    #[expect(clippy::print_stderr, reason = "the report is the test's output")]
+    pub fn run_general(runner: &impl Runner, fork: &str, handler: &str) -> Option<Report> {
+        let label = format!("general/{fork}/{}/{handler}", runner.name());
+        let Some(suite) = Self::general(fork, runner.name(), handler) else {
+            eprintln!("skipping {label}: vectors not found, run `make -C testing/ef-tests`");
+            return None;
+        };
+        let report = suite.execute(runner);
+        Self::conclude(&label, &report);
+        Some(report)
     }
 
     /// Runs every case, panicking with a report when any fails.
@@ -146,9 +193,14 @@ impl Suite {
             return;
         };
         let report = suite.execute(runner);
+        Self::conclude(&format!("{preset}/{fork}/{}", runner.name()), &report);
+    }
+
+    /// Prints the tally, then panics when any case failed.
+    #[expect(clippy::print_stderr, reason = "the report is the test's output")]
+    fn conclude(label: &str, report: &Report) {
         eprintln!(
-            "{preset}/{fork}/{}: {} passed, {} skipped, {} failed",
-            runner.name(),
+            "{label}: {} passed, {} skipped, {} failed",
             report.passed,
             report.skipped.len(),
             report.failed.len()
@@ -206,6 +258,13 @@ impl Suite {
         let mut cases = Vec::new();
         for handler in Self::subdirectories(&self.dir) {
             let handler_name = Self::file_name(&handler);
+            if self
+                .handler
+                .as_ref()
+                .is_some_and(|only| *only != handler_name)
+            {
+                continue;
+            }
             for suite in Self::subdirectories(&handler) {
                 for case in Self::subdirectories(&suite) {
                     cases.push((handler_name.clone(), Case::new(case)));

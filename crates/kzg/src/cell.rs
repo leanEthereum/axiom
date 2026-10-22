@@ -21,11 +21,11 @@
 //! Every coset is a shift of the same subgroup G_64, which makes cells interchangeable for FFTs.
 //!
 //! ```text
-//!     cell 0     cell 1     ...   cell 63    |  cell 64   ...   cell 127
-//!     h = 1      h = w^64         h = w^126  |  h = w           h = w^127
-//!     <-------- the original blob -------->  |  <---- the Reed-Solomon extension ---->
+//!     cell    0     1      ...   63       64    ...   127
+//!     h       1     w^64         w^126    w           w^127
 //! ```
 //!
+//! Cells 0 to 63 hold the original blob, and cells 64 to 127 hold the Reed-Solomon extension.
 //! The first 64 cells carry the blob itself, because rev_13 of an index below 4096 is even.
 
 use axiom_bls12_381::{SCALAR_BYTES, Scalar};

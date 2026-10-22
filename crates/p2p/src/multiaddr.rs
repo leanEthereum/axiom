@@ -37,7 +37,9 @@ const CODE_IP6: u64 = 0x29;
 /// Multicodec of UDP.
 const CODE_UDP: u64 = 0x0111;
 /// Multicodec of QUIC version 1, RFC 9000.
-const CODE_QUIC_V1: u64 = 0x01cc;
+///
+/// The multicodec table gives 0x01cc to the draft-29 QUIC this client never speaks.
+const CODE_QUIC_V1: u64 = 0x01cd;
 /// Multicodec of a libp2p peer identifier.
 const CODE_P2P: u64 = 0x01a5;
 
@@ -370,12 +372,55 @@ mod tests {
     }
 
     #[test]
+    fn spec_examples() {
+        // The udp example of the multiaddr README specification section.
+        let udp = [0x04, 0x7f, 0x00, 0x00, 0x01, 0x91, 0x02, 0x04, 0xd2];
+        let addr: Multiaddr = "/ip4/127.0.0.1/udp/1234".parse().unwrap();
+        assert_eq!(addr.to_bytes(), udp);
+        assert_eq!(Multiaddr::from_bytes(&udp), Ok(addr.clone()));
+        assert_eq!(addr.to_string(), "/ip4/127.0.0.1/udp/1234");
+
+        // Both scenarios of multiaddr test/multiaddr.feature: 192.0.2.42 is c000022a, port 443 is 01bb.
+        let tcp = [0x04, 0xc0, 0x00, 0x02, 0x2a, 0x06, 0x01, 0xbb];
+        let addr: Multiaddr = "/ip4/192.0.2.42/tcp/443".parse().unwrap();
+        assert_eq!(addr.to_bytes(), tcp);
+        assert_eq!(Multiaddr::from_bytes(&tcp), Ok(addr.clone()));
+        assert_eq!(addr.to_string(), "/ip4/192.0.2.42/tcp/443");
+        // The string form is 23 bytes, the packed form 8.
+        assert_eq!(addr.to_string().len(), 23);
+        assert_eq!(addr.to_bytes().len(), 8);
+    }
+
+    #[test]
+    fn codes_match_the_protocol_table() {
+        // Codes from multiaddr protocols.csv and the multicodec table.
+        let cases = [
+            (Protocol::Ip4(Ipv4Addr::UNSPECIFIED), 4),
+            (Protocol::Tcp(0), 6),
+            (Protocol::Ip6(Ipv6Addr::UNSPECIFIED), 41),
+            (Protocol::Udp(0), 273),
+            (Protocol::QuicV1, 461),
+        ];
+        for (protocol, code) in cases {
+            // Each layer opens with its code as a varint.
+            let mut bytes = Vec::new();
+            protocol.encode_to(&mut bytes);
+            assert_eq!(Varint::Multiformat.read(&mut &bytes[..]), Ok(code));
+        }
+        // The p2p code is 421, read off the front of an encoded peer layer.
+        let peer = PeerId::from_public_key(&PublicKey::secp256k1([2; 33]));
+        let mut bytes = Vec::new();
+        Protocol::P2p(peer).encode_to(&mut bytes);
+        assert_eq!(Varint::Multiformat.read(&mut &bytes[..]), Ok(421));
+    }
+
+    #[test]
     fn quic_address_binary_layout() {
-        // udp is code 0x0111 → varint [0x91, 0x02]; quic-v1 is 0x01cc → [0xcc, 0x03].
+        // udp is code 0x0111, varint [0x91, 0x02]; quic-v1 is 0x01cd, varint [0xcd, 0x03].
         let addr: Multiaddr = "/ip6/::1/udp/9001/quic-v1".parse().unwrap();
         let mut expected = vec![0x29];
         expected.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
-        expected.extend_from_slice(&[0x91, 0x02, 0x23, 0x29, 0xcc, 0x03]);
+        expected.extend_from_slice(&[0x91, 0x02, 0x23, 0x29, 0xcd, 0x03]);
         assert_eq!(addr.to_bytes(), expected);
         assert_eq!(Multiaddr::from_bytes(&expected), Ok(addr.clone()));
         // A QUIC address is not a TCP socket.
@@ -384,7 +429,7 @@ mod tests {
 
     #[test]
     fn peer_layer_round_trips() {
-        // After 8 bytes of ip4 and tcp, a 39-byte secp256k1 identifier → p2p code [0xa5, 0x03], length 0x27.
+        // After 8 bytes of ip4 and tcp, a 39-byte secp256k1 identifier takes p2p code [0xa5, 0x03] and length 0x27.
         let peer = PeerId::from_public_key(&PublicKey::secp256k1([2; 33]));
         let addr = Multiaddr::from_tcp("10.0.0.1:13000".parse().unwrap())
             .with(Protocol::P2p(peer.clone()));

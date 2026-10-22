@@ -5,12 +5,11 @@
 //! After multistream-select picks a security protocol, a handshake runs on the raw stream.
 //! It proves the remote identity and yields two half-duplex ciphers.
 //!
-//! ```text
-//! raw stream ──▶ handshake (bytes in, bytes out) ──▶ secure session
-//!                                                     ├ remote peer id, proven
-//!                                                     ├ sealer: plaintext → wire bytes
-//!                                                     └ opener: wire bytes → plaintext
-//! ```
+//! The handshake takes bytes in and gives bytes out, then yields a secure session:
+//!
+//! - The remote peer id, proven.
+//! - A sealer, which turns plaintext into wire bytes.
+//! - An opener, which turns wire bytes back into plaintext.
 //!
 //! The halves are separate, so a reader task and a writer task each own one.
 //!

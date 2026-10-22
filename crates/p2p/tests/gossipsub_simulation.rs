@@ -220,7 +220,7 @@ const TOPIC: &str = "/eth2/00000000/beacon_block/ssz_snappy";
 
 #[test]
 fn messages_reach_every_node_and_meshes_stay_in_bounds() {
-    // Fixture state: 50 nodes, each dialing 10 others → about 20 connections per node.
+    // Fixture state: 50 nodes, each dialing 10 others, for about 20 connections per node.
     let topic = Topic::new(TOPIC);
     let mut network = Network::new(50, 10, 0x5eed, &topic);
     for node in &mut network.nodes {

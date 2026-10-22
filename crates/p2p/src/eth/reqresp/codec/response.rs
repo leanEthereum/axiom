@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn large_payload_spans_several_snappy_chunks() {
-        // 200 000 bytes → 4 chunks of at most 65536 uncompressed bytes.
+        // 200 000 bytes make 4 chunks of at most 65536 uncompressed bytes.
         let payload: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
         let mut wire = Vec::new();
         ResponseChunk::success(Some(ForkDigest::ZERO), payload.clone()).encode_to(&mut wire);

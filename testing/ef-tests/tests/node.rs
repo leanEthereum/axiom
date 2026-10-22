@@ -65,8 +65,12 @@ struct Fixture {
     genesis: PathBuf,
     /// Milliseconds at the start of the slot the clock stands at.
     ///
+    /// ```text
     ///     slot:   0        1        2
-    ///     time:   0 s      6 s      12 s   <- clock at slot 2, when both blocks are timely
+    ///     time:   0 s      6 s      12 s
+    /// ```
+    ///
+    /// The clock stands at slot 2, when both blocks are timely.
     now_ms: u64,
 }
 
@@ -360,7 +364,10 @@ fn a_node_finds_its_peer_through_discovery() {
         // Fixture state: A announces 127.0.0.1 in its record and holds both blocks.
         // B knows only A's record, not its TCP address.
         //
-        //     B ──discv5 lookup──> A's record ──TCP dial──> A ──status──> range sync
+        // 1. B runs a discv5 lookup and finds A's record.
+        // 2. B dials A over TCP.
+        // 3. The two nodes exchange status.
+        // 4. B range-syncs from A.
         let discovery = |boot_enrs| DiscoverySettings {
             udp_port: free_udp_port(),
             enr_address: Some(Ipv4Addr::LOCALHOST),
@@ -407,8 +414,9 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
 
     // Fixture state: block 1 and its post-state, a checkpoint in the middle of epoch 0.
     //
-    //     genesis ──block 1──> state 1        checkpoint = (block 1, state 1), slot 1
-    //                              └──block 2──> published after the node starts
+    // Block 1 builds on genesis and gives state 1.
+    // The checkpoint is block 1 with state 1, at slot 1.
+    // Block 2 builds on block 1, and is published after the node starts.
     let genesis =
         BeaconState::<Minimal>::decode(&fixture.case.ssz_bytes("anchor_state").unwrap()).unwrap();
     let anchor = fixture
@@ -469,8 +477,10 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
     runtime.block_on(async {
         // Fixture state: two branches from genesis; A holds the long one, B only the short one.
         //
-        //     A: genesis -> 1 (0x74ac) -> 2 (0x8b93) -> 3 (0x0b5c)
-        //     B: genesis -> 1 (0xd732)
+        // Each branch lists its blocks by slot, each the parent of the next.
+        //
+        //     A: genesis, 1 (0x74ac), 2 (0x8b93), 3 (0x0b5c)
+        //     B: genesis, 1 (0xd732)
         //
         // B starts first and cannot reach A yet, so it holds its branch before they meet.
         // Then B asks for slots 2 and 3, whose parent it does not know.

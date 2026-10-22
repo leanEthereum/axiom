@@ -276,11 +276,13 @@ mod tests {
         }
     }
 
-    /// Fixture tree:
+    /// Fixture tree, each block with its slot, each edge from parent to child:
     ///
-    ///     a(0) -> b(1) -> c(3)
-    ///               \
-    ///                d(2)
+    /// ```text
+    ///     a(0) -> b(1)
+    ///     b(1) -> c(3)
+    ///     b(1) -> d(2)
+    /// ```
     fn fixture() -> BlockTree {
         let mut tree = BlockTree::new(root(1), node(0, 0));
         tree.insert(root(2), node(1, 1));
@@ -335,9 +337,9 @@ mod tests {
     fn retaining_a_subtree_drops_ancestors_and_side_branches() {
         // Fixture state: keep the subtree of b, then add e under the pruned root a.
         //
-        //     a(0) -> b(1) -> c(3)        kept:    b, c, d
-        //       \       \                 dropped: a, e
-        //        e(1)    d(2)
+        //     edges:     a(0) -> b(1), b(1) -> c(3), b(1) -> d(2), a(0) -> e(1)
+        //     kept:      b, c, d
+        //     dropped:   a, e
         let mut tree = fixture();
         tree.insert(root(5), node(1, 1));
 

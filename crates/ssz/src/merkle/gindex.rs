@@ -7,9 +7,9 @@ use std::fmt;
 /// The root is 1, and the children of node `i` are `2i` and `2i + 1`.
 ///
 /// ```text
-///             1
-///         2       3
-///       4   5   6   7
+/// depth 0:   1
+/// depth 1:   2 3
+/// depth 2:   4 5 6 7
 /// ```
 ///
 /// The binary form reads as a path: after the leading 1, each bit picks left (0) or right (1).

@@ -190,4 +190,39 @@ mod tests {
         assert!(headers.has_token("Connection", "close"));
         assert!(!headers.has_token("connection", "upgrade"));
     }
+
+    #[test]
+    fn rfc9110_section5_3_repeated_field() {
+        // Two lines of one field: "Foo, Bar" then "Baz", whose combined value is "Foo, Bar, Baz".
+        let mut headers = Headers::new();
+        headers.append("Example-Field", "Foo, Bar");
+        headers.append("Example-Field", "Baz");
+
+        // The lines stay apart, in order, and the token search spans both.
+        assert_eq!(
+            headers.get_all("example-field").collect::<Vec<_>>(),
+            ["Foo, Bar", "Baz"]
+        );
+        for token in ["foo", "bar", "baz"] {
+            assert!(headers.has_token("example-field", token), "{token}");
+        }
+    }
+
+    #[test]
+    fn rfc9110_section5_6_1_2_list_examples() {
+        // The three valid lists of the example, with empty elements and stray whitespace.
+        for list in ["foo,bar", "foo ,bar,", "foo , ,bar,charlie"] {
+            let mut headers = Headers::new();
+            headers.append("example-list", list);
+            assert!(headers.has_token("example-list", "foo"), "{list:?}");
+            assert!(headers.has_token("example-list", "bar"), "{list:?}");
+        }
+
+        // The three invalid lists hold no element at all, so no token is found.
+        for list in ["", ",", ",   ,"] {
+            let mut headers = Headers::new();
+            headers.append("example-list", list);
+            assert!(!headers.has_token("example-list", "foo"), "{list:?}");
+        }
+    }
 }

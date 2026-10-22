@@ -2,7 +2,9 @@
 //!
 //! The vectors live outside the repository.
 //! Point AXIOM_VECTORS at their root.
-//! It defaults to the workspace's testing/vectors, then to the main checkout's, and every suite skips when both are absent.
+//! It defaults to the workspace's testing/vectors, and every suite skips when it is absent.
+//! Setting AXIOM_REQUIRE_VECTORS, as CI does, turns a missing set into a failure.
+//! Each handler asserts its case count, so a shrinking download cannot pass silently.
 //!
 //! ```text
 //!     $AXIOM_VECTORS/kzg/tests/<handler>/kzg-mainnet/<case>/data.yaml
@@ -18,9 +20,6 @@ use std::{
 
 use axiom_kzg::{Blob, Bytes32, Bytes48, Cell, CellIndex, CellsAndProofs, Kzg};
 use axiom_yaml::Yaml;
-
-/// The main checkout's vectors, for worktrees whose own testing/vectors is empty.
-const MAIN_CHECKOUT_VECTORS: &str = "/home/utilisateur/Documents/axiom/testing/vectors";
 
 /// A comparable outcome: the shape of every output in the vectors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,21 +66,27 @@ impl Outcome {
     }
 }
 
-/// The vectors root: AXIOM_VECTORS, the workspace's testing/vectors, or the main checkout's.
+/// The vectors root, AXIOM_VECTORS or the workspace's testing/vectors, when it holds the KZG set.
+///
+/// # Panics
+///
+/// Panics when the set is absent and AXIOM_REQUIRE_VECTORS is set.
 fn vectors_root() -> Option<PathBuf> {
     // The variable wins, so any checkout can point at shared vectors.
-    if let Some(root) = env::var_os("AXIOM_VECTORS") {
-        return Some(PathBuf::from(root));
-    }
-    [
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/vectors"),
-        PathBuf::from(MAIN_CHECKOUT_VECTORS),
-    ]
-    .into_iter()
-    .find(|root| root.join("kzg").is_dir())
+    let root = env::var_os("AXIOM_VECTORS").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/vectors"),
+        PathBuf::from,
+    );
+    let found = root.join("kzg").is_dir();
+    assert!(
+        found || env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+        "vectors required but missing under {}; run make -C testing/ef-tests",
+        root.display()
+    );
+    found.then_some(root)
 }
 
-/// Runs a check on every case of a handler and returns how many ran.
+/// Runs a check on every case of a handler, which must hold exactly the given count.
 ///
 /// The check maps the case's input to the actual outcome, none for a rejection.
 /// Every mismatch is collected, then the test fails listing them all.
@@ -89,10 +94,10 @@ fn vectors_root() -> Option<PathBuf> {
     clippy::print_stderr,
     reason = "the suite reports its case count, or why it skipped, to the test output"
 )]
-fn run(handler: &str, check: impl Fn(&Kzg, &Yaml) -> Option<Outcome>) -> usize {
+fn run(handler: &str, count: usize, check: impl Fn(&Kzg, &Yaml) -> Option<Outcome>) {
     let Some(root) = vectors_root() else {
         eprintln!("skipping {handler}: KZG vectors not found (set AXIOM_VECTORS)");
-        return 0;
+        return;
     };
     let directory = root.join("kzg/tests").join(handler).join("kzg-mainnet");
     let mut cases: Vec<PathBuf> = fs::read_dir(&directory)
@@ -117,13 +122,13 @@ fn run(handler: &str, check: impl Fn(&Kzg, &Yaml) -> Option<Outcome>) -> usize {
         }
     }
     assert!(failures.is_empty(), "{handler}: failing cases {failures:?}");
-    assert!(
-        !cases.is_empty(),
-        "{handler}: no cases in {}",
+    assert_eq!(
+        cases.len(),
+        count,
+        "{handler}: cases in {}",
         directory.display()
     );
     eprintln!("{handler}: {} cases passed", cases.len());
-    cases.len()
 }
 
 /// Reads a list field of the input.
@@ -167,7 +172,7 @@ fn all<T>(items: &[Yaml], decode: fn(&Yaml) -> Option<T>) -> Option<Vec<T>> {
 #[test]
 fn blob_to_kzg_commitment() {
     // Output: the commitment, or null for an invalid blob.
-    run("blob_to_kzg_commitment", |kzg, input| {
+    run("blob_to_kzg_commitment", 11, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         Some(Outcome::Bytes(kzg.blob_to_kzg_commitment(&blob).0.to_vec()))
     });
@@ -176,7 +181,7 @@ fn blob_to_kzg_commitment() {
 #[test]
 fn compute_kzg_proof() {
     // Output: [proof, y], or null for an invalid blob or point.
-    run("compute_kzg_proof", |kzg, input| {
+    run("compute_kzg_proof", 52, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         let z = bytes32(input.get("z")?)?;
         let (proof, y) = kzg.compute_kzg_proof(&blob, &z).ok()?;
@@ -190,7 +195,7 @@ fn compute_kzg_proof() {
 #[test]
 fn compute_blob_kzg_proof() {
     // Output: the proof, or null for an invalid blob or commitment.
-    run("compute_blob_kzg_proof", |kzg, input| {
+    run("compute_blob_kzg_proof", 15, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         let commitment = bytes48(input.get("commitment")?)?;
         let proof = kzg.compute_blob_kzg_proof(&blob, &commitment).ok()?;
@@ -201,7 +206,7 @@ fn compute_blob_kzg_proof() {
 #[test]
 fn verify_kzg_proof() {
     // Output: whether the proof verifies, or null for a malformed input.
-    run("verify_kzg_proof", |kzg, input| {
+    run("verify_kzg_proof", 122, |kzg, input| {
         let commitment = bytes48(input.get("commitment")?)?;
         let z = bytes32(input.get("z")?)?;
         let y = bytes32(input.get("y")?)?;
@@ -215,7 +220,7 @@ fn verify_kzg_proof() {
 #[test]
 fn verify_blob_kzg_proof() {
     // Output: whether the proof verifies, or null for a malformed input.
-    run("verify_blob_kzg_proof", |kzg, input| {
+    run("verify_blob_kzg_proof", 29, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         let commitment = bytes48(input.get("commitment")?)?;
         let proof = bytes48(input.get("proof")?)?;
@@ -228,7 +233,7 @@ fn verify_blob_kzg_proof() {
 #[test]
 fn verify_blob_kzg_proof_batch() {
     // Output: whether every proof verifies, or null for a malformed input.
-    run("verify_blob_kzg_proof_batch", |kzg, input| {
+    run("verify_blob_kzg_proof_batch", 24, |kzg, input| {
         let blobs = all(list(input, "blobs"), blob)?;
         let commitments = all(list(input, "commitments"), bytes48)?;
         let proofs = all(list(input, "proofs"), bytes48)?;
@@ -241,7 +246,7 @@ fn verify_blob_kzg_proof_batch() {
 #[test]
 fn compute_cells() {
     // Output: the 128 cells, or null for an invalid blob.
-    run("compute_cells", |kzg, input| {
+    run("compute_cells", 11, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         let cells = kzg.compute_cells(&blob);
         Some(Outcome::List(
@@ -256,7 +261,7 @@ fn compute_cells() {
 #[test]
 fn compute_cells_and_kzg_proofs() {
     // Output: [cells, proofs], or null for an invalid blob.
-    run("compute_cells_and_kzg_proofs", |kzg, input| {
+    run("compute_cells_and_kzg_proofs", 11, |kzg, input| {
         let blob = blob(input.get("blob")?)?;
         Some(Outcome::cells_and_proofs(
             &kzg.compute_cells_and_kzg_proofs(&blob),
@@ -267,7 +272,7 @@ fn compute_cells_and_kzg_proofs() {
 #[test]
 fn verify_cell_kzg_proof_batch() {
     // Output: whether every cell verifies, or null for a malformed input.
-    run("verify_cell_kzg_proof_batch", |kzg, input| {
+    run("verify_cell_kzg_proof_batch", 32, |kzg, input| {
         let commitments = all(list(input, "commitments"), bytes48)?;
         let cell_indices = all(list(input, "cell_indices"), cell_index)?;
         let cells = all(list(input, "cells"), cell)?;
@@ -281,7 +286,7 @@ fn verify_cell_kzg_proof_batch() {
 #[test]
 fn recover_cells_and_kzg_proofs() {
     // Output: [cells, proofs] of the whole extended blob, or null for a malformed input.
-    run("recover_cells_and_kzg_proofs", |kzg, input| {
+    run("recover_cells_and_kzg_proofs", 18, |kzg, input| {
         let cell_indices = all(list(input, "cell_indices"), cell_index)?;
         let cells = all(list(input, "cells"), cell)?;
         let recovered = kzg

@@ -17,9 +17,10 @@ use crate::{BlockError, SwapOrNot};
 /// The shuffled list is then cut into contiguous committees, slot by slot.
 ///
 /// ```text
-/// shuffled: [v7 v2 v9 | v4 v1 v8 | v3 v6 v5 | ...]
-///             slot 0     slot 0     slot 1
-///             index 0    index 1    index 0
+/// shuffled:         [v7 v2 v9 | v4 v1 v8 | v3 v6 v5 | ...]
+/// slot 0, index 0:   v7 v2 v9
+/// slot 0, index 1:   v4 v1 v8
+/// slot 1, index 0:   v3 v6 v5
 /// ```
 ///
 /// See `compute_committee` and `get_beacon_committee` in the phase0 beacon chain spec.

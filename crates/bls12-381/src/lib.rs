@@ -7,13 +7,15 @@
 //!
 //! ```text
 //!     F_p                 base field, 381 bits
-//!     F_p2 -> F_p6 -> F_p12   extension tower, the pairing's target field
+//!     F_p2, F_p6, F_p12   extension tower, each over the previous one
 //!     F_r                 scalar field, 255 bits, 2-adicity 32
 //!
 //!     G1 = E(F_p)[r]       E : y^2 = x^3 + 4             48-byte points
 //!     G2 = E'(F_p2)[r]     E': y^2 = x^3 + 4(1 + u)      96-byte points
 //!     e : G1 x G2 -> GT    optimal ate pairing, GT inside F_p12
 //! ```
+//!
+//! The pairing's target field is F_p12, the top of the tower.
 //!
 //! The crate follows these references:
 //!

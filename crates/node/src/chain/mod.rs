@@ -42,11 +42,9 @@ const EVENT_BACKLOG: usize = 256;
 /// The fork choice store holds every block since finality and picks the head.
 /// The database keeps blocks for good and an anchor state to resume from.
 ///
-/// ```text
-///     block ──> fork choice store ──> head ──> events: head, reorg, finalized
-///                     │
-///                     └── finality ──> database: anchor state, canonical index, orphans
-/// ```
+/// 1. A block enters the fork choice store.
+/// 2. The store picks the head, which emits head, reorg, and finalized events.
+/// 3. On finality, the database stores the anchor state and the canonical index, and drops orphans.
 ///
 /// Every method is synchronous and runs on one thread.
 /// Other services reach it through a handle.

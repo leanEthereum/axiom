@@ -42,11 +42,15 @@ pub trait Operation<P: Preset> {
 ///
 /// # Overview
 ///
-/// The parts apply in the spec's order, each its own operation.
+/// The parts apply in the spec's order, each its own operation:
 ///
-/// ```text
-/// header -> withdrawals -> execution payload -> randao -> eth1 data -> operations -> sync aggregate
-/// ```
+/// 1. The header.
+/// 2. The withdrawals.
+/// 3. The execution payload.
+/// 4. The RANDAO reveal.
+/// 5. The eth1 data.
+/// 6. The operations.
+/// 7. The sync aggregate.
 ///
 /// A step that fails leaves the state half-updated.
 /// The caller discards that state, since an invalid block has no post-state.

@@ -43,14 +43,12 @@ pub enum PublishError {
 ///
 /// # Overview
 ///
-/// ```text
-///     block + blobs + cell proofs
-///          │
-///          ├── build the 128 column sidecars, checking every cell proof
-///          ├── gossip rules for blocks: a rejected block is never broadcast
-///          ├── broadcast the block, then each column on its subnet
-///          └── import: custody columns first, then the block with its engine verdict
-/// ```
+/// A block arrives with its blobs and cell proofs, and publishing runs four steps:
+///
+/// 1. Build the 128 column sidecars, checking every cell proof.
+/// 2. Apply the gossip rules for blocks, so a rejected block is never broadcast.
+/// 3. Broadcast the block, then each column on its subnet.
+/// 4. Import the custody columns first, then the block with its engine verdict.
 ///
 /// See `publishBlockV2` in the beacon API, with gossip-level broadcast validation.
 #[derive(Debug)]

@@ -177,7 +177,10 @@ impl<'a> Iterator for Entries<'a> {
         let header = EntryHeader::decode(*self.frame.get(start..)?.first_chunk()?)?;
 
         //     | header 12 | key key_len | value value_len |
-        //     ^start      ^key_start    ^value_start      ^end
+        //
+        //     key start   = start + 12
+        //     value start = key start + key length
+        //     end         = value start + value length
         let key_start = start + ENTRY_HEADER_LEN;
         let value_start = key_start + usize::from(header.key_len);
         let end = value_start + header.value_len as usize;

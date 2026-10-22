@@ -51,12 +51,18 @@ impl Default for ServerConfig {
 /// Each connection runs in its own task and serves requests one after another.
 /// Shutdown stops accepting, lets each in-flight request finish, then closes.
 ///
-/// ```text
-///     accept loop ── conn task ── read head ─ read body ─ handler ─ write ─┐
-///                                    ^                                     │
-///                                    └──────────── keep-alive ─────────────┘
-///     shutdown:  accept stops -> idle conns close -> busy conns finish, then close
-/// ```
+/// A connection runs in four steps:
+///
+/// 1. The accept loop hands the new connection to its own task.
+/// 2. The task reads the head, then the body.
+/// 3. The handler runs, and the task writes its response.
+/// 4. On keep-alive, the task goes back to step 2.
+///
+/// Shutdown runs in three steps:
+///
+/// 1. The accept loop stops.
+/// 2. Idle connections close.
+/// 3. Busy connections finish their request, then close.
 #[derive(Debug)]
 pub struct Server {
     /// The bound socket.

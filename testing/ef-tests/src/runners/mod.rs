@@ -12,6 +12,7 @@ mod networking;
 mod operations;
 mod rewards;
 mod shuffling;
+mod ssz_generic;
 mod ssz_static;
 mod transition;
 
@@ -26,6 +27,7 @@ pub use networking::Networking;
 pub use operations::Operations;
 pub use rewards::Rewards;
 pub use shuffling::Shuffling;
+pub use ssz_generic::SszGeneric;
 pub use ssz_static::SszStatic;
 pub use transition::Transition;
 

@@ -10,19 +10,16 @@
 //! - Consistent snapshots in O(1).
 //! - An in-memory backend behind the same type, for tests and simulation.
 //!
-//! ```text
-//!               writers (serialized)                 readers (never blocked)
-//!                      |                                      |
-//!                      v                                      v
-//!     +----------------------------------+   swap   +-------------------+
-//!     | log: append frame, sync, publish | -------> | current version   |
-//!     +----------------------------------+          | per-table index:  |
-//!                      |                            |  key -> location  |
-//!                      v                            +-------------------+
-//!     +---------+---------+-----+--------+                    |
-//!     | seg 0   | seg 1   | ... | active | <------- pread ----+
-//!     +---------+---------+-----+--------+
-//! ```
+//! Writers are serialized, and each write runs in three steps:
+//!
+//! 1. Append a frame to the active segment of the log.
+//! 2. Sync the segment.
+//! 3. Swap in a new current version, with a per-table index from key to location.
+//!
+//! Readers are never blocked, and each read runs in two steps:
+//!
+//! 1. Look up the key's location in the current version's index.
+//! 2. Read the value from its segment with one positional read.
 //!
 //! # Algorithm
 //!

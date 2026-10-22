@@ -351,13 +351,100 @@ mod tests {
             Err(ProtocolError::InvalidRequestLine)
         );
         assert_eq!(
-            request("GET http://x/ HTTP/1.1\r\n\r\n"),
-            Err(ProtocolError::InvalidTarget)
-        );
-        assert_eq!(
             request("GET / HTTP/2.0\r\n\r\n"),
             Err(ProtocolError::UnsupportedVersion)
         );
+    }
+
+    #[test]
+    fn rfc9112_section3_2_target_forms() {
+        // Origin form, section 3.2.1: the only form a server that is not a proxy needs.
+        let head = request("GET /where?q=now HTTP/1.1\r\nHost: www.example.org\r\n\r\n").unwrap();
+        assert_eq!(head.target, "/where?q=now");
+        assert_eq!(head.headers.get("host"), Some("www.example.org"));
+
+        // Absolute form, section 3.2.2, is sent only to proxies, so it is refused.
+        assert_eq!(
+            request("GET http://www.example.org/pub/WWW/TheProject.html HTTP/1.1\r\n\r\n"),
+            Err(ProtocolError::InvalidTarget)
+        );
+
+        // Authority form, section 3.2.3, belongs to CONNECT, a method this server lacks.
+        assert_eq!(
+            request("CONNECT www.example.com:80 HTTP/1.1\r\nHost: www.example.com\r\n\r\n"),
+            Err(ProtocolError::UnknownMethod)
+        );
+
+        // Asterisk form, section 3.2.4, asks about the whole server, which is not served.
+        assert_eq!(
+            request("OPTIONS * HTTP/1.1\r\nHost: www.example.org:8001\r\n\r\n"),
+            Err(ProtocolError::InvalidTarget)
+        );
+    }
+
+    #[test]
+    fn rfc9110_section3_9_example_exchange() {
+        // The request of the example, with CRLF line ends as the wire carries them.
+        let text = "GET /hello.txt HTTP/1.1\r\n\
+                    User-Agent: curl/7.64.1\r\n\
+                    Host: www.example.com\r\n\
+                    Accept-Language: en, mi\r\n\
+                    \r\n";
+        let (head, consumed) = RequestHead::parse(text.as_bytes(), &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumed, text.len());
+        let mut headers = Headers::new();
+        headers.append("user-agent", "curl/7.64.1");
+        headers.append("host", "www.example.com");
+        headers.append("accept-language", "en, mi");
+        assert_eq!(
+            head,
+            RequestHead {
+                method: Method::Get,
+                target: "/hello.txt".to_owned(),
+                version: Version::Http11,
+                headers,
+            }
+        );
+        assert_eq!(head.body_length(), Ok(BodyLength::Empty));
+
+        // The response: nine fields, then a 51-byte body of 49 characters and a CRLF.
+        let text = "HTTP/1.1 200 OK\r\n\
+                    Date: Mon, 27 Jul 2009 12:28:53 GMT\r\n\
+                    Server: Apache\r\n\
+                    Last-Modified: Wed, 22 Jul 2009 19:15:56 GMT\r\n\
+                    ETag: \"34aa387-d-1568eb00\"\r\n\
+                    Accept-Ranges: bytes\r\n\
+                    Content-Length: 51\r\n\
+                    Vary: Accept-Encoding\r\n\
+                    Content-Type: text/plain\r\n\
+                    \r\n\
+                    Hello World! My content includes a trailing CRLF.\r\n";
+        let (head, consumed) = ResponseHead::parse(text.as_bytes(), &Limits::DEFAULT)
+            .unwrap()
+            .unwrap();
+        let mut headers = Headers::new();
+        headers.append("date", "Mon, 27 Jul 2009 12:28:53 GMT");
+        headers.append("server", "Apache");
+        headers.append("last-modified", "Wed, 22 Jul 2009 19:15:56 GMT");
+        headers.append("etag", "\"34aa387-d-1568eb00\"");
+        headers.append("accept-ranges", "bytes");
+        headers.append("content-length", "51");
+        headers.append("vary", "Accept-Encoding");
+        headers.append("content-type", "text/plain");
+        assert_eq!(
+            head,
+            ResponseHead {
+                version: Version::Http11,
+                status: StatusCode::OK,
+                headers,
+            }
+        );
+
+        // The declared length matches the body exactly.
+        assert_eq!(head.body_length(Method::Get), Ok(BodyLength::Fixed(51)));
+        assert_eq!(text.len() - consumed, 51);
     }
 
     #[test]

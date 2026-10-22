@@ -19,11 +19,10 @@ use axiom_ssz::U256;
 ///
 /// One key yields every network identity, so they always agree:
 ///
-/// ```text
-///     secret key ──> public key ──┬──> libp2p peer id (compressed point)
-///                                 └──> discovery node id = keccak256(x || y)
-///                                          └──> custody groups, attestation subnets
-/// ```
+/// - The secret key gives the public key.
+/// - The compressed public key gives the libp2p peer id.
+/// - The public key's coordinates give the discovery node id, keccak256(x || y).
+/// - The node id gives the custody groups and the attestation subnets.
 ///
 /// The key persists across restarts: peers and custody assignments recognize the node.
 #[derive(Debug)]

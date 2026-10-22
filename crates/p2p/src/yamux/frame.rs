@@ -92,10 +92,8 @@ impl Flags {
 /// A decoded frame header.
 ///
 /// ```text
-/// byte  0        1        2..4         4..8            8..12
-///     ┌────────┬────────┬────────────┬───────────────┬───────────────┐
-///     │version │ type   │ flags BE   │ stream id BE  │ length BE     │
-///     └────────┴────────┴────────────┴───────────────┴───────────────┘
+/// byte    0         1        2..4        4..8            8..12
+/// field   version   type     flags BE    stream id BE    length BE
 ///
 /// open stream 1 with 3 data bytes:
 ///   00 00 00 01 00 00 00 01 00 00 00 03

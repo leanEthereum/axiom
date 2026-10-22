@@ -40,13 +40,10 @@ enum Accepted<P: Preset> {
 ///
 /// # Overview
 ///
-/// ```text
-///     bytes ──decode──> message ──chain thread: gossip rules──> accept | ignore | reject
-///                                                                  │
-///                     report to gossipsub first, so the message propagates without delay
-///                                                                  │
-///                                    then: import a block, count votes, store a column
-/// ```
+/// 1. Decode the bytes into a message.
+/// 2. Run the gossip rules on the chain thread, giving accept, ignore, or reject.
+/// 3. Report the verdict to gossipsub first, so the message propagates without delay.
+/// 4. Then act on it: import a block, count votes, or store a column.
 ///
 /// A message that does not decode is rejected: no honest peer sends one.
 #[derive(Debug)]

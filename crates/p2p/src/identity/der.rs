@@ -5,8 +5,8 @@
 //!    02 len_r  r          INTEGER r, big-endian, minimal, non-negative
 //!    02 len_s  s          INTEGER s, likewise
 //!
-//! r = 0x8f..., 32 bytes  →  02 21 00 8f ...    a leading zero keeps it positive
-//! r = 0x00 7a..          →  02 1f 7a ...       leading zeros are stripped
+//! r = 0x8f..., 32 bytes  ->  02 21 00 8f ...    a leading zero keeps it positive
+//! r = 0x00 7a..          ->  02 1f 7a ...       leading zeros are stripped
 //! ```
 //!
 //! See BIP 66 for the strict rules, and `libp2p/specs/peer-ids/peer-ids.md`.

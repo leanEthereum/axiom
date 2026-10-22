@@ -6,20 +6,15 @@
 //! A store holding a few hundred beacon states would read tens of gigabytes at each start.
 //! Bitcask's answer is a hint file per sealed segment: the entry metadata, without values.
 //!
-//! ```text
-//!     hint file
-//!     +-------------+----------+-----+----------+--------+
-//!     | file header | record 0 | ... | record n | crc32c |
-//!     |  16         |          |     |          |  4     |
-//!     +-------------+----------+-----+----------+--------+
-//!       magic "AXIOMHNT"           crc covers every byte before it
+//! Each field below shows its size in bytes after the colon.
 //!
-//!     record
-//!     +------+-------+-------------+---------------+------------+-----+
-//!     | kind | table | key len u16 | value len u32 | offset u64 | key |
-//!     |  1   |  1    |  2          |  4            |  8         |     |
-//!     +------+-------+-------------+---------------+------------+-----+
+//! ```text
+//!     hint file   [ file header: 16 ][ record 0 ] ... [ record n ][ crc32c: 4 ]
+//!     record      [ kind: 1 ][ table: 1 ][ key len u16: 2 ][ value len u32: 4 ][ offset u64: 8 ][ key ]
 //! ```
+//!
+//! The file header carries the magic "AXIOMHNT".
+//! The trailing checksum covers every byte before it.
 //!
 //! A hint is written under a temporary name, synced, then renamed into place.
 //! Rename is atomic, so a hint either exists whole or not at all.

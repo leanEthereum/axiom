@@ -5,14 +5,14 @@
 //! Every frame opens with a 12-byte header naming its stream.
 //! Streams open with a SYN flag, close with FIN, and abort with RST.
 //!
-//! ```text
-//! client (odd ids)                                server (even ids)
-//!   ── window update, SYN, stream 1 ───────────────▶
-//!   ── data, stream 1, "hello" ────────────────────▶   no need to wait for the ACK
-//!   ◀────────────────── window update, ACK, stream 1 ──
-//!   ◀──────────────────── data, FIN, stream 1, "hi" ──   half-close from the server
-//!   ── data, FIN, stream 1 ────────────────────────▶   fully closed
-//! ```
+//! The client uses odd stream ids and the server even ones.
+//! A stream's life, with five frames:
+//!
+//! 1. The client sends a window update with SYN on stream 1.
+//! 2. The client sends data "hello" on stream 1, with no need to wait for the ACK.
+//! 3. The server sends a window update with ACK on stream 1.
+//! 4. The server sends data "hi" with FIN on stream 1, half-closing it.
+//! 5. The client sends data with FIN on stream 1, and the stream is fully closed.
 //!
 //! Each stream starts with a 256 KiB receive window per direction.
 //! A sender may only have that many unacknowledged data bytes in flight.

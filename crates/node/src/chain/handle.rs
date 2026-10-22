@@ -31,11 +31,9 @@ pub struct ChainStopped;
 /// The chain is synchronous and owned by one thread, so it needs no lock.
 /// Requests queue in order and run one at a time.
 ///
-/// ```text
-///     api task ───┐
-///     ticker ─────┼──> queue ──> chain thread: job(&mut chain) ──> reply
-///     network ────┘
-/// ```
+/// 1. The API task, the ticker, or the network pushes a job into the queue.
+/// 2. The chain thread pops the job and runs it with exclusive access to the chain.
+/// 3. The chain thread sends the job's reply back.
 ///
 /// Heavy work such as a state transition blocks only the chain thread, never the async runtime.
 #[derive(Debug)]

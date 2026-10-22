@@ -679,7 +679,9 @@ c: [1, # inside
         // The tab sits where the nested key's indentation should be.
         //
         //     a:
-        //     \tb: 1    <- line 2, column 1
+        //     \tb: 1
+        //
+        // The tab sits at line 2, column 1.
         assert_eq!(fail("a:\n\tb: 1\n"), (ErrorKind::TabIndentation, 2, 1));
     }
 

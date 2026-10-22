@@ -8,11 +8,8 @@
 //! Time is a duration since an arbitrary origin, passed in by the caller.
 //! Randomness comes from a seeded generator, so a simulation replays exactly.
 //!
-//! ```text
-//!            add/remove peer, rpc, publish, validation, heartbeat(now)
-//! owner ───────────────────────────────────────────────────────────▶ router
-//! owner ◀─────────────────────────────── (peer, rpc) to send, events ──┘
-//! ```
+//! - The owner sends the router peer additions and removals, RPCs, publishes, validations, and heartbeats.
+//! - The router returns RPCs to send, each with its peer, and events.
 //!
 //! A received message is not forwarded until the application validates it.
 //! Accepted messages go to the mesh, rejected ones penalize their senders.
@@ -20,12 +17,12 @@
 //! The router composes parts that each own their tables, and delegates to them.
 //!
 //! ```text
-//! router ─┬─ mesh          members per joined topic, graft backoffs
-//!         ├─ fanout        recipients per topic published to but not joined
-//!         ├─ gossip        message cache, IHAVE and IWANT, delivery promises
-//!         ├─ validations   messages awaiting the application's verdict
-//!         ├─ seen          recent identifiers, for deduplication
-//!         └─ context       config, randomness, peers, scorer, outbox: shared by all parts
+//! mesh          members per joined topic, graft backoffs
+//! fanout        recipients per topic published to but not joined
+//! gossip        message cache, IHAVE and IWANT, delivery promises
+//! validations   messages awaiting the application's verdict
+//! seen          recent identifiers, for deduplication
+//! context       config, randomness, peers, scorer, outbox: shared by all parts
 //! ```
 
 mod backoff;

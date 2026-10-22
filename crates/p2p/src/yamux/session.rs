@@ -460,8 +460,7 @@ impl Session {
     /// Registers a stream the peer opened, or refuses it.
     fn accept_stream(&mut self, id: StreamId) -> Result<(), YamuxError> {
         // The peer must use the opposite parity: odd for a client peer.
-        //
-        //     we are server → peer is client → peer ids are odd
+        // When this side is the server, the peer is the client and its ids are odd.
         let peer_parity = match self.mode {
             Mode::Server => 1,
             Mode::Client => 0,
@@ -504,7 +503,7 @@ impl Session {
         };
         // Batching credit halves the number of window updates on a busy stream.
         //
-        //     window 256 KiB → one update per 128 KiB received
+        //     window 256 KiB -> one update per 128 KiB received
         if stream.consumed < threshold || stream.remote_closed {
             return;
         }

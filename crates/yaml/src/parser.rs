@@ -636,7 +636,8 @@ mapping: [1, 2,
         // The second colon on the line would make "b" a key.
         //
         //     a: b: c
-        //         ^ column 5
+        //
+        // The second colon sits at column 5.
         assert_eq!(fail("a: b: c\n"), (ErrorKind::UnexpectedMappingValue, 1, 5));
 
         // A continuation line cannot turn a multi-line scalar into a key.

@@ -64,7 +64,8 @@ pub trait ProtoMessage: Sized {
         Varint::Multiformat.write(body_len as u64, out);
         // Rotate the prefix in front of the body, with no scratch buffer.
         //
-        //     [ body ][ prefix ]  →  [ prefix ][ body ]
+        //     before: [ body ][ prefix ]
+        //     after:  [ prefix ][ body ]
         let prefix_len = out.len() - start - body_len;
         out[start..].rotate_right(prefix_len);
     }

@@ -124,11 +124,11 @@ impl<'a, 'o> BlockDecoder<'a, 'o> {
     /// The copy then repeats a pattern of the offset's length, run-length style.
     ///
     /// ```text
-    /// out = "xab", copy offset 2, length 4:
-    ///
-    ///     x a b | a b a b
-    ///           ^ each byte equals the one 2 back
+    /// out = "xab", copy offset 2, length 4
+    /// out = "xab" + "abab"
     /// ```
+    ///
+    /// Each copied byte equals the one 2 back.
     #[inline]
     fn copy_back(&mut self, offset: usize, len: usize) -> Result<(), SnappyError> {
         let end = self.end();

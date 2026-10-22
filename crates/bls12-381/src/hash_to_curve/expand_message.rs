@@ -160,6 +160,67 @@ mod tests {
     }
 
     #[test]
+    fn rfc_9380_appendix_k2_long_tag_vectors() {
+        // Fixture state: a 256-byte tag, past the 255-byte limit, so it is hashed first.
+        let dst = [
+            b"QUUX-V01-CS02-with-expander-SHA256-128-long-DST-".as_slice(),
+            &[b'1'; 208],
+        ]
+        .concat();
+        assert_eq!(dst.len(), 256);
+        let expected_32 = [
+            "e8dc0c8b686b7ef2074086fbdd2f30e3f8bfbd3bdf177f73f04b97ce618a3ed3",
+            "52dbf4f36cf560fca57dedec2ad924ee9c266341d8f3d6afe5171733b16bbb12",
+            "35387dcf22618f3728e6c686490f8b431f76550b0b2c61cbc1ce7001536f4521",
+            "01b637612bb18e840028be900a833a74414140dde0c4754c198532c3a0ba42bc",
+            "20cce7033cabc5460743180be6fa8aac5a103f56d481cf369a8accc0c374431b",
+        ];
+        let expected_128 = [
+            concat!(
+                "14604d85432c68b757e485c8894db3117992fc57e0e136f71ad987f789a0abc2",
+                "87c47876978e2388a02af86b1e8d1342e5ce4f7aaa07a87321e691f6fba7e007",
+                "2eecc1218aebb89fb14a0662322d5edbd873f0eb35260145cd4e64f748c5dfe6",
+                "0567e126604bcab1a3ee2dc0778102ae8a5cfd1429ebc0fa6bf1a53c36f55dfc",
+            ),
+            concat!(
+                "1a30a5e36fbdb87077552b9d18b9f0aee16e80181d5b951d0471d55b66684914",
+                "aef87dbb3626eaabf5ded8cd0686567e503853e5c84c259ba0efc37f71c839da",
+                "2129fe81afdaec7fbdc0ccd4c794727a17c0d20ff0ea55e1389d6982d1241cb8",
+                "d165762dbc39fb0cee4474d2cbbd468a835ae5b2f20e4f959f56ab24cd6fe267",
+            ),
+            concat!(
+                "d2ecef3635d2397f34a9f86438d772db19ffe9924e28a1caf6f1c8f15603d402",
+                "8f40891044e5c7e39ebb9b31339979ff33a4249206f67d4a1e7c765410bcd249",
+                "ad78d407e303675918f20f26ce6d7027ed3774512ef5b00d816e51bfcc96c353",
+                "9601fa48ef1c07e494bdc37054ba96ecb9dbd666417e3de289d4f424f502a982",
+            ),
+            concat!(
+                "ed6e8c036df90111410431431a232d41a32c86e296c05d426e5f44e75b9a50d3",
+                "35b2412bc6c91e0a6dc131de09c43110d9180d0a70f0d6289cb4e43b05f7ee5e",
+                "9b3f42a1fad0f31bac6a625b3b5c50e3a83316783b649e5ecc9d3b1d9471cb50",
+                "24b7ccf40d41d1751a04ca0356548bc6e703fca02ab521b505e8e45600508d32",
+            ),
+            concat!(
+                "78b53f2413f3c688f07732c10e5ced29a17c6a16f717179ffbe38d92d6c9ec29",
+                "6502eb9889af83a1928cd162e845b0d3c5424e83280fed3d10cffb2f8431f14e",
+                "7a23f4c68819d40617589e4c41169d0b56e0e3535be1fd71fbb08bb70c5b5ffe",
+                "d953d6c14bf7618b35fc1f4c4b30538236b4b08c9fbf90462447a8ada60be495",
+            ),
+        ];
+
+        for (index, (short, long)) in expected_32.iter().zip(expected_128).enumerate() {
+            let message = rfc_message(index);
+            let mut out = [0_u8; 32];
+            expand_message_xmd(&message, &dst, &mut out);
+            assert_eq!(out.to_vec(), hex(short), "32-byte case {index}");
+
+            let mut out = [0_u8; 128];
+            expand_message_xmd(&message, &dst, &mut out);
+            assert_eq!(out.to_vec(), hex(long), "128-byte case {index}");
+        }
+    }
+
+    #[test]
     fn oversized_tag_is_replaced_by_its_hash() {
         // A 256-byte tag must behave exactly like its 32-byte digest under the oversize prefix.
         let long_dst = [7_u8; 256];

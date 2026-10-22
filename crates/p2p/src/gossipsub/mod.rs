@@ -5,11 +5,11 @@
 //! Each node keeps, per topic, a mesh of about D peers that receive full messages.
 //! Other topic peers hear only identifiers, through periodic IHAVE gossip.
 //!
-//! ```text
-//!   publisher ──full──▶ mesh peer ──full──▶ its mesh peers ──▶ ...      eager push
-//!       │
-//!       └──IHAVE [ids]──▶ non-mesh peer ──IWANT [id]──▶ full message    lazy pull
-//! ```
+//! Messages spread in two ways:
+//!
+//! - Eager push: the publisher sends the full message to its mesh peers, which forward it to theirs.
+//! - Lazy pull: the publisher sends IHAVE with identifiers to a non-mesh peer.
+//! - That peer answers IWANT for an identifier it lacks, and receives the full message.
 //!
 //! The heartbeat keeps each mesh between D_low and D_high with GRAFT and PRUNE.
 //! v1.1 adds backoff, peer exchange, flood publishing, and peer scoring.

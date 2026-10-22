@@ -116,7 +116,7 @@ fn received_message_waits_for_validation_then_forwards() {
         panic!("expected a message event");
     };
     assert_eq!(source, peer(1));
-    // Small message (below 1000 bytes) → no IDONTWANT, and nothing forwarded yet.
+    // A small message, below 1000 bytes, sends no IDONTWANT, and nothing is forwarded yet.
     assert!(router.poll_transmit().is_none());
 
     // Accepting forwards to mesh peers 2 and 3, never back to the source.
@@ -158,7 +158,7 @@ fn rejected_message_penalizes_the_sender() {
         panic!("expected a message event");
     };
     router.report_validation(&id, ValidationOutcome::Reject, now);
-    // Ethereum P4: one invalid message → topic_weight * w4 * 1 = 0.5 * -320 = -160.
+    // Ethereum P4: one invalid message gives topic_weight * w4 * 1 = 0.5 * -320 = -160.
     assert!((router.peer_score(&peer(1), now) + 160.0).abs() < 1.0);
     // Nothing was forwarded.
     assert!(
@@ -386,7 +386,7 @@ fn publish_errors() {
         Err(PublishError::Duplicate { id })
     );
     // A 100-byte payload under a 100-byte limit.
-    // Framed: data field 1 + 1 + 100, topic field 1 + 1 + 38, plus 16 of allowance → 158.
+    // Framed: data field 1 + 1 + 100, topic field 1 + 1 + 38, plus 16 of allowance, makes 158.
     let config = GossipsubConfig {
         max_transmit_size: 100,
         ..GossipsubConfig::default()

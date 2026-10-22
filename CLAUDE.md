@@ -137,7 +137,10 @@ More rules:
 - Section names: `# Overview`, `# Algorithm`, `# Invariants`, `# Performance`, `# Arguments`, `# Returns`, `# Errors`, `# Panics`, `# Safety`.
 - No code examples in docs: tests show usage, and examples only go stale and bury the explanation.
   Diagrams fenced as `text` stay.
-- Diagrams in `///` docs are fenced as `text`. In `//` comments they are indented four spaces.
+- Docs must read well as plain text in an editor, not only as rendered rustdoc.
+  No ASCII art: no underbrace annotations, no box-drawing characters, no unicode arrows, no flow charts.
+  A flow is a numbered list of short steps; a relation is one plain formula per line.
+- Small plain-ASCII tables and one-line formulas are fine, fenced as `text` in `///` docs and indented four spaces in `//` comments.
 - Inline comments explain the reasoning and teach the domain, glued to the line they explain.
 - Useful labels: `// Invariant:`, `// Threshold:`, `// Timing:`, `// Phase N:`, `// Fixture state:`, `// Mutation:`.
 - Never reference the past: no "previously", "used to", "regression".

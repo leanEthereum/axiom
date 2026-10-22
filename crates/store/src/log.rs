@@ -6,11 +6,8 @@
 //! There is no separate data file to update in place: a committed frame is the data.
 //!
 //! ```text
-//!     sealed                          sealed             active
-//!     +----------------+------+       +-------+------+   +------------------+
-//!     | 00000000.seg   | hint |  ...  | 0007  | hint |   | 00000008.seg     | <- appends
-//!     +----------------+------+       +-------+------+   +------------------+
-//!       immutable, indexed by hint                         scanned at open
+//!     00000000.seg + hint  ...  00000007.seg + hint     sealed: immutable, indexed by hint
+//!     00000008.seg                                      active: takes appends, scanned at open
 //! ```
 //!
 //! # Invariants
@@ -148,7 +145,8 @@ impl Log {
             // Cut the torn tail so the next append starts on a frame boundary.
             //
             //     | header | frame ok | frame ok | torn ... |
-            //                                    ^ truncate here
+            //
+            // The cut falls where the torn frame starts.
             active.truncate(scan.valid_len)?;
         }
         let active = Arc::new(active);
@@ -454,9 +452,10 @@ impl Log {
     ///
     /// # Algorithm
     ///
-    /// ```text
-    ///     sync segment n  ->  write hint n  ->  create segment n + 1  ->  publish it
-    /// ```
+    /// 1. Sync segment n.
+    /// 2. Write hint n.
+    /// 3. Create segment n + 1.
+    /// 4. Publish segment n + 1.
     ///
     /// Segment n is durable before n + 1 exists, so only the newest segment can be torn.
     fn rotate(&mut self, shared: &Shared, counters: &Counters) -> Result<(), Error> {

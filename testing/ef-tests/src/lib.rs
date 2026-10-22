@@ -17,6 +17,6 @@ pub use case::{Case, Failure, Meta};
 pub use fields::FieldNames;
 pub use runners::{
     BEACON_STATE_FIELDS, Blocks, ChainReplay, EpochProcessing, Fork, LightClient, MerkleProofs,
-    Networking, Operations, Rewards, Shuffling, SszStatic, StoreReplay, Transition,
+    Networking, Operations, Rewards, Shuffling, SszGeneric, SszStatic, StoreReplay, Transition,
 };
 pub use suite::{Report, Runner, Suite, Vectors};

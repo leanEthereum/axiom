@@ -99,7 +99,7 @@ mod tests {
         let mut dialer = Dialer::new(["/mplex/6.7.0", "/yamux/1.0.0"]).unwrap();
         let mut listener = Listener::new(["/yamux/1.0.0"]);
 
-        // Flight 1, dialer → listener: header and first proposal, pipelined.
+        // Flight 1, from dialer to listener: header and first proposal, pipelined.
         //
         //     0x13 "/multistream/1.0.0\n"   19 bytes
         //     0x0d "/mplex/6.7.0\n"         13 bytes
@@ -186,7 +186,7 @@ mod tests {
         // ls answer: one message nesting "/a\n" and "/bb\n".
         //
         //     outer length 9 = [0x03 "/a\n"] (4) + [0x04 "/bb\n"] (5)
-        //     plus the outer newline → prefix 0x0a
+        //     prefix = 9 + 1 outer newline = 10 = 0x0a
         let mut lister = Lister::new();
         let mut listener = Listener::new(["/a", "/bb"]);
         assert_eq!(listener.receive(&lister.take_output()), Ok(None));

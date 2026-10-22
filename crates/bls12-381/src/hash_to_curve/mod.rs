@@ -4,11 +4,10 @@
 //!
 //! The random-oracle construction of RFC 9380 section 3 chains four steps:
 //!
-//! ```text
-//!     msg --expand_message_xmd--> 256 bytes --hash_to_field--> u_0, u_1 in F_{p^2}
-//!     Q_i = map_to_curve(u_i)                    (points of the twist E')
-//!     P   = clear_cofactor(Q_0 + Q_1)            (a point of G2)
-//! ```
+//! 1. Expand the message with the XMD expander into 256 uniform bytes.
+//! 2. Hash those bytes to two field elements u_0 and u_1 in F_{p^2}.
+//! 3. Map each u_i to a point Q_i of the twist E'.
+//! 4. Clear the cofactor of Q_0 + Q_1 to get a point P of G2.
 //!
 //! Adding two independent images makes the output indistinguishable from a random oracle.
 //! A single image would only be a well-distributed encoding.

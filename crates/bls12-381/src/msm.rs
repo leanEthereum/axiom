@@ -150,9 +150,10 @@ impl Digits {
 
         // A digit straddling a limb boundary takes its high part from the next limb.
         //
-        //     limb k+1          limb k
-        //     [ ....hhhh ] [ llll........ ]
-        //                    ^ start
+        //     limb k+1 = [ ....hhhh ]
+        //     limb k   = [ llll........ ]
+        //
+        // The digit starts at the first low bit l of limb k, and its high bits h sit in limb k+1.
         if shift + width > 64 && limb + 1 < limbs.len() {
             bits |= limbs[limb + 1] << (64 - shift);
         }

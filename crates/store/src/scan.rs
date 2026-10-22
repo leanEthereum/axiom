@@ -33,8 +33,9 @@ impl Scan {
     ///
     /// ```text
     ///     | file header | frame 0 ok | frame 1 ok | frame 2 torn ......|
-    ///                                             ^ valid_len          ^ file end
     /// ```
+    ///
+    /// The valid length ends where the torn frame starts, short of the file end.
     ///
     /// A frame counts only if all four checks pass:
     ///

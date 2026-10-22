@@ -6,13 +6,11 @@
 //! The driver feeds it datagrams, the current time, and timer expiries.
 //! It hands back datagrams to send and events to report.
 //!
-//! ```text
-//!   datagram, now ──▶ ┌──────────────────────────────┐ ──▶ datagrams to send
-//!   timer, now    ──▶ │ service                      │
-//!   commands      ──▶ │   lookups, table, liveness   │ ──▶ events
-//!                     │   handler: sessions, packets │
-//!                     └──────────────────────────────┘
-//! ```
+//! Inputs are a datagram with the time, a timer expiry with the time, or a command.
+//! Outputs are datagrams to send and events.
+//!
+//! Inside, the service runs lookups, the routing table, and liveness checks.
+//! Its handler owns sessions and packets.
 //!
 //! Equal seeds and equal inputs give equal outputs, so a simulation replays exactly.
 

@@ -80,17 +80,16 @@ pub(crate) struct BatchOutcome {
 ///
 /// # Overview
 ///
-/// ```text
-///     status ──> valid fork digest, head not in the future? else disconnect
-///                                   │
-///     cursor ──> blocks by range [cursor, cursor + 32) + sampled columns by range
-///                                   │
-///     background task: columns (structure, inclusion, KZG) then blocks (engine, import)
-///                                   │
-///     done: cursor moves past the range, empty or not
-///     unknown parent: the head is on a dead fork; rewind the cursor to finality
-///     invalid data: disconnect the peer
-/// ```
+/// 1. Check the peer's status: a wrong fork digest or a head in the future disconnects it.
+/// 2. Request blocks by range [cursor, cursor + 32), and the sampled columns by range.
+/// 3. A background task checks columns for structure, inclusion, and KZG.
+/// 4. It then runs the blocks through the engine and imports them.
+///
+/// The batch ends in one of three ways:
+///
+/// - Done: the cursor moves past the range, empty or not.
+/// - Unknown parent: the head is on a dead fork, so the cursor rewinds to finality.
+/// - Invalid data: the peer is disconnected.
 ///
 /// A peer that fails a request repeatedly is no longer asked.
 /// Processing runs off the network loop, so peers' requests keep being answered meanwhile.
