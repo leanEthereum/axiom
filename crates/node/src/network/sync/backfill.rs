@@ -146,7 +146,11 @@ impl<P: Preset> BackfillSync<P> {
 
     /// Marks one of the batch's requests finished, starting processing once all are.
     pub(crate) async fn on_end(&mut self, request: RequestId) {
-        if !self.batch.as_mut().is_some_and(|batch| batch.on_end(request)) {
+        if !self
+            .batch
+            .as_mut()
+            .is_some_and(|batch| batch.on_end(request))
+        {
             return;
         }
         let Some(batch) = self.batch.take() else {
@@ -232,7 +236,9 @@ impl<P: Preset> BackfillSync<P> {
         };
 
         // The range ends below the stored start, or below the last empty range.
-        let end = self.cursor.map_or(start.slot, |cursor| cursor.min(start.slot));
+        let end = self
+            .cursor
+            .map_or(start.slot, |cursor| cursor.min(start.slot));
         if end <= target {
             return;
         }

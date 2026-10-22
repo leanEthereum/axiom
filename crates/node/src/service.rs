@@ -198,8 +198,10 @@ impl<P: Preset> Node<P> {
         let hub = task::spawn(hub.run());
 
         // The chain, from the database's anchor or from genesis, with its slasher if enabled.
+        // A checkpoint download holds a whole state; boxing keeps this future small.
+        let chain = Box::pin(config.open_chain::<P>(chain_config, clock.as_ref())).await?;
         let mut chain = config
-            .attach_slasher(config.open_chain::<P>(chain_config)?)?
+            .attach_slasher(chain)?
             .with_metrics(metrics.clone())
             .with_events(event_sender.clone());
 

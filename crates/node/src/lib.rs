@@ -12,6 +12,7 @@
 
 mod api;
 mod chain;
+mod checkpoint;
 mod clock;
 mod config;
 mod engine;
@@ -32,8 +33,11 @@ pub use chain::{
     ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SnapshotInterval,
     StateReplay, StorageMode, Submission, VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
+pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig, ProposerSettings};
+pub use config::{
+    AnchorSource, EngineConfig, HistorySettings, NetworkSettings, NodeConfig, ProposerSettings,
+};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use events::{

@@ -17,7 +17,10 @@ use axiom_telemetry::RegistryError;
 use axiom_types::{CommitteeIndex, ForkName, Root, Slot};
 use thiserror::Error;
 
-use crate::chain::{SchemaVersion, WeakSubjectivityError};
+use crate::{
+    CheckpointError,
+    chain::{SchemaVersion, WeakSubjectivityError},
+};
 
 /// Why the chain refused an input or could not persist it.
 #[derive(Debug, Error)]
@@ -207,6 +210,9 @@ pub enum NodeError {
     /// The peer-to-peer stack failed to start.
     #[error("network: {0}")]
     Network(#[source] NetworkError),
+    /// The checkpoint could not be downloaded.
+    #[error("checkpoint sync: {0}")]
+    Checkpoint(#[from] CheckpointError),
     /// The chain thread stopped before the node did.
     #[error("chain service stopped unexpectedly")]
     ChainStopped,

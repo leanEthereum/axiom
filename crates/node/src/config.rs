@@ -17,7 +17,7 @@ use axiom_slasher::SlasherConfig;
 use axiom_ssz::DecodeError;
 use axiom_telemetry::{MetricsServer, Registry};
 use axiom_types::{
-    ChainConfig, ExecutionAddress, Preset,
+    ChainConfig, ExecutionAddress, Preset, SlotClock,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
 };
@@ -28,8 +28,9 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    BeaconApi, Chain, ChainDatabase, ChainHandle, DiscoverySettings, ExecutionLayer, NodeError,
-    NodeKey, api::ApiServices, network::NetworkIdentity, slasher::SlasherFeed,
+    BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, CheckpointServer, Clock,
+    DiscoverySettings, ExecutionLayer, NodeError, NodeKey, StorageMode, WeakSubjectivity,
+    WeakSubjectivityError, api::ApiServices, network::NetworkIdentity, slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -102,37 +103,116 @@ pub enum AnchorSource {
         /// The signed block.
         block: PathBuf,
     },
+    /// A trusted beacon API to download the finalized block and its post-state from.
+    Url(String),
 }
 
 impl AnchorSource {
     /// Builds a chain on an empty database from this anchor.
-    fn open<P: Preset>(
+    ///
+    /// A checkpoint must be recent: a stale one may hide a long-range attack.
+    /// See `is_within_weak_subjectivity_period` in the phase0 weak subjectivity guide.
+    async fn open<P: Preset>(
         &self,
         chain_config: ChainConfig,
         database: ChainDatabase<P>,
+        history: &HistorySettings,
+        now_ms: u64,
     ) -> Result<Chain<P>, NodeError> {
-        match self {
-            Self::Genesis(path) => {
-                let genesis = SszFile::new(path, "reading the genesis state")
-                    .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
-                info!(
-                    validators = genesis.validators().len(),
-                    fork = %genesis.fork_name(),
-                    "starting from genesis"
-                );
-                Ok(Chain::from_genesis(chain_config, genesis, database)?)
-            }
+        let (state, block, genesis) = match self {
+            Self::Genesis(path) => return Self::genesis(path, chain_config, database),
             Self::Checkpoint { state, block } => {
                 let state = SszFile::new(state, "reading the checkpoint state")
                     .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
                 let block = SszFile::new(block, "reading the checkpoint block")
                     .decode(|bytes| SignedBeaconBlock::<P>::decode_at(bytes, &chain_config))?;
-                // The store refuses a block whose state root is not this state's.
-                info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
-                Ok(Chain::from_anchor(chain_config, state, &block, database)?)
+                (state, block, None)
             }
-        }
+            Self::Url(url) => {
+                info!(%url, "downloading the finalized checkpoint");
+                let server = CheckpointServer::new(url)?;
+                let (state, block) = server.finalized::<P>(&chain_config).await?;
+                // An archive rebuilds the states below the anchor from genesis, if the server has it.
+                let genesis = match (database.mode(), &history.genesis) {
+                    (StorageMode::Archive(_), None) => {
+                        match server.genesis::<P>(&chain_config).await {
+                            Ok(genesis) => Some(genesis),
+                            Err(error) => {
+                                warn!(%error, "no genesis state from the checkpoint server");
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                (state, block, genesis)
+            }
+        };
+        Self::check_recent(&state, &chain_config, now_ms)?;
+        // The store refuses a block whose state root is not this state's.
+        info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
+        let chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
+        let genesis = match (&history.genesis, genesis) {
+            (Some(path), _) => Some(
+                SszFile::new(path, "reading the genesis state")
+                    .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?,
+            ),
+            (None, downloaded) => downloaded,
+        };
+        Ok(match genesis {
+            Some(genesis) => chain.with_genesis(&genesis)?,
+            None => chain,
+        })
     }
+
+    /// Refuses a checkpoint state older than its weak subjectivity period.
+    fn check_recent<P: Preset>(
+        state: &BeaconState<P>,
+        chain_config: &ChainConfig,
+        now_ms: u64,
+    ) -> Result<(), NodeError> {
+        let clock = SlotClock::new(
+            state.genesis_time().saturating_mul(1000),
+            chain_config.slot_duration_ms.max(1),
+        );
+        let current = clock.slot_at(now_ms).epoch::<P>();
+        if WeakSubjectivity::is_within_period(state, chain_config, current) {
+            return Ok(());
+        }
+        let stale = WeakSubjectivityError::Stale {
+            state_epoch: state.current_epoch(),
+            period: WeakSubjectivity::period(state, chain_config),
+            current,
+        };
+        Err(ChainError::WeakSubjectivity(stale).into())
+    }
+
+    /// Builds a chain from a genesis state file.
+    fn genesis<P: Preset>(
+        path: &Path,
+        chain_config: ChainConfig,
+        database: ChainDatabase<P>,
+    ) -> Result<Chain<P>, NodeError> {
+        let genesis = SszFile::new(path, "reading the genesis state")
+            .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
+        info!(
+            validators = genesis.validators().len(),
+            fork = %genesis.fork_name(),
+            "starting from genesis"
+        );
+        Ok(Chain::from_genesis(chain_config, genesis, database)?)
+    }
+}
+
+/// How much history the node keeps and what anchors it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HistorySettings {
+    /// How much past state to keep.
+    pub mode: StorageMode,
+    /// A checkpoint the operator trusts, which the chain must pass through.
+    pub weak_subjectivity: Option<WeakSubjectivity>,
+    /// The genesis state, which lets an archive anchored later rebuild the states below its anchor.
+    pub genesis: Option<PathBuf>,
 }
 
 /// An SSZ file, with what reading it is for.
@@ -182,6 +262,8 @@ pub struct NodeConfig {
     pub engine: Option<EngineConfig>,
     /// The peer-to-peer network; none runs the node alone.
     pub network: Option<NetworkSettings>,
+    /// History, pruning, and weak subjectivity.
+    pub history: HistorySettings,
     /// How the node builds blocks for its validators.
     pub proposer: ProposerSettings,
     /// The slasher's history and layout; none runs no slasher.
@@ -198,23 +280,36 @@ pub struct ProposerSettings {
 }
 
 impl NodeConfig {
-    /// Opens the database and builds the chain from its anchor or from genesis.
-    pub(crate) fn open_chain<P: Preset>(
+    /// Opens the database and builds the chain from its anchor, a checkpoint, or genesis.
+    ///
+    /// A configured weak subjectivity checkpoint then holds the chain to it.
+    pub(crate) async fn open_chain<P: Preset>(
         &self,
         chain_config: ChainConfig,
+        clock: &dyn Clock,
     ) -> Result<Chain<P>, NodeError> {
         let database = match &self.data_dir {
             Some(directory) => ChainDatabase::open(&directory.join("chain"), chain_config.clone())?,
             None => ChainDatabase::in_memory(chain_config.clone())?,
-        };
-        if database.has_anchor()? {
-            info!("resuming from the database");
-            return Ok(Chain::resume(chain_config, database)?);
         }
-        self.anchor
-            .as_ref()
-            .ok_or(NodeError::NoAnchor)?
-            .open(chain_config, database)
+        .with_mode(self.history.mode);
+        let chain = if database.has_anchor()? {
+            info!("resuming from the database");
+            Chain::resume(chain_config, database)?
+        } else {
+            self.anchor
+                .as_ref()
+                .ok_or(NodeError::NoAnchor)?
+                .open(chain_config, database, &self.history, clock.now_ms())
+                .await?
+        };
+        Ok(match self.history.weak_subjectivity {
+            Some(checkpoint) => {
+                info!(%checkpoint, "holding the chain to a weak subjectivity checkpoint");
+                chain.with_weak_subjectivity(checkpoint)?
+            }
+            None => chain,
+        })
     }
 
     /// Starts the slasher, when enabled, with its history beside the chain's, and feeds it the chain.

@@ -56,6 +56,7 @@ impl Run {
             let clock = Arc::new(SystemClock);
             let shutdown = Self::shutdown_signal();
             // The preset is a compile-time choice, so each one is its own monomorphized node.
+            // A node's future holds every service's state, so it lives on the heap.
             match self.preset {
                 PresetName::Mainnet => {
                     Box::pin(Node::<Mainnet>::run(self.chain, self.node, clock, shutdown)).await

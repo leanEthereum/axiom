@@ -284,9 +284,14 @@ impl<P: Preset> Batch<P> {
             return;
         };
         let context = chunk.context.unwrap_or(ForkDigest([0; 4]));
-        if let Err(fault) =
-            Self::take(config, forks, fetch, context, &chunk.payload, &mut self.received)
-        {
+        if let Err(fault) = Self::take(
+            config,
+            forks,
+            fetch,
+            context,
+            &chunk.payload,
+            &mut self.received,
+        ) {
             self.fault.get_or_insert(fault);
         }
     }
@@ -492,7 +497,11 @@ impl<P: Preset> RangeSync<P> {
 
     /// Marks one of the batch's requests finished, starting processing once all are.
     pub(crate) async fn on_end(&mut self, request: RequestId) {
-        if !self.batch.as_mut().is_some_and(|batch| batch.on_end(request)) {
+        if !self
+            .batch
+            .as_mut()
+            .is_some_and(|batch| batch.on_end(request))
+        {
             return;
         }
         let Some(batch) = self.batch.take() else {

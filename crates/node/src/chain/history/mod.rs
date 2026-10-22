@@ -60,7 +60,7 @@ pub(crate) struct History<P: Preset> {
     /// Block root of each state root since finality.
     hot_roots: HashMap<Root, Root>,
     /// The state a rebuild reached, between steps.
-    rebuilding: Option<State<P>>,
+    rebuilding: Option<Box<State<P>>>,
     /// The trusted checkpoint, until the chain passes it.
     weak_subjectivity: Option<WeakSubjectivity>,
 }
@@ -275,7 +275,7 @@ impl<P: Preset> History<P> {
             return Ok(Reconstruction::Waiting);
         }
         let mut state = match self.rebuilding.take() {
-            Some(state) if state.beacon().slot() == cursor.reached => state,
+            Some(state) if state.beacon().slot() == cursor.reached => *state,
             _ => match database.snapshot_before(cursor.reached)? {
                 Some(snapshot) => State::new(snapshot),
                 None => return Ok(Reconstruction::Waiting),
@@ -311,7 +311,7 @@ impl<P: Preset> History<P> {
         if end >= cursor.target {
             return Ok(Reconstruction::Done);
         }
-        self.rebuilding = Some(state);
+        self.rebuilding = Some(Box::new(state));
         Ok(Reconstruction::Progressed(end))
     }
 
