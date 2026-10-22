@@ -71,6 +71,7 @@ mod sampling;
 mod shuffle;
 mod signatures;
 mod state;
+mod votes;
 
 pub use active_balance::ActiveBalance;
 pub use block::{BlockProcessor, Operation};
@@ -86,3 +87,4 @@ pub use registry::Registry;
 pub use shuffle::SwapOrNot;
 pub use signatures::{SignatureBatch, Verification};
 pub use state::{SignedBlock, State};
+pub use votes::{EpochVotes, RecordedVote, VoteRecord};

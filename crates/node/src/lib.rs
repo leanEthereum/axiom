@@ -25,6 +25,7 @@ mod publish;
 mod race;
 mod service;
 mod slasher;
+mod target_committees;
 mod tasks;
 
 pub use api::BeaconApi;

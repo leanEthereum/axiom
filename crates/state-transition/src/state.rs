@@ -11,8 +11,8 @@ use axiom_types::{
 
 use crate::{
     BlockError, BlockProcessor, CachedState, Caches, EpochCommittees, EpochProcessor, EpochStep,
-    ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError, TransitionError, Upgrade,
-    Verification,
+    EpochVotes, ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError, TransitionError,
+    Upgrade, Verification,
     gloas::{EnvelopeError, PayloadEnvelope},
     rewards::AttesterRewards,
 };
@@ -341,6 +341,15 @@ impl<P: Preset> State<P> {
         config: &ChainConfig,
     ) -> Result<AttesterRewards, StateError> {
         self.dispatch_mut(RewardAttesters { config })
+    }
+
+    /// Which parts of each validator's vote of the state's previous epoch the state records.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a recorded vote names a committee or a root the state does not hold.
+    pub fn previous_epoch_votes(&mut self) -> Result<EpochVotes, StateError> {
+        self.dispatch_mut(ReadVotes)
     }
 
     /// Proposer of the state's slot, by the rules of the state's fork.
@@ -792,6 +801,18 @@ impl<P: Preset> ForkTaskMut<P> for RewardAttesters<'_> {
 
     fn run<S: Fork<Preset = P>>(self, state: CachedState<'_, S>) -> Self::Output {
         S::attester_rewards(state, self.config)
+    }
+}
+
+/// The vote records of the state's previous epoch.
+#[derive(Clone, Copy, Debug)]
+struct ReadVotes;
+
+impl<P: Preset> ForkTaskMut<P> for ReadVotes {
+    type Output = Result<EpochVotes, StateError>;
+
+    fn run<S: Fork<Preset = P>>(self, state: CachedState<'_, S>) -> Self::Output {
+        S::previous_epoch_votes(state)
     }
 }
 

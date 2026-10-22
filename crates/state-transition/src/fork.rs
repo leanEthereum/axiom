@@ -6,8 +6,8 @@ use axiom_ssz::Ssz;
 use axiom_types::{ChainConfig, ValidatorIndex, accessors::ForkState, phase0::BeaconBlockHeader};
 
 use crate::{
-    BlockError, BlockProcessor, CachedState, Caches, EpochProcessor, EpochStep, PayloadEngine,
-    Registry, StateError, rewards::AttesterRewards,
+    BlockError, BlockProcessor, CachedState, Caches, EpochProcessor, EpochStep, EpochVotes,
+    PayloadEngine, Registry, StateError, rewards::AttesterRewards,
 };
 
 /// The state transition rules of one fork, implemented on that fork's state.
@@ -98,6 +98,13 @@ pub trait Fork: ForkState + Ssz + Clone + Debug + 'static {
         state: CachedState<'_, Self>,
         config: &ChainConfig,
     ) -> Result<AttesterRewards, StateError>;
+
+    /// Which parts of each validator's vote of the state's previous epoch the state records.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a recorded vote names a committee or a root the state does not hold.
+    fn previous_epoch_votes(state: CachedState<'_, Self>) -> Result<EpochVotes, StateError>;
 
     /// Applies a block, given with its header.
     ///
