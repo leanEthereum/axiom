@@ -2,7 +2,7 @@
 
 use std::iter;
 
-use crate::{ErrorKind, ParseError};
+use crate::{ErrorKind, ParseError, char_class::CharClass};
 
 /// A position in the text, with the bookkeeping to report lines and columns.
 ///
@@ -17,29 +17,6 @@ pub(crate) struct Scanner<'a> {
     line: usize,
     /// Byte offset where the current line starts.
     line_start: usize,
-}
-
-/// Whether a byte ends a line.
-const fn is_break(byte: u8) -> bool {
-    matches!(byte, b'\n' | b'\r')
-}
-
-/// Whether a byte separates tokens within a line.
-const fn is_blank(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t')
-}
-
-/// Whether a byte delimits entries of a flow collection.
-const fn is_flow_indicator(byte: u8) -> bool {
-    matches!(byte, b',' | b'[' | b']' | b'{' | b'}')
-}
-
-/// Whether an optional byte is whitespace, a line break, or the end of the text.
-const fn is_blank_or_end(byte: Option<u8>) -> bool {
-    match byte {
-        Some(b) => is_blank(b) || is_break(b),
-        None => true,
-    }
 }
 
 impl<'a> Scanner<'a> {
@@ -77,14 +54,15 @@ impl<'a> Scanner<'a> {
 
     /// Whether the next byte is whitespace, a line break, or the end, after a given distance.
     pub(crate) fn blank_or_end_at(&self, distance: usize) -> bool {
-        is_blank_or_end(self.peek_at(distance))
+        self.peek_at(distance)
+            .is_none_or(|byte| CharClass::of(byte).is_space())
     }
 
     /// Whether the next bytes end the line, possibly after a comment.
     pub(crate) fn at_line_end(&self) -> bool {
         match self.peek() {
             Some(b'#') => self.preceded_by_blank(),
-            Some(byte) => is_break(byte),
+            Some(byte) => CharClass::of(byte).is_break(),
             None => true,
         }
     }
@@ -93,7 +71,7 @@ impl<'a> Scanner<'a> {
     ///
     /// A `#` starts a comment only in that position.
     const fn preceded_by_blank(&self) -> bool {
-        self.pos == self.line_start || is_blank(self.src.as_bytes()[self.pos - 1])
+        self.pos == self.line_start || CharClass::of(self.src.as_bytes()[self.pos - 1]).is_white()
     }
 
     /// Byte distance from the start of the line, which is the indentation at a line's content.
@@ -154,7 +132,10 @@ impl<'a> Scanner<'a> {
 
     /// Skips spaces and tabs within the line.
     pub(crate) fn skip_blanks(&mut self) {
-        while self.peek().is_some_and(is_blank) {
+        while self
+            .peek()
+            .is_some_and(|byte| CharClass::of(byte).is_white())
+        {
             self.pos += 1;
         }
     }
@@ -184,7 +165,7 @@ impl<'a> Scanner<'a> {
             match self.peek() {
                 None => return Ok(()),
                 Some(b'#') if self.preceded_by_blank() => self.skip_comment(),
-                Some(byte) if is_break(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => {
                     self.consume_break();
                 }
                 Some(_) => {
@@ -194,7 +175,7 @@ impl<'a> Scanner<'a> {
                     //     "- \tvalue"   ->  tab after an indicator      ->  fine
                     let prefix = &self.src.as_bytes()[self.line_start..self.pos];
                     if let Some(tab) = prefix.iter().position(|&b| b == b'\t')
-                        && prefix.iter().all(|&b| is_blank(b))
+                        && prefix.iter().all(|&b| CharClass::of(b).is_white())
                     {
                         let mut at_tab = *self;
                         at_tab.pos = self.line_start + tab;
@@ -208,7 +189,7 @@ impl<'a> Scanner<'a> {
 
     /// Skips a comment up to, not including, the line break.
     fn skip_comment(&mut self) {
-        while self.peek().is_some_and(|b| !is_break(b)) {
+        while self.peek().is_some_and(|b| !CharClass::of(b).is_break()) {
             self.pos += 1;
         }
     }
@@ -234,12 +215,12 @@ impl<'a> Scanner<'a> {
             Some(b'-' | b'?' | b':') => match self.peek_at(1) {
                 None => false,
                 Some(next) => {
-                    !(is_blank(next) || is_break(next) || (flow && is_flow_indicator(next)))
+                    let class = CharClass::of(next);
+                    !(class.is_space() || (flow && class.is_flow_indicator()))
                 }
             },
             Some(byte) => {
-                !is_blank(byte)
-                    && !is_break(byte)
+                !CharClass::of(byte).is_space()
                     && !matches!(
                         byte,
                         b',' | b'['
@@ -268,7 +249,11 @@ impl<'a> Scanner<'a> {
     /// In flow context a flow indicator after it also counts.
     pub(crate) fn at_value_colon(&self, flow: bool) -> bool {
         self.peek() == Some(b':')
-            && (self.blank_or_end_at(1) || (flow && self.peek_at(1).is_some_and(is_flow_indicator)))
+            && (self.blank_or_end_at(1)
+                || (flow
+                    && self
+                        .peek_at(1)
+                        .is_some_and(|byte| CharClass::of(byte).is_flow_indicator())))
     }
 
     /// Reads the part of a plain scalar that lies on the current line.
@@ -280,8 +265,8 @@ impl<'a> Scanner<'a> {
         loop {
             match self.peek() {
                 None => break,
-                Some(byte) if is_break(byte) => break,
-                Some(byte) if is_blank(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => break,
+                Some(byte) if CharClass::of(byte).is_white() => {
                     // Whitespace belongs to the scalar only when content follows it.
                     //
                     //     "a b"     ->  "a b"
@@ -293,7 +278,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 Some(b':') if self.at_value_colon(flow) => break,
-                Some(byte) if flow && is_flow_indicator(byte) => break,
+                Some(byte) if flow && CharClass::of(byte).is_flow_indicator() => break,
                 Some(_) => {
                     self.bump_char();
                     end = self.pos;
@@ -324,7 +309,10 @@ impl<'a> Scanner<'a> {
             // Lookahead: keep the position after the last content in case the scalar ends.
             let end = *self;
             self.skip_blanks();
-            if !self.peek().is_some_and(is_break) {
+            if !self
+                .peek()
+                .is_some_and(|byte| CharClass::of(byte).is_break())
+            {
                 *self = end;
                 return Ok(out);
             }
@@ -344,7 +332,10 @@ impl<'a> Scanner<'a> {
                 || self.at_line_end()
                 || self.at_document_marker()
                 || (self.indent().cast_signed() <= parent)
-                || (flow && self.peek().is_some_and(is_flow_indicator))
+                || (flow
+                    && self
+                        .peek()
+                        .is_some_and(|byte| CharClass::of(byte).is_flow_indicator()))
                 || self.at_value_colon(flow);
             if ends_scalar {
                 *self = end;
@@ -385,7 +376,9 @@ impl<'a> Scanner<'a> {
                     self.bump();
                     return Ok(out);
                 }
-                Some(byte) if is_break(byte) => self.fold_quoted(&mut out, 0, parent, open)?,
+                Some(byte) if CharClass::of(byte).is_break() => {
+                    self.fold_quoted(&mut out, 0, parent, open)?;
+                }
                 Some(_) => out.extend(self.bump_char()),
             }
         }
@@ -407,7 +400,11 @@ impl<'a> Scanner<'a> {
                     self.bump();
                     return Ok(out);
                 }
-                Some(b'\\') if self.peek_at(1).is_some_and(is_break) => {
+                Some(b'\\')
+                    if self
+                        .peek_at(1)
+                        .is_some_and(|byte| CharClass::of(byte).is_break()) =>
+                {
                     // An escaped line break joins the lines with nothing between them.
                     //
                     //     "ab\        ->  "abcd"
@@ -421,7 +418,9 @@ impl<'a> Scanner<'a> {
                     self.escape(&mut out)?;
                     kept = out.len();
                 }
-                Some(byte) if is_break(byte) => self.fold_quoted(&mut out, kept, parent, open)?,
+                Some(byte) if CharClass::of(byte).is_break() => {
+                    self.fold_quoted(&mut out, kept, parent, open)?;
+                }
                 Some(_) => out.extend(self.bump_char()),
             }
         }
@@ -554,7 +553,7 @@ impl<'a> Scanner<'a> {
             self.skip_blanks();
             match self.peek() {
                 Some(b'#') if self.preceded_by_blank() => self.skip_comment(),
-                Some(byte) if is_break(byte) => {
+                Some(byte) if CharClass::of(byte).is_break() => {
                     self.consume_break();
                 }
                 _ => break,

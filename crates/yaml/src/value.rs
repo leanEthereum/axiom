@@ -1,8 +1,11 @@
 //! A parsed YAML node and its typed views.
 
-use std::str::FromStr;
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 
-use crate::{Mapping, ParseError, parser::Parser};
+use crate::{Mapping, ParseError, emitter::Emitter, parser::Parser};
 
 /// One node of a YAML document.
 ///
@@ -107,9 +110,11 @@ impl Yaml {
         if !odd.is_empty() {
             return None;
         }
+        // The standard digit parse takes either case, and two digits always fit a byte.
+        let nibble = |byte: u8| char::from(byte).to_digit(16);
         pairs
             .iter()
-            .map(|&[high, low]| Some((hex_digit(high)? << 4) | hex_digit(low)?))
+            .map(|&[high, low]| u8::try_from((nibble(high)? << 4) | nibble(low)?).ok())
             .collect()
     }
 
@@ -148,13 +153,10 @@ impl FromStr for Yaml {
     }
 }
 
-/// Value of one ASCII hex digit.
-const fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
+impl Display for Yaml {
+    /// Writes the node as a block-style document ending in a newline.
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Emitter::new(f).document(self)
     }
 }
 

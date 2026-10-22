@@ -6,7 +6,7 @@
 //!     fields    the members of an object           decoded by name, located by member
 //! ```
 
-use axiom_json::{Json, Object, data, quantity};
+use axiom_json::{Data, Json, Object, Quantity};
 
 use super::JsonCodec;
 use crate::{WireError, WireErrorKind};
@@ -30,17 +30,17 @@ impl<'a> Reader<'a> {
 
     /// Reads a QUANTITY of up to 64 bits.
     pub(crate) fn quantity(self) -> Result<u64, WireError> {
-        quantity::decode(self.text()?).map_err(WireError::hex)
+        u64::from_quantity(self.text()?).map_err(WireError::hex)
     }
 
     /// Reads a DATA of exactly N bytes.
     pub(crate) fn data<const N: usize>(self) -> Result<[u8; N], WireError> {
-        data::decode_array::<N>(self.text()?).map_err(WireError::hex)
+        <[u8; N]>::from_data(self.text()?).map_err(WireError::hex)
     }
 
     /// Reads a DATA of any length.
     pub(crate) fn bytes(self) -> Result<Vec<u8>, WireError> {
-        data::decode(self.text()?).map_err(WireError::hex)
+        Vec::<u8>::from_data(self.text()?).map_err(WireError::hex)
     }
 
     /// The elements of a value that must be an array.

@@ -2,7 +2,7 @@
 
 use std::str::FromStr;
 
-use axiom_json::data;
+use axiom_json::Data;
 use axiom_types::{Preset, Root, Slot};
 
 use super::ApiError;
@@ -39,7 +39,7 @@ impl FromStr for BlockId {
             "finalized" => Ok(Self::Finalized),
             "justified" => Ok(Self::Justified),
             // Anything with a hex prefix must be a whole 32-byte root.
-            _ if text.starts_with("0x") => data::decode_array::<32>(text)
+            _ if text.starts_with("0x") => <[u8; 32]>::from_data(text)
                 .map(|bytes| Self::Root(Root(bytes)))
                 .map_err(|_| ApiError::bad_request(format!("invalid block id: {text}"))),
             _ => text

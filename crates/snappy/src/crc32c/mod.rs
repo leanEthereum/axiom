@@ -44,9 +44,32 @@ impl Crc32c {
         crc.finish()
     }
 
-    /// Feeds more bytes.
+    /// Feeds more bytes, with the fastest path the CPU supports.
+    #[cfg(target_arch = "x86_64")]
     pub fn update(&mut self, bytes: &[u8]) {
-        self.state = update(self.state, bytes);
+        self.state = if is_x86_feature_detected!("sse4.2") {
+            // SAFETY: the CPU reports SSE4.2, the only feature the function enables.
+            unsafe { x86::update(self.state, bytes) }
+        } else {
+            table::update(self.state, bytes)
+        };
+    }
+
+    /// Feeds more bytes, with the fastest path the CPU supports.
+    #[cfg(target_arch = "aarch64")]
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.state = if is_aarch64_feature_detected!("crc") {
+            // SAFETY: the CPU reports the CRC extension, the only feature the function enables.
+            unsafe { arm::update(self.state, bytes) }
+        } else {
+            table::update(self.state, bytes)
+        };
+    }
+
+    /// Feeds more bytes, with the portable table path.
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.state = table::update(self.state, bytes);
     }
 
     /// The checksum of all bytes fed so far.
@@ -62,34 +85,6 @@ impl Default for Crc32c {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Advances a raw state with the fastest path the CPU supports.
-#[cfg(target_arch = "x86_64")]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    if is_x86_feature_detected!("sse4.2") {
-        // SAFETY: the CPU reports SSE4.2, the only feature the function enables.
-        unsafe { x86::update(crc, bytes) }
-    } else {
-        table::update(crc, bytes)
-    }
-}
-
-/// Advances a raw state with the fastest path the CPU supports.
-#[cfg(target_arch = "aarch64")]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    if is_aarch64_feature_detected!("crc") {
-        // SAFETY: the CPU reports the CRC extension, the only feature the function enables.
-        unsafe { arm::update(crc, bytes) }
-    } else {
-        table::update(crc, bytes)
-    }
-}
-
-/// Advances a raw state with the portable table path.
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn update(crc: u32, bytes: &[u8]) -> u32 {
-    table::update(crc, bytes)
 }
 
 #[cfg(test)]

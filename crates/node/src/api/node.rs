@@ -6,7 +6,7 @@ use std::{
 };
 
 use axiom_http::{Request, Response, StatusCode};
-use axiom_json::{Json, data};
+use axiom_json::{Data, Json};
 use axiom_types::Preset;
 
 use super::{
@@ -111,7 +111,7 @@ impl NodeRoutes {
                         Reply::number(metadata.seq_number.load(Ordering::Relaxed)),
                     ),
                     // Bitfields go out as little-endian hex, as SSZ lays them out.
-                    ("attnets", data::encode(&attnets.to_le_bytes()).into()),
+                    ("attnets", attnets.to_le_bytes().to_data().into()),
                     ("syncnets", Reply::text(&"0x00")),
                     (
                         "custody_group_count",
