@@ -1,11 +1,14 @@
 //! What a proposal needs from the chain, read in one visit to the chain thread.
 
+use std::collections::BTreeSet;
+
 use axiom_block_production::{BlockProducer, ParentPayload, PayloadRequest, ProductionError};
+use axiom_builder_client::ChainHealth;
 use axiom_state_transition::State;
 use axiom_types::{
     BlsPubkey, ForkName, Preset, Slot, ValidatorIndex,
     accessors::{BuilderState, CoreState, ForkState},
-    gloas,
+    combined, gloas,
 };
 
 use crate::{Chain, ExecutionHead, ProposerError};
@@ -25,6 +28,10 @@ pub(crate) struct ProposalContext<P: Preset> {
     pub(crate) parent: ParentPayload,
     /// The execution head to build on and the build's inputs, once the merge is done.
     pub(crate) execution: Option<(ExecutionHead, PayloadRequest)>,
+    /// Gas limit of the parent's payload, which a builder's bid must move from.
+    pub(crate) parent_gas_limit: u64,
+    /// The recent chain, which decides whether builders may be trusted with the slot.
+    pub(crate) health: ChainHealth,
 }
 
 impl<P: Preset> ProposalContext<P> {
@@ -88,6 +95,8 @@ impl<P: Preset> ProposalContext<P> {
         } else {
             None
         };
+        let parent_gas_limit = Self::latest_gas_limit(state.beacon());
+        let health = Self::health(chain, slot);
         Ok(Self {
             state,
             fork,
@@ -95,6 +104,48 @@ impl<P: Preset> ProposalContext<P> {
             pubkey,
             parent,
             execution,
+            parent_gas_limit,
+            health,
         })
+    }
+
+    /// The slots of the canonical blocks of the last epoch, and the finalized epoch.
+    fn health(chain: &Chain<P>, slot: Slot) -> ChainHealth {
+        let head = chain.head();
+        let blocks = chain.store().blocks();
+        let oldest = Slot(slot.0.saturating_sub(P::SLOTS_PER_EPOCH));
+        let mut block_slots = BTreeSet::new();
+        let mut root = head.root;
+        while let Some(node) = blocks.get(&root) {
+            if node.slot < oldest {
+                break;
+            }
+            block_slots.insert(node.slot);
+            root = node.parent_root;
+        }
+        ChainHealth {
+            current_slot: slot,
+            block_slots,
+            finalized_epoch: head.finalized.epoch,
+        }
+    }
+
+    /// Gas limit of the latest payload a state records, zero before the merge.
+    const fn latest_gas_limit(state: &combined::BeaconState<P>) -> u64 {
+        match state {
+            combined::BeaconState::Phase0(_) | combined::BeaconState::Altair(_) => 0,
+            combined::BeaconState::Bellatrix(state) => {
+                state.latest_execution_payload_header.gas_limit
+            }
+            combined::BeaconState::Capella(state) => {
+                state.latest_execution_payload_header.gas_limit
+            }
+            combined::BeaconState::Deneb(state) => state.latest_execution_payload_header.gas_limit,
+            combined::BeaconState::Electra(state) => {
+                state.latest_execution_payload_header.gas_limit
+            }
+            combined::BeaconState::Fulu(state) => state.latest_execution_payload_header.gas_limit,
+            combined::BeaconState::Gloas(state) => state.latest_execution_payload_bid.gas_limit,
+        }
     }
 }

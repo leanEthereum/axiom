@@ -34,6 +34,9 @@ pub trait BlockFork: PoolFork {
         false
     }
 
+    /// Whether the fork's payloads carry withdrawals, from Capella on.
+    const CARRIES_WITHDRAWALS: bool = false;
+
     /// The withdrawals a payload of the state's slot must carry, none before Capella.
     ///
     /// A Gloas payload's withdrawals depend on whether it builds on its parent's payload.

@@ -11,14 +11,19 @@ use std::{
 };
 
 use axiom_block_production::{
-    BlockProducer, ExecutionChoice, GloasBid, LocalBuild, PayloadRequest, ProducedBlock, Proposal,
-    ProposalRequest, RandaoCheck,
+    BlockProducer, BuilderBoost, ExecutionChoice, GloasBid, LocalBuild, PayloadRequest,
+    ProducedBlock, Proposal, ProposalRequest, RandaoCheck,
+};
+use axiom_builder_client::{
+    BidRequest, CircuitBreaker, GasLimitTarget, RelaySet, UnblindedBlock, VerifiedBid,
 };
 use axiom_execution::PayloadId;
 use axiom_ssz::Ssz;
 use axiom_types::{
     BlsSignature, Bytes32, ExecutionAddress, Preset, Root, Slot, ValidatorIndex,
-    bellatrix::ValidatorRegistrationV1, gloas::ExecutionPayloadEnvelope,
+    bellatrix::{SignedValidatorRegistrationV1, ValidatorRegistrationV1},
+    combined::SignedBlindedBeaconBlock,
+    gloas::ExecutionPayloadEnvelope,
 };
 use context::ProposalContext;
 pub use error::ProposerError;
@@ -39,6 +44,8 @@ pub struct BlockOrder {
     pub graffiti: Bytes32,
     /// Whether to check the reveal before building on it.
     pub randao: RandaoCheck,
+    /// How strongly the proposer prefers a builder's payload over its own.
+    pub boost: BuilderBoost,
 }
 
 /// The node's proposal desk: payload preparation, block production, and their caches.
@@ -62,15 +69,20 @@ pub struct ProposerService<P: Preset> {
     builds: Mutex<HashMap<(Slot, Root), PayloadId>>,
     /// The envelope of the latest self-built Gloas block, by slot and block root.
     envelope: Mutex<Option<(Slot, Root, ExecutionPayloadEnvelope<P>)>>,
+    /// Builders that sell payloads, when any are configured.
+    relays: Option<RelaySet>,
+    /// When the chain is too unhealthy to trust builders with a slot.
+    breaker: CircuitBreaker,
 }
 
 impl<P: Preset> ProposerService<P> {
-    /// A desk over the chain and the engine, paying a default fee recipient.
+    /// A desk over the chain, the engine, and the builders, paying a default fee recipient.
     #[must_use]
     pub fn new(
         chain: ChainHandle<P>,
         execution: Arc<ExecutionLayer>,
         default_fee_recipient: ExecutionAddress,
+        relays: Option<RelaySet>,
     ) -> Self {
         Self {
             chain,
@@ -78,7 +90,38 @@ impl<P: Preset> ProposerService<P> {
             preparations: Mutex::new(Preparations::new(default_fee_recipient)),
             builds: Mutex::new(HashMap::new()),
             envelope: Mutex::new(None),
+            relays,
+            breaker: CircuitBreaker::for_preset::<P>(),
         }
+    }
+
+    /// Records builder registrations, and forwards them to every builder.
+    ///
+    /// A builder that fails is logged; the others still learn the registrations.
+    pub async fn register_with_builders(&self, registrations: &[SignedValidatorRegistrationV1]) {
+        self.register(registrations.iter().map(|signed| signed.message.clone()));
+        let Some(relays) = &self.relays else {
+            return;
+        };
+        for failure in relays.register_validators(registrations).await {
+            warn!(relay = %failure.relay, error = %failure.error, "builder refused registrations");
+        }
+    }
+
+    /// Asks the builder that sold a blinded block's payload to reveal it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no builder is configured, or none reveals a payload matching the block.
+    pub async fn reveal(
+        &self,
+        block: &SignedBlindedBeaconBlock<P>,
+    ) -> Result<UnblindedBlock<P>, ProposerError> {
+        let relays = self.relays.as_ref().ok_or(ProposerError::NoBuilder)?;
+        relays
+            .submit_blinded_block(block)
+            .await
+            .map_err(ProposerError::Builder)
     }
 
     /// Records the fee recipients validators named for their coming proposals.
@@ -150,15 +193,9 @@ impl<P: Preset> ProposerService<P> {
         let execution = match context.execution.clone() {
             None => ExecutionChoice::PreMerge,
             Some((head, request)) => {
-                let build = self.local_build(&context, head, request).await?;
-                if context.fork.separates_payloads() {
-                    ExecutionChoice::Gloas {
-                        parent: context.parent.clone(),
-                        bid: GloasBid::SelfBuild(Box::new(build)),
-                    }
-                } else {
-                    ExecutionChoice::Local(build)
-                }
+                let bid = self.builder_bid(&context, head, &request).await;
+                let build = self.local_build(&context, head, request).await;
+                Self::choose(&context, order.boost, build, bid)?
             }
         };
         let request = ProposalRequest {
@@ -184,6 +221,70 @@ impl<P: Preset> ProposerService<P> {
                 Some((slot, root, envelope));
         }
         Ok(proposal)
+    }
+
+    /// The payload a block commits to: the engine's, or a builder's when it pays enough more.
+    ///
+    /// A failed local build still leaves a builder's bid, and a missing bid the local build.
+    fn choose(
+        context: &ProposalContext<P>,
+        boost: BuilderBoost,
+        build: Result<LocalBuild<P>, ProposerError>,
+        bid: Option<VerifiedBid<P>>,
+    ) -> Result<ExecutionChoice<P>, ProposerError> {
+        if context.fork.separates_payloads() {
+            return Ok(ExecutionChoice::Gloas {
+                parent: context.parent.clone(),
+                bid: GloasBid::SelfBuild(Box::new(build?)),
+            });
+        }
+        Ok(match (build, bid) {
+            (Ok(local), Some(bid)) if boost.prefers_builder(local.value, bid.value()) => {
+                ExecutionChoice::Builder(bid.into_bid())
+            }
+            (Ok(local), _) => ExecutionChoice::Local(local),
+            (Err(error), Some(bid)) => {
+                warn!(%error, "local payload failed; using the builder's");
+                ExecutionChoice::Builder(bid.into_bid())
+            }
+            (Err(error), None) => return Err(error),
+        })
+    }
+
+    /// The best verified bid of the configured builders, when the fork and the chain allow one.
+    async fn builder_bid(
+        &self,
+        context: &ProposalContext<P>,
+        head: ExecutionHead,
+        request: &PayloadRequest,
+    ) -> Option<VerifiedBid<P>> {
+        let relays = self.relays.as_ref()?;
+        if !context.fork.has_builder_api() {
+            return None;
+        }
+        if let Err(trip) = self.breaker.check::<P>(&context.health) {
+            warn!(%trip, "chain unhealthy; building locally");
+            return None;
+        }
+        let bid_request = BidRequest {
+            fork: context.fork,
+            slot: request.slot,
+            parent_hash: head.head,
+            proposer: context.pubkey,
+            timestamp: request.timestamp,
+            prev_randao: request.prev_randao,
+            gas_limit: GasLimitTarget {
+                parent: context.parent_gas_limit,
+                target: self.preparations().gas_limit(&context.pubkey),
+            },
+            withdrawals_root: request.withdrawals_root,
+        };
+        let config = self.chain.run(|chain| chain.config().clone()).await.ok()?;
+        let auction = relays.best_header::<P>(&bid_request, &config).await;
+        for failure in &auction.failures {
+            debug!(relay = %failure.relay, error = %failure.error, "builder gave no usable bid");
+        }
+        auction.winner.map(|winner| winner.bid)
     }
 
     /// The envelope of the self-built Gloas block at a slot, when the node built it.

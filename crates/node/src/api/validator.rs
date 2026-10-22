@@ -6,8 +6,9 @@
 use std::collections::BTreeSet;
 
 use axiom_beacon_json::{ApiJson, ForkedJson};
-use axiom_block_production::{ProducedBlock, ProductionError, Proposal, RandaoCheck};
+use axiom_block_production::{BuilderBoost, ProducedBlock, ProductionError, Proposal, RandaoCheck};
 use axiom_bls::{PublicKey, Signature};
+use axiom_builder_client::{RevealedBlobs, UnblindedBlock};
 use axiom_fork_choice::NodePayload;
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::{Data, Json};
@@ -17,7 +18,8 @@ use axiom_state_transition::State;
 use axiom_types::{
     BlsSignature, Bytes32, CommitteeIndex, Epoch, ExecutionAddress, ForkName, Preset, Root, Slot,
     ValidatorIndex, accessors::CoreState, altair, bellatrix,
-    bellatrix::SignedValidatorRegistrationV1, capella, deneb, electra, fulu, gloas, phase0,
+    bellatrix::SignedValidatorRegistrationV1, capella, combined,
+    combined::SignedBlindedBeaconBlock, deneb, electra, fulu, gloas, phase0,
     phase0::AttestationData,
 };
 
@@ -27,7 +29,10 @@ use super::{
     query::{Body, Query},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::{BlockOrder, Chain, ProposerError};
+use crate::{
+    BlockOrder, Chain, ChainStopped, Proposal as PublishProposal, ProposerError, PublishError,
+    Published,
+};
 
 /// Wei per Gwei, to state consensus rewards in the unit the API uses.
 const WEI_PER_GWEI: u128 = 1_000_000_000;
@@ -86,6 +91,7 @@ impl ValidatorRoutes {
                 "/eth/v1/validator/register_validator",
                 Self::register_validator::<P>,
             )
+            .post("/eth/v2/beacon/blinded_blocks", Self::publish_blinded::<P>)
             .post(
                 "/eth/v1/validator/beacon_committee_subscriptions",
                 Self::subscriptions::<P>,
@@ -474,9 +480,9 @@ impl ValidatorRoutes {
                     "registration {position} is not signed by its key"
                 )));
             }
-            accepted.push(signed.message);
+            accepted.push(signed);
         }
-        context.proposer.register(accepted);
+        context.proposer.register_with_builders(&accepted).await;
         Ok(Response::new(StatusCode::OK))
     }
 
@@ -492,6 +498,70 @@ impl ValidatorRoutes {
         // A subscription needs a running chain, whose subnets it would join.
         context.query(|_| Ok(())).await?;
         Ok(Response::new(StatusCode::OK))
+    }
+
+    /// Publishes a signed blinded block, once its builder reveals the payload.
+    ///
+    /// The revealed payload must match the signed header, so the signature covers the full block.
+    /// Statuses follow the full block route: 200 imported, 202 broadcast only, 400 invalid.
+    async fn publish_blinded<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let named = request
+            .headers
+            .get("eth-consensus-version")
+            .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
+        let fork = ForkName::from_name(named)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))?;
+        let block = if Reply::sends_ssz(&request) {
+            SignedBlindedBeaconBlock::<P>::decode(&request.body, fork)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?
+        } else {
+            SignedBlindedBeaconBlock::<P>::from_json_in(fork, &Body(&request).json()?)
+                .map_err(|error| ApiError::bad_request(error.to_string()))?
+        };
+        let revealed = context
+            .proposer
+            .reveal(&block)
+            .await
+            .map_err(ApiError::from)?;
+        let proposal = Self::full_proposal(revealed)?;
+        match context.publisher.publish(proposal).await {
+            Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
+            Ok(Published::BroadcastOnly(_)) => Ok(Response::new(StatusCode::ACCEPTED)),
+            Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
+            Err(error) => Err(ApiError::bad_request(error.to_string())),
+        }
+    }
+
+    /// The publishable form of an unblinded block, with the blobs its builder revealed.
+    fn full_proposal<P: Preset>(
+        revealed: UnblindedBlock<P>,
+    ) -> Result<PublishProposal<P>, ApiError> {
+        let mismatch = || ApiError::internal("revealed blobs of another fork than the block");
+        Ok(match (revealed.block, revealed.blobs) {
+            (combined::SignedBeaconBlock::Deneb(block), Some(RevealedBlobs::Deneb(bundle))) => {
+                PublishProposal::DenebBlobs(deneb::SignedBlockContents {
+                    signed_block: block,
+                    kzg_proofs: bundle.proofs,
+                    blobs: bundle.blobs,
+                })
+            }
+            (combined::SignedBeaconBlock::Electra(block), Some(RevealedBlobs::Deneb(bundle))) => {
+                PublishProposal::ElectraBlobs(electra::SignedBlockContents {
+                    signed_block: block,
+                    kzg_proofs: bundle.proofs,
+                    blobs: bundle.blobs,
+                })
+            }
+            (combined::SignedBeaconBlock::Fulu(block), Some(RevealedBlobs::Fulu(bundle))) => {
+                PublishProposal::Columns(fulu::SignedBlockContents {
+                    signed_block: block,
+                    kzg_proofs: bundle.proofs,
+                    blobs: bundle.blobs,
+                })
+            }
+            (block, None) => PublishProposal::Block(block),
+            _ => return Err(mismatch()),
+        })
     }
 
     /// The vote of a committee at a slot, on the head as the slot sees it.
@@ -616,12 +686,15 @@ impl ValidatorRoutes {
         } else {
             RandaoCheck::Verify
         };
-        query.optional_number("builder_boost_factor")?;
+        let boost = query
+            .optional_number("builder_boost_factor")?
+            .map_or(BuilderBoost::NEUTRAL, BuilderBoost);
         Ok(BlockOrder {
             slot,
             randao_reveal,
             graffiti,
             randao,
+            boost,
         })
     }
 
@@ -741,9 +814,11 @@ impl ValidatorRoutes {
 impl From<ProposerError> for ApiError {
     fn from(error: ProposerError) -> Self {
         match error {
-            ProposerError::ChainStopped | ProposerError::NoEngine | ProposerError::Engine(_) => {
-                Self::unavailable(error.to_string())
-            }
+            ProposerError::ChainStopped
+            | ProposerError::NoEngine
+            | ProposerError::Engine(_)
+            | ProposerError::NoBuilder
+            | ProposerError::Builder(_) => Self::unavailable(error.to_string()),
             ProposerError::SlotOutOfRange { .. }
             | ProposerError::WrongRoute(_)
             | ProposerError::Production(ProductionError::InvalidRandao { .. }) => {

@@ -18,6 +18,8 @@ use crate::{
 };
 
 impl<P: Preset> BlockFork for BeaconState<P> {
+    const CARRIES_WITHDRAWALS: bool = true;
+
     /// The validator sweep of Capella.
     fn withdrawals_due(
         trial: &Trial<'_, P>,

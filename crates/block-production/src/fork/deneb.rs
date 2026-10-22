@@ -19,6 +19,8 @@ use crate::{
 };
 
 impl<P: Preset> BlockFork for BeaconState<P> {
+    const CARRIES_WITHDRAWALS: bool = true;
+
     /// The validator sweep of Capella, which Deneb kept.
     fn withdrawals_due(
         trial: &Trial<'_, P>,

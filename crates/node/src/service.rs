@@ -2,6 +2,7 @@
 
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
+use axiom_builder_client::{RelayClient, RelaySet};
 use axiom_p2p::swarm::NetworkHandle;
 use axiom_telemetry::{NodeMetrics, Registry};
 use axiom_types::{ChainConfig, Preset, SlotClock};
@@ -38,16 +39,32 @@ impl<P: Preset> StartedChain<'_, P> {
         execution: &Arc<ExecutionLayer>,
         clock: &Arc<dyn Clock>,
         settings: &ProposerSettings,
-    ) -> (Arc<ProposerService<P>>, JoinHandle<()>) {
+    ) -> Result<(Arc<ProposerService<P>>, JoinHandle<()>), NodeError> {
+        let relays = if settings.builders.is_empty() {
+            None
+        } else {
+            let clients = settings
+                .builders
+                .iter()
+                .map(|url| {
+                    RelayClient::new(url).map_err(|error| NodeError::Builder {
+                        url: url.clone(),
+                        error: Box::new(error),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(RelaySet::new(clients))
+        };
         let proposer = Arc::new(ProposerService::new(
             self.handle.clone(),
             Arc::clone(execution),
             settings.default_fee_recipient,
+            relays,
         ));
         let preparer = task::spawn(
             PayloadPreparer::new(Arc::clone(&proposer), Arc::clone(clock), self.slots).run(),
         );
-        (proposer, preparer)
+        Ok((proposer, preparer))
     }
 
     /// Starts libp2p and the network service over it.
@@ -239,7 +256,7 @@ impl<P: Preset> Node<P> {
             handle: &handle,
             slots,
         };
-        let (proposer, preparer) = started.start_proposer(&execution, &clock, &config.proposer);
+        let (proposer, preparer) = started.start_proposer(&execution, &clock, &config.proposer)?;
 
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);

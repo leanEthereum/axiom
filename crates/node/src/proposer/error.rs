@@ -1,6 +1,7 @@
 //! Why the node could not produce or publish a proposal.
 
 use axiom_block_production::ProductionError;
+use axiom_builder_client::BuilderError;
 use axiom_execution::EngineError;
 use axiom_types::{ForkName, Slot};
 use thiserror::Error;
@@ -29,6 +30,14 @@ pub enum ProposerError {
     /// The engine failed.
     #[error("engine: {0}")]
     Engine(#[source] EngineError),
+
+    /// A blinded block came in, and no builder is configured to reveal it.
+    #[error("no builder is configured")]
+    NoBuilder,
+
+    /// The builders failed to reveal a payload.
+    #[error("builder: {0}")]
+    Builder(#[source] BuilderError),
 
     /// The engine accepted the build but gave it no identifier.
     #[error("the engine started no build for slot {0}")]

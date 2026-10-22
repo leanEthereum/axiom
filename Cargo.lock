@@ -263,6 +263,7 @@ dependencies = [
  "axiom-beacon-json",
  "axiom-block-production",
  "axiom-bls",
+ "axiom-builder-client",
  "axiom-crypto",
  "axiom-das",
  "axiom-discv5",

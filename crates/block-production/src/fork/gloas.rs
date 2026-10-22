@@ -24,6 +24,8 @@ use crate::{
 };
 
 impl<P: Preset> BlockFork for BeaconState<P> {
+    const CARRIES_WITHDRAWALS: bool = true;
+
     /// Gloas takes no deposit from the contract, so the vote has nothing left to decide.
     fn bridge_closed(_state: &Self) -> bool {
         true

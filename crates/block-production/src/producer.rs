@@ -15,7 +15,7 @@ use axiom_types::{
 };
 
 use crate::{
-    BlockFork, BodyParts, Built, Eth1Candidate, Eth1Vote, ExecutionChoice, ParentPayload,
+    BlockFork, BodyParts, Bounded, Built, Eth1Candidate, Eth1Vote, ExecutionChoice, ParentPayload,
     ProductionError, Proposal, Trial,
 };
 
@@ -65,6 +65,8 @@ pub struct PayloadRequest {
     pub prev_randao: Bytes32,
     /// The withdrawals the payload must carry, from Capella on.
     pub withdrawals: Vec<Withdrawal>,
+    /// Root of those withdrawals as a payload commits to them, none before Capella.
+    pub withdrawals_root: Option<Root>,
     /// Root of the parent beacon block, from Deneb on.
     pub parent_beacon_block_root: Root,
 }
@@ -130,26 +132,41 @@ impl<'a, P: Preset> BlockProducer<'a, P> {
     ) -> Result<PayloadRequest, ProductionError> {
         let state = self.advance(parent, slot)?;
         let trial = Trial::new(&state, self.config);
-        let withdrawals = match state.fork_name() {
-            ForkName::Phase0 => phase0::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Altair => altair::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Bellatrix => {
-                bellatrix::BeaconState::<P>::withdrawals_due(&trial, parent_payload)
-            }
-            ForkName::Capella => capella::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Deneb => deneb::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Electra => electra::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Fulu => fulu::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
-            ForkName::Gloas => gloas::BeaconState::<P>::withdrawals_due(&trial, parent_payload),
+        let (withdrawals, carries_withdrawals) = match state.fork_name() {
+            ForkName::Phase0 => Self::due::<phase0::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Altair => Self::due::<altair::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Bellatrix => Self::due::<bellatrix::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Capella => Self::due::<capella::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Deneb => Self::due::<deneb::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Electra => Self::due::<electra::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Fulu => Self::due::<fulu::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Gloas => Self::due::<gloas::BeaconState<P>>(&trial, parent_payload),
         }?;
         let beacon = state.beacon();
         Ok(PayloadRequest {
             slot,
             timestamp: beacon.genesis_time() + slot.0 * self.config.slot_duration_ms / 1000,
             prev_randao: beacon.randao_mix(beacon.current_epoch()),
+            withdrawals_root: carries_withdrawals
+                .then(|| {
+                    Bounded::list::<Withdrawal, P::MaxWithdrawalsPerPayload>(
+                        "withdrawals",
+                        &withdrawals,
+                    )
+                })
+                .transpose()?
+                .map(|list| list.hash_tree_root()),
             withdrawals,
             parent_beacon_block_root: beacon.latest_block_header().hash_tree_root(),
         })
+    }
+
+    /// The withdrawals due under one fork's rule, and whether its payloads carry any.
+    fn due<S: BlockFork<Preset = P>>(
+        trial: &Trial<'_, P>,
+        parent: &ParentPayload,
+    ) -> Result<(Vec<Withdrawal>, bool), ProductionError> {
+        Ok((S::withdrawals_due(trial, parent)?, S::CARRIES_WITHDRAWALS))
     }
 
     /// The parent's state advanced to the slot.

@@ -19,6 +19,8 @@ use crate::{
 };
 
 impl<P: Preset> BlockFork for BeaconState<P> {
+    const CARRIES_WITHDRAWALS: bool = true;
+
     /// The vote stops once every contract deposit is bridged, see EIP-6110.
     fn bridge_closed(state: &Self) -> bool {
         state.eth1_deposit_index == state.deposit_requests_start_index()

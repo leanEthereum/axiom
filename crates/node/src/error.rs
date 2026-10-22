@@ -2,6 +2,7 @@
 
 use std::{io, net::SocketAddr, path::PathBuf};
 
+use axiom_builder_client::BuilderError;
 use axiom_das::CustodyError;
 use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
@@ -71,6 +72,15 @@ pub enum NodeError {
     /// The chain could not be built or resumed.
     #[error("chain: {0}")]
     Chain(#[from] ChainError),
+    /// A builder endpoint is not a usable URL.
+    #[error("builder {url}: {error}")]
+    Builder {
+        /// The endpoint as configured.
+        url: String,
+        /// Why it is unusable, boxed since it is rare and large.
+        #[source]
+        error: Box<BuilderError>,
+    },
     /// An operating system resource, such as a thread or a runtime, failed.
     #[error("{context}: {error}")]
     Io {
