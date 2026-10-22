@@ -1,8 +1,15 @@
 //! The command line: flags parsed by hand into a typed configuration.
 
-use std::{error::Error, fmt, fs, io, net::SocketAddr, path::PathBuf};
+use std::{
+    error::Error,
+    fmt, fs, io,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    str::FromStr,
+};
 
-use axiom_node::{EngineConfig, NetworkSettings, NodeConfig};
+use axiom_discv5::Enr;
+use axiom_node::{DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
 use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
@@ -28,6 +35,10 @@ OPTIONS:
     --listen-address <ADDR>      libp2p TCP address [default: 0.0.0.0:9000]
     --boot-node <MULTIADDR>      peer to dial at startup, repeatable
     --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
+    --discovery-port <PORT>      discv5 UDP port [default: the libp2p port]
+    --enr-address <IP>           public IPv4 address announced in the node record
+    --boot-enr <ENR>             discovery record to bootstrap from, repeatable
+    --no-discovery               find peers through boot nodes only
     --no-network                 run without peers
     --execution-endpoint <URL>   engine API endpoint, such as http://127.0.0.1:8551
     --jwt-secret <FILE>          hex JWT secret shared with the engine
@@ -121,6 +132,14 @@ pub(crate) struct Cli {
     custody_groups: Option<u64>,
     /// Whether the network is off.
     no_network: bool,
+    /// The discovery UDP port.
+    discovery_port: Option<u16>,
+    /// The address announced in the node record.
+    enr_address: Option<Ipv4Addr>,
+    /// Discovery records to bootstrap from.
+    boot_enrs: Vec<Enr>,
+    /// Whether discovery is off.
+    no_discovery: bool,
     /// The engine endpoint.
     execution_endpoint: Option<String>,
     /// The engine secret file.
@@ -153,38 +172,43 @@ impl Cli {
                 "--datadir" => cli.datadir = Some(value("--datadir")?.into()),
                 "--http-address" => {
                     cli.http_address =
-                        Some(Self::address("--http-address", value("--http-address")?)?);
+                        Some(Self::parsed("--http-address", value("--http-address")?)?);
                 }
                 "--no-http" => cli.no_http = true,
                 "--metrics-address" => {
-                    cli.metrics_address = Some(Self::address(
+                    cli.metrics_address = Some(Self::parsed(
                         "--metrics-address",
                         value("--metrics-address")?,
                     )?);
                 }
                 "--listen-address" => {
-                    cli.listen_address = Some(Self::address(
+                    cli.listen_address = Some(Self::parsed(
                         "--listen-address",
                         value("--listen-address")?,
                     )?);
                 }
                 "--boot-node" => {
                     let text = value("--boot-node")?;
-                    let address = text.parse().map_err(|_| CliError::InvalidValue {
-                        flag: "--boot-node",
-                        value: text,
-                    })?;
-                    cli.boot_nodes.push(address);
+                    cli.boot_nodes.push(Self::parsed("--boot-node", text)?);
                 }
                 "--custody-groups" => {
                     let text = value("--custody-groups")?;
-                    let count = text.parse().map_err(|_| CliError::InvalidValue {
-                        flag: "--custody-groups",
-                        value: text,
-                    })?;
-                    cli.custody_groups = Some(count);
+                    cli.custody_groups = Some(Self::parsed("--custody-groups", text)?);
                 }
                 "--no-network" => cli.no_network = true,
+                "--discovery-port" => {
+                    let text = value("--discovery-port")?;
+                    cli.discovery_port = Some(Self::parsed("--discovery-port", text)?);
+                }
+                "--enr-address" => {
+                    let text = value("--enr-address")?;
+                    cli.enr_address = Some(Self::parsed("--enr-address", text)?);
+                }
+                "--boot-enr" => {
+                    let text = value("--boot-enr")?;
+                    cli.boot_enrs.push(Self::parsed("--boot-enr", text)?);
+                }
+                "--no-discovery" => cli.no_discovery = true,
                 "--execution-endpoint" => {
                     cli.execution_endpoint = Some(value("--execution-endpoint")?);
                 }
@@ -210,11 +234,19 @@ impl Cli {
         let network = if self.no_network {
             None
         } else {
+            let listen_address = self
+                .listen_address
+                .unwrap_or_else(|| Self::default_address(DEFAULT_LISTEN_ADDRESS));
+            // Discovery shares the libp2p port number by default, over UDP.
+            let discovery = (!self.no_discovery).then(|| DiscoverySettings {
+                udp_port: self.discovery_port.unwrap_or_else(|| listen_address.port()),
+                enr_address: self.enr_address,
+                boot_enrs: self.boot_enrs,
+            });
             Some(NetworkSettings {
-                listen_address: self
-                    .listen_address
-                    .unwrap_or_else(|| Self::default_address(DEFAULT_LISTEN_ADDRESS)),
+                listen_address,
                 boot_nodes: self.boot_nodes,
+                discovery,
                 // Every node keeps at least the spec's minimum.
                 custody_group_count: self
                     .custody_groups
@@ -272,8 +304,8 @@ impl Cli {
         }
     }
 
-    /// A socket address flag.
-    fn address(flag: &'static str, value: String) -> Result<SocketAddr, CliError> {
+    /// Any flag whose value parses from text.
+    fn parsed<T: FromStr>(flag: &'static str, value: String) -> Result<T, CliError> {
         value
             .parse()
             .map_err(|_| CliError::InvalidValue { flag, value })
@@ -305,6 +337,9 @@ impl Cli {
 mod tests {
     use super::*;
 
+    /// The example record of EIP-778.
+    const EIP_778_RECORD: &str = "enr:-IS4QHCYrYZbAKWCBRlAy5zzaDZXJBGkcnh4MHcBFZntXNFrdvJjX04jRzjzCBOonrkTfj499SZuOh8R33Ls8RRcy5wBgmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQPKY0yuDUmstAHYpMa2_oxVtw0RW_QAdpzBQA8yWM0xOIN1ZHCCdl8";
+
     fn parse(arguments: &[&str]) -> Result<Command, CliError> {
         Cli::parse(arguments.iter().map(|argument| (*argument).to_owned()))
     }
@@ -330,6 +365,11 @@ mod tests {
                     listen_address: "0.0.0.0:9000".parse().unwrap(),
                     boot_nodes: Vec::new(),
                     custody_group_count: 4,
+                    discovery: Some(DiscoverySettings {
+                        udp_port: 9000,
+                        enr_address: None,
+                        boot_enrs: Vec::new(),
+                    }),
                 }),
                 ..NodeConfig::default()
             }
@@ -364,6 +404,12 @@ mod tests {
             "/ip4/10.0.0.1/tcp/9000",
             "--custody-groups",
             "128",
+            "--discovery-port",
+            "9002",
+            "--enr-address",
+            "203.0.113.7",
+            "--boot-enr",
+            EIP_778_RECORD,
         ]);
 
         assert_eq!(run.preset, PresetName::Minimal);
@@ -383,6 +429,11 @@ mod tests {
                     listen_address: "127.0.0.1:9001".parse().unwrap(),
                     boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
                     custody_group_count: 128,
+                    discovery: Some(DiscoverySettings {
+                        udp_port: 9002,
+                        enr_address: Some(Ipv4Addr::new(203, 0, 113, 7)),
+                        boot_enrs: vec![EIP_778_RECORD.parse().unwrap()],
+                    }),
                 }),
             }
         );
@@ -417,6 +468,13 @@ mod tests {
             parse(&["--http-address", "localhost"]),
             Err(CliError::InvalidValue {
                 flag: "--http-address",
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse(&["--boot-enr", "enr:not-base64!"]),
+            Err(CliError::InvalidValue {
+                flag: "--boot-enr",
                 ..
             })
         ));

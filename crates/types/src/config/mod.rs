@@ -383,6 +383,26 @@ impl ChainConfig {
         ForkDigest(digest)
     }
 
+    /// The first epoch after this one at which the fork digest changes, or the far future.
+    ///
+    /// From Fulu on, a blob limit step counts as a fork as much as a full upgrade does.
+    /// See `ENRForkID` in the Fulu p2p spec.
+    #[must_use]
+    pub fn next_fork_epoch(&self, epoch: Epoch) -> Epoch {
+        let forks = ForkName::ALL.into_iter().map(|fork| self.fork_epoch(fork));
+        let blob_steps = self
+            .blob_schedule
+            .entries()
+            .iter()
+            .map(|entry| entry.epoch)
+            .filter(|step| *step >= self.fulu_fork_epoch);
+        forks
+            .chain(blob_steps)
+            .filter(|next| *next > epoch && *next != Epoch::FAR_FUTURE)
+            .min()
+            .unwrap_or(Epoch::FAR_FUTURE)
+    }
+
     /// Blob limit and the epoch it started at, for an epoch.
     ///
     /// Before the first schedule entry, the Electra limit applies.
@@ -399,6 +419,17 @@ impl ChainConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_next_fork_counts_blob_steps_after_fulu() {
+        // Mainnet: Fulu at 411392, then blob steps at 412672 and 419072, Gloas unscheduled.
+        let config = ChainConfig::mainnet();
+
+        assert_eq!(config.next_fork_epoch(Epoch(400_000)), Epoch(411_392));
+        assert_eq!(config.next_fork_epoch(Epoch(411_392)), Epoch(412_672));
+        assert_eq!(config.next_fork_epoch(Epoch(415_000)), Epoch(419_072));
+        assert_eq!(config.next_fork_epoch(Epoch(419_072)), Epoch::FAR_FUTURE);
+    }
 
     #[test]
     fn fork_digests_match_the_executable_spec() {

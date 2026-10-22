@@ -13,7 +13,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
-use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset};
+use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, Slot};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -25,8 +25,12 @@ use tokio::{
 use tracing::{info, warn};
 
 use crate::{
-    BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, ExecutionLayer,
-    NetworkIdentity, NetworkService, NetworkSetup, NodeError, NodeKey, Publisher,
+    BeaconApi, Chain, ChainDatabase, ChainEvent, ChainHandle, Clock, DiscoverySettings,
+    ExecutionLayer, NodeError, NodeKey, Publisher,
+    network::{
+        AttestationSubnets, Discovery, LocalRecord, NetworkIdentity, NetworkService, NetworkSetup,
+        NodeIdentity,
+    },
 };
 
 /// How many times per slot the fork choice clock advances.
@@ -53,6 +57,8 @@ pub struct NetworkSettings {
     pub boot_nodes: Vec<Multiaddr>,
     /// Custody groups to keep, at least the spec's custody requirement.
     pub custody_group_count: u64,
+    /// Peer discovery; none relies on boot nodes alone.
+    pub discovery: Option<DiscoverySettings>,
 }
 
 /// Everything an operator chooses about a node.
@@ -155,6 +161,10 @@ impl<P: Preset> Node<P> {
             }
             _ => None,
         };
+        let (network, identity) = match network {
+            Some((p2p, service, identity)) => (Some((p2p, service)), Some(Arc::new(identity))),
+            None => (None, None),
+        };
 
         // Proposed blocks go out on the network, when there is one, before import.
         let publisher = Arc::new(Publisher::new(
@@ -166,7 +176,8 @@ impl<P: Preset> Node<P> {
 
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);
-        let servers = Self::start_servers(&config, &handle, publisher, registry, &stopped).await?;
+        let servers =
+            Self::start_servers(&config, &handle, publisher, identity, registry, &stopped).await?;
 
         // Background loops run until aborted.
         let ticker = task::spawn(Self::tick(handle.clone(), clock, slot_ms));
@@ -206,12 +217,13 @@ impl<P: Preset> Node<P> {
         config: &NodeConfig,
         handle: &ChainHandle<P>,
         publisher: Arc<Publisher<P>>,
+        identity: Option<Arc<NodeIdentity>>,
         registry: Registry,
         stopped: &watch::Receiver<bool>,
     ) -> Result<Vec<JoinHandle<()>>, NodeError> {
         let mut servers = Vec::new();
         if let Some(address) = config.http_address {
-            let router = BeaconApi::router(handle.clone(), publisher);
+            let router = BeaconApi::router(handle.clone(), publisher, identity);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Io {
@@ -238,20 +250,49 @@ impl<P: Preset> Node<P> {
     ///
     /// # Returns
     ///
-    /// The network handle, for shutdown, and the service's task.
+    /// The network handle, for shutdown and publishing, the service's task, and the node's identity.
     async fn start_network(
         (key, identity): (NodeKey, NetworkIdentity),
         settings: &NetworkSettings,
         chain: StartedChain<'_, P>,
         (execution, clock, metrics): (Arc<ExecutionLayer>, Arc<dyn Clock>, NodeMetrics),
-    ) -> Result<(NetworkHandle, JoinHandle<()>), NodeError> {
-        let (config, custody) = chain
+    ) -> Result<(NetworkHandle, JoinHandle<()>, NodeIdentity), NodeError> {
+        // The record is stated for the wall clock's epoch, not the anchor's.
+        let elapsed = clock.now_ms().saturating_sub(chain.genesis_time_ms);
+        let (config, custody, genesis_validators_root) = chain
             .handle
-            .run(|chain| (chain.config().clone(), chain.custody().clone()))
+            .run(|chain| {
+                (
+                    chain.config().clone(),
+                    chain.custody().clone(),
+                    chain.genesis_validators_root(),
+                )
+            })
             .await
             .map_err(|_| NodeError::ChainStopped)?;
+        let epoch = Slot(elapsed / config.slot_duration_ms.max(1)).epoch::<P>();
 
         let (network, events) = Self::start_p2p(&key, settings).await?;
+        let discovery = match &settings.discovery {
+            Some(discovery) => {
+                let record = LocalRecord {
+                    tcp_port: settings.listen_address.port(),
+                    fork_digest: config.fork_digest(genesis_validators_root, epoch),
+                    epoch,
+                    genesis_validators_root,
+                    attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),
+                    custody_group_count: identity.custody_group_count,
+                };
+                let started = Discovery::start(&key, discovery, &config, record)
+                    .await
+                    .map_err(|error| NodeError::Io {
+                        context: "starting discovery",
+                        error,
+                    })?;
+                Some(started)
+            }
+            None => None,
+        };
         let service = NetworkService::start(
             network.clone(),
             &identity,
@@ -263,10 +304,12 @@ impl<P: Preset> Node<P> {
                 execution,
                 clock,
                 metrics,
+                discovery,
             },
         )
         .await;
-        Ok((network, task::spawn(service.run(events))))
+        let identity = service.identity();
+        Ok((network, task::spawn(service.run(events)), identity))
     }
 
     /// Opens the database and builds the chain from its anchor or from genesis.

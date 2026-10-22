@@ -23,7 +23,7 @@ use self::{
     node::NodeRoutes,
     reply::{ApiError, Freshness, Routes},
 };
-use crate::{Chain, ChainHandle, Publisher};
+use crate::{Chain, ChainHandle, Publisher, network::NodeIdentity};
 
 /// What every route can reach: the chain and the engine.
 #[derive(Debug)]
@@ -32,6 +32,8 @@ pub(crate) struct ApiContext<P: Preset> {
     chain: ChainHandle<P>,
     /// Publishes proposed blocks.
     publisher: Arc<Publisher<P>>,
+    /// How the node presents itself on the network, when it has one.
+    identity: Option<Arc<NodeIdentity>>,
 }
 
 impl<P: Preset> Clone for ApiContext<P> {
@@ -39,6 +41,7 @@ impl<P: Preset> Clone for ApiContext<P> {
         Self {
             chain: self.chain.clone(),
             publisher: Arc::clone(&self.publisher),
+            identity: self.identity.clone(),
         }
     }
 }
@@ -83,8 +86,17 @@ pub struct BeaconApi;
 impl BeaconApi {
     /// The router serving every supported route.
     #[must_use]
-    pub fn router<P: Preset>(chain: ChainHandle<P>, publisher: Arc<Publisher<P>>) -> Router {
-        let routes = Routes::new(Router::new(), ApiContext { chain, publisher });
+    pub(crate) fn router<P: Preset>(
+        chain: ChainHandle<P>,
+        publisher: Arc<Publisher<P>>,
+        identity: Option<Arc<NodeIdentity>>,
+    ) -> Router {
+        let context = ApiContext {
+            chain,
+            publisher,
+            identity,
+        };
+        let routes = Routes::new(Router::new(), context);
         let routes = NodeRoutes::register(routes);
         let routes = BeaconRoutes::register(routes);
         DebugRoutes::register(routes).finish()

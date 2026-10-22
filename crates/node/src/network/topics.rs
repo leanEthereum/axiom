@@ -74,10 +74,7 @@ impl Subscriptions {
         fork_digest: ForkDigest,
     ) -> TopicChange {
         let subnets = self.subnets.at::<P>(epoch, &self.config);
-        let attnets = subnets
-            .iter()
-            .filter(|subnet| subnet.0 < 64)
-            .fold(0_u64, |bits, subnet| bits | (1 << subnet.0));
+        let attnets = self.subnets.bits::<P>(epoch, &self.config);
 
         // Global topics, custody column subnets, then long-lived attestation subnets.
         let mut kinds = vec![

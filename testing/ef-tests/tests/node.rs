@@ -2,17 +2,18 @@
 
 use std::{
     env, fs,
-    net::{SocketAddr, TcpListener},
+    net::{Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     path::PathBuf,
     process,
     sync::Arc,
     time::Duration,
 };
 
+use axiom_discv5::Enr;
 use axiom_ef_tests::{Case, Vectors, config_of};
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::Json;
-use axiom_node::{ManualClock, NetworkSettings, Node, NodeConfig, NodeError};
+use axiom_node::{DiscoverySettings, ManualClock, NetworkSettings, Node, NodeConfig, NodeError};
 use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
 use axiom_types::{BeaconState, Minimal, SignedBeaconBlock, SignedBlockContents};
@@ -181,11 +182,32 @@ impl TestNode {
     }
 }
 
-/// A free local port, released for the node to bind.
+/// A free local TCP port, released for the node to bind.
 fn free_address() -> SocketAddr {
     TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .expect("a local port is free")
+}
+
+/// A free local UDP port, released for discovery to bind.
+fn free_udp_port() -> u16 {
+    UdpSocket::bind("127.0.0.1:0")
+        .and_then(|socket| socket.local_addr())
+        .expect("a local port is free")
+        .port()
+}
+
+/// Waits until a node reports a head, or gives up after about ten seconds.
+async fn wait_for_head(node: &TestNode, expected: &str) -> Option<String> {
+    let mut head = None;
+    for _ in 0..500 {
+        head = node.head_root().await;
+        if head.as_deref() == Some(expected) {
+            break;
+        }
+        time::sleep(Duration::from_millis(20)).await;
+    }
+    head
 }
 
 /// A response body as text, for failure messages.
@@ -264,6 +286,7 @@ fn a_node_range_syncs_from_a_peer_over_noise() {
             listen_address,
             boot_nodes,
             custody_group_count: 4,
+            discovery: None,
         };
         let a = TestNode::start(&fixture, Some(settings(a_address, Vec::new()))).await;
         for name in BLOCKS {
@@ -293,6 +316,55 @@ fn a_node_range_syncs_from_a_peer_over_noise() {
             Some(HEAD),
             "node B never synced to node A's head"
         );
+
+        b.stop().await;
+        a.stop().await;
+    });
+}
+
+#[test]
+fn a_node_finds_its_peer_through_discovery() {
+    let Some(fixture) = Fixture::load("discovery") else {
+        return;
+    };
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        // Fixture state: A announces 127.0.0.1 in its record and holds both blocks.
+        // B knows only A's record, not its TCP address.
+        //
+        //     B ──discv5 lookup──> A's record ──TCP dial──> A ──status──> range sync
+        let discovery = |boot_enrs| DiscoverySettings {
+            udp_port: free_udp_port(),
+            enr_address: Some(Ipv4Addr::LOCALHOST),
+            boot_enrs,
+        };
+        let settings = |boot_enrs| NetworkSettings {
+            listen_address: free_address(),
+            boot_nodes: Vec::new(),
+            custody_group_count: 4,
+            discovery: Some(discovery(boot_enrs)),
+        };
+        let a = TestNode::start(&fixture, Some(settings(Vec::new()))).await;
+        for name in BLOCKS {
+            assert_eq!(
+                a.publish(&fixture.contents(name)).await.status,
+                StatusCode::OK
+            );
+        }
+
+        // A's record, as its identity route reports it.
+        let identity = a.json("/eth/v1/node/identity").await.unwrap();
+        let enr: Enr = identity
+            .get("data")
+            .and_then(|data| data.get("enr"))
+            .and_then(Json::as_str)
+            .expect("a node with discovery has a record")
+            .parse()
+            .expect("the record parses");
+
+        let b = TestNode::start(&fixture, Some(settings(vec![enr]))).await;
+        let head = wait_for_head(&b, HEAD).await;
+        assert_eq!(head.as_deref(), Some(HEAD), "node B never found node A");
 
         b.stop().await;
         a.stop().await;

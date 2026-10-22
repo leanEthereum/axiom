@@ -1,5 +1,6 @@
 //! The node on the network: gossip, requests, and sync over the libp2p stack.
 
+mod discovery;
 mod gossip;
 mod identity;
 mod requests;
@@ -10,6 +11,7 @@ mod topics;
 
 use std::{
     collections::BTreeSet,
+    future::pending,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -18,6 +20,7 @@ use std::{
 };
 
 use axiom_das::NodeId;
+use axiom_discv5::driver::Discv5Events;
 use axiom_p2p::{
     Multiaddr, PeerId,
     eth::reqresp::{Protocol, ResponseCode, Status},
@@ -29,24 +32,24 @@ use axiom_types::{ChainConfig, ColumnIndex, Preset, Slot};
 use tokio::{task, time};
 use tracing::{debug, info, warn};
 
-pub use self::identity::NodeKey;
-use self::{
-    gossip::GossipHandler,
-    server::{LocalMetadata, RequestServer},
-    sync::RangeSync,
-    topics::Subscriptions,
+pub use self::{discovery::DiscoverySettings, identity::NodeKey};
+pub(crate) use self::{
+    discovery::{Discovery, LocalRecord},
+    server::LocalMetadata,
+    subnets::AttestationSubnets,
 };
+use self::{gossip::GossipHandler, server::RequestServer, sync::RangeSync, topics::Subscriptions};
 use crate::{ChainHandle, Clock, ExecutionLayer, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
-pub struct NetworkIdentity {
+pub(crate) struct NetworkIdentity {
     /// The discovery identifier, which fixes custody and attestation subnets.
-    pub node_id: NodeId,
+    pub(crate) node_id: NodeId,
     /// Custody groups the node keeps and advertises.
-    pub custody_group_count: u64,
+    pub(crate) custody_group_count: u64,
     /// Peers to dial at startup.
-    pub boot_nodes: Vec<Multiaddr>,
+    pub(crate) boot_nodes: Vec<Multiaddr>,
 }
 
 /// The node's network service.
@@ -66,7 +69,7 @@ pub struct NetworkIdentity {
 ///                ──> ask peers for their status: every slot while behind, every epoch otherwise
 /// ```
 #[derive(Debug)]
-pub struct NetworkService<P: Preset> {
+pub(crate) struct NetworkService<P: Preset> {
     /// The network.
     network: NetworkHandle,
     /// The chain thread.
@@ -93,7 +96,31 @@ pub struct NetworkService<P: Preset> {
     peers: BTreeSet<PeerId>,
     /// Peer counts and gossip outcomes.
     metrics: NodeMetrics,
+    /// Peer discovery, when enabled.
+    discovery: Option<Discovery>,
+    /// Discovery's events, until the run loop takes them.
+    discovery_events: Option<Discv5Events>,
 }
+
+/// How the node presents itself on the network, as the identity route reports it.
+#[derive(Debug)]
+pub(crate) struct NodeIdentity {
+    /// The libp2p peer identifier.
+    pub(crate) peer_id: String,
+    /// The discovery record, in text form.
+    pub(crate) enr: Option<String>,
+    /// The libp2p listen address.
+    pub(crate) p2p_address: String,
+    /// The discovery UDP address.
+    pub(crate) discovery_address: Option<String>,
+    /// The metadata peers fetch.
+    pub(crate) metadata: Arc<LocalMetadata>,
+}
+
+/// Peers the node keeps looking for until it has them.
+///
+/// Enough to fill every gossip mesh with spares, as lighthouse aims for by default.
+const TARGET_PEERS: usize = 64;
 
 impl<P: Preset> NetworkService<P> {
     /// Joins the network: subscribes to the topics and dials the boot nodes.
@@ -104,7 +131,7 @@ impl<P: Preset> NetworkService<P> {
     /// - `identity`: the node identifier, custody, and boot nodes.
     /// - `chain`: the chain thread.
     /// - `setup`: the node's other services and chain facts.
-    pub async fn start(
+    pub(crate) async fn start(
         network: NetworkHandle,
         identity: &NetworkIdentity,
         chain: ChainHandle<P>,
@@ -117,7 +144,12 @@ impl<P: Preset> NetworkService<P> {
             execution,
             clock,
             metrics,
+            discovery,
         } = setup;
+        let (discovery, discovery_events) = discovery
+            .map_or((None, None), |(discovery, events)| {
+                (Some(discovery), Some(events))
+            });
         let slot_ms = config.slot_duration_ms;
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
@@ -144,6 +176,8 @@ impl<P: Preset> NetworkService<P> {
             handshakes: Vec::new(),
             peers: BTreeSet::new(),
             metrics,
+            discovery,
+            discovery_events,
         };
 
         // The first upkeep joins the topics of the current epoch.
@@ -162,15 +196,59 @@ impl<P: Preset> NetworkService<P> {
         service
     }
 
-    /// Handles network events until the network stops, with upkeep once a slot.
-    pub async fn run(mut self, mut events: NetworkEvents) {
+    /// How the node presents itself, for the identity route.
+    pub(crate) fn identity(&self) -> NodeIdentity {
+        NodeIdentity {
+            peer_id: self.network.local_peer().to_string(),
+            enr: self
+                .discovery
+                .as_ref()
+                .map(|discovery| discovery.enr().to_string()),
+            p2p_address: self.network.listen_addr().to_string(),
+            discovery_address: self.discovery.as_ref().map(|discovery| {
+                // The multiaddr form of a UDP socket, as the identity route lists it.
+                let address = discovery.local_addr();
+                let family = if address.is_ipv4() { "ip4" } else { "ip6" };
+                format!("/{family}/{}/udp/{}", address.ip(), address.port())
+            }),
+            metadata: Arc::clone(&self.metadata),
+        }
+    }
+
+    /// Handles network and discovery events until the network stops, with upkeep once a slot.
+    pub(crate) async fn run(mut self, mut events: NetworkEvents) {
         let mut upkeep = time::interval(Duration::from_millis(self.slot_ms.max(1)));
+        let mut discovered = self.discovery_events.take();
         loop {
-            match Either::race(events.next(), upkeep.tick()).await {
+            // Without discovery, its branch simply never completes.
+            let found = async {
+                match &mut discovered {
+                    Some(stream) => stream.next().await,
+                    None => pending().await,
+                }
+            };
+            match Either::race(events.next(), Either::race(found, upkeep.tick())).await {
                 Either::Left(Some(event)) => self.handle(event).await,
                 Either::Left(None) => break,
-                Either::Right(_) => self.maintain().await,
+                Either::Right(Either::Left(Some(event))) => {
+                    let addresses = self
+                        .discovery
+                        .as_mut()
+                        .map(|discovery| discovery.on_event(event))
+                        .unwrap_or_default();
+                    for address in addresses {
+                        if let Err(error) = self.network.dial(address.clone()).await {
+                            debug!(%error, %address, "could not dial a discovered peer");
+                        }
+                    }
+                }
+                // Discovery stopped: carry on with the peers already known.
+                Either::Right(Either::Left(None)) => discovered = None,
+                Either::Right(Either::Right(_)) => self.maintain().await,
             }
+        }
+        if let Some(discovery) = &self.discovery {
+            discovery.shutdown();
         }
         info!("network stopped");
     }
@@ -208,6 +286,13 @@ impl<P: Preset> NetworkService<P> {
             != change.attnets
         {
             self.metadata.seq_number.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Too few peers: look for more on this fork.
+        if self.peers.len() < TARGET_PEERS
+            && let Some(discovery) = &mut self.discovery
+        {
+            discovery.search(digest).await;
         }
 
         // Peers' heads move every slot; ask again often while behind, rarely once caught up.
@@ -309,17 +394,19 @@ impl<P: Preset> NetworkService<P> {
 
 /// The node's services and chain facts the network service starts from.
 #[derive(Debug)]
-pub struct NetworkSetup {
+pub(crate) struct NetworkSetup {
     /// The chain configuration.
-    pub config: ChainConfig,
+    pub(crate) config: ChainConfig,
     /// The node's custody columns.
-    pub custody: BTreeSet<ColumnIndex>,
+    pub(crate) custody: BTreeSet<ColumnIndex>,
     /// Genesis, in milliseconds since the Unix epoch.
-    pub genesis_time_ms: u64,
+    pub(crate) genesis_time_ms: u64,
     /// The engine.
-    pub execution: Arc<ExecutionLayer>,
+    pub(crate) execution: Arc<ExecutionLayer>,
     /// The wall clock.
-    pub clock: Arc<dyn Clock>,
+    pub(crate) clock: Arc<dyn Clock>,
     /// The node's metrics.
-    pub metrics: NodeMetrics,
+    pub(crate) metrics: NodeMetrics,
+    /// Peer discovery and its events, when enabled.
+    pub(crate) discovery: Option<(Discovery, Discv5Events)>,
 }

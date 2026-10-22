@@ -1,13 +1,17 @@
 //! The node namespace: version, health, and sync status.
 
-use std::future::{Ready, ready};
+use std::{
+    future::{Ready, ready},
+    sync::atomic::Ordering,
+};
 
 use axiom_http::{Request, Response, StatusCode};
+use axiom_json::{Json, data};
 use axiom_types::Preset;
 
 use super::{
     ApiContext,
-    reply::{ApiResult, Reply, Routes},
+    reply::{ApiError, ApiResult, Reply, Routes},
 };
 use crate::Chain;
 
@@ -30,6 +34,7 @@ impl NodeRoutes {
             .get("/eth/v1/node/version", Self::version::<P>)
             .get("/eth/v1/node/health", Self::health::<P>)
             .get("/eth/v1/node/syncing", Self::syncing::<P>)
+            .get("/eth/v1/node/identity", Self::identity::<P>)
     }
 
     /// The client's version string.
@@ -72,6 +77,50 @@ impl NodeRoutes {
             ]),
             None,
         ))
+    }
+
+    /// The node's network identity: peer id, record, addresses, and metadata.
+    fn identity<P: Preset>(context: ApiContext<P>, _request: Request) -> Ready<ApiResult> {
+        let Some(identity) = context.identity else {
+            return ready(Err(ApiError::not_found("the node runs without a network")));
+        };
+        let metadata = &identity.metadata;
+        let attnets = metadata.attnets.load(Ordering::Relaxed);
+        let data = Reply::object([
+            ("peer_id", Reply::text(&identity.peer_id)),
+            ("enr", identity.enr.clone().into()),
+            (
+                "p2p_addresses",
+                Json::from(vec![Reply::text(&identity.p2p_address)]),
+            ),
+            (
+                "discovery_addresses",
+                Json::from(
+                    identity
+                        .discovery_address
+                        .iter()
+                        .map(Reply::text)
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+            (
+                "metadata",
+                Reply::object([
+                    (
+                        "seq_number",
+                        Reply::number(metadata.seq_number.load(Ordering::Relaxed)),
+                    ),
+                    // Bitfields go out as little-endian hex, as SSZ lays them out.
+                    ("attnets", data::encode(&attnets.to_le_bytes()).into()),
+                    ("syncnets", Reply::text(&"0x00")),
+                    (
+                        "custody_group_count",
+                        Reply::number(metadata.custody_group_count),
+                    ),
+                ]),
+            ),
+        ]);
+        ready(Ok(Reply::data(data, None)))
     }
 
     /// Slots between the head and the fork choice clock.

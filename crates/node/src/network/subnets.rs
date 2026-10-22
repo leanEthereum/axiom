@@ -40,6 +40,15 @@ impl AttestationSubnets {
             .collect()
     }
 
+    /// The subnets of an epoch as a bitfield, one bit per subnet, as metadata and records carry them.
+    pub(crate) fn bits<P: Preset>(&self, epoch: Epoch, config: &ChainConfig) -> u64 {
+        // Subnets past 63 cannot occur with 64 subnets; the guard keeps the shift in range.
+        self.at::<P>(epoch, config)
+            .iter()
+            .filter(|subnet| subnet.0 < 64)
+            .fold(0, |bits, subnet| bits | (1 << subnet.0))
+    }
+
     /// One of the node's subnets in an epoch.
     ///
     /// See `compute_subscribed_subnet` in the phase0 p2p spec.

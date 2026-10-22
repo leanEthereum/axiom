@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 axiom-crypto.workspace = true
 axiom-das.workspace = true
+axiom-discv5.workspace = true
 axiom-execution.workspace = true
 axiom-fork-choice.workspace = true
 axiom-gossip.workspace = true

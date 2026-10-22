@@ -17,7 +17,7 @@ mod chain;
 mod clock;
 mod engine;
 mod error;
-mod network;
+pub(crate) mod network;
 mod publish;
 mod race;
 mod service;
@@ -29,6 +29,6 @@ pub use chain::{
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
-pub use network::{NetworkIdentity, NetworkService, NetworkSetup, NodeKey};
+pub use network::{DiscoverySettings, NodeKey};
 pub use publish::{PublishError, Published, Publisher};
 pub use service::{EngineConfig, NetworkSettings, Node, NodeConfig};
