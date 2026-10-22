@@ -17,6 +17,9 @@
 //! Phase0 through Fulu share one rule set, with blocks and states read through the combined enums.
 //! Votes enter as fork-agnostic views, converted once from each fork's container.
 //!
+//! Heads are read off a weight tree that votes update by change, see the weight tree module.
+//! The views that recount every vote stay as the reference the fast path is pinned to.
+//!
 //! Two forks wrote rules of their own, and each has a folder.
 //! Bellatrix checks the merge block against the terminal proof-of-work block.
 //! Gloas weighs each block's payload apart from the block, with a payload committee voting on it.
@@ -35,7 +38,9 @@ mod payload;
 mod proposer_head;
 mod store;
 mod timeliness;
+mod tree_ghost;
 mod votes;
+mod weight_tree;
 
 pub use availability::DataAvailability;
 pub use block_tree::{BlockNode, BlockTree, ExecutionStatus, PayloadArrival};

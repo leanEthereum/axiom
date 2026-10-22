@@ -4,7 +4,7 @@
 
 use axiom_ssz::{
     BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, List, Merkleization,
-    ProgressiveList, Ssz, Vector,
+    PersistentVector, ProgressiveList, Ssz, Vector,
 };
 
 use crate::{BlsSignature, Preset, Root, Slot, ValidatorIndex};
@@ -19,8 +19,11 @@ pub type PayloadTimelinessCommitteeIndices<P> = List<ValidatorIndex, <P as Prese
 pub type PayloadTimelinessCommitteeBits<P> = BitVector<<P as Preset>::PtcSize>;
 
 /// Committees of the previous, current, and next epochs, one per slot.
+///
+/// The window changes once per epoch but enters every slot's state root.
+/// Kept persistent, its cached root makes those slots cheap.
 pub type PayloadTimelinessCommitteeWindow<P> =
-    Vector<PayloadTimelinessCommittee<P>, <P as Preset>::PtcWindowSlots>;
+    PersistentVector<PayloadTimelinessCommittee<P>, <P as Preset>::PtcWindowSlots>;
 
 /// Payload attestations a block carries.
 pub type PayloadAttestations<P> = ProgressiveList<PayloadAttestation<P>>;

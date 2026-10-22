@@ -219,7 +219,7 @@ impl<'a, P: Preset> Ghost<'a, P> {
         viable
     }
 
-    /// Whether a block's support is below the reorg threshold.
+    /// Whether a block's support is below a reorg threshold.
     ///
     /// Equivocators in the committees of the block's slot count toward the block.
     /// More votes can then only make the block stronger, which keeps the rule monotonic.
@@ -228,14 +228,17 @@ impl<'a, P: Preset> Ghost<'a, P> {
     /// See `is_head_weak` in the phase0 and Gloas fork choice specs.
     pub(crate) fn is_weak(
         &self,
-        scores: &HashMap<Root, Gwei>,
-        root: Root,
+        score: Gwei,
+        threshold: Gwei,
         slot: Slot,
         committees: &EpochCommittees,
     ) -> bool {
-        let threshold = self.committee_fraction(self.store.config.reorg_head_weight_threshold);
+        // Equivocators only add weight, so a score at the threshold settles it alone.
+        if score >= threshold {
+            return false;
+        }
         let validators = self.balance_source.validators();
-        let mut weight = scores.get(&root).copied().unwrap_or_default();
+        let mut weight = score;
         for index in 0..committees.committees_per_slot() {
             let committee = committees
                 .committee(slot, CommitteeIndex(index))
@@ -254,20 +257,9 @@ impl<'a, P: Preset> Ghost<'a, P> {
     /// Whether a leaf's checkpoints agree with the store's.
     pub(crate) fn is_viable_leaf(&self, root: Root) -> bool {
         let store = self.store;
-        let current_epoch = store.current_epoch();
-        let justified = store.checkpoints.justified();
         let finalized = store.checkpoints.finalized();
-        let source = store.voting_source(root);
-
-        // A source two epochs stale still counts, so the chain can recover from a late justification.
-        let correct_justified = justified.epoch == Epoch::GENESIS
-            || source.is_some_and(|source| {
-                source.epoch == justified.epoch || source.epoch + 2 >= current_epoch
-            });
-
         let correct_finalized = finalized.epoch == Epoch::GENESIS
             || store.checkpoint_block(root, finalized.epoch) == Some(finalized.root);
-
-        correct_justified && correct_finalized
+        store.agrees_with_justified(root) && correct_finalized
     }
 }

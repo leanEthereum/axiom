@@ -19,6 +19,11 @@ impl CommitteeWeight {
             .filter(|validator| validator.is_active_at(epoch) && !validator.slashed)
             .map(|validator| validator.effective_balance)
             .sum();
+        Self::from_total::<P>(total)
+    }
+
+    /// The committee weight of a total unslashed active balance.
+    pub(crate) fn from_total<P: Preset>(total: Gwei) -> Self {
         Self(total.max(P::EFFECTIVE_BALANCE_INCREMENT) / P::SLOTS_PER_EPOCH)
     }
 

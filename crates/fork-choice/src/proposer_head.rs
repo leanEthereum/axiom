@@ -1,11 +1,9 @@
 //! The proposer's choice of parent: building on the head, or reorging a late, weak one.
 
-use std::collections::HashMap;
-
 use axiom_state_transition::EpochCommittees;
-use axiom_types::{Gwei, Preset, Root, Slot};
+use axiom_types::{Gwei, Preset, Slot};
 
-use crate::{BlockNode, ForkChoiceNode, Ghost};
+use crate::{BlockNode, ForkChoiceNode, Ghost, committee_weight::CommitteeWeight};
 
 /// A late head and its parent, weighed by a proposer deciding which one to build on.
 ///
@@ -50,6 +48,12 @@ pub(crate) struct LateHeadReorg<'a, P: Preset> {
     pub(crate) head_committees: &'a EpochCommittees,
     /// Whether a reorg at an epoch boundary could change the proposer, as before Fulu.
     pub(crate) boundary_sensitive: bool,
+    /// Attestation score of the head block.
+    pub(crate) head_score: Gwei,
+    /// Attestation score of the parent block.
+    pub(crate) parent_score: Gwei,
+    /// One slot's committee weight in the justified state, the unit of both thresholds.
+    pub(crate) committee: CommitteeWeight,
 }
 
 impl<P: Preset> LateHeadReorg<'_, P> {
@@ -77,12 +81,16 @@ impl<P: Preset> LateHeadReorg<'_, P> {
         let current_time_ok = self.head_block.slot + 1 == slot;
         let single_slot_reorg = parent_slot_ok && current_time_ok;
 
-        // Both thresholds weigh the same votes, so the scores are computed once.
-        let scores = self.ghost.attestation_scores();
-        let head_weak =
-            self.ghost
-                .is_weak(&scores, head, self.head_block.slot, self.head_committees);
-        let parent_strong = self.is_parent_strong(&scores, parent_root);
+        let head_weak = self.ghost.is_weak(
+            self.head_score,
+            self.committee.percent(config.reorg_head_weight_threshold),
+            self.head_block.slot,
+            self.head_committees,
+        );
+        // Threshold: strictly above the parent threshold, whatever the parent's payload status.
+        // See `is_parent_strong` in the phase0 and Gloas fork choice specs.
+        let parent_strong =
+            self.parent_score > self.committee.percent(config.reorg_parent_weight_threshold);
         let proposer_equivocation = store.blocks.has_proposer_equivocation(head);
 
         let reorg = head_late
@@ -98,15 +106,5 @@ impl<P: Preset> LateHeadReorg<'_, P> {
         } else {
             self.head
         }
-    }
-
-    /// Whether the parent's support is above the reorg threshold, whatever its payload status.
-    ///
-    /// See `is_parent_strong` in the phase0 and Gloas fork choice specs.
-    fn is_parent_strong(&self, scores: &HashMap<Root, Gwei>, parent: Root) -> bool {
-        let threshold = self
-            .ghost
-            .committee_fraction(self.ghost.store().config().reorg_parent_weight_threshold);
-        scores.get(&parent).copied().unwrap_or_default() > threshold
     }
 }
