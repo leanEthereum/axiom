@@ -159,7 +159,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         };
 
         let bits: Vec<bool> = aggregate.aggregation_bits.iter().collect();
-        let data_key = (data.hash_tree_root(), index);
+        let data_key = (data.target.epoch, data.hash_tree_root(), index);
         if self
             .seen
             .aggregate_data_roots
