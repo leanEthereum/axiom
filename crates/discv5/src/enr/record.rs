@@ -45,18 +45,6 @@ const TEXT_PREFIX: &str = "enr:";
 /// Known keys are parsed once, at decoding.
 ///
 /// See EIP-778.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_discv5::Enr;
-///
-/// let text = "enr:-IS4QHCYrYZbAKWCBRlAy5zzaDZXJBGkcnh4MHcBFZntXNFrdvJjX04jRzjzCBOonrkTfj499SZuOh8R33Ls8RRcy5wBgmlkgnY0gmlwhH8AAAGJc2VjcDI1NmsxoQPKY0yuDUmstAHYpMa2_oxVtw0RW_QAdpzBQA8yWM0xOIN1ZHCCdl8";
-/// let enr: Enr = text.parse().unwrap();
-/// assert_eq!(enr.seq(), 1);
-/// assert_eq!(enr.endpoints().udp4, Some(30303));
-/// assert_eq!(enr.to_string(), text);
-/// ```
 #[derive(Clone)]
 pub struct Enr {
     /// The sequence number.

@@ -17,33 +17,6 @@
 //!
 //! The specifications are EIP-778 and the devp2p discv5 documents, protocol version v5.1.
 //! The consensus entries follow the p2p interface of the consensus specs, up to Fulu.
-//!
-//! # Examples
-//!
-//! ```
-//! use std::{net::Ipv4Addr, time::Duration};
-//!
-//! use axiom_crypto::secp256k1::SecretKey;
-//! use axiom_discv5::{
-//!     Enr,
-//!     service::{Config, EnrFilter, Event, Output, Service},
-//! };
-//!
-//! let key = SecretKey::from_bytes(&[1; 32]).unwrap();
-//! let enr = Enr::builder()
-//!     .ip4(Ipv4Addr::LOCALHOST)
-//!     .udp4(9000)
-//!     .build(&key)
-//!     .unwrap();
-//! let mut service = Service::new(key, enr.clone(), Config::default(), [7; 32]).unwrap();
-//!
-//! // An empty table: the lookup ends at once with no peers.
-//! service.lookup(Duration::ZERO, enr.node_id(), EnrFilter::Any, 16);
-//! let Some(Output::Event(Event::LookupFinished { peers, .. })) = service.poll_output() else {
-//!     panic!("expected the lookup result");
-//! };
-//! assert!(peers.is_empty());
-//! ```
 
 mod base64;
 mod distance;

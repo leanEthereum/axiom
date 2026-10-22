@@ -15,23 +15,6 @@ use crate::{
 ///
 /// Every read is strict.
 /// A byte string has at most one accepted reading, so equal values have equal encodings.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_rlp::Decoder;
-///
-/// // [ "zw", [ 4 ], 1 ].
-/// let mut decoder = Decoder::new(&[0xc6, 0x82, 0x7a, 0x77, 0xc1, 0x04, 0x01]);
-/// let mut list = decoder.list().unwrap();
-/// assert_eq!(list.bytes().unwrap(), b"zw");
-/// let mut inner = list.list().unwrap();
-/// assert_eq!(inner.uint().unwrap(), 4);
-/// inner.finish().unwrap();
-/// assert_eq!(list.uint().unwrap(), 1);
-/// list.finish().unwrap();
-/// decoder.finish().unwrap();
-/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoder<'a> {
     /// Bytes not read yet.

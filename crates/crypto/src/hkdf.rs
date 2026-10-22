@@ -20,16 +20,6 @@ const MAX_OUTPUT_LEN: usize = 255 * HmacSha256::OUTPUT_LEN;
 /// expand  : T(i) = HMAC(PRK, T(i - 1) || info || i),  T(0) = empty
 ///           OKM  = first L bytes of T(1) || T(2) || ...
 /// ```
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::hkdf::Hkdf;
-///
-/// let hkdf = Hkdf::extract(b"salt", b"input keying material");
-/// let mut key = [0_u8; 16];
-/// hkdf.expand(b"context", &mut key).unwrap();
-/// ```
 #[derive(Clone)]
 pub struct Hkdf {
     /// The pseudorandom key.

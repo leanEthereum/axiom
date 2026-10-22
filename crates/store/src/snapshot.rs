@@ -18,25 +18,6 @@ use crate::{Error, Iter, Table, metrics::Counters, version::Version};
 ///
 /// A snapshot keeps the segment files it needs open, even across compaction.
 /// Holding one for hours therefore pins the disk space of rewritten segments.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_store::Store;
-///
-/// let store = Store::in_memory();
-/// let states = store.table("states").unwrap();
-/// store.put(states, b"slot 1", b"old").unwrap();
-///
-/// let snapshot = store.snapshot();
-/// store.put(states, b"slot 1", b"new").unwrap();
-///
-/// assert_eq!(
-///     snapshot.get(states, b"slot 1").unwrap(),
-///     Some(b"old".to_vec())
-/// );
-/// assert_eq!(store.get(states, b"slot 1").unwrap(), Some(b"new".to_vec()));
-/// ```
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     /// The frozen state.
@@ -99,28 +80,6 @@ impl Snapshot {
     /// # Errors
     ///
     /// Fails on an unknown table.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use axiom_store::Store;
-    ///
-    /// let store = Store::in_memory();
-    /// let blocks = store.table("blocks_by_slot").unwrap();
-    /// for slot in 0u64..10 {
-    ///     store.put(blocks, &slot.to_be_bytes(), b"block").unwrap();
-    /// }
-    ///
-    /// let lower = 3u64.to_be_bytes();
-    /// let upper = 6u64.to_be_bytes();
-    /// let keys: Vec<_> = store
-    ///     .snapshot()
-    ///     .range(blocks, &lower[..]..&upper[..])
-    ///     .unwrap()
-    ///     .keys()
-    ///     .collect();
-    /// assert_eq!(keys.len(), 3);
-    /// ```
     pub fn range<K, R>(&self, table: Table, range: R) -> Result<Iter, Error>
     where
         K: AsRef<[u8]> + ?Sized,

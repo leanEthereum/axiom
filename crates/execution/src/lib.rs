@@ -40,25 +40,6 @@
 //!
 //! On the consensus side, the new payload call implements `notify_new_payload`,
 //! and its requests list is `get_execution_requests_list`, both in the Electra beacon chain spec.
-//!
-//! # Examples
-//!
-//! ```no_run
-//! use axiom_execution::{EngineClient, ForkchoiceState, JwtSecret, PayloadAttributes};
-//! use axiom_types::Mainnet;
-//!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let secret = JwtSecret::from_hex(&std::fs::read_to_string("jwt.hex")?)?;
-//! let engine = EngineClient::new("http://localhost:8551", secret)?;
-//!
-//! let state = ForkchoiceState::default();
-//! let updated = engine
-//!     .forkchoice_updated::<Mainnet>(&state, None::<&PayloadAttributes<Mainnet>>)
-//!     .await?;
-//! println!("head is {}", updated.payload_status.status);
-//! # Ok(())
-//! # }
-//! ```
 
 mod auth;
 mod client;

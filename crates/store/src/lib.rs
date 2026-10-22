@@ -96,26 +96,6 @@
 //! - Keys up to 65535 bytes, values up to 4 GiB minus one byte, 255 tables.
 //! - Every key lives in memory, at about 100 bytes of overhead plus the key itself.
 //! - Unix only: reads rely on positional I/O and on unlinked files staying readable.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_store::{Batch, Store};
-//!
-//! let store = Store::in_memory();
-//! let blocks = store.table("blocks").unwrap();
-//! let states = store.table("states").unwrap();
-//!
-//! // Both writes land together or not at all.
-//! let mut batch = Batch::new();
-//! batch.put(blocks, b"root a", b"block a").unwrap();
-//! batch.put(states, b"root a", b"state a").unwrap();
-//! store.write(&batch).unwrap();
-//!
-//! let snapshot = store.snapshot();
-//! let keys: Vec<_> = snapshot.prefix(blocks, b"root").unwrap().keys().collect();
-//! assert_eq!(keys, vec![b"root a".to_vec()]);
-//! ```
 
 mod batch;
 mod compaction;

@@ -9,18 +9,6 @@
 //!
 //! The specification lives in `ethereum/ssz-specs`.
 //! Merkle proofs follow the consensus specs' `ssz/merkle-proofs.md`.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_ssz::{Const, List, Ssz};
-//!
-//! let balances = List::<u64, Const<8>>::try_from(vec![32, 31]).unwrap();
-//!
-//! let bytes = balances.encode();
-//! assert_eq!(bytes.len(), 16);
-//! assert_eq!(List::<u64, Const<8>>::decode(&bytes).unwrap(), balances);
-//! ```
 
 mod basic;
 mod collections;

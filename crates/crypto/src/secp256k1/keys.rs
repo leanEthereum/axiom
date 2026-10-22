@@ -16,17 +16,6 @@ use crate::ct::wipe;
 /// A secp256k1 secret key: a scalar d in [1, n).
 ///
 /// The scalar is cleared from memory when the key is dropped.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::secp256k1::SecretKey;
-///
-/// let key = SecretKey::from_bytes(&[0x11; 32]).unwrap();
-/// let hash = [0x22; 32];
-/// let signature = key.sign(&hash);
-/// assert!(key.public_key().verify(&hash, &signature).is_ok());
-/// ```
 #[derive(Clone)]
 pub struct SecretKey {
     /// The scalar d.

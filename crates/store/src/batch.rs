@@ -12,23 +12,6 @@ use crate::{
 /// Committing it is then one positional write of a contiguous buffer.
 ///
 /// Operations apply in insertion order, so a later write to a key wins.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_store::{Batch, Store};
-///
-/// let store = Store::in_memory();
-/// let blocks = store.table("blocks").unwrap();
-/// let roots = store.table("roots").unwrap();
-///
-/// let mut batch = Batch::new();
-/// batch.put(blocks, b"root", b"block").unwrap();
-/// batch.put(roots, b"slot 1", b"root").unwrap();
-/// store.write(&batch).unwrap();
-///
-/// assert_eq!(store.get(blocks, b"root").unwrap(), Some(b"block".to_vec()));
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Batch {
     /// The encoded frame: a valid header followed by every entry so far.

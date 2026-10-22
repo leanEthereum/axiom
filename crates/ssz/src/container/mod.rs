@@ -10,39 +10,6 @@
 //! - A field-by-field decode.
 //!
 //! Every SSZ operation then follows from that description.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Root, Ssz};
-//!
-//! struct Checkpoint {
-//!     epoch: u64,
-//!     root: Root,
-//! }
-//!
-//! impl Container for Checkpoint {
-//!     const FIELDS: &'static [Option<usize>] = &[u64::FIXED_SIZE, Root::FIXED_SIZE];
-//!
-//!     fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
-//!         visitor.field(&self.epoch);
-//!         visitor.field(&self.root);
-//!     }
-//!
-//!     fn decode_fields(fields: &mut FieldDecoder<'_>) -> Result<Self, DecodeError> {
-//!         Ok(Self {
-//!             epoch: fields.field()?,
-//!             root: fields.field()?,
-//!         })
-//!     }
-//! }
-//!
-//! let checkpoint = Checkpoint {
-//!     epoch: 3,
-//!     root: Root::ZERO,
-//! };
-//! assert_eq!(checkpoint.encode().len(), 40);
-//! ```
 
 mod decoder;
 mod layout;

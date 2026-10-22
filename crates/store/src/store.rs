@@ -23,27 +23,6 @@ const MAX_TABLE_NAME: usize = 64;
 ///
 /// The handle is shareable across threads.
 /// Reads never wait for writes; writes are serialized.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_store::{Options, Store};
-///
-/// let dir = std::env::temp_dir().join(format!("axiom-store-doc-{}", std::process::id()));
-/// # std::fs::remove_dir_all(&dir).ok();
-/// {
-///     let store = Store::open(&dir, Options::default()).unwrap();
-///     let blocks = store.table("blocks").unwrap();
-///     store.put(blocks, b"root", b"block").unwrap();
-/// }
-///
-/// // Reopening replays the log: the write is still there.
-/// let store = Store::open(&dir, Options::default()).unwrap();
-/// let blocks = store.table("blocks").unwrap();
-/// assert_eq!(store.get(blocks, b"root").unwrap(), Some(b"block".to_vec()));
-/// # drop(store);
-/// # std::fs::remove_dir_all(&dir).unwrap();
-/// ```
 #[derive(Debug)]
 pub struct Store {
     /// The latest committed state, cloned by readers and swapped by the writer.

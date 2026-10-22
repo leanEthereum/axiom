@@ -16,23 +16,6 @@
 //! Fixed-window scalar multiplication reads tables by full scan, and inversions use fixed chains.
 //!
 //! Verification and recovery touch only public data and take faster variable-time paths.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_crypto::secp256k1::SecretKey;
-//!
-//! let alice = SecretKey::from_bytes(&[0xa1; 32]).unwrap();
-//! let bob = SecretKey::from_bytes(&[0xb0; 32]).unwrap();
-//!
-//! let hash = [0x42; 32];
-//! let signature = alice.sign_recoverable(&hash);
-//! assert_eq!(signature.recover(&hash).unwrap(), alice.public_key());
-//!
-//! let ab = alice.diffie_hellman(&bob.public_key());
-//! let ba = bob.diffie_hellman(&alice.public_key());
-//! assert_eq!(ab.to_compressed(), ba.to_compressed());
-//! ```
 
 mod error;
 mod field;

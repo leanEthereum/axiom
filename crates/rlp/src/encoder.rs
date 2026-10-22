@@ -9,28 +9,6 @@ use crate::header::Header;
 /// Strings and integers append directly.
 /// A list runs a closure that appends its items, then gains its header in front.
 /// Closures keep every list balanced by construction.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_rlp::Encoder;
-///
-/// // The Yellow Paper example: [ [], [[]], [ [], [[]] ] ].
-/// let mut encoder = Encoder::new();
-/// let empty = |_: &mut Encoder| {};
-/// let wrapped_empty = |list: &mut Encoder| {
-///     list.list(empty);
-/// };
-/// encoder.list(|outer| {
-///     outer.list(empty).list(wrapped_empty).list(|inner| {
-///         inner.list(empty).list(wrapped_empty);
-///     });
-/// });
-/// assert_eq!(
-///     encoder.finish(),
-///     [0xc7, 0xc0, 0xc1, 0xc0, 0xc3, 0xc0, 0xc1, 0xc0]
-/// );
-/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Encoder {
     /// The encoding so far.

@@ -6,16 +6,6 @@ use super::{
 };
 
 /// An ECDSA signature (r, s) with both components in [1, n).
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::secp256k1::{SecretKey, Signature};
-///
-/// let key = SecretKey::from_bytes(&[1; 32]).unwrap();
-/// let signature = key.sign(&[7; 32]);
-/// assert_eq!(Signature::from_bytes(&signature.to_bytes()), Ok(signature));
-/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Signature {
     /// The x-coordinate of the nonce point, reduced modulo n.

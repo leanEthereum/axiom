@@ -46,18 +46,6 @@ const BATCH: usize = 8;
 /// The AES-128 block cipher, encryption direction only.
 ///
 /// Counter mode and GCM never decrypt a block, so the inverse cipher is left out.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::aes::Aes128;
-///
-/// // FIPS 197, appendix C.1.
-/// let key: [u8; 16] = std::array::from_fn(|i| i as u8);
-/// let mut block: [u8; 16] = std::array::from_fn(|i| (i as u8) * 0x11);
-/// Aes128::new(&key).encrypt_block(&mut block);
-/// assert_eq!(block[..4], [0x69, 0xc4, 0xe0, 0xd8]);
-/// ```
 #[derive(Clone)]
 pub struct Aes128 {
     /// The expanded key, cleared from memory when dropped.

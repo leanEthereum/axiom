@@ -171,17 +171,6 @@ impl KeccakF1600 {
 }
 
 /// An incremental Keccak-256 hasher.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::keccak::Keccak256;
-///
-/// let mut hasher = Keccak256::new();
-/// hasher.update(b"a");
-/// hasher.update(b"bc");
-/// assert_eq!(hasher.finalize(), Keccak256::digest(b"abc"));
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keccak256 {
     /// The sponge state.

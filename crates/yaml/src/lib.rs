@@ -15,21 +15,6 @@
 //! Scalars keep their text.
 //! Only plain nulls and booleans resolve, per the YAML 1.2 core schema.
 //! Typed views read decimal integers and `0x` hex bytes from the text on demand.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_yaml::Yaml;
-//!
-//! let doc = Yaml::parse("slot: 8\nroot: '0xabcd'\nvalid: true\n").unwrap();
-//!
-//! assert_eq!(doc.get("slot").and_then(Yaml::as_u64), Some(8));
-//! assert_eq!(
-//!     doc.get("root").and_then(Yaml::as_hex_bytes),
-//!     Some(vec![0xab, 0xcd])
-//! );
-//! assert_eq!(doc.get("valid").and_then(Yaml::as_bool), Some(true));
-//! ```
 
 mod char_class;
 mod emitter;

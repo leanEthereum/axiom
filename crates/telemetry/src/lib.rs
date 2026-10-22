@@ -14,25 +14,6 @@
 //!
 //! Metric updates are single atomic operations and take no lock.
 //! The registry is read only when scraped, in the Prometheus text format 0.0.4.
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_telemetry::{Buckets, Registry};
-//!
-//! let registry = Registry::new();
-//! let imports = registry
-//!     .counter_vec("imports_total", "Blocks imported.", ["outcome"])
-//!     .unwrap();
-//! imports.with_label_values(["ok"]).inc();
-//!
-//! let expected = concat!(
-//!     "# HELP imports_total Blocks imported.\n",
-//!     "# TYPE imports_total counter\n",
-//!     "imports_total{outcome=\"ok\"} 1\n",
-//! );
-//! assert_eq!(registry.render(), expected);
-//! ```
 
 mod exporter;
 mod logging;

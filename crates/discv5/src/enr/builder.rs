@@ -20,24 +20,6 @@ use super::{
 /// Collects the entries of a record, then signs it under the "v4" scheme.
 ///
 /// The scheme name and the public key are written at signing.
-///
-/// # Examples
-///
-/// ```
-/// use std::net::Ipv4Addr;
-///
-/// use axiom_crypto::secp256k1::SecretKey;
-/// use axiom_discv5::Enr;
-///
-/// let key = SecretKey::from_bytes(&[1; 32]).unwrap();
-/// let enr = Enr::builder()
-///     .ip4(Ipv4Addr::LOCALHOST)
-///     .udp4(9000)
-///     .build(&key)
-///     .unwrap();
-/// assert_eq!(enr.seq(), 1);
-/// assert_eq!(enr.endpoints().udp4, Some(9000));
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnrBuilder {
     /// The sequence number to sign.

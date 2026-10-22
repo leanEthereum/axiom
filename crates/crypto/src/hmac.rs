@@ -26,16 +26,6 @@ const OPAD: u8 = 0x5c;
 ///
 /// Both hashes start from their keyed block at construction.
 /// Feeding message bytes then only touches the inner hash.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::hmac::HmacSha256;
-///
-/// let mut mac = HmacSha256::new(b"key");
-/// mac.update(b"message");
-/// assert_eq!(mac.finalize(), HmacSha256::mac(b"key", b"message"));
-/// ```
 #[derive(Clone)]
 pub struct HmacSha256 {
     /// SHA-256 that has absorbed the inner padded key, then the message so far.

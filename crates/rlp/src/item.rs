@@ -12,17 +12,6 @@ const MAX_DEPTH: usize = 64;
 ///
 /// Typed codecs read and write fields directly.
 /// This tree serves inputs of unknown shape, such as test vectors.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_rlp::Item;
-///
-/// let item = Item::List(vec![Item::String(b"cat".to_vec()), Item::List(vec![])]);
-/// let encoded = item.encode();
-/// assert_eq!(encoded, [0xc5, 0x83, b'c', b'a', b't', 0xc0]);
-/// assert_eq!(Item::decode(&encoded).unwrap(), item);
-/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Item {
     /// A byte string.

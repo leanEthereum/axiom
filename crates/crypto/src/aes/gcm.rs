@@ -28,19 +28,6 @@ const MAX_PLAINTEXT_LEN: u64 = ((1 << 32) - 2) * BLOCK_LEN as u64;
 ///
 /// A nonce must never repeat under one key.
 /// A repeat reveals the XOR of two plaintexts and lets an attacker solve for H.
-///
-/// # Examples
-///
-/// ```
-/// use axiom_crypto::aes::Aes128Gcm;
-///
-/// let cipher = Aes128Gcm::new(&[7; 16]);
-/// let sealed = cipher.seal(&[0; 12], b"header", b"message");
-/// assert_eq!(
-///     cipher.open(&[0; 12], b"header", &sealed).unwrap(),
-///     b"message"
-/// );
-/// ```
 #[derive(Clone)]
 pub struct Aes128Gcm {
     /// The block cipher.

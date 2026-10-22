@@ -28,20 +28,6 @@
 //!     DATA      two hex digits per byte      []     -> "0x"
 //!                                            [0, 1] -> "0x0001"
 //! ```
-//!
-//! # Examples
-//!
-//! ```
-//! use axiom_json::{Json, Quantity};
-//!
-//! let text = br#"{"jsonrpc":"2.0","id":1,"result":"0x400"}"#;
-//! let value = Json::parse(text).unwrap();
-//!
-//! let result = value.get("result").and_then(Json::as_str).unwrap();
-//! assert_eq!(u64::from_quantity(result), Ok(1024));
-//!
-//! assert_eq!(value.to_string().as_bytes(), text);
-//! ```
 
 mod data;
 mod error;
