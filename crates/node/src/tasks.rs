@@ -1,13 +1,13 @@
-//! The node's background loops: the fork choice clock and the engine follower.
+//! The node's background loops: the clock, payload preparation, sync watching, and the engine.
 
-use std::{sync::Arc, time::Duration};
+use std::{future, sync::Arc, time::Duration};
 
-use axiom_types::{ChainConfig, Preset, SlotClock};
+use axiom_types::{ChainConfig, Preset, Slot, SlotClock};
 use tokio::{
     sync::broadcast::{self, error::RecvError},
     time,
 };
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{ChainEvent, ChainHandle, Clock, ExecutionLayer, ProposerService};
 
@@ -92,14 +92,11 @@ impl<P: Preset> Ticker<P> {
 }
 
 /// Tells the engine about every new head and feeds its verdicts back.
-/// When, as a fraction of a slot, the engine starts building the next slot's payload.
+/// Default lead of payload preparation, as a fraction of a slot: one third.
 ///
 /// Two thirds in, the slot's block and votes have arrived, so the head is settled.
 /// Proposers that build ahead give the engine the last third to fill the payload.
-const PREPARE_AT_NUMERATOR: u64 = 2;
-
-/// The denominator of the fraction above.
-const PREPARE_AT_DENOMINATOR: u64 = 3;
+const DEFAULT_LEAD_DENOMINATOR: u64 = 3;
 
 /// Starts the engine building each prepared proposer's payload before its slot.
 #[derive(Debug)]
@@ -110,38 +107,91 @@ pub(crate) struct PayloadPreparer<P: Preset> {
     clock: Arc<dyn Clock>,
     /// Genesis and the slot length.
     slots: SlotClock,
+    /// How long before each slot its payload is prepared, at most a slot.
+    lead_ms: u64,
 }
 
 impl<P: Preset> PayloadPreparer<P> {
+    /// A preparer leading each slot by a lookahead, or by a third of a slot without one.
     pub(crate) fn new(
         proposer: Arc<ProposerService<P>>,
         clock: Arc<dyn Clock>,
         slots: SlotClock,
+        lookahead: Option<Duration>,
     ) -> Self {
+        let slot_ms = slots.slot_duration_ms();
+        let lead_ms = lookahead.map_or(slot_ms / DEFAULT_LEAD_DENOMINATOR, |lookahead| {
+            u64::try_from(lookahead.as_millis()).unwrap_or(u64::MAX)
+        });
         Self {
             proposer,
             clock,
             slots,
+            // A lead past one slot would aim at the slot after next.
+            lead_ms: lead_ms.min(slot_ms),
         }
     }
 
-    /// Each slot, two thirds in, prepares the next slot's payload.
+    /// The next moment to prepare at, after a time, and the slot it prepares.
+    fn next_preparation(&self, now_ms: u64) -> (u64, Slot) {
+        let next = self.slots.slot_at(now_ms) + 1;
+        let at = self.slots.slot_start_ms(next).saturating_sub(self.lead_ms);
+        // Past this slot's moment, aim at the following slot's.
+        if now_ms < at {
+            (at, next)
+        } else {
+            let after = next + 1;
+            (
+                self.slots.slot_start_ms(after).saturating_sub(self.lead_ms),
+                after,
+            )
+        }
+    }
+
+    /// Before each slot, by the lead, prepares that slot's payload.
     pub(crate) async fn run(self) {
         loop {
             let now = self.clock.now_ms();
-            let slot = self.slots.slot_at(now);
-            let start = self.slots.slot_start_ms(slot);
-            let at = start
-                + self.slots.slot_duration_ms() * PREPARE_AT_NUMERATOR / PREPARE_AT_DENOMINATOR;
-            // Past this slot's moment, aim at the next slot's.
-            let at = if now < at {
-                at
-            } else {
-                at + self.slots.slot_duration_ms()
-            };
+            let (at, slot) = self.next_preparation(now);
             time::sleep(Duration::from_millis(at.saturating_sub(now))).await;
-            let next = self.slots.slot_at(self.clock.now_ms()) + 1;
-            self.proposer.prepare_next(next).await;
+            self.proposer.prepare_next(slot).await;
+        }
+    }
+}
+
+/// Completes once the head is within a slot of the wall clock, for a node that stops when synced.
+#[derive(Debug)]
+pub(crate) struct SyncWatcher<P: Preset> {
+    /// The chain thread.
+    chain: ChainHandle<P>,
+    /// Genesis and the slot length.
+    slots: SlotClock,
+}
+
+impl<P: Preset> SyncWatcher<P> {
+    /// A watcher of a chain.
+    pub(crate) const fn new(chain: ChainHandle<P>, slots: SlotClock) -> Self {
+        Self { chain, slots }
+    }
+
+    /// Completes once synced when asked to stop then, and never otherwise.
+    pub(crate) async fn stop(self, when_synced: bool) {
+        if when_synced {
+            self.synced().await;
+            info!("synced; stopping as asked");
+        } else {
+            future::pending::<()>().await;
+        }
+    }
+
+    /// Waits, checking twice a slot, until the head is synced or the chain thread stops.
+    async fn synced(self) {
+        let period = Duration::from_millis((self.slots.slot_duration_ms() / 2).max(1));
+        loop {
+            match self.chain.run(|chain| chain.is_synced()).await {
+                Ok(true) | Err(_) => return,
+                Ok(false) => time::sleep(period).await,
+            }
         }
     }
 }

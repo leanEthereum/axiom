@@ -5,7 +5,7 @@ use std::time::Duration;
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, StatusCode};
 use axiom_ssz::Ssz;
 use axiom_types::{
-    ChainConfig, Preset, Root,
+    ChainConfig, Hash32, Preset, Root,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
 };
@@ -16,11 +16,6 @@ use thiserror::Error;
 /// A mainnet state weighs a few hundred megabytes and grows with the registry.
 /// Two gigabytes leaves years of growth while still bounding a hostile server.
 const MAX_DOWNLOAD_BYTES: usize = 2 << 30;
-
-/// Longest wait for one download.
-///
-/// A mainnet state over a slow link takes minutes, not hours.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// A beacon API trusted to serve the finalized checkpoint.
 ///
@@ -44,18 +39,23 @@ pub struct CheckpointServer {
 }
 
 impl CheckpointServer {
-    /// A server at a URL, such as `http://127.0.0.1:5052`.
+    /// Default longest wait for one download.
+    ///
+    /// A finalized mainnet state over a slow link takes minutes, so three leave room.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
+
+    /// A server at a URL, such as `http://127.0.0.1:5052`, waiting at most a timeout per download.
     ///
     /// # Errors
     ///
     /// Fails when the URL is not a plain HTTP endpoint.
-    pub fn new(url: &str) -> Result<Self, CheckpointError> {
+    pub fn new(url: &str, timeout: Duration) -> Result<Self, CheckpointError> {
         let endpoint = Endpoint::parse(url).map_err(|source| CheckpointError::Url {
             url: url.to_owned(),
             reason: source.to_string(),
         })?;
         let config = ClientConfig {
-            request_timeout: DOWNLOAD_TIMEOUT,
+            request_timeout: timeout,
             limits: Limits {
                 max_body_bytes: MAX_DOWNLOAD_BYTES,
                 ..Limits::DEFAULT
@@ -121,19 +121,31 @@ impl CheckpointServer {
         self.state("genesis", config).await
     }
 
+    /// Downloads the genesis state as SSZ bytes, for a caller that checks them against a digest.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the download fails.
+    pub async fn genesis_bytes(&self) -> Result<Vec<u8>, CheckpointError> {
+        self.download(&Self::state_path("genesis")).await
+    }
+
     /// Downloads a state by identifier.
     async fn state<P: Preset>(
         &self,
         id: &str,
         config: &ChainConfig,
     ) -> Result<BeaconState<P>, CheckpointError> {
-        let bytes = self
-            .download(&format!("/eth/v2/debug/beacon/states/{id}"))
-            .await?;
+        let bytes = self.download(&Self::state_path(id)).await?;
         BeaconState::<P>::decode_at(&bytes, config).map_err(|error| CheckpointError::Decode {
             what: "state",
             reason: error.to_string(),
         })
+    }
+
+    /// The debug API path of a state.
+    fn state_path(id: &str) -> String {
+        format!("/eth/v2/debug/beacon/states/{id}")
     }
 
     /// Fetches a path as SSZ.
@@ -192,6 +204,16 @@ pub enum CheckpointError {
         what: &'static str,
         /// The decoder's complaint.
         reason: String,
+    },
+    /// A downloaded state is not the one the network published.
+    #[error("state from {url} has SHA-256 {actual}, but the network published {expected}")]
+    Checksum {
+        /// The server.
+        url: String,
+        /// The digest the network published.
+        expected: Hash32,
+        /// The digest of the bytes served.
+        actual: Hash32,
     },
     /// The block served is not the one the state names.
     #[error("downloaded block has root {actual}, but the state names {expected}")]

@@ -162,7 +162,7 @@ async fn run(genesis: phase0::BeaconState<Minimal>) {
         .and_then(|listener| listener.local_addr())
         .expect("a loopback port is free");
     let node_config = NodeConfig {
-        anchor: Some(AnchorSource::Genesis(genesis_path)),
+        anchor: Some(AnchorSource::Genesis(genesis_path.into())),
         http_address: Some(address),
         ..NodeConfig::default()
     };

@@ -203,7 +203,7 @@ impl TestNode {
     async fn start(fixture: &Fixture, network: Option<NetworkSettings>) -> Self {
         let address = free_address();
         let config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(fixture.genesis.clone())),
+            anchor: Some(AnchorSource::Genesis(fixture.genesis.clone().into())),
             http_address: Some(address),
             network,
             ..NodeConfig::default()
@@ -635,6 +635,7 @@ fn range_sync(quic: bool) {
             boot_nodes,
             custody_group_count: 4,
             discovery: None,
+            subscribe_all_subnets: false,
         };
         let a = TestNode::start(
             &fixture,
@@ -708,6 +709,7 @@ fn a_node_finds_its_peer_through_discovery() {
                     enr_address: Some(Ipv4Addr::LOCALHOST),
                     boot_enrs,
                 }),
+                subscribe_all_subnets: false,
             }
         };
         let a = TestNode::start(&fixture, Some(settings(Vec::new()))).await;
@@ -820,6 +822,7 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
             boot_nodes,
             custody_group_count: 4,
             discovery: None,
+            subscribe_all_subnets: false,
         };
         let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port()).parse().unwrap();
         let b = TestNode::start(&fixture, Some(settings(free_address(), vec![boot]))).await;
@@ -938,6 +941,7 @@ async fn valid_engine(terminal: Hash32, secret_file: &Path) -> (MockEngine, Engi
     let config = EngineConfig {
         url: mock.url().to_owned(),
         jwt_secret: secret_file.to_path_buf(),
+        timeout_multiplier: 1,
     };
     (mock, config)
 }
@@ -993,9 +997,10 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             boot_nodes,
             custody_group_count: 4,
             discovery: None,
+            subscribe_all_subnets: false,
         };
         let node_config = |network, engine| NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             network: Some(network),
             engine: Some(engine),
             ..NodeConfig::default()
@@ -1097,7 +1102,7 @@ fn a_node_without_an_engine_imports_an_old_merge_block_optimistically() {
     runtime.block_on(async {
         let address = free_address();
         let node_config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             http_address: Some(address),
             ..NodeConfig::default()
         };
@@ -1187,7 +1192,7 @@ fn a_node_serves_light_client_data_that_follows_its_canonical_chain() {
     runtime.block_on(async {
         let address = free_address();
         let node_config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             http_address: Some(address),
             ..NodeConfig::default()
         };
@@ -1320,7 +1325,7 @@ fn a_node_reports_the_rewards_its_blocks_and_epochs_paid() {
     runtime.block_on(async {
         let address = free_address();
         let node_config = NodeConfig {
-            anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+            anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
             http_address: Some(address),
             ..NodeConfig::default()
         };
@@ -1447,9 +1452,10 @@ fn publish_blobs_and_sync(fork: ForkName) {
                 boot_nodes,
                 custody_group_count: 4,
                 discovery: None,
+                subscribe_all_subnets: false,
             };
             let node_config = NodeConfig {
-                anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+                anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
                 http_address: Some(api),
                 network: Some(network),
                 ..NodeConfig::default()

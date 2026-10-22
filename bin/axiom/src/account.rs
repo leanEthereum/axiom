@@ -12,8 +12,8 @@ use axiom_http::{ClientConfig, HttpError};
 use axiom_json::{Data, Json};
 use axiom_node::{Clock, SystemClock};
 use axiom_types::{
-    BlsPubkey, BlsSignature, ChainConfig, Epoch, ExecutionAddress, Gwei, Mainnet, Minimal, Root,
-    SlotClock, ValidatorIndex,
+    BlsPubkey, BlsSignature, ChainConfig, Epoch, ExecutionAddress, Gnosis, Gwei, Mainnet, Minimal,
+    Root, SlotClock, ValidatorIndex,
     capella::{BlsToExecutionChange, SignedBlsToExecutionChange},
     phase0::{SignedVoluntaryExit, VoluntaryExit},
 };
@@ -662,6 +662,17 @@ impl Exit {
                     (
                         epoch,
                         context.signing_root::<Minimal>(&SigningRequest::VoluntaryExit(&message)),
+                    )
+                }
+                PresetName::Gnosis => {
+                    let epoch = self.epoch.unwrap_or_else(|| slot.epoch::<Gnosis>());
+                    let message = VoluntaryExit {
+                        epoch,
+                        validator_index: summary.index,
+                    };
+                    (
+                        epoch,
+                        context.signing_root::<Gnosis>(&SigningRequest::VoluntaryExit(&message)),
                     )
                 }
             };

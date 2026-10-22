@@ -18,6 +18,7 @@ mod config;
 mod engine;
 mod error;
 mod events;
+mod genesis;
 pub(crate) mod network;
 mod proposer;
 mod publish;
@@ -28,15 +29,17 @@ mod tasks;
 
 pub use api::BeaconApi;
 pub use chain::{
-    Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Finality, Head,
-    HistorySegment, HistoryStart, InvalidInterval, ProposerKeys, Reconstruction,
-    ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SnapshotInterval,
-    StateReplay, StorageMode, Submission, VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
+    Chain, ChainDatabase, ChainEvent, ChainHandle, ChainSettings, ChainStopped, ExecutionHead,
+    Finality, Head, HistorySegment, HistoryStart, InvalidInterval, ProposerKeys, RawRecord,
+    Reconstruction, ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SidecarPass,
+    SidecarPruning, SnapshotInterval, StateReplay, StorageMode, Submission, TableUsage,
+    VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
 pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
-    AnchorSource, EngineConfig, HistorySettings, NetworkSettings, NodeConfig, ProposerSettings,
+    AnchorSource, BuilderClientSettings, BuilderFallback, DatabaseSettings, EngineConfig,
+    HistorySettings, NetworkSettings, NodeConfig, ProposerSettings, SlasherSetup,
 };
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
@@ -44,6 +47,7 @@ pub use events::{
     ApiEvent, EventHub, EventSender, EventSubscriptions, EventTopic, HubStopped, TopicSet,
     UnknownTopic,
 };
+pub use genesis::{EmbeddedGenesis, GenesisDownload, GenesisState};
 pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
 pub use proposer::{BlockOrder, ProposerError, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};

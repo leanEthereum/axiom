@@ -15,7 +15,7 @@ use super::{
     query::Query,
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::{Chain, network::PeerRecord};
+use crate::{Chain, chain::SYNCING_DISTANCE, network::PeerRecord};
 
 /// The client's name and version, as reported to peers and tools.
 const VERSION: &str = concat!("axiom/v", env!("CARGO_PKG_VERSION"));
@@ -33,11 +33,6 @@ const COMMIT: &str = match option_env!("AXIOM_COMMIT") {
     Some(commit) => commit,
     None => "0x00000000",
 };
-
-/// A head this many slots behind the clock or more means the node is syncing.
-///
-/// One slot of lag is normal: the current slot's block may not have arrived yet.
-const SYNCING_DISTANCE: u64 = 2;
 
 /// Routes under `/eth/v1/node`.
 #[derive(Clone, Copy, Debug)]
@@ -283,10 +278,6 @@ impl NodeRoutes {
 
     /// Slots between the head and the fork choice clock.
     const fn distance<P: Preset>(chain: &Chain<P>) -> u64 {
-        chain
-            .store()
-            .current_slot()
-            .0
-            .saturating_sub(chain.head().slot.0)
+        chain.sync_distance()
     }
 }

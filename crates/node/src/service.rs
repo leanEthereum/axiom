@@ -2,7 +2,7 @@
 
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
-use axiom_builder_client::{RelayClient, RelaySet};
+use axiom_builder_client::RelaySet;
 use axiom_p2p::swarm::NetworkHandle;
 use axiom_telemetry::{NodeMetrics, Registry};
 use axiom_types::{ChainConfig, Preset, SlotClock};
@@ -21,7 +21,7 @@ use crate::{
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
     },
     race::Either,
-    tasks::{EngineFollower, PayloadPreparer, Ticker},
+    tasks::{EngineFollower, PayloadPreparer, SyncWatcher, Ticker},
 };
 
 /// The running chain, as the services started after it see it.
@@ -44,27 +44,29 @@ impl<P: Preset> StartedChain<'_, P> {
         let relays = if settings.builders.is_empty() {
             None
         } else {
-            let clients = settings
-                .builders
-                .iter()
-                .map(|url| {
-                    RelayClient::new(url).map_err(|error| NodeError::Builder {
-                        url: url.clone(),
-                        error: Box::new(error),
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let clients = settings.builder_client.connect(&settings.builders)?;
             Some(RelaySet::new(clients))
         };
-        let proposer = Arc::new(ProposerService::new(
+        let proposer = ProposerService::new(
             self.handle.clone(),
             Arc::clone(execution),
             settings.default_fee_recipient,
             relays,
-        ));
-        let preparer = task::spawn(
-            PayloadPreparer::new(Arc::clone(&proposer), Arc::clone(clock), self.slots).run(),
+        )
+        .with_breaker(settings.builder_fallback.breaker::<P>())
+        .with_graffiti(settings.graffiti);
+        let proposer = Arc::new(if settings.always_prepare_payload {
+            proposer.preparing_always()
+        } else {
+            proposer
+        });
+        let preparer = PayloadPreparer::new(
+            Arc::clone(&proposer),
+            Arc::clone(clock),
+            self.slots,
+            settings.prepare_lookahead,
         );
+        let preparer = task::spawn(preparer.run());
         Ok((proposer, preparer))
     }
 
@@ -113,7 +115,11 @@ impl<P: Preset> StartedChain<'_, P> {
                     quic_port: settings.quic_port,
                     epoch,
                     genesis_validators_root,
-                    attnets: AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config),
+                    attnets: if settings.subscribe_all_subnets {
+                        AttestationSubnets::all(&config)
+                    } else {
+                        AttestationSubnets::new(identity.node_id).bits::<P>(epoch, &config)
+                    },
                     custody_group_count: identity.custody_group_count,
                 };
                 let (mut started, events) = Discovery::start(&key, discovery, &config, record)
@@ -149,6 +155,7 @@ impl<P: Preset> StartedChain<'_, P> {
                 },
                 discovery,
                 events: api_events,
+                subscribe_all_subnets: settings.subscribe_all_subnets,
             },
         )
         .await;
@@ -311,6 +318,10 @@ impl<P: Preset> Node<P> {
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
         let follower =
             task::spawn(EngineFollower::new(handle.clone(), events, execution, schedule).run());
+
+        // An operator who only wants the chain synced stops the node once it is.
+        let synced = SyncWatcher::new(handle.clone(), slots).stop(config.shutdown_after_sync);
+        let shutdown = Either::race(shutdown, synced);
 
         // The ticker only ends when the chain thread is gone, such as after a panic.
         // The node then stops too, rather than serving from a dead chain.

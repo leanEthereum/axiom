@@ -235,6 +235,7 @@ impl<P: Preset> NetworkService<P> {
             peer_limits,
             discovery,
             events,
+            subscribe_all_subnets,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
         let (discovery, discovery_events) = discovery
@@ -281,12 +282,19 @@ impl<P: Preset> NetworkService<P> {
             backfill_outcomes: Some(backfill_outcomes),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
-            subscriptions: Subscriptions::new(
-                identity.node_id,
-                config.clone(),
-                genesis_validators_root,
-                &custody,
-            ),
+            subscriptions: {
+                let subscriptions = Subscriptions::new(
+                    identity.node_id,
+                    config.clone(),
+                    genesis_validators_root,
+                    &custody,
+                );
+                if subscribe_all_subnets {
+                    subscriptions.subscribing_all()
+                } else {
+                    subscriptions
+                }
+            },
             network,
             chain,
             clock,
@@ -928,4 +936,6 @@ pub(crate) struct NetworkSetup {
     pub(crate) discovery: Option<(Discovery, Discv5Events)>,
     /// Where accepted gossip goes out to event stream clients.
     pub(crate) events: EventSender,
+    /// Whether every attestation and sync committee subnet is joined.
+    pub(crate) subscribe_all_subnets: bool,
 }

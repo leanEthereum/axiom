@@ -70,7 +70,7 @@ impl ValidatorRoutes {
     ///
     /// The value headers state what the block's consensus rewards and its payload pay, in wei.
     async fn produce_v3<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let order = Self::block_order(&request)?;
+        let order = Self::block_order(&request, context.proposer.graffiti())?;
         let fork = Self::slot_fork(&context, order.slot).await?;
         if fork.separates_payloads() {
             return Err(ApiError::bad_request(format!(
@@ -123,7 +123,7 @@ impl ValidatorRoutes {
     ///
     /// Without the payload, the node keeps the envelope for the validator to fetch.
     async fn produce_v4<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let order = Self::block_order(&request)?;
+        let order = Self::block_order(&request, context.proposer.graffiti())?;
         let include_payload = Query::of(&request).flag("include_payload")?;
         // The builder configuration must decode; its entries ask for bids this node does not fetch.
         if Encoding::of_body(&request, true)? == Encoding::Json {
@@ -517,11 +517,15 @@ impl ValidatorRoutes {
     }
 
     /// The proposal a block request asks for, from its path and query.
-    fn block_order(request: &Request) -> Result<BlockOrder, ApiError> {
+    ///
+    /// A request naming no graffiti gets the node's.
+    fn block_order(request: &Request, graffiti: Bytes32) -> Result<BlockOrder, ApiError> {
         let slot = Slot(Self::path_number(request, "slot")?);
         let query = Query::of(request);
         let randao_reveal = BlsSignature(query.bytes::<96>("randao_reveal")?);
-        let graffiti = Bytes32(query.optional_bytes::<32>("graffiti")?.unwrap_or_default());
+        let graffiti = query
+            .optional_bytes::<32>("graffiti")?
+            .map_or(graffiti, Bytes32);
         // Skipping needs the point at infinity as the reveal, so no real reveal is ignored.
         let randao = if query.flag("skip_randao_verification")? {
             if randao_reveal.0 != Signature::INFINITY_BYTES {

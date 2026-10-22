@@ -4,6 +4,7 @@ mod archive;
 mod history;
 mod light_client;
 mod schema;
+mod usage;
 
 use std::{marker::PhantomData, path::Path};
 
@@ -20,6 +21,7 @@ pub use history::{HistoryStart, ReconstructionCursor};
 use light_client::LightClientRecords;
 use schema::Migration;
 pub use schema::SchemaVersion;
+pub use usage::TableUsage;
 
 use super::{VerifiedSegment, availability::Sidecar};
 use crate::ChainError;
@@ -108,6 +110,18 @@ pub struct ChainDatabase<P: Preset> {
     preset: PhantomData<P>,
 }
 
+/// A record as the store holds it: key bytes, then value bytes.
+pub type RawRecord = (Vec<u8>, Vec<u8>);
+
+/// What one sidecar pruning pass did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidecarPass {
+    /// Blocks whose sidecars were deleted.
+    pub blocks: usize,
+    /// Whether the pass reached a block still kept, so nothing older is left.
+    pub complete: bool,
+}
+
 /// What a new finality writes, in one atomic batch.
 #[derive(Clone, Copy, Debug)]
 pub struct Finality<'a, P: Preset> {
@@ -138,7 +152,29 @@ impl<P: Preset> ChainDatabase<P> {
     /// - The layout version is unknown to this build.
     /// - A migration step fails.
     pub fn open(directory: &Path, config: ChainConfig) -> Result<Self, ChainError> {
-        Self::with_store(Store::open(directory, Options::default())?, config)
+        Self::open_with(directory, config, Options::default())
+    }
+
+    /// Opens or creates a database under explicit store options, such as without auto-compaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails as opening does, and when an option breaks the store's bounds.
+    pub fn open_with(
+        directory: &Path,
+        config: ChainConfig,
+        options: Options,
+    ) -> Result<Self, ChainError> {
+        Self::with_store(Store::open(directory, options)?, config)
+    }
+
+    /// Rewrites every segment mostly holding dead records, to give their space back.
+    ///
+    /// # Errors
+    ///
+    /// Fails on an I/O error or a corrupt segment.
+    pub fn compact(&self) -> Result<(), ChainError> {
+        Ok(self.store.compact()?)
     }
 
     /// A database that lives in memory and vanishes with the node.
@@ -172,9 +208,25 @@ impl<P: Preset> ChainDatabase<P> {
         &self.config
     }
 
+    /// Opens a database without bringing its layout to the current version, to read the version.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the directory cannot be opened, or another process holds it.
+    pub fn open_unmigrated(directory: &Path, config: ChainConfig) -> Result<Self, ChainError> {
+        Self::named(Store::open(directory, Options::default())?, config)
+    }
+
     /// Names the tables in an open store, then brings its layout to the current version.
     fn with_store(store: Store, config: ChainConfig) -> Result<Self, ChainError> {
-        let database = Self {
+        let database = Self::named(store, config)?;
+        database.migrate()?;
+        Ok(database)
+    }
+
+    /// Names the tables in an open store.
+    fn named(store: Store, config: ChainConfig) -> Result<Self, ChainError> {
+        Ok(Self {
             blocks: store.table("blocks")?,
             states: store.table("states")?,
             blobs: store.table("blobs")?,
@@ -189,9 +241,88 @@ impl<P: Preset> ChainDatabase<P> {
             config,
             mode: StorageMode::default(),
             preset: PhantomData,
-        };
-        database.migrate()?;
-        Ok(database)
+        })
+    }
+
+    /// Every table by name, in the layout's order.
+    const fn tables(&self) -> [(&'static str, Table); 10] {
+        [
+            ("blocks", self.blocks),
+            ("states", self.states),
+            ("blobs", self.blobs),
+            ("columns", self.columns),
+            ("envelopes", self.envelopes),
+            ("canonical", self.canonical),
+            ("snapshots", self.snapshots),
+            ("state_roots", self.state_roots),
+            ("light_client", self.light_client.table()),
+            ("meta", self.meta),
+        ]
+    }
+
+    /// Entries and bytes of every table, in the layout's order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a read fails.
+    pub fn usage(&self) -> Result<Vec<TableUsage>, ChainError> {
+        let snapshot = self.store.snapshot();
+        self.tables()
+            .into_iter()
+            .map(|(name, table)| {
+                let mut usage = TableUsage::empty(name);
+                for entry in snapshot.entries(table)? {
+                    let (key, value) = entry?;
+                    usage.add(key.len(), value.len());
+                }
+                Ok(usage)
+            })
+            .collect()
+    }
+
+    /// Every key and value of one table, in key order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when no table has the name, or a read fails.
+    pub fn entries(&self, name: &str) -> Result<Vec<RawRecord>, ChainError> {
+        let tables = self.tables();
+        let table = tables
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, table)| *table)
+            .ok_or_else(|| ChainError::UnknownTable(name.to_owned()))?;
+        let entries = self.store.snapshot().entries(table)?;
+        Ok(entries.collect::<Result<_, _>>()?)
+    }
+
+    /// Deletes every archived state snapshot, and the state roots and rebuild cursor that go with them.
+    ///
+    /// The finalized anchor state stays, so the node still resumes.
+    ///
+    /// # Returns
+    ///
+    /// The snapshots deleted.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a read or the write fails.
+    pub fn prune_states(&self) -> Result<usize, ChainError> {
+        let snapshot = self.store.snapshot();
+        let mut batch = Batch::new();
+        let mut snapshots = 0;
+        for entry in snapshot.entries(self.snapshots)? {
+            let (key, _) = entry?;
+            batch.delete(self.snapshots, &key)?;
+            snapshots += 1;
+        }
+        for entry in snapshot.entries(self.state_roots)? {
+            let (key, _) = entry?;
+            batch.delete(self.state_roots, &key)?;
+        }
+        batch.delete(self.meta, RECONSTRUCTED_KEY)?;
+        self.store.write(&batch)?;
+        Ok(snapshots)
     }
 
     /// The layout version the database was last written in.
@@ -774,18 +905,19 @@ impl<P: Preset> ChainDatabase<P> {
     /// Deletes the sidecars of finalized blocks past their retention window.
     ///
     /// Each fork's data form has its own window, so the cutoff is decided slot by slot.
-    /// The pass stops at the first block still in its window, and resumes there next time.
+    /// A margin keeps that many epochs more than the window.
+    /// The pass stops at the first block still kept, and resumes there next time.
     /// See `MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS` in the Deneb p2p spec.
     /// See `MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS` in the Fulu p2p spec.
-    ///
-    /// # Returns
-    ///
-    /// The blocks whose sidecars were pruned.
     ///
     /// # Errors
     ///
     /// Fails when a read or the write fails.
-    pub fn prune_sidecars(&self, current: Epoch) -> Result<usize, ChainError> {
+    pub fn prune_sidecars(
+        &self,
+        current: Epoch,
+        margin_epochs: u64,
+    ) -> Result<SidecarPass, ChainError> {
         let from = self
             .read_with(
                 self.meta,
@@ -798,20 +930,27 @@ impl<P: Preset> ChainDatabase<P> {
         let mut batch = Batch::new();
         let mut cursor = from;
         let mut pruned = 0;
+        let mut walked = 0;
+        let mut complete = false;
         let lower = from.0.to_be_bytes();
         for entry in snapshot
             .range(self.canonical, lower.as_slice()..)?
             .take(PRUNE_SLOTS_PER_PASS)
         {
+            walked += 1;
             let (key, value) = entry?;
             let slot = Self::slot_key(&key)?;
             let epoch = slot.epoch::<P>();
             let data = self.config.fork_at(epoch).blob_data();
             // Blocks before Deneb have no sidecars, so the cursor just walks past them.
             if data != BlobData::None {
-                let window = self.config.blob_retention_epochs(data);
-                // Threshold: data of epoch e is served while e + window >= current epoch.
+                let window = self
+                    .config
+                    .blob_retention_epochs(data)
+                    .saturating_add(margin_epochs);
+                // Threshold: data of epoch e is kept while e + window + margin >= current epoch.
                 if epoch.0.saturating_add(window) >= current.0 {
+                    complete = true;
                     break;
                 }
                 let root = Root::decode(&value).map_err(|error| ChainError::Corrupt {
@@ -827,7 +966,11 @@ impl<P: Preset> ChainDatabase<P> {
             batch.put(self.meta, SIDECARS_PRUNED_KEY, &cursor.0.to_be_bytes())?;
             self.store.write(&batch)?;
         }
-        Ok(pruned)
+        Ok(SidecarPass {
+            blocks: pruned,
+            // A pass that ran out of finalized slots also caught up.
+            complete: complete || walked < PRUNE_SLOTS_PER_PASS,
+        })
     }
 
     /// Persists what a light client server settled, so a restart serves it at once.
@@ -1191,17 +1334,35 @@ mod tests {
                 .is_some()
         };
 
+        // A margin of one epoch keeps epoch 2 at epoch 4: 2 + 1 + 1 = 4.
+        assert_eq!(
+            database.prune_sidecars(Epoch(4), 1).unwrap(),
+            SidecarPass {
+                blocks: 0,
+                complete: true,
+            }
+        );
+
         // Threshold: at epoch 4, epoch 2 + 1 < 4 expires, epoch 3 + 1 = 4 is still served.
-        assert_eq!(database.prune_sidecars(Epoch(4)).unwrap(), 1);
+        let pass = |epoch, blocks| {
+            assert_eq!(
+                database.prune_sidecars(Epoch(epoch), 0).unwrap(),
+                SidecarPass {
+                    blocks,
+                    complete: true,
+                }
+            );
+        };
+        pass(4, 1);
         assert_eq!(
             [held(chain[0].1), held(chain[1].1), held(chain[2].1)],
             [true, false, true]
         );
 
         // A second pass at the same epoch resumes past slot 16 and prunes nothing.
-        assert_eq!(database.prune_sidecars(Epoch(4)).unwrap(), 0);
+        pass(4, 0);
         // One epoch later, slot 24 expires as well.
-        assert_eq!(database.prune_sidecars(Epoch(5)).unwrap(), 1);
+        pass(5, 1);
         assert!(!held(chain[2].1));
     }
 

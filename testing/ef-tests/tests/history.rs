@@ -21,10 +21,10 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_node::{
-    AnchorSource, Chain, ChainDatabase, ChainError, EngineConfig, HistorySegment, HistorySettings,
-    HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError, PortMappingSettings,
-    Reconstruction, SegmentContext, SegmentError, SnapshotInterval, StorageMode, WeakSubjectivity,
-    WeakSubjectivityError,
+    AnchorSource, Chain, ChainDatabase, ChainError, CheckpointServer, EngineConfig, HistorySegment,
+    HistorySettings, HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError,
+    PortMappingSettings, Reconstruction, SegmentContext, SegmentError, SnapshotInterval,
+    StorageMode, WeakSubjectivity, WeakSubjectivityError,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
@@ -636,6 +636,7 @@ async fn valid_engine(terminal: Hash32, secret_file: &Path) -> (MockEngine, Engi
     let config = EngineConfig {
         url: mock.url().to_owned(),
         jwt_secret: secret_file.to_path_buf(),
+        timeout_multiplier: 1,
     };
     (mock, config)
 }
@@ -706,6 +707,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             boot_nodes,
             custody_group_count: 4,
             discovery: None,
+            subscribe_all_subnets: false,
         };
 
         // Node A holds the whole chain from genesis, published over its API.
@@ -715,7 +717,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             now_ms,
             config.clone(),
             NodeConfig {
-                anchor: Some(AnchorSource::Genesis(genesis_path.clone())),
+                anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
                 http_address: Some(a_api),
                 engine: Some(engine_config),
                 network: Some(settings(a_p2p, Vec::new())),
@@ -737,12 +739,15 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             config.clone(),
             NodeConfig {
                 data_dir: Some(scratch.0.join("b")),
-                anchor: Some(AnchorSource::Url(format!("http://{a_api}"))),
+                anchor: Some(AnchorSource::Url {
+                    url: format!("http://{a_api}"),
+                    timeout: CheckpointServer::DEFAULT_TIMEOUT,
+                }),
                 http_address: Some(b_api),
                 network: Some(settings(free_address(), vec![boot.clone()])),
                 history: HistorySettings {
                     mode: StorageMode::Archive(SnapshotInterval::new(8).unwrap()),
-                    genesis: Some(genesis_path.clone()),
+                    genesis: Some(genesis_path.clone().into()),
                     ..HistorySettings::default()
                 },
                 ..NodeConfig::default()

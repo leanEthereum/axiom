@@ -86,6 +86,15 @@ impl CircuitBreaker {
     /// Three in a row therefore point to a shared cause, such as a relay outage.
     pub const DEFAULT_CONSECUTIVE_MISSED: u64 = 3;
 
+    /// Thresholds no chain can cross, for an operator who always wants builders asked.
+    ///
+    /// Every threshold is the largest count, and the breaker trips only strictly above one.
+    pub const NEVER: Self = Self {
+        max_consecutive_missed: u64::MAX,
+        max_missed_per_epoch: u64::MAX,
+        max_finality_delay: u64::MAX,
+    };
+
     /// The default thresholds of a preset.
     ///
     /// - A quarter of an epoch missed is far above a healthy rate.
@@ -165,6 +174,22 @@ mod tests {
             block_slots,
             finalized_epoch: Epoch(current / 32 - 2),
         }
+    }
+
+    #[test]
+    fn the_never_breaker_stays_open_on_a_dead_chain() {
+        // Fixture state: slot 1000, no block for a whole epoch, nothing finalized.
+        let dead = ChainHealth {
+            current_slot: Slot(1000),
+            block_slots: BTreeSet::new(),
+            finalized_epoch: Epoch(0),
+        };
+        assert!(CircuitBreaker::NEVER.check::<Mainnet>(&dead).is_ok());
+        assert!(
+            CircuitBreaker::for_preset::<Mainnet>()
+                .check::<Mainnet>(&dead)
+                .is_err()
+        );
     }
 
     /// The mainnet defaults: 3 in a row, 8 per epoch, 4 epochs of delay.

@@ -44,6 +44,11 @@ impl LightClientRecords {
         Self { table }
     }
 
+    /// The table, for maintenance that walks it whole.
+    pub(super) const fn table(self) -> Table {
+        self.table
+    }
+
     /// Stages what the server settled, from a period on, and drops what it pruned.
     ///
     /// # Arguments

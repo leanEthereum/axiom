@@ -14,9 +14,10 @@ use axiom_beacon_json::api::Genesis;
 use axiom_http::{Client, ClientConfig, Cors, Endpoint, HttpError};
 use axiom_json::Data;
 use axiom_node::SystemClock;
-use axiom_telemetry::{LogConfig, LogFormat, MetricsServer, Registry, RegistryError};
+use axiom_telemetry::{LogConfig, MetricsServer, Registry, RegistryError};
 use axiom_types::{
-    BlsPubkey, ChainConfig, ExecutionAddress, Mainnet, Minimal, Preset, Root, SlotClock, Version,
+    BlsPubkey, ChainConfig, ExecutionAddress, Gnosis, Mainnet, Minimal, Preset, Root, SlotClock,
+    Version,
 };
 use axiom_validator::{
     beacon::{ApiTopic, BeaconClient, BeaconError, BeaconNodes},
@@ -37,7 +38,7 @@ use tokio::{runtime::Builder, task, time};
 use tracing::{info, warn};
 
 use crate::{
-    cli::{Cli, CliError},
+    cli::{Cli, CliError, log::LogFlags},
     run::{PresetName, Run},
 };
 
@@ -49,7 +50,7 @@ USAGE:
     axiom validator [OPTIONS]
 
 OPTIONS:
-    --network <NAME>               mainnet or minimal [default: mainnet]
+    --network <NAME>               mainnet, sepolia, holesky, hoodi, gnosis, chiado, or minimal
     --config <FILE>                chain config YAML; its PRESET_BASE picks the preset
     --datadir <DIR>                keys, definitions, and slashing protection [default: validator]
     --beacon-node <URLS>           beacon API endpoints, comma-separated or repeated,
@@ -83,8 +84,8 @@ OPTIONS:
     --metrics-port <PORT>          metrics port [default: 5064]
     --metrics-allow-origin <ORIGIN>
                                    origin browsers may read metrics from, or *
-    --log <FILTER>                 log filter [default: info]
-    --log-format <FORMAT>          compact, pretty, or json [default: compact]
+    --log, --log-format, --logfile-*
+                                   logging, as for the beacon node; files go to DIR/logs
     -h, --help                     print this help
 ";
 
@@ -270,10 +271,8 @@ struct ValidatorFlags {
     metrics_port: Option<u16>,
     /// Metrics browser origin.
     metrics_origin: Option<Cors>,
-    /// Log filter.
-    log: Option<String>,
-    /// Log format.
-    log_format: Option<LogFormat>,
+    /// Logging, to the terminal and to files.
+    log: LogFlags,
 }
 
 impl Default for ValidatorFlags {
@@ -302,8 +301,7 @@ impl Default for ValidatorFlags {
             metrics_address: None,
             metrics_port: None,
             metrics_origin: None,
-            log: None,
-            log_format: None,
+            log: LogFlags::default(),
         }
     }
 }
@@ -362,9 +360,7 @@ impl ValidatorFlags {
             }
             "--remote-signer" => self.remote_signer = Some(value("--remote-signer")?),
             "--init-slashing-protection" => self.init_slashing_protection = true,
-            "--log" => self.log = Some(value("--log")?),
-            "--log-format" => self.log_format = Some(Cli::log_format(value("--log-format")?)?),
-            _ => return Ok(false),
+            _ => return self.log.read_with(flag, &mut *value),
         }
         Ok(true)
     }
@@ -492,10 +488,13 @@ impl ValidatorFlags {
                 self.metrics_port.unwrap_or(DEFAULT_METRICS_PORT),
             )
         });
+        let datadir = self.datadir.unwrap_or_else(|| PathBuf::from("validator"));
+        // Logs land beside the keys unless told otherwise.
+        let log = self.log.resolve(Some(datadir.join("logs")), "validator");
         Ok(ValidatorRun {
             preset,
             chain,
-            datadir: self.datadir.unwrap_or_else(|| PathBuf::from("validator")),
+            datadir,
             beacon_nodes,
             proposer_nodes: self.proposer_nodes,
             broadcast: self.broadcast.unwrap_or_else(ApiTopic::defaults),
@@ -512,10 +511,7 @@ impl ValidatorFlags {
             keymanager_origin: self.keymanager_origin,
             metrics,
             metrics_origin: self.metrics_origin,
-            log: LogConfig {
-                filter: self.log.unwrap_or_else(|| "info".to_owned()),
-                format: self.log_format.unwrap_or_default(),
-            },
+            log,
         })
     }
 
@@ -609,6 +605,7 @@ impl ValidatorRun {
             match self.preset {
                 PresetName::Mainnet => self.run::<Mainnet>().await,
                 PresetName::Minimal => self.run::<Minimal>().await,
+                PresetName::Gnosis => self.run::<Gnosis>().await,
             }
         })
     }

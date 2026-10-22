@@ -74,6 +74,10 @@ pub struct ProposerService<P: Preset> {
     relays: Option<RelaySet>,
     /// When the chain is too unhealthy to trust builders with a slot.
     breaker: CircuitBreaker,
+    /// Graffiti of blocks whose request names none.
+    graffiti: Bytes32,
+    /// Whether payloads are prepared for every slot, not only for prepared proposers.
+    always_prepare: bool,
 }
 
 impl<P: Preset> ProposerService<P> {
@@ -93,7 +97,38 @@ impl<P: Preset> ProposerService<P> {
             envelope: Mutex::new(None),
             relays,
             breaker: CircuitBreaker::for_preset::<P>(),
+            graffiti: Bytes32::default(),
+            always_prepare: false,
         }
+    }
+
+    /// Closes the builder path under other thresholds than the preset's defaults.
+    #[must_use]
+    pub const fn with_breaker(mut self, breaker: CircuitBreaker) -> Self {
+        self.breaker = breaker;
+        self
+    }
+
+    /// Writes this graffiti into blocks whose request names none.
+    #[must_use]
+    pub const fn with_graffiti(mut self, graffiti: Bytes32) -> Self {
+        self.graffiti = graffiti;
+        self
+    }
+
+    /// Prepares a payload for every slot, paying the default fee recipient when nobody prepared.
+    ///
+    /// Builders and relays use it to watch every slot's payload attributes.
+    #[must_use]
+    pub const fn preparing_always(mut self) -> Self {
+        self.always_prepare = true;
+        self
+    }
+
+    /// Graffiti of blocks whose request names none.
+    #[must_use]
+    pub const fn graffiti(&self) -> Bytes32 {
+        self.graffiti
     }
 
     /// Records builder registrations, and forwards them to every builder.
@@ -155,7 +190,7 @@ impl<P: Preset> ProposerService<P> {
         let Ok(Ok(context)) = gathered else {
             return;
         };
-        if !self.preparations().is_prepared(context.proposer) {
+        if !self.always_prepare && !self.preparations().is_prepared(context.proposer) {
             return;
         }
         let Some((head, request)) = context.execution.clone() else {
