@@ -2,8 +2,10 @@
 
 mod behaviour;
 mod chain;
+mod monitoring;
 mod peers;
 mod proposer;
+mod reorg;
 mod services;
 mod slasher;
 mod storage;
@@ -11,8 +13,10 @@ mod storage;
 use axiom_node::NodeConfig;
 use behaviour::{BEHAVIOUR_USAGE, BehaviourFlags};
 use chain::{CHAIN_USAGE, ChainFlags};
+use monitoring::{MONITORING_USAGE, MonitoringFlags};
 use peers::{PEER_USAGE, PeerFlags};
 use proposer::{PROPOSER_USAGE, ProposerFlags};
+use reorg::{REORG_USAGE, ReorgFlags};
 use services::{SERVICE_USAGE, ServiceFlags};
 use slasher::{SLASHER_USAGE, SlasherFlags};
 pub(crate) use storage::Purge;
@@ -29,13 +33,15 @@ use crate::{
 };
 
 /// The beacon node's flags, in the order the help text lists them.
-pub(crate) const NODE_USAGE: [&str; 8] = [
+pub(crate) const NODE_USAGE: [&str; 10] = [
     CHAIN_USAGE,
     STORAGE_USAGE,
     SERVICE_USAGE,
     PEER_USAGE,
     PROPOSER_USAGE,
+    REORG_USAGE,
     SLASHER_USAGE,
+    MONITORING_USAGE,
     BEHAVIOUR_USAGE,
     LOG_USAGE,
 ];
@@ -53,6 +59,10 @@ pub(crate) struct NodeFlags {
     peers: PeerFlags,
     /// Block production.
     proposer: ProposerFlags,
+    /// Proposer reorgs of late heads.
+    reorg: ReorgFlags,
+    /// The validator monitor and the client stats push.
+    monitoring: MonitoringFlags,
     /// The slasher.
     slasher: SlasherFlags,
     /// The chain thread and startup output.
@@ -83,6 +93,8 @@ impl NodeFlags {
                 || flags.services.read(&flag, &mut words)?
                 || flags.peers.read(&flag, &mut words)?
                 || flags.proposer.read(&flag, &mut words)?
+                || flags.reorg.read(&flag, &mut words)?
+                || flags.monitoring.read(&flag, &mut words)?
                 || flags.slasher.read(&flag, &mut words)?
                 || flags.behaviour.read(&flag, &mut words)?
                 || flags.log.read(&flag, &mut words)?;
@@ -98,7 +110,10 @@ impl NodeFlags {
         let chain = self.chain.resolve()?;
         let storage = self.storage.resolve();
         let services = self.services.resolve()?;
-        let proposer = self.proposer.resolve(services.engine.is_some())?;
+        let mut proposer = self.proposer.resolve(services.engine.is_some())?;
+        let (reorgs, deprecated) = self.reorg.resolve()?;
+        proposer.reorgs = reorgs;
+        let (monitor, client_stats) = self.monitoring.resolve()?;
         let (slasher, slasher_setup) = self.slasher.resolve()?;
         let network = self
             .peers
@@ -124,7 +139,10 @@ impl NodeFlags {
                 http_allow_origin: services.http_allow_origin,
                 metrics_allow_origin: services.metrics_allow_origin,
                 shutdown_after_sync: self.behaviour.shutdown_after_sync,
+                monitor,
+                client_stats,
             },
+            deprecated,
             chain: chain.network.chain,
             purge: storage.purge,
             dumps: Dumps {
