@@ -257,6 +257,18 @@ impl ForkName {
         }
     }
 
+    /// Whether the off-protocol builder API sells the fork's payloads as blinded headers.
+    ///
+    /// The API starts with the merge and ends where Gloas brings builders into the protocol.
+    /// See the builder specs, and EIP-7732 for the in-protocol replacement.
+    #[must_use]
+    pub const fn has_builder_api(self) -> bool {
+        match self {
+            Self::Bellatrix | Self::Capella | Self::Deneb | Self::Electra | Self::Fulu => true,
+            Self::Phase0 | Self::Altair | Self::Gloas => false,
+        }
+    }
+
     /// Whether fork choice checks a merge block against the terminal proof-of-work block.
     ///
     /// Only Bellatrix checks it: Capella drops the check, since the merge is long done.
@@ -383,5 +395,15 @@ mod tests {
             .map(ForkName::max_attester_slashings::<Minimal>)
             .to_vec();
         assert_eq!(slashings, [2, 2, 2, 2, 2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn the_builder_api_spans_the_merge_to_fulu() {
+        // Bellatrix to Fulu sell payloads off-protocol; Gloas bids in the protocol.
+        let builder_api: Vec<bool> = ForkName::ALL.map(ForkName::has_builder_api).to_vec();
+        assert_eq!(
+            builder_api,
+            [false, false, true, true, true, true, true, false]
+        );
     }
 }
