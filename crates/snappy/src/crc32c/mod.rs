@@ -1,15 +1,13 @@
 //! CRC-32C, the Castagnoli checksum that guards every framed Snappy chunk.
 
 #[cfg(target_arch = "aarch64")]
-mod arm;
-mod table;
+mod aarch64_crc;
+mod backend;
+mod portable;
 #[cfg(target_arch = "x86_64")]
-mod x86;
+mod x86_64_sse42;
 
-#[cfg(target_arch = "aarch64")]
-use std::arch::is_aarch64_feature_detected;
-#[cfg(target_arch = "x86_64")]
-use std::arch::is_x86_feature_detected;
+use backend::Backend;
 
 /// A running CRC-32C over bytes fed in any number of pieces.
 ///
@@ -22,18 +20,29 @@ use std::arch::is_x86_feature_detected;
 ///
 /// On x86_64 with SSE4.2 and on aarch64 with the CRC extension, a hardware instruction does the work.
 /// Elsewhere a slicing-by-8 table path handles 8 bytes per step.
-/// The choice happens at run time, and tests pin every path to the same values.
+/// The choice happens once per checksum, at run time.
+/// Tests pin every path to the same values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Crc32c {
     /// Raw state: the inverted CRC of the bytes so far.
     state: u32,
+    /// The implementation chosen for this CPU.
+    backend: Backend,
 }
 
 impl Crc32c {
-    /// A checksum over no bytes yet.
+    /// A checksum over no bytes yet, on the fastest path the CPU supports.
     #[must_use]
-    pub const fn new() -> Self {
-        Self { state: u32::MAX }
+    pub fn new() -> Self {
+        Self::with_backend(Backend::detect())
+    }
+
+    /// A checksum over no bytes yet, on a chosen path.
+    const fn with_backend(backend: Backend) -> Self {
+        Self {
+            state: u32::MAX,
+            backend,
+        }
     }
 
     /// The checksum of one byte string.
@@ -61,32 +70,9 @@ impl Crc32c {
         crc.rotate_right(15).wrapping_add(0xa282_ead8)
     }
 
-    /// Feeds more bytes, with the fastest path the CPU supports.
-    #[cfg(target_arch = "x86_64")]
+    /// Feeds more bytes.
     pub fn update(&mut self, bytes: &[u8]) {
-        self.state = if is_x86_feature_detected!("sse4.2") {
-            // SAFETY: the CPU reports SSE4.2, the only feature the function enables.
-            unsafe { x86::update(self.state, bytes) }
-        } else {
-            table::update(self.state, bytes)
-        };
-    }
-
-    /// Feeds more bytes, with the fastest path the CPU supports.
-    #[cfg(target_arch = "aarch64")]
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.state = if is_aarch64_feature_detected!("crc") {
-            // SAFETY: the CPU reports the CRC extension, the only feature the function enables.
-            unsafe { arm::update(self.state, bytes) }
-        } else {
-            table::update(self.state, bytes)
-        };
-    }
-
-    /// Feeds more bytes, with the portable table path.
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    pub fn update(&mut self, bytes: &[u8]) {
-        self.state = table::update(self.state, bytes);
+        self.state = self.backend.update(self.state, bytes);
     }
 
     /// The checksum of all bytes fed so far.
@@ -110,43 +96,41 @@ mod tests {
 
     use super::*;
 
-    /// The hardware path's result, when this CPU has one.
-    #[cfg(target_arch = "x86_64")]
-    fn hardware_update(crc: u32, bytes: &[u8]) -> Option<u32> {
-        // SAFETY: the call only happens once the CPU reports SSE4.2.
-        is_x86_feature_detected!("sse4.2").then(|| unsafe { x86::update(crc, bytes) })
+    /// The checksum of the bytes on one path.
+    fn checksum_on(backend: Backend, bytes: &[u8]) -> u32 {
+        let mut crc = Crc32c::with_backend(backend);
+        crc.update(bytes);
+        crc.finish()
     }
 
-    /// The hardware path's result, when this CPU has one.
-    #[cfg(target_arch = "aarch64")]
-    fn hardware_update(crc: u32, bytes: &[u8]) -> Option<u32> {
-        // SAFETY: the call only happens once the CPU reports the CRC extension.
-        is_aarch64_feature_detected!("crc").then(|| unsafe { arm::update(crc, bytes) })
-    }
-
-    /// No hardware path on other architectures.
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    fn hardware_update(_crc: u32, _bytes: &[u8]) -> Option<u32> {
-        None
+    /// Random bytes, in lengths around the 8-byte step of every path, then long ones.
+    fn data() -> impl Strategy<Value = Vec<u8>> {
+        let lengths = prop_oneof![
+            prop::sample::select(vec![0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65]),
+            0_usize..5000,
+        ];
+        lengths.prop_flat_map(|len| prop::collection::vec(any::<u8>(), len))
     }
 
     #[test]
     fn check_value_of_the_standard_string() {
-        // The catalogue check value of CRC-32C over the ASCII digits 1 to 9.
-        assert_eq!(Crc32c::checksum(b"123456789"), 0xe306_9283);
+        // The catalogue check value of CRC-32C over the ASCII digits 1 to 9, on every path.
+        for backend in Backend::supported() {
+            assert_eq!(checksum_on(backend, b"123456789"), 0xe306_9283);
+        }
     }
 
     #[test]
     fn rfc_3720_vectors() {
-        // iSCSI test patterns, RFC 3720 appendix B.4: 32 bytes each.
-        assert_eq!(Crc32c::checksum(&[0; 32]), 0x8a91_36aa);
-        assert_eq!(Crc32c::checksum(&[0xff; 32]), 0x62a8_ab43);
-
+        // iSCSI test patterns, RFC 3720 appendix B.4: 32 bytes each, on every path.
         let ascending: Vec<u8> = (0..32).collect();
-        assert_eq!(Crc32c::checksum(&ascending), 0x46dd_794e);
-
         let descending: Vec<u8> = (0..32).rev().collect();
-        assert_eq!(Crc32c::checksum(&descending), 0x113f_db5c);
+        for backend in Backend::supported() {
+            assert_eq!(checksum_on(backend, &[0; 32]), 0x8a91_36aa);
+            assert_eq!(checksum_on(backend, &[0xff; 32]), 0x62a8_ab43);
+            assert_eq!(checksum_on(backend, &ascending), 0x46dd_794e);
+            assert_eq!(checksum_on(backend, &descending), 0x113f_db5c);
+        }
     }
 
     #[test]
@@ -163,19 +147,20 @@ mod tests {
             state in any::<u32>(),
         ) {
             // Slicing-by-8 must equal the one-bit-at-a-time division from any state.
-            prop_assert_eq!(table::update(state, &bytes), table::update_bitwise(state, &bytes));
+            prop_assert_eq!(portable::update(state, &bytes), portable::update_bitwise(state, &bytes));
         }
 
         #[test]
-        fn hardware_path_matches_the_table_path(
-            bytes in prop::collection::vec(any::<u8>(), 0..2000),
+        fn every_path_matches_the_portable_path(
+            data in data(),
             skew in 0_usize..8,
             state in any::<u32>(),
         ) {
-            // Every length and every start alignment: the hardware path equals the reference.
-            let bytes = &bytes[skew.min(bytes.len())..];
-            if let Some(fast) = hardware_update(state, bytes) {
-                prop_assert_eq!(fast, table::update(state, bytes));
+            // Every length class and every start alignment: each path equals the reference.
+            let bytes = &data[skew.min(data.len())..];
+            let reference = portable::update(state, bytes);
+            for backend in Backend::supported() {
+                prop_assert_eq!(backend.update(state, bytes), reference);
             }
         }
 

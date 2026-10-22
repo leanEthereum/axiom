@@ -222,7 +222,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::aes::state::tests::gf_mul;
+    use crate::aes::cipher::portable::state::tests::gf_mul;
 
     /// The S-box from its definition: inversion, then the affine map of FIPS 197, section 5.1.1.
     fn sbox_reference(byte: u8) -> u8 {

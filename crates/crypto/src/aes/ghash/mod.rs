@@ -1,12 +1,18 @@
 //! GHASH, the polynomial hash that authenticates GCM, per NIST SP 800-38D, section 6.4.
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64_pmull;
+mod backend;
+mod gf128;
 #[cfg(target_arch = "x86_64")]
-use std::arch::is_x86_feature_detected;
+mod x86_64_pclmul;
+
 use std::slice;
 
-#[cfg(target_arch = "x86_64")]
-use super::clmul::ClmulGhash;
-use super::{BLOCK_LEN, gf128::Gf128};
+use backend::Backend;
+use gf128::Gf128;
+
+use super::BLOCK_LEN;
 use crate::ct::wipe;
 
 /// A running GHASH under one hash key H.
@@ -22,19 +28,19 @@ pub(super) struct Ghash {
     powers: [Gf128; 4],
     /// The running value Y.
     acc: Gf128,
-    /// Whether the CPU offers PCLMULQDQ and SSSE3.
-    hardware: bool,
+    /// The implementation chosen for this CPU, once, at construction.
+    backend: Backend,
 }
 
 impl Ghash {
     /// A hash keyed by H = AES_K(0^128), on the fastest path the CPU supports.
     pub(super) fn new(h: &[u8; BLOCK_LEN]) -> Self {
-        Self::with_path(h, Self::hardware_available())
+        Self::with_backend(h, Backend::detect())
     }
 
     /// A hash keyed by H on a chosen path.
-    pub(super) fn with_path(h: &[u8; BLOCK_LEN], hardware: bool) -> Self {
-        // Four powers let the hardware path fold four blocks per reduction.
+    fn with_backend(h: &[u8; BLOCK_LEN], backend: Backend) -> Self {
+        // Four powers let the hardware paths fold four blocks per reduction.
         let h = Gf128::from_block(h);
         let h2 = h * h;
         let h3 = h2 * h;
@@ -42,20 +48,8 @@ impl Ghash {
         Self {
             powers: [h, h2, h3, h4],
             acc: Gf128::ZERO,
-            hardware,
+            backend,
         }
-    }
-
-    /// Whether this CPU runs the hardware path.
-    #[cfg(target_arch = "x86_64")]
-    fn hardware_available() -> bool {
-        is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("ssse3")
-    }
-
-    /// Whether this CPU runs the hardware path.
-    #[cfg(not(target_arch = "x86_64"))]
-    const fn hardware_available() -> bool {
-        false
     }
 
     /// Absorbs the data, then zeros up to the next block boundary.
@@ -75,25 +69,7 @@ impl Ghash {
 
     /// Absorbs whole blocks.
     pub(super) fn update_blocks(&mut self, blocks: &[[u8; BLOCK_LEN]]) {
-        #[cfg(target_arch = "x86_64")]
-        if self.hardware {
-            // Both paths hold values in the natural bit order, so they share state.
-            let powers = self.powers.map(Gf128::to_bits);
-            // SAFETY: the flag is set only when the CPU reports PCLMULQDQ and SSSE3.
-            // Those are the features the function enables.
-            let acc = unsafe { ClmulGhash::update(&powers, self.acc.to_bits(), blocks) };
-            self.acc = Gf128::from_bits(acc);
-            return;
-        }
-        self.update_portable(blocks);
-    }
-
-    /// Absorbs whole blocks one at a time, the reference for the hardware path.
-    fn update_portable(&mut self, blocks: &[[u8; BLOCK_LEN]]) {
-        // Horner's rule, one block at a time.
-        for block in blocks {
-            self.acc = (self.acc ^ Gf128::from_block(block)) * self.powers[0];
-        }
+        self.acc = self.backend.absorb(&self.powers, self.acc, blocks);
     }
 
     /// The hash value Y, back in GCM's byte order.
@@ -116,6 +92,15 @@ mod tests {
 
     use super::*;
 
+    /// Random bytes, in lengths around one block and the 4-block aggregation, then long ones.
+    fn data() -> impl Strategy<Value = Vec<u8>> {
+        let lengths = prop_oneof![
+            prop::sample::select(vec![0, 1, 15, 16, 17, 63, 64, 65, 127, 128, 129]),
+            0_usize..2000,
+        ];
+        lengths.prop_flat_map(|len| prop::collection::vec(any::<u8>(), len))
+    }
+
     #[test]
     fn sp_800_38d_ghash_example() {
         // GCM test case 2 of McGrew and Viega: one ciphertext block, then the lengths.
@@ -123,8 +108,8 @@ mod tests {
         let h = 0x66e9_4bd4_ef8a_2c3b_884c_fa59_ca34_2b2e_u128.to_be_bytes();
         let ciphertext = 0x0388_dace_60b6_a392_f328_c2b9_71b2_fe78_u128.to_be_bytes();
         let lengths = 0x0000_0000_0000_0000_0000_0000_0000_0080_u128.to_be_bytes();
-        for hardware in [false, Ghash::hardware_available()] {
-            let mut ghash = Ghash::with_path(&h, hardware);
+        for backend in Backend::supported() {
+            let mut ghash = Ghash::with_backend(&h, backend);
             ghash.update_blocks(&[ciphertext, lengths]);
             assert_eq!(
                 ghash.finalize(),
@@ -135,20 +120,22 @@ mod tests {
 
     proptest! {
         #[test]
-        fn hardware_path_matches_the_portable_path(
+        fn every_path_matches_the_portable_path(
             h in any::<[u8; 16]>(),
-            data in prop::collection::vec(any::<u8>(), 0..300),
+            data in data(),
             split in any::<prop::sample::Index>(),
         ) {
-            // Two uneven calls exercise the 4-block aggregation and its remainder.
+            // Two uneven calls exercise the 4-block aggregation, its remainder, and padding.
             let at = split.index(data.len() + 1);
-            let mut fast = Ghash::new(&h);
-            fast.update_padded(&data[..at]);
-            fast.update_padded(&data[at..]);
-            let mut reference = Ghash::with_path(&h, false);
+            let mut reference = Ghash::with_backend(&h, Backend::portable());
             reference.update_padded(&data[..at]);
             reference.update_padded(&data[at..]);
-            prop_assert_eq!(fast.finalize(), reference.finalize());
+            for backend in Backend::supported() {
+                let mut fast = Ghash::with_backend(&h, backend);
+                fast.update_padded(&data[..at]);
+                fast.update_padded(&data[at..]);
+                prop_assert_eq!(fast.finalize(), reference.finalize());
+            }
         }
     }
 }

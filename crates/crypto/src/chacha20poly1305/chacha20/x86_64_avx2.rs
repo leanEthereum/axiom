@@ -1,4 +1,12 @@
 //! Eight ChaCha20 blocks at once in AVX2 registers.
+//!
+//! # Overview
+//!
+//! Each 32-bit lane runs the scalar block function of RFC 8439 on its own block.
+//! Lane-wise addition, XOR and rotation are the scalar operations, so every lane equals the reference.
+//!
+//! Additions, XORs, shifts and shuffles take the same time for every value.
+//! No branch or address depends on the key or the keystream.
 
 use std::arch::x86_64::{
     __m256i, _mm256_add_epi32, _mm256_loadu_si256, _mm256_or_si256, _mm256_permute2x128_si256,
@@ -7,20 +15,20 @@ use std::arch::x86_64::{
     _mm256_unpacklo_epi32, _mm256_unpacklo_epi64, _mm256_xor_si256,
 };
 
-use super::chacha20::BLOCK_LEN;
+use super::BLOCK_LEN;
 
 /// Blocks per call: one per 32-bit lane of a 256-bit register.
-pub(crate) const BLOCKS: usize = 8;
+pub(super) const BLOCKS: usize = 8;
 
 /// Eight ChaCha20 states side by side: row i holds word i of every block, one block per lane.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct EightBlocks([__m256i; 16]);
+pub(super) struct EightBlocks([__m256i; 16]);
 
 impl EightBlocks {
     /// XORs eight consecutive keystream blocks into 512 bytes of data.
     ///
     /// The counter of the given state is the first block's.
-    /// The caller advances it by eight afterwards.
+    /// The caller advances it by eight afterwards, and guarantees the eight counters do not wrap.
     ///
     /// # Algorithm
     ///
@@ -35,7 +43,7 @@ impl EightBlocks {
     ///
     /// A final 8 x 8 transpose turns each column back into one block's bytes.
     #[target_feature(enable = "avx2")]
-    pub(crate) fn xor_keystream(state: &[u32; 16], data: &mut [u8; BLOCKS * BLOCK_LEN]) {
+    pub(super) fn xor_keystream(state: &[u32; 16], data: &mut [u8; BLOCKS * BLOCK_LEN]) {
         // Phase 1: eight copies of the state, each lane with its own counter.
         let initial = Self::broadcast(state);
 

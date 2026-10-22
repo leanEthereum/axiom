@@ -1,4 +1,4 @@
-//! Portable CRC-32C by slicing-by-8 tables, the reference every other path must match.
+//! Portable CRC-32C by slicing-by-8 tables, the fallback and the oracle of every other path.
 
 /// The Castagnoli polynomial 0x1EDC6F41, bit-reversed for least-significant-bit-first order.
 const POLYNOMIAL: u32 = 0x82f6_3b78;
@@ -53,7 +53,10 @@ const fn build_tables() -> [[u32; 256]; 8] {
 /// Advances a raw CRC state over the bytes.
 ///
 /// The state is the inverted CRC, as the hardware instructions use it.
-pub(crate) fn update(mut crc: u32, bytes: &[u8]) -> u32 {
+///
+/// The table indices depend on the data.
+/// That is sound only because checksummed bytes are public: frames on the wire and records on disk.
+pub(super) fn update(mut crc: u32, bytes: &[u8]) -> u32 {
     let (blocks, tail) = bytes.as_chunks::<8>();
     for block in blocks {
         // Fold the state into the first four bytes, then look up all eight at once.
@@ -87,7 +90,7 @@ pub(crate) fn update(mut crc: u32, bytes: &[u8]) -> u32 {
 ///
 /// Tests pin the table path to this one.
 #[cfg(test)]
-pub(crate) fn update_bitwise(mut crc: u32, bytes: &[u8]) -> u32 {
+pub(super) fn update_bitwise(mut crc: u32, bytes: &[u8]) -> u32 {
     for &byte in bytes {
         crc ^= u32::from(byte);
         for _ in 0..8 {

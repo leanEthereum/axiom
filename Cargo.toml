@@ -22,6 +22,8 @@ unused_must_use = "deny"
 unused_qualifications = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 trivial_numeric_casts = "warn"
+# Set through RUSTFLAGS to pin every crypto and checksum kernel to its portable reference.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(axiom_portable)'] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

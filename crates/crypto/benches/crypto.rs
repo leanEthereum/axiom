@@ -10,7 +10,7 @@ use std::hint::black_box;
 
 use axiom_crypto::{
     aes::{Aes128Ctr, Aes128Gcm},
-    chacha20poly1305::ChaCha20Poly1305,
+    chacha20poly1305::{ChaCha20, ChaCha20Poly1305},
     keccak::Keccak256,
     secp256k1::SecretKey,
     x25519,
@@ -77,6 +77,9 @@ fn symmetric_throughput(c: &mut Criterion) {
         // Each closure works in place, so no allocation enters the measurement.
         group.bench_function(format!("chacha20-poly1305 seal {size} B"), |b| {
             b.iter(|| chacha.seal_in_place_detached(&[1; 12], b"aad", black_box(&mut buffer)));
+        });
+        group.bench_function(format!("chacha20 keystream {size} B"), |b| {
+            b.iter(|| ChaCha20::new(&[7; 32], &[1; 12], 1).apply_keystream(black_box(&mut buffer)));
         });
         group.bench_function(format!("aes-128-gcm seal {size} B"), |b| {
             b.iter(|| gcm.seal_in_place_detached(&[1; 12], b"aad", black_box(&mut buffer)));
