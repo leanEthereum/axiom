@@ -189,7 +189,6 @@ impl<P: Preset> Node<P> {
         // Telemetry comes first, so every later component records into the same registry.
         let registry = Registry::new();
         let metrics = NodeMetrics::register(&registry).map_err(NodeError::Metrics)?;
-        let nat_metrics = NatMetrics::register(&registry).map_err(NodeError::Metrics)?;
         if let Err(error) = registry.register_process_metrics() {
             warn!(%error, "process metrics unavailable");
         }
@@ -236,7 +235,7 @@ impl<P: Preset> Node<P> {
                     execution: Arc::clone(&execution),
                     clock: Arc::clone(&clock),
                     metrics,
-                    nat: nat_metrics,
+                    nat: NatMetrics::register(&registry).map_err(NodeError::Metrics)?,
                 };
                 let (key, identity) = identity;
                 // The network's start holds every service's state; boxing keeps this future small.

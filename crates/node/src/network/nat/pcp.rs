@@ -91,7 +91,7 @@ impl PcpMapRequest {
         }
 
         // Phase 2: framing, then the header.
-        if bytes.len() < HEADER_LEN || bytes.len() > MAX_LEN || bytes.len() % 4 != 0 {
+        if bytes.len() < HEADER_LEN || bytes.len() > MAX_LEN || !bytes.len().is_multiple_of(4) {
             return Err(CodecError::BadLength {
                 length: bytes.len(),
             });
@@ -149,7 +149,7 @@ impl PcpMapRequest {
     }
 
     /// The big-endian 32-bit number at an offset the caller has bounds-checked.
-    fn u32_at(bytes: &[u8], offset: usize) -> u32 {
+    const fn u32_at(bytes: &[u8], offset: usize) -> u32 {
         u32::from_be_bytes([
             bytes[offset],
             bytes[offset + 1],

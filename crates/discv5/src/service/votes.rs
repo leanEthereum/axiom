@@ -50,7 +50,7 @@ impl Default for VoteConfig {
             threshold: 10,
             // Timing: twenty minutes span about 120 liveness checks at one every 10 s.
             // That is far more than the threshold needs, yet a stale address fades within the hour.
-            lifetime: Duration::from_secs(20 * 60),
+            lifetime: Duration::from_mins(20),
             // A routing table holds at most 256 buckets of 16; votes come only from pinged peers.
             capacity: 512,
         }
@@ -92,8 +92,9 @@ impl VoterNetwork {
             }
             IpAddr::V6(ip) if Self::is_local_v6(ip) => Self::Local(ip.into()),
             IpAddr::V6(ip) => {
-                let [a, b, c, d, e, f, ..] = ip.octets();
-                Self::Ipv6([a, b, c, d, e, f])
+                let mut prefix = [0; 6];
+                prefix.copy_from_slice(&ip.octets()[..6]);
+                Self::Ipv6(prefix)
             }
         }
     }
@@ -101,7 +102,7 @@ impl VoterNetwork {
     /// Whether an IPv6 address is loopback, unique local, or link-local.
     ///
     /// Unique local is fc00::/7, per RFC 4193; link-local is fe80::/10, per RFC 4291.
-    fn is_local_v6(ip: Ipv6Addr) -> bool {
+    const fn is_local_v6(ip: Ipv6Addr) -> bool {
         let first = ip.segments()[0];
         ip.is_loopback() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
     }

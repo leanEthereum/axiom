@@ -74,7 +74,7 @@ impl ExternalAddress {
     }
 
     /// Takes the gateway's latest report, or its loss.
-    pub(crate) fn on_mapping(&mut self, mapped: Option<MappedEndpoint>) {
+    pub(crate) const fn on_mapping(&mut self, mapped: Option<MappedEndpoint>) {
         self.mapped = mapped;
     }
 
@@ -87,7 +87,7 @@ impl ExternalAddress {
         let ip = self
             .voted
             .map(|voted| *voted.ip())
-            .or(mapped.map(|m| m.ip))?;
+            .or_else(|| mapped.map(|m| m.ip))?;
         // The gateway's ports hold only on the gateway's own address.
         let mapped = mapped.filter(|mapped| mapped.ip == ip);
         Some(AdvertisedEndpoint {
@@ -95,7 +95,7 @@ impl ExternalAddress {
             udp: self
                 .voted
                 .map(|voted| voted.port())
-                .or(mapped.and_then(|m| m.udp)),
+                .or_else(|| mapped.and_then(|m| m.udp)),
             tcp: mapped.and_then(|m| m.tcp),
             quic: mapped.and_then(|m| m.quic),
         })
@@ -105,7 +105,7 @@ impl ExternalAddress {
     ///
     /// Private, shared, loopback, link-local, documentation, and reserved ranges cannot.
     /// See RFC 6890 for the special-purpose registry these come from.
-    fn is_public(ip: Ipv4Addr) -> bool {
+    const fn is_public(ip: Ipv4Addr) -> bool {
         let [a, b, c, _] = ip.octets();
         // 100.64.0.0/10 is the carrier-grade NAT range, per RFC 6598.
         let shared = a == 100 && b & 0xc0 == 64;
@@ -256,7 +256,7 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 1),
             Ipv4Addr::new(100, 64, 0, 1),
             Ipv4Addr::new(100, 127, 255, 254),
-            Ipv4Addr::new(127, 0, 0, 1),
+            Ipv4Addr::LOCALHOST,
             Ipv4Addr::new(169, 254, 1, 1),
             Ipv4Addr::new(192, 0, 0, 8),
             Ipv4Addr::new(192, 0, 2, 1),

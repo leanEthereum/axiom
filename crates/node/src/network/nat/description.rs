@@ -125,12 +125,12 @@ mod tests {
     #[test]
     fn a_base_url_and_version_two_take_precedence() {
         // An IGD 2.0 device with a URLBase and a relative path without a leading slash.
-        let document = r#"<root><URLBase>http://10.0.0.1:49152</URLBase><device><serviceList>
+        let document = r"<root><URLBase>http://10.0.0.1:49152</URLBase><device><serviceList>
             <service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>
               <controlURL>/v1</controlURL></service>
             <service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>
               <controlURL>upnp/control/WANIPConn2</controlURL></service>
-            </serviceList></device></root>"#;
+            </serviceList></device></root>";
         assert_eq!(
             ControlPoint::from_description(document, "http://10.0.0.1:1900/igd.xml"),
             Some(ControlPoint {
@@ -142,9 +142,9 @@ mod tests {
 
     #[test]
     fn an_absolute_control_url_is_kept() {
-        let document = r#"<root><service>
+        let document = r"<root><service>
             <serviceType>urn:schemas-upnp-org:service:WANPPPConnection:1</serviceType>
-            <controlURL>http://192.168.0.1:80/ppp</controlURL></service></root>"#;
+            <controlURL>http://192.168.0.1:80/ppp</controlURL></service></root>";
         assert_eq!(
             ControlPoint::from_description(document, "http://192.168.0.1:5431/desc.xml"),
             Some(ControlPoint {
@@ -157,9 +157,9 @@ mod tests {
     #[test]
     fn a_device_without_forwarding_has_no_control_point() {
         // A media server lists services, but none that forwards ports.
-        let document = r#"<root><service>
+        let document = r"<root><service>
             <serviceType>urn:schemas-upnp-org:service:ContentDirectory:1</serviceType>
-            <controlURL>/cd</controlURL></service></root>"#;
+            <controlURL>/cd</controlURL></service></root>";
         assert_eq!(
             ControlPoint::from_description(document, "http://192.168.1.5/desc.xml"),
             None

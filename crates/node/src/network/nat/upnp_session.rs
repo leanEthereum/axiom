@@ -107,7 +107,7 @@ impl UpnpSession {
             match self.invoke(action).await {
                 Ok(_) => debug!(listener = %forwarding.listener, "UPnP mapping deleted"),
                 Err(error) => {
-                    debug!(%error, listener = %forwarding.listener, "UPnP deletion failed")
+                    debug!(%error, listener = %forwarding.listener, "UPnP deletion failed");
                 }
             }
         }
@@ -194,7 +194,7 @@ impl UpnpSession {
                     lifetime: self.lease,
                 }),
                 Err(error) => {
-                    warn!(%error, listener = %listener, port = internal, "UPnP mapping refused")
+                    warn!(%error, listener = %listener, port = internal, "UPnP mapping refused");
                 }
             }
         }
