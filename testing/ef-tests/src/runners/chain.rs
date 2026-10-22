@@ -11,8 +11,10 @@ use std::{
 
 use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
+use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, Hash32, Preset, SignedBeaconBlock,
+    Attestation, AttesterSlashing, BeaconBlock, BeaconState, CommitteeIndex, Hash32, Preset,
+    SignedBeaconBlock, SingleAttestation,
 };
 use axiom_yaml::Yaml;
 
@@ -87,6 +89,38 @@ impl<P: Preset> ChainReplay<P> {
         Ok(())
     }
 
+    /// The one validator's vote an attestation carries, if it has exactly one participant.
+    ///
+    /// This is the inverse of the conversion the chain applies to gossiped single votes.
+    fn single(chain: &Chain<P>, attestation: &Attestation<P>) -> Option<SingleAttestation> {
+        let mut committees = attestation
+            .committee_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, bit)| *bit);
+        let (committee_index, _) = committees.next().filter(|_| committees.next().is_none())?;
+        let mut bits = attestation
+            .aggregation_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, bit)| *bit);
+        let (position, _) = bits.next().filter(|_| bits.next().is_none())?;
+
+        // The attester sits at that position in the committee, as the head state shuffles it.
+        let state = chain.state(&chain.head().root)?;
+        let shuffling = EpochCommittees::compute(state.beacon(), attestation.data.target.epoch);
+        let committee_index = CommitteeIndex(committee_index as u64);
+        let attester_index = *shuffling
+            .committee(attestation.data.slot, committee_index)?
+            .get(position)?;
+        Some(SingleAttestation {
+            committee_index,
+            attester_index,
+            data: attestation.data.clone(),
+            signature: attestation.signature,
+        })
+    }
+
     /// Runs every step, returning the chain for the restart check.
     fn replay(case: &Case, mut chain: Chain<P>) -> Result<Chain<P>, Failure> {
         let mut payload_statuses: HashMap<Hash32, PayloadStatus> = HashMap::new();
@@ -108,9 +142,12 @@ impl<P: Preset> ChainReplay<P> {
                     .unwrap_or(PayloadStatus::Valid);
                 chain.import_block(&block, availability, payload).is_ok()
             } else if let Some(name) = step.get("attestation").and_then(Yaml::as_str) {
-                chain
-                    .on_attestation(&case.ssz::<Attestation<P>>(name)?)
-                    .is_ok()
+                let attestation = case.ssz::<Attestation<P>>(name)?;
+                // A valid vote with one participant takes the gossip path for single votes.
+                match Self::single(&chain, &attestation).filter(|_| expected_valid) {
+                    Some(single) => chain.on_single_attestation(&single).is_ok(),
+                    None => chain.on_attestation(&attestation).is_ok(),
+                }
             } else if let Some(name) = step.get("attester_slashing").and_then(Yaml::as_str) {
                 chain
                     .on_attester_slashing(&case.ssz::<AttesterSlashing<P>>(name)?)

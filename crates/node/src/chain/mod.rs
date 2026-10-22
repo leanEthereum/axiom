@@ -16,12 +16,12 @@ use availability::{AvailabilityBuffer, ReadyBlock};
 use axiom_fork_choice::{DataAvailability, ExecutionStatus, PayloadStatus, Store};
 use axiom_gossip::{ChainView, GossipValidator};
 use axiom_ssz::Ssz;
-use axiom_state_transition::{State, Verification};
+use axiom_state_transition::{EpochCommittees, State, Verification};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, BlsSignature,
-    ChainConfig, Checkpoint, ColumnIndex, DataColumnSidecar, Epoch, ForkDigest, Hash32, Preset,
-    Root, SignedBeaconBlock, Slot,
+    AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
+    BlsSignature, ChainConfig, Checkpoint, ColumnIndex, CommitteeBits, DataColumnSidecar, Epoch,
+    ForkDigest, Hash32, Preset, Root, SignedBeaconBlock, SingleAttestation, Slot,
 };
 pub use database::ChainDatabase;
 use gossip::GossipMemory;
@@ -68,6 +68,8 @@ pub struct Chain<P: Preset> {
     availability: AvailabilityBuffer<P>,
     /// What gossip validation remembers.
     gossip: GossipMemory,
+    /// Committees of one epoch as the head state shuffles them, reused until the head moves.
+    committees: Option<(Epoch, Root, Arc<EpochCommittees>)>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -170,6 +172,7 @@ impl<P: Preset> Chain<P> {
             // Until told otherwise, sample every column: the strictest availability rule.
             availability: AvailabilityBuffer::new((0..P::NUMBER_OF_COLUMNS).map(ColumnIndex)),
             gossip: GossipMemory::default(),
+            committees: None,
         })
     }
 
@@ -422,6 +425,66 @@ impl<P: Preset> Chain<P> {
         self.store
             .on_attestation(attestation, false, Verification::Verify)?;
         Ok(())
+    }
+
+    /// Counts one validator's vote, received alone on an attestation subnet.
+    ///
+    /// The vote becomes an attestation with one committee and one participant, as aggregates carry them.
+    /// Gossip validation already checked its signature, so the store does not check it again.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
+    pub fn on_single_attestation(&mut self, single: &SingleAttestation) -> Result<(), ChainError> {
+        let committees = self.committees_at(single.data.target.epoch)?;
+        let committee = committees
+            .committee(single.data.slot, single.committee_index)
+            .ok_or(ChainError::Missing("committee of the vote"))?;
+        let position = committee
+            .iter()
+            .position(|validator| *validator == single.attester_index)
+            .ok_or(ChainError::Missing("attester in its committee"))?;
+
+        // One committee bit, and one participant bit at the attester's place in that committee.
+        //
+        //     committee 2 of the slot: [v9, v4, v7]   attester v4   ->   aggregation bits 010
+        let mut aggregation_bits = AggregationBits::<P>::with_len(committee.len())
+            .map_err(|_| ChainError::Missing("committee within the bitfield bound"))?;
+        aggregation_bits.set(position, true);
+        let mut committee_bits = CommitteeBits::<P>::default();
+        let index = single.committee_index.as_usize();
+        if single.committee_index.0 >= P::MAX_COMMITTEES_PER_SLOT {
+            return Err(ChainError::Missing("committee index within the slot"));
+        }
+        committee_bits.set(index, true);
+        let attestation = Attestation {
+            aggregation_bits,
+            data: single.data.clone(),
+            signature: single.signature,
+            committee_bits,
+        };
+        self.store
+            .on_attestation(&attestation, false, Verification::Skip)?;
+        Ok(())
+    }
+
+    /// Committees of an epoch as the head state shuffles them.
+    ///
+    /// Shuffling walks every validator, so the result is kept until the head changes.
+    fn committees_at(&mut self, epoch: Epoch) -> Result<Arc<EpochCommittees>, ChainError> {
+        if let Some((cached, root, committees)) = &self.committees
+            && *cached == epoch
+            && *root == self.head.root
+        {
+            return Ok(Arc::clone(committees));
+        }
+        let state = self
+            .store
+            .block_state(&self.head.root)
+            .ok_or(ChainError::MissingState(self.head.root))?;
+        let committees = Arc::new(EpochCommittees::compute(state.beacon(), epoch));
+        self.committees = Some((epoch, self.head.root, Arc::clone(&committees)));
+        Ok(committees)
     }
 
     /// Removes the weight of validators an attester slashing proves to have equivocated.

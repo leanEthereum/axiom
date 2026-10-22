@@ -27,6 +27,8 @@ enum Accepted<P: Preset> {
     Block(Arc<SignedBeaconBlock<P>>),
     /// An aggregate, whose votes feed the fork choice.
     Aggregate(Box<SignedAggregateAndProof<P>>),
+    /// One validator's vote, which feeds the fork choice too.
+    Single(Box<SingleAttestation>),
     /// Equivocation evidence, which removes weight from the fork choice.
     AttesterSlashing(Box<AttesterSlashing<P>>),
     /// A custody column, which may complete a waiting block.
@@ -151,13 +153,12 @@ impl<P: Preset> GossipHandler<P> {
                 .await
             }
             GossipKind::BeaconAttestation(subnet) => {
-                // Single votes are forwarded; the fork choice counts them once aggregated.
                 self.check(
                     data,
                     move |validator, attestation: &SingleAttestation| {
                         validator.beacon_attestation(attestation, now, SubnetId(subnet))
                     },
-                    |_| None,
+                    |attestation| Some(Accepted::Single(Box::new(attestation))),
                 )
                 .await
             }
@@ -310,6 +311,11 @@ impl<P: Preset> GossipHandler<P> {
             Accepted::Aggregate(aggregate) => {
                 self.chain
                     .run(move |chain| chain.on_attestation(&aggregate.message.aggregate))
+                    .await
+            }
+            Accepted::Single(attestation) => {
+                self.chain
+                    .run(move |chain| chain.on_single_attestation(&attestation))
                     .await
             }
             Accepted::AttesterSlashing(slashing) => {
