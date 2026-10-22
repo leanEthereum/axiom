@@ -92,6 +92,9 @@ axiom-p2p = { path = "crates/p2p" }
 axiom-rlp = { path = "crates/rlp" }
 axiom-discv5 = { path = "crates/discv5" }
 
+# Error types: the derive writes the Display and Error impls each error enum needs.
+thiserror = "2"
+
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"
 
