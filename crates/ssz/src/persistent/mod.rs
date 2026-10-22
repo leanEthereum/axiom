@@ -40,9 +40,9 @@
 //!
 //! Memory stays close to the plain buffers: one cached root per 64 leaves.
 //!
-//! The same ideas appear in Lighthouse's persistent trees and Grandine's persistent vectors.
-//! Those keep a deep tree with a hash per node, which costs memory and makes indexing slow.
-//! Lighthouse's earlier separate tree hash cache had to be rebuilt after a clone.
+//! The common alternative is a deep persistent tree with a hash per node.
+//! It costs memory, and every index walks the tree.
+//! A hash cache kept beside the value instead must be rebuilt after a clone.
 //! Here the cache is part of the value, so a clone keeps it, and no caller ever sees it.
 
 mod iter;
