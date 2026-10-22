@@ -103,7 +103,8 @@ impl LiveSet {
         }
         if epoch < previous {
             return Err(ApiError::bad_request(format!(
-                "epoch {epoch} is before the previous epoch {previous}, so its messages are forgotten"
+                "epoch {epoch} is before the previous epoch {previous}, \
+                 so its messages are forgotten"
             )));
         }
         let committees = chain.committees_at(epoch)?;

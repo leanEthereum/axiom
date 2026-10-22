@@ -183,7 +183,7 @@ impl StateId {
 /// A validator named by its registry index or by its key.
 ///
 /// ```text
-///     12345 | 0x93247f2209abcacf57b75a51dafae777f9dd38bc7053d1af526f220a7489a6d3a2753e5f3e8b1cfe39b56f43611df74a
+///     12345 | 0x9324...f74a, the 48 bytes of a key in hex
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ValidatorId {

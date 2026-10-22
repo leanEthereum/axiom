@@ -110,7 +110,7 @@ impl PreparationRoutes {
     ///
     /// # Overview
     ///
-    /// The gossip rules check the proposal slot, the dependent block, the proposer, and the signature.
+    /// The gossip rules check the slot, the dependent block, the proposer, and the signature.
     /// Preferences that pass are remembered by proposal slot and dependent root.
     /// Bids are then checked against them, until their slot is two epochs old.
     /// Any refusal, even one gossip would only ignore, is reported for its item.

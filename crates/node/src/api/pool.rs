@@ -898,7 +898,8 @@ mod tests {
     #[test]
     fn pooled_attestations_are_filtered_by_slot_and_committee() {
         let api = TestApi::phase0(64);
-        // One signer in each of three committee votes: slot 1 committees 0 and 1, slot 2 committee 0.
+        // One signer in each of three committee votes.
+        // Slot 1 has committees 0 and 1, slot 2 has committee 0.
         let votes = [(1, 0), (1, 1), (2, 0)];
         let vote = |slot: u64, committee: u64| AttestationData {
             slot: Slot(slot),
