@@ -10,7 +10,8 @@ use std::{error::Error, fmt};
 pub enum PointDecodeError {
     /// The compression flag disagrees with the length of the encoding.
     ///
-    /// Compressed encodings set the top bit of the first byte; uncompressed ones clear it.
+    /// Compressed encodings set the top bit of the first byte.
+    /// Uncompressed ones clear it.
     InvalidCompressionFlag,
 
     /// The infinity flag is set but other bits are not all zero.
@@ -35,6 +36,7 @@ pub enum PointDecodeError {
 
 impl fmt::Display for PointDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Each message names the broken rule.
         f.write_str(match self {
             Self::InvalidCompressionFlag => "compression flag does not match the encoding length",
             Self::InvalidInfinityEncoding => "infinity flag set with other bits nonzero",

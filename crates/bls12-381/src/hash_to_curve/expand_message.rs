@@ -58,7 +58,8 @@ pub(crate) fn expand_message_xmd(message: &[u8], dst: &[u8], out: &mut [u8]) {
         .chain_update(dst_length)
         .finalize();
 
-    // b_1 starts the chain; each later block mixes b_0 back in.
+    // b_1 starts the chain.
+    // Each later block mixes b_0 back in.
     let mut previous = [0_u8; HASH_BYTES];
     for (index, chunk) in (1_u8..).zip(out.chunks_mut(HASH_BYTES)) {
         // The first block has previous = 0, so b_0 xor previous = b_0 as the RFC writes it.
@@ -83,6 +84,7 @@ mod tests {
 
     /// The messages of RFC 9380 appendix K, by index.
     fn rfc_message(index: usize) -> Vec<u8> {
+        // The five messages the RFC uses in every suite, in order.
         match index {
             0 => Vec::new(),
             1 => b"abc".to_vec(),
@@ -94,6 +96,7 @@ mod tests {
 
     /// Decodes a hex string.
     fn hex(text: &str) -> Vec<u8> {
+        // Two hex digits per byte.
         (0..text.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())

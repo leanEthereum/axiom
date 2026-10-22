@@ -22,7 +22,9 @@ impl SecretKey {
     ///
     /// Rejects zero and any integer not below r, as KeyGen never produces them.
     pub fn from_bytes(bytes: &[u8; SCALAR_BYTES]) -> Result<Self, BlsError> {
+        // The integer must be canonical, below r.
         let scalar = Scalar::from_bytes_be(bytes).ok_or(BlsError::InvalidSecretKey)?;
+        // Zero would make every signature the identity.
         if scalar.is_zero() {
             return Err(BlsError::InvalidSecretKey);
         }
@@ -69,6 +71,7 @@ mod tests {
 
     #[test]
     fn zero_is_rejected() {
+        // Zero is canonical but signs every message with the identity.
         assert_eq!(
             SecretKey::from_bytes(&[0; 32]).err(),
             Some(BlsError::InvalidSecretKey)

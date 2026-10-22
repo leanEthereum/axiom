@@ -94,7 +94,8 @@ impl Scalar {
     /// Embeds a small integer into the field.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
-        // value < 2^64 < r is reduced; one product with R^2 gives its Montgomery form.
+        // value < 2^64 < r is reduced.
+        // One product with R^2 gives its Montgomery form.
         Self(Self::montgomery_mul(&[value, 0, 0, 0], &R2))
     }
 
@@ -364,6 +365,7 @@ impl fmt::Debug for Scalar {
 impl fmt::Display for Scalar {
     /// Renders the canonical integer as 0x-prefixed big-endian hex.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Big-endian bytes of the canonical integer.
         f.write_str("0x")?;
         for byte in self.to_bytes_be() {
             write!(f, "{byte:02x}")?;
@@ -526,6 +528,7 @@ pub(crate) mod tests {
 
     /// Reference product built only from addition, by binary long multiplication.
     fn mul_by_doubling(a: &Scalar, b: &Scalar) -> Scalar {
+        // Add a * 2^i for every set bit i of b.
         let mut result = Scalar::ZERO;
         let mut addend = *a;
         for limb in b.to_canonical() {
@@ -552,7 +555,8 @@ pub(crate) mod tests {
 
     #[test]
     fn reduction_of_all_ones_matches_arithmetic() {
-        // 2^256 - 1 = 2 * r + k for a k below r; check against field arithmetic.
+        // 2^256 - 1 = 2 * r + k for a k below r.
+        // Check against field arithmetic.
         //
         //     2^256 - 1 = (2^128)^2 - 1
         let two_64 = Scalar::from_u64(u64::MAX) + Scalar::ONE;
@@ -630,11 +634,14 @@ pub(crate) mod tests {
         #[test]
         fn field_axioms_hold(a in arb_scalar(), b in arb_scalar(), c in arb_scalar()) {
             prop_assert_eq!((a + b) + c, a + (b + c));
+            // Associativity and commutativity of the product, then distributivity.
             prop_assert_eq!((a * b) * c, a * (b * c));
             prop_assert_eq!(a * b, b * a);
             prop_assert_eq!(a * (b + c), a * b + a * c);
+            // Subtraction and negation undo addition.
             prop_assert_eq!(a - b + b, a);
             prop_assert_eq!(a + (-a), Scalar::ZERO);
+            // The dedicated squaring agrees with the generic product.
             prop_assert_eq!(a.square(), a * a);
         }
 
@@ -646,6 +653,7 @@ pub(crate) mod tests {
 
         #[test]
         fn batch_inversion_matches_single(values in proptest::collection::vec(arb_scalar(), 0..20)) {
+            // Zeros map to zero, everything else to its own inverse.
             let mut batch = values.clone();
             Scalar::batch_invert(&mut batch);
             for (inverse, value) in batch.iter().zip(&values) {

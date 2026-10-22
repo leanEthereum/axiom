@@ -49,6 +49,7 @@ impl G1Affine {
     /// The affine coordinates, or nothing at infinity.
     #[must_use]
     pub const fn coordinates(&self) -> Option<(Fp, Fp)> {
+        // Infinity has no affine coordinates.
         if self.infinity {
             None
         } else {
@@ -88,6 +89,7 @@ impl G1Affine {
 
     /// The endomorphism sigma(x, y) = (beta x, y).
     fn endomorphism(&self) -> Self {
+        // (beta x)^3 = x^3, so the image stays on y^2 = x^3 + 4.
         Self {
             x: self.x * BETA,
             y: self.y,
@@ -116,11 +118,13 @@ impl G1Affine {
     /// Encodes the point as 96 bytes: x || y with the infinity flag.
     #[must_use]
     pub fn to_uncompressed(&self) -> [u8; G1_UNCOMPRESSED_BYTES] {
+        // Infinity keeps all coordinate bytes zero.
         let mut bytes = [0; G1_UNCOMPRESSED_BYTES];
         if !self.infinity {
             bytes[..FP_BYTES].copy_from_slice(&self.x.to_bytes_be());
             bytes[FP_BYTES..].copy_from_slice(&self.y.to_bytes_be());
         }
+        // Only the infinity flag can be set in this form.
         Flags {
             compression: false,
             infinity: self.infinity,
@@ -132,6 +136,7 @@ impl G1Affine {
 
     /// Decodes a compressed point and checks that it lies in G1.
     pub fn from_compressed(bytes: &[u8; G1_COMPRESSED_BYTES]) -> Result<Self, PointDecodeError> {
+        // Decode and check the curve equation first, then the subgroup.
         let point = Self::from_compressed_unchecked(bytes)?;
         if !point.is_torsion_free() {
             return Err(PointDecodeError::NotInSubgroup);
@@ -177,6 +182,7 @@ impl G1Affine {
     pub fn from_uncompressed(
         bytes: &[u8; G1_UNCOMPRESSED_BYTES],
     ) -> Result<Self, PointDecodeError> {
+        // Decode and check the curve equation first, then the subgroup.
         let point = Self::from_uncompressed_unchecked(bytes)?;
         if !point.is_torsion_free() {
             return Err(PointDecodeError::NotInSubgroup);
@@ -230,7 +236,8 @@ impl Default for G1Affine {
 
 impl From<&G1Projective> for G1Affine {
     fn from(point: &G1Projective) -> Self {
-        // x = X / Z and y = Y / Z; a zero Z is the point at infinity.
+        // x = X / Z and y = Y / Z.
+        // A zero Z is the point at infinity.
         match point.z.invert() {
             Some(z_inverse) => Self {
                 x: point.x * z_inverse,
@@ -260,7 +267,8 @@ impl Neg for &G1Affine {
     type Output = G1Affine;
 
     fn neg(self) -> G1Affine {
-        // -(x, y) = (x, -y); infinity keeps its canonical coordinates.
+        // -(x, y) = (x, -y).
+        // Infinity keeps its canonical coordinates.
         G1Affine {
             x: self.x,
             y: Fp::conditional_select(&-self.y, &Fp::ONE, self.infinity),

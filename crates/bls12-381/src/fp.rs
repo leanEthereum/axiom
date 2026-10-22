@@ -129,7 +129,8 @@ impl Fp {
     /// Embeds a small integer into the field.
     #[must_use]
     pub fn from_u64(value: u64) -> Self {
-        // value < 2^64 < p, so it is already reduced; one product with R^2 moves it to Montgomery form.
+        // value < 2^64 < p, so it is already reduced.
+        // One product with R^2 moves it to Montgomery form.
         Self(Self::montgomery_mul(&[value, 0, 0, 0, 0, 0], &R2))
     }
 
@@ -296,6 +297,7 @@ impl Fp {
     ///
     /// The selection reads both inputs in full and never branches on the flag.
     pub(crate) fn conditional_select(a: &Self, b: &Self, choice: bool) -> Self {
+        // All ones picks b, all zeros picks a, limb by limb.
         let mask = mask(choice);
         let mut limbs = [0; 6];
         for ((out, a), b) in limbs.iter_mut().zip(a.0).zip(b.0) {
@@ -431,6 +433,7 @@ impl fmt::Debug for Fp {
 impl fmt::Display for Fp {
     /// Renders the canonical integer as 0x-prefixed big-endian hex.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Big-endian bytes of the canonical integer.
         f.write_str("0x")?;
         for byte in self.to_bytes_be() {
             write!(f, "{byte:02x}")?;
@@ -672,7 +675,8 @@ pub(crate) mod tests {
 
     #[test]
     fn minus_one_squares_to_one() {
-        // p - 1 is the largest element; (-1)^2 = 1 exercises every reduction path.
+        // p - 1 is the largest element.
+        // (-1)^2 = 1 exercises every reduction path.
         let minus_one = -Fp::ONE;
         assert_eq!(minus_one.square(), Fp::ONE);
         assert_eq!(minus_one + Fp::ONE, Fp::ZERO);
@@ -709,7 +713,8 @@ pub(crate) mod tests {
 
     #[test]
     fn sign_of_a_pair_is_decided_by_the_half_modulus() {
-        // (p - 1) / 2 is not largest; its negation (p + 1) / 2 is.
+        // (p - 1) / 2 is not largest.
+        // Its negation (p + 1) / 2 is.
         let half = Fp(Fp::montgomery_mul(&HALF_MODULUS, &R2));
         assert!(!half.is_lexicographically_largest());
         assert!((-half).is_lexicographically_largest());

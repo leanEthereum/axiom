@@ -48,7 +48,9 @@ impl SignatureSet {
     /// The consensus layer has no randomness source, so the coefficients come from SHA-256.
     /// The hash covers every signature, key, and message of the batch, in order.
     ///
-    /// # Soundness
+    /// # Invariants
+    ///
+    /// Acceptance implies every set is valid, except with probability at most q / 2^128.
     ///
     /// Write each signature as sig_i = sk_i H(m_i) + D_i, where D_i in G2 is its error.
     /// Bilinearity collapses the product to e(G1, sum_i r_i D_i).
@@ -75,7 +77,8 @@ impl SignatureSet {
     fn verify_combined(sets: &[Self]) -> bool {
         let coefficients = Self::coefficients(sets);
 
-        // G1 side: scale each key by its coefficient; short scalars make variable time cheap.
+        // G1 side: scale each key by its coefficient.
+        // Short scalars make variable time cheap.
         let scaled_keys: Vec<G1Projective> = sets
             .iter()
             .zip(&coefficients)
@@ -125,7 +128,8 @@ impl SignatureSet {
                     .finalize();
                 let mut bytes = [0_u8; 32];
                 bytes[32 - COEFFICIENT_BYTES..].copy_from_slice(&digest[..COEFFICIENT_BYTES]);
-                // 2^128 < r, so the integer is canonical; zero would drop the set, so it becomes one.
+                // 2^128 < r, so the integer is canonical.
+                // Zero would drop the set, so it becomes one.
                 let coefficient = Scalar::from_bytes_be_reduced(&bytes);
                 if coefficient.is_zero() {
                     Scalar::ONE
@@ -185,7 +189,8 @@ mod tests {
         let mut sets = [valid_set(4), valid_set(5)];
         assert!(SignatureSet::verify_batch(&sets));
 
-        // Mutation: exchange the signatures; each set alone is now invalid.
+        // Mutation: exchange the signatures.
+        // Each set alone is now invalid.
         //
         //     set 0: sig_5 over m_4 under pk_4
         //     set 1: sig_4 over m_5 under pk_5

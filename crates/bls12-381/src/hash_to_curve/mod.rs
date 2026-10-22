@@ -30,9 +30,12 @@ const UNIFORM_BYTES: usize = 2 * 2 * L;
 
 /// Hashes a message to G2, RFC 9380 section 3 with the parameters of section 8.8.2.
 pub(crate) fn hash_to_g2(message: &[u8], dst: &[u8]) -> G2Projective {
+    // Two field elements, mapped independently and added, give a random-oracle output.
     let [u0, u1] = hash_to_field(message, dst);
     let q0 = map_to_curve::map_to_curve(&u0);
     let q1 = map_to_curve::map_to_curve(&u1);
+    // The sum lies on the twist.
+    // Clearing the cofactor moves it into G2.
     (q0 + q1).clear_cofactor()
 }
 
@@ -70,6 +73,7 @@ mod tests {
 
     /// The messages of the RFC vectors, by index.
     fn rfc_message(index: usize) -> Vec<u8> {
+        // The five messages the RFC uses in every suite, in order.
         match index {
             0 => Vec::new(),
             1 => b"abc".to_vec(),
@@ -81,6 +85,7 @@ mod tests {
 
     /// Decodes a 96-character hex coordinate.
     fn fp(text: &str) -> Fp {
+        // Two hex digits per byte, then a canonical decode.
         let mut bytes = [0_u8; 48];
         for (i, byte) in bytes.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap();
@@ -90,6 +95,7 @@ mod tests {
 
     /// Decodes four hex coordinates into an affine point.
     fn point(coordinates: &[&str; 4]) -> (Fp2, Fp2) {
+        // The RFC lists c0 before c1, for x then y.
         (
             Fp2::new(fp(coordinates[0]), fp(coordinates[1])),
             Fp2::new(fp(coordinates[2]), fp(coordinates[3])),

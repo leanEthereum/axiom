@@ -59,9 +59,11 @@ impl Signature {
     ///
     /// Rejects an empty list.
     pub fn aggregate(signatures: &[Self]) -> Result<Self, BlsError> {
+        // The draft defines no aggregate of nothing.
         if signatures.is_empty() {
             return Err(BlsError::EmptyAggregate);
         }
+        // Mixed additions into a projective accumulator, one normalization at the end.
         let sum = signatures
             .iter()
             .fold(G2Projective::IDENTITY, |acc, signature| {
@@ -109,9 +111,11 @@ impl Signature {
     /// It lets a sync committee aggregate with no participants verify.
     #[must_use]
     pub fn eth_fast_aggregate_verify(&self, keys: &[&PublicKey], message: &[u8]) -> bool {
+        // Altair: an empty participant set signs with the infinity signature.
         if keys.is_empty() && self.is_infinity() {
             return true;
         }
+        // Every other case follows the draft's rules.
         self.fast_aggregate_verify(keys, message)
     }
 
@@ -153,6 +157,7 @@ impl Signature {
 
 impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The compressed encoding identifies the signature compactly.
         f.write_str("Signature(0x")?;
         for byte in self.to_bytes() {
             write!(f, "{byte:02x}")?;

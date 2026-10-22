@@ -9,7 +9,8 @@
 //!     u in F_{p^2} --SSWU--> (x', y') on E2' --iso_3--> (x, y) on E'
 //! ```
 //!
-//! The output is a point of E', not yet of G2; cofactor clearing finishes the job.
+//! The output is a point of E', not yet of G2.
+//! Cofactor clearing finishes the job.
 //! Every input here is public (it derives from the message), so variable-time square roots are fine.
 
 use crate::{Fp, Fp2, G2Projective};

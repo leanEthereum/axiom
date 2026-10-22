@@ -1,4 +1,4 @@
-//! The quadratic extension F_{p^12} = F_{p^6}[w] / (w^2 - v), the target field of the pairing.
+//! The quadratic extension F_{p^12} = F_{p^6}\[w\] / (w^2 - v), the target field of the pairing.
 //!
 //! Over F_{p^2} the element w satisfies w^6 = xi, so the six powers below form a basis:
 //!
@@ -181,7 +181,7 @@ impl Fp12 {
         Self::new(Fp6::new(z0, z4, z3), Fp6::new(z2, z1, z5))
     }
 
-    /// Squares a + b * s in F_{p^4} = F_{p^2}[s] / (s^2 - xi).
+    /// Squares a + b * s in F_{p^4} = F_{p^2}\[s\] / (s^2 - xi).
     ///
     /// # Returns
     ///
@@ -404,9 +404,11 @@ pub(crate) mod tests {
     proptest! {
         #[test]
         fn field_axioms_hold(a in arb_fp12(), b in arb_fp12(), c in arb_fp12()) {
+            // Associativity and commutativity of the product, then distributivity.
             prop_assert_eq!((a * b) * c, a * (b * c));
             prop_assert_eq!(a * b, b * a);
             prop_assert_eq!(a * (b + c), a * b + a * c);
+            // The dedicated squaring agrees with the generic product.
             prop_assert_eq!(a.square(), a * a);
         }
 
@@ -430,7 +432,9 @@ pub(crate) mod tests {
 
         #[test]
         fn frobenius_is_a_ring_morphism_of_order_twelve(a in arb_fp12(), b in arb_fp12()) {
+            // x -> x^p respects products.
             prop_assert_eq!((a * b).frobenius_map(), a.frobenius_map() * b.frobenius_map());
+            // Twelve applications give x^{p^12} = x on F_{p^12}.
             let mut image = a;
             for _ in 0..12 {
                 image = image.frobenius_map();
@@ -440,6 +444,7 @@ pub(crate) mod tests {
 
         #[test]
         fn conjugate_is_the_sixth_frobenius_power(a in arb_fp12()) {
+            // x^{p^6} flips the sign of the w coefficient, which is conjugation.
             let mut image = a;
             for _ in 0..6 {
                 image = image.frobenius_map();

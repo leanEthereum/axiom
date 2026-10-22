@@ -49,6 +49,7 @@ impl G2Affine {
     /// The affine coordinates, or nothing at infinity.
     #[must_use]
     pub const fn coordinates(&self) -> Option<(Fp2, Fp2)> {
+        // Infinity has no affine coordinates.
         if self.infinity {
             None
         } else {
@@ -71,7 +72,7 @@ impl G2Affine {
     /// Scott, "A note on group membership tests for G1, G2 and GT", eprint 2021/1130, section 4.
     ///
     /// The endomorphism psi acts on G2 as multiplication by p, and p = x mod r.
-    /// For BLS12 curves the converse holds too: psi(P) = [x] P only inside G2.
+    /// For BLS12 curves the converse holds too: psi(P) = x P holds only inside G2.
     ///
     /// ```text
     ///     P in G2  <=>  psi(P) = [x] P
@@ -87,10 +88,12 @@ impl G2Affine {
     /// Encodes the point as 96 bytes: x_1 || x_0 with the compression, infinity, and sort flags.
     #[must_use]
     pub fn to_compressed(&self) -> [u8; G2_COMPRESSED_BYTES] {
+        // Infinity keeps all coordinate bytes zero.
         let mut bytes = [0; G2_COMPRESSED_BYTES];
         if !self.infinity {
             Self::write_fp2(&self.x, &mut bytes);
         }
+        // The sort flag records which of +-y the point uses.
         Flags {
             compression: true,
             infinity: self.infinity,
@@ -103,12 +106,14 @@ impl G2Affine {
     /// Encodes the point as 192 bytes: x_1 || x_0 || y_1 || y_0 with the infinity flag.
     #[must_use]
     pub fn to_uncompressed(&self) -> [u8; G2_UNCOMPRESSED_BYTES] {
+        // Infinity keeps all coordinate bytes zero.
         let mut bytes = [0; G2_UNCOMPRESSED_BYTES];
         if !self.infinity {
             let (x_bytes, y_bytes) = bytes.split_at_mut(2 * FP_BYTES);
             Self::write_fp2(&self.x, x_bytes);
             Self::write_fp2(&self.y, y_bytes);
         }
+        // Only the infinity flag can be set in this form.
         Flags {
             compression: false,
             infinity: self.infinity,
@@ -120,6 +125,7 @@ impl G2Affine {
 
     /// Decodes a compressed point and checks that it lies in G2.
     pub fn from_compressed(bytes: &[u8; G2_COMPRESSED_BYTES]) -> Result<Self, PointDecodeError> {
+        // Decode and check the curve equation first, then the subgroup.
         let point = Self::from_compressed_unchecked(bytes)?;
         if !point.is_torsion_free() {
             return Err(PointDecodeError::NotInSubgroup);
@@ -165,6 +171,7 @@ impl G2Affine {
     pub fn from_uncompressed(
         bytes: &[u8; G2_UNCOMPRESSED_BYTES],
     ) -> Result<Self, PointDecodeError> {
+        // Decode and check the curve equation first, then the subgroup.
         let point = Self::from_uncompressed_unchecked(bytes)?;
         if !point.is_torsion_free() {
             return Err(PointDecodeError::NotInSubgroup);
@@ -208,11 +215,13 @@ impl G2Affine {
 
     /// Reads c1 || c0 from 96 bytes, rejecting a non-canonical half.
     fn read_fp2(bytes: &[u8]) -> Result<Fp2, PointDecodeError> {
+        // Each half must be a canonical base-field element.
         let read = |chunk: &[u8]| {
             let mut array = [0; FP_BYTES];
             array.copy_from_slice(chunk);
             Fp::from_bytes_be(&array).ok_or(PointDecodeError::NonCanonicalCoordinate)
         };
+        // The u coefficient comes first on the wire.
         let c1 = read(&bytes[..FP_BYTES])?;
         let c0 = read(&bytes[FP_BYTES..2 * FP_BYTES])?;
         Ok(Fp2::new(c0, c1))
@@ -227,7 +236,8 @@ impl Default for G2Affine {
 
 impl From<&G2Projective> for G2Affine {
     fn from(point: &G2Projective) -> Self {
-        // x = X / Z and y = Y / Z; a zero Z is the point at infinity.
+        // x = X / Z and y = Y / Z.
+        // A zero Z is the point at infinity.
         match point.z.invert() {
             Some(z_inverse) => Self {
                 x: point.x * z_inverse,
@@ -257,7 +267,8 @@ impl Neg for &G2Affine {
     type Output = G2Affine;
 
     fn neg(self) -> G2Affine {
-        // -(x, y) = (x, -y); infinity keeps its canonical coordinates.
+        // -(x, y) = (x, -y).
+        // Infinity keeps its canonical coordinates.
         G2Affine {
             x: self.x,
             y: Fp2::conditional_select(&-self.y, &Fp2::ONE, self.infinity),

@@ -1,4 +1,4 @@
-//! The quadratic extension F_{p^2} = F_p[u] / (u^2 + 1).
+//! The quadratic extension F_{p^2} = F_p\[u\] / (u^2 + 1).
 //!
 //! Since p = 3 mod 4, -1 is not a square in F_p, so u^2 = -1 defines a field.
 //! G2 coordinates live here, and it is the base of the degree-12 tower.
@@ -213,6 +213,7 @@ impl Fp2 {
     ///
     /// It is the parity of the constant coefficient, or of the u coefficient when the constant one is zero.
     pub(crate) fn sgn0(&self) -> bool {
+        // The constant coefficient decides unless it is zero.
         let sign_0 = self.c0.is_odd();
         let zero_0 = self.c0.is_zero();
         let sign_1 = self.c1.is_odd();
@@ -221,6 +222,7 @@ impl Fp2 {
 
     /// Picks the second element when the flag is set, the first otherwise, without branching.
     pub(crate) fn conditional_select(a: &Self, b: &Self, choice: bool) -> Self {
+        // Select both coefficients with the same flag.
         Self::new(
             Fp::conditional_select(&a.c0, &b.c0, choice),
             Fp::conditional_select(&a.c1, &b.c1, choice),
@@ -459,10 +461,13 @@ pub(crate) mod tests {
     proptest! {
         #[test]
         fn field_axioms_hold(a in arb_fp2(), b in arb_fp2(), c in arb_fp2()) {
+            // Associativity and commutativity of the product, then distributivity.
             prop_assert_eq!((a * b) * c, a * (b * c));
             prop_assert_eq!(a * b, b * a);
             prop_assert_eq!(a * (b + c), a * b + a * c);
+            // The dedicated squaring agrees with the generic product.
             prop_assert_eq!(a.square(), a * a);
+            // Subtraction undoes addition.
             prop_assert_eq!(a - b + b, a);
         }
 

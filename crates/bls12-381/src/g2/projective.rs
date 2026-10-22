@@ -1,6 +1,7 @@
 //! G2 points in homogeneous projective coordinates, with complete addition formulas.
 //!
-//! A point (X : Y : Z) stands for the affine point (X / Z, Y / Z); Z = 0 is the point at infinity.
+//! A point (X : Y : Z) stands for the affine point (X / Z, Y / Z).
+//! Z = 0 is the point at infinity.
 //! The formulas are those of Renes, Costello, and Batina, "Complete addition formulas for prime order elliptic curves", eprint 2015/1060, specialized to a = 0.
 //! Complete means one formula handles every input, including doubling and the identity.
 //! There is no branch to leak timing, and no exceptional case to forget.
@@ -76,17 +77,22 @@ impl G2Projective {
     /// Algorithm 9 of eprint 2015/1060: 6 multiplications, 2 squarings, 1 multiplication by 3b.
     #[must_use]
     pub fn double(&self) -> Self {
+        // Phase 1: the squares the formula reuses.
+        //
+        //     t0 = Y^2,  t1 = Y Z,  t2 = 3b Z^2,  X3 = 24 b Y^2 Z^2
         let t0 = self.y.square();
         let z3 = t0.double().double().double();
         let t1 = self.y * self.z;
         let t2 = Self::mul_by_3b(&self.z.square());
         let x3 = t2 * z3;
+        // Phase 2: Y3 = (Y^2 - 9b Z^2)(Y^2 + 3b Z^2) + 24 b Y^2 Z^2 and Z3 = 8 Y^3 Z.
         let y3 = t0 + t2;
         let z3 = t1 * z3;
         let t1 = t2.double();
         let t2 = t1 + t2;
         let t0 = t0 - t2;
         let y3 = t0 * y3 + x3;
+        // Phase 3: X3 = 2 X Y (Y^2 - 9b Z^2).
         let t1 = self.x * self.y;
         let x3 = (t0 * t1).double();
         Self {
@@ -107,6 +113,7 @@ impl G2Projective {
     /// Projective coordinates follow by conjugating Z too, since conjugation is a field automorphism.
     #[must_use]
     pub fn psi(&self) -> Self {
+        // Conjugate every coordinate, then rescale x and y by the twist constants.
         Self {
             x: self.x.conjugate() * PSI_X,
             y: self.y.conjugate() * PSI_Y,
@@ -119,6 +126,7 @@ impl G2Projective {
     /// Two conjugations cancel, and the product of the scalings collapses to a cube root of unity on x and -1 on y.
     #[must_use]
     pub fn psi2(&self) -> Self {
+        // The double conjugation cancels, leaving one scaling of x and a sign flip of y.
         Self {
             x: self.x.mul_by_fp(&PSI2_X),
             y: -self.y,
@@ -195,7 +203,7 @@ impl G2Projective {
         acc
     }
 
-    /// Computes sum_i scalars[i] * points[i] with Pippenger's bucket method.
+    /// Computes sum_i k_i P_i over paired points and scalars, with Pippenger's bucket method.
     ///
     /// The running time depends on the scalars, which must be public.
     ///
@@ -242,6 +250,7 @@ impl G2Projective {
 
     /// Picks the second point when the flag is set, the first otherwise, without branching.
     pub(crate) fn conditional_select(a: &Self, b: &Self, choice: bool) -> Self {
+        // Select each coordinate with the same mask.
         Self {
             x: Fp2::conditional_select(&a.x, &b.x, choice),
             y: Fp2::conditional_select(&a.y, &b.y, choice),
@@ -282,17 +291,25 @@ impl G2Projective {
     ///
     /// Algorithm 7 of eprint 2015/1060: 12 multiplications, 2 multiplications by 3b.
     fn add_impl(&self, rhs: &Self) -> Self {
+        // Phase 1: the three coordinate products.
         let t0 = self.x * rhs.x;
         let t1 = self.y * rhs.y;
         let t2 = self.z * rhs.z;
+        // Phase 2: the three cross sums, each from one product by Karatsuba.
+        //
+        //     t3 = X1 Y2 + X2 Y1,  t4 = Y1 Z2 + Y2 Z1,  y3 = X1 Z2 + X2 Z1
         let t3 = (self.x + self.y) * (rhs.x + rhs.y) - (t0 + t1);
         let t4 = (self.y + self.z) * (rhs.y + rhs.z) - (t1 + t2);
         let y3 = (self.x + self.z) * (rhs.x + rhs.z) - (t0 + t2);
+        // Phase 3: scale by 3 and 3b, folding in the curve equation y^2 = x^3 + b.
+        //
+        //     t0 = 3 X1 X2,  z3 = Y1 Y2 + 3b Z1 Z2,  t1 = Y1 Y2 - 3b Z1 Z2
         let t0 = t0.double() + t0;
         let t2 = Self::mul_by_3b(&t2);
         let z3 = t1 + t2;
         let t1 = t1 - t2;
         let y3 = Self::mul_by_3b(&y3);
+        // Phase 4: assemble the sum from the scaled terms.
         let x3 = t3 * t1 - t4 * y3;
         let y3 = t1 * z3 + y3 * t0;
         let z3 = z3 * t4 + t0 * t3;
@@ -308,16 +325,22 @@ impl G2Projective {
     /// Algorithm 8 of eprint 2015/1060: 11 multiplications, 2 multiplications by 3b.
     /// The formula assumes Z2 = 1, which fails at infinity, so that case selects self instead.
     fn add_mixed_impl(&self, rhs: &G2Affine) -> Self {
+        // Phase 1: the coordinate products, with Z2 = 1 implicit.
         let t0 = self.x * rhs.x;
         let t1 = self.y * rhs.y;
+        // Phase 2: the cross sums.
+        //
+        //     t3 = X1 Y2 + X2 Y1,  t4 = Y1 + Y2 Z1,  y3 = X1 + X2 Z1
         let t3 = (rhs.x + rhs.y) * (self.x + self.y) - (t0 + t1);
         let t4 = rhs.y * self.z + self.y;
         let y3 = rhs.x * self.z + self.x;
+        // Phase 3: scale by 3 and 3b, as in the full addition.
         let t0 = t0.double() + t0;
         let t2 = Self::mul_by_3b(&self.z);
         let z3 = t1 + t2;
         let t1 = t1 - t2;
         let y3 = Self::mul_by_3b(&y3);
+        // Phase 4: assemble the sum.
         let x3 = t3 * t1 - t4 * y3;
         let y3 = t1 * z3 + y3 * t0;
         let z3 = z3 * t4 + t0 * t3;
@@ -326,6 +349,7 @@ impl G2Projective {
             y: y3,
             z: z3,
         };
+        // An affine identity has no Z = 1 form, so the sum is replaced by self.
         Self::conditional_select(&sum, self, rhs.infinity)
     }
 
@@ -336,6 +360,7 @@ impl G2Projective {
 
     /// Returns -self.
     fn neg_impl(&self) -> Self {
+        // -(X : Y : Z) = (X : -Y : Z), the reflection across the x-axis.
         Self {
             x: self.x,
             y: -self.y,
@@ -367,7 +392,8 @@ impl Eq for G2Projective {}
 
 impl From<&G2Affine> for G2Projective {
     fn from(point: &G2Affine) -> Self {
-        // (x, y) lifts to (x : y : 1); infinity lifts to (0 : 1 : 0).
+        // (x, y) lifts to (x : y : 1).
+        // Infinity lifts to (0 : 1 : 0).
         Self {
             x: point.x,
             y: point.y,
@@ -596,6 +622,7 @@ pub(crate) mod tests {
 
     /// Multiplies by an integer given as limbs, outside the scalar field.
     fn mul_by_limbs(point: &G2Projective, limbs: &[u64]) -> G2Projective {
+        // Left-to-right double-and-add over every bit, leading zeros included.
         let mut result = G2Projective::IDENTITY;
         for limb in limbs.iter().rev() {
             for bit in (0..64).rev() {
@@ -646,9 +673,11 @@ pub(crate) mod tests {
     proptest! {
         #[test]
         fn group_laws_hold(a in arb_g2(), b in arb_g2(), c in arb_g2()) {
+            // Associativity, commutativity, and doubling as self-addition.
             prop_assert_eq!((a + b) + c, a + (b + c));
             prop_assert_eq!(a + b, b + a);
             prop_assert_eq!(a.double(), a + a);
+            // Sums stay on the curve, and every point has an inverse.
             prop_assert!((a + b).is_on_curve());
             prop_assert!((a - a).is_identity());
             prop_assert_eq!(a + G2Affine::from(b), a + b);

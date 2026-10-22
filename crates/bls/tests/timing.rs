@@ -36,7 +36,7 @@ impl Timer {
     }
 }
 
-/// A valid key from a small index; the top byte stays below the group order.
+/// A valid key from a small index, with a top byte below the group order.
 fn secret_key(index: u32) -> SecretKey {
     let mut bytes = [0x11; 32];
     bytes[28..].copy_from_slice(&index.to_be_bytes());

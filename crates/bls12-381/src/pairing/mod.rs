@@ -110,6 +110,7 @@ mod tests {
 
     /// Raises an element of F_{p^12} to a power given as little-endian limbs.
     fn pow(base: &Fp12, exponent: &[u64]) -> Fp12 {
+        // Plain square-and-multiply: the reference the optimized chains are checked against.
         let mut result = Fp12::ONE;
         for limb in exponent.iter().rev() {
             for bit in (0..64).rev() {
@@ -166,6 +167,8 @@ mod tests {
         assert!(!e.is_identity());
         // The value lies in GT: its r-th power is one.
         assert_eq!(pow(&e.0, &ORDER), Fp12::ONE);
+        // Inside GT the conjugate is the inverse.
+        assert!((e * e.invert()).is_identity());
     }
 
     #[test]
@@ -205,9 +208,11 @@ mod tests {
 
         #[test]
         fn multi_pairing_is_the_product_of_pairings(a in arb_scalar(), b in arb_scalar()) {
+            // Two pairs with independent random factors on each side.
             let p1 = G1Affine::from(G1Projective::GENERATOR * a);
             let q2 = G2Affine::from(G2Projective::GENERATOR * b);
             let terms = [(p1, G2Affine::GENERATOR), (G1Affine::GENERATOR, q2)];
+            // One shared loop must equal two separate pairings multiplied.
             let expected =
                 Gt::pairing(&p1, &G2Affine::GENERATOR) * Gt::pairing(&G1Affine::GENERATOR, &q2);
             prop_assert_eq!(Gt::multi_pairing(&terms), expected);

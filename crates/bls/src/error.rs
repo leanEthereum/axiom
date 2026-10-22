@@ -31,6 +31,7 @@ pub enum BlsError {
 
 impl fmt::Display for BlsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Each message names the rejected input and the reason.
         match self {
             Self::InvalidSecretKey => {
                 f.write_str("secret key is zero or not below the group order")
@@ -46,6 +47,7 @@ impl fmt::Display for BlsError {
 
 impl Error for BlsError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
+        // Decoding failures carry the curve-level reason.
         match self {
             Self::InvalidPublicKey(error) | Self::InvalidSignature(error) => Some(error),
             _ => None,

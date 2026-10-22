@@ -2,9 +2,14 @@
 //!
 //! # Overview
 //!
-//! For P in G1 and Q in G2 the loop builds f_{x,Q}(P), the rational function with divisor
-//! x (Q) - ([x] Q) - (x - 1) (O), evaluated at P.
-//! It walks the bits of |x| like a double-and-add on Q.
+//! For P in G1 and Q in G2 the loop evaluates the Miller function f_{x,Q} at P.
+//! That rational function has a known divisor:
+//!
+//! ```text
+//!     div(f_{x,Q}) = x (Q) - ([x] Q) - (x - 1) (O)
+//! ```
+//!
+//! The loop walks the bits of |x| like a double-and-add on Q.
 //! Each step doubles or adds a running point R and multiplies f by the line through the points involved.
 //!
 //! ```text
@@ -62,6 +67,7 @@ impl Line {
 impl MillerPoint {
     /// Lifts an affine twist point to Jacobian coordinates with Z = 1.
     const fn from_affine(q: &G2Affine) -> Self {
+        // Z = 1 makes the Jacobian and affine coordinates coincide.
         Self {
             x: q.x,
             y: q.y,
@@ -163,7 +169,8 @@ pub(super) fn multi_miller_loop(terms: &[(G1Affine, G2Affine)]) -> Fp12 {
         .map(|(p, q)| (*p, *q, MillerPoint::from_affine(q)))
         .collect();
 
-    // The top bit 63 of |x| is the initial R = Q; the loop covers bits 62 down to 0.
+    // The top bit 63 of |x| is the initial R = Q.
+    // The loop covers bits 62 down to 0.
     let mut f = Fp12::ONE;
     for bit in (0..63).rev() {
         // f starts at one, so the first squaring is skipped.

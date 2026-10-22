@@ -1,6 +1,7 @@
 //! Conformance against the Ethereum BLS vectors and the Altair spec's BLS vectors.
 //!
-//! The vectors live outside the repository; point AXIOM_VECTORS at their root.
+//! The vectors live outside the repository.
+//! Point AXIOM_VECTORS at their root.
 //! It defaults to the workspace's testing/vectors directory, and every suite skips when it is absent.
 //!
 //! ```text
@@ -36,10 +37,12 @@ enum Yaml {
 impl Yaml {
     /// Parses a whole document: block mappings and sequences, with flow collections inside.
     fn parse(text: &str) -> Self {
+        // Blank lines and comments carry no structure.
         let lines: Vec<&str> = text
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
             .collect();
+        // The document is one block node at indentation zero.
         let mut cursor = 0;
         Self::parse_block(&lines, &mut cursor, 0)
     }
@@ -135,7 +138,8 @@ impl Yaml {
                 }
             }
             Some('\'') => {
-                // Single-quoted scalar; a doubled quote stands for one quote.
+                // Single-quoted scalar.
+                // A doubled quote stands for one quote.
                 chars.next();
                 let mut value = String::new();
                 while let Some(c) = chars.next() {
@@ -173,6 +177,7 @@ impl Yaml {
 
     /// The value under a mapping key.
     fn get(&self, key: &str) -> &Self {
+        // Keys are few, so a linear scan suffices.
         let Self::Map(entries) = self else {
             panic!("expected a mapping, found {self:?}");
         };
@@ -184,6 +189,7 @@ impl Yaml {
 
     /// The items of a sequence.
     fn list(&self) -> &[Self] {
+        // Any other node is a malformed vector.
         match self {
             Self::List(items) => items,
             other => panic!("expected a sequence, found {other:?}"),
@@ -192,6 +198,7 @@ impl Yaml {
 
     /// The text of a scalar.
     fn str(&self) -> &str {
+        // Any other node is a malformed vector.
         match self {
             Self::Str(value) => value,
             other => panic!("expected a string, found {other:?}"),
@@ -211,6 +218,7 @@ fn indentation(line: &str) -> usize {
 
 /// Whether every bracket and brace opened outside quotes is closed.
 fn brackets_balanced(text: &str) -> bool {
+    // Count open minus closed brackets, ignoring those inside single quotes.
     let mut depth = 0_i32;
     let mut quoted = false;
     for c in text.chars() {
@@ -233,6 +241,7 @@ fn skip_spaces(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
 
 /// Decodes hex, with or without a 0x prefix.
 fn hex(text: &str) -> Vec<u8> {
+    // Vectors write hex both with and without the prefix.
     let digits = text.strip_prefix("0x").unwrap_or(text);
     (0..digits.len())
         .step_by(2)
@@ -242,6 +251,7 @@ fn hex(text: &str) -> Vec<u8> {
 
 /// The vectors root: AXIOM_VECTORS, or the workspace's testing/vectors.
 fn vectors_root() -> PathBuf {
+    // The variable wins, so worktrees can point at a shared checkout.
     env::var_os("AXIOM_VECTORS").map_or_else(
         || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testing/vectors"),
         PathBuf::from,
@@ -250,7 +260,8 @@ fn vectors_root() -> PathBuf {
 
 /// Runs a check on every YAML file of a directory, returning how many ran.
 ///
-/// The check returns the expected and the actual outcome; any mismatch fails the test.
+/// The check returns the expected and the actual outcome.
+/// Any mismatch fails the test.
 #[allow(
     clippy::print_stdout,
     clippy::print_stderr,
@@ -272,7 +283,8 @@ fn run_suite(directory: &Path, check: impl Fn(&Yaml) -> (Yaml, Yaml)) -> usize {
 
     let mut failures = Vec::new();
     for file in &files {
-        // Spec-test cases are folders holding a data.yaml; the bls12-381 suite uses bare files.
+        // Spec-test cases are folders holding a data.yaml.
+        // The bls12-381 suite uses bare files.
         let path = if file.is_dir() {
             file.join("data.yaml")
         } else {
@@ -304,6 +316,7 @@ fn bls_suite(name: &str) -> PathBuf {
 
 /// Root of an Altair BLS handler in the consensus spec tests.
 fn altair_suite(handler: &str) -> PathBuf {
+    // Layout: general/altair/bls/<handler>/bls/<case>/data.yaml.
     vectors_root()
         .join("consensus-spec-tests/tests/general/altair/bls")
         .join(handler)
@@ -327,6 +340,7 @@ fn public_keys(value: &Yaml) -> Option<Vec<PublicKey>> {
 
 /// Encodes bytes as 0x-prefixed hex, the form of the expected outputs.
 fn to_hex(bytes: &[u8]) -> Yaml {
+    // Lowercase, 0x-prefixed, as the vectors print bytes.
     let text = bytes.iter().fold(String::from("0x"), |mut text, byte| {
         write!(text, "{byte:02x}").expect("writing to a string cannot fail");
         text
@@ -378,7 +392,9 @@ fn sign() {
 #[test]
 fn verify() {
     run_suite(&bls_suite("verify"), |case| {
+        // Fixture state: one key, one message, one signature.
         let input = case.get("input");
+        // A key or signature that fails to decode means the vector expects false.
         let valid = match (
             public_key(input.get("pubkey")),
             signature(input.get("signature")),
@@ -393,8 +409,10 @@ fn verify() {
 #[test]
 fn aggregate() {
     run_suite(&bls_suite("aggregate"), |case| {
+        // One undecodable signature voids the whole aggregate.
         let signatures: Option<Vec<Signature>> =
             case.get("input").list().iter().map(signature).collect();
+        // An empty list has no aggregate, which the vector writes as null.
         let actual = signatures
             .and_then(|signatures| Signature::aggregate(&signatures).ok())
             .map_or(Yaml::Null, |aggregate| to_hex(&aggregate.to_bytes()));
@@ -405,6 +423,7 @@ fn aggregate() {
 #[test]
 fn aggregate_verify() {
     run_suite(&bls_suite("aggregate_verify"), |case| {
+        // Fixture state: n keys, n messages, one aggregate signature.
         let input = case.get("input");
         let messages: Vec<Vec<u8>> = input
             .get("messages")
@@ -413,6 +432,7 @@ fn aggregate_verify() {
             .map(Yaml::bytes)
             .collect();
         let messages: Vec<&[u8]> = messages.iter().map(Vec::as_slice).collect();
+        // Any undecodable key or signature means the vector expects false.
         let valid = match (
             public_keys(input.get("pubkeys")),
             signature(input.get("signature")),
@@ -430,7 +450,9 @@ fn aggregate_verify() {
 #[test]
 fn fast_aggregate_verify() {
     run_suite(&bls_suite("fast_aggregate_verify"), |case| {
+        // Fixture state: n keys over one message, one aggregate signature.
         let input = case.get("input");
+        // Any undecodable key or signature means the vector expects false.
         let valid = match (
             public_keys(input.get("pubkeys")),
             signature(input.get("signature")),
@@ -452,7 +474,8 @@ fn batch_verify() {
         let keys = input.get("pubkeys").list();
         let messages = input.get("messages").list();
         let signatures = input.get("signatures").list();
-        // Build one set per triple; any undecodable part makes the whole batch invalid.
+        // Build one set per triple.
+        // Any undecodable part makes the whole batch invalid.
         let sets: Option<Vec<SignatureSet>> = keys
             .iter()
             .zip(messages)
@@ -473,7 +496,8 @@ fn batch_verify() {
 #[test]
 fn deserialization_g1() {
     run_suite(&bls_suite("deserialization_G1"), |case| {
-        // Point decoding with the subgroup check; infinity is a valid point here.
+        // Point decoding with the subgroup check.
+        // Infinity is a valid point here.
         let bytes = case.get("input").get("pubkey").bytes();
         let valid = <[u8; 48]>::try_from(bytes.as_slice())
             .is_ok_and(|bytes| G1Affine::from_compressed(&bytes).is_ok());
@@ -484,6 +508,8 @@ fn deserialization_g1() {
 #[test]
 fn deserialization_g2() {
     run_suite(&bls_suite("deserialization_G2"), |case| {
+        // Signature decoding is the subgroup-checked G2 decoding.
+        // Infinity is valid.
         let bytes = case.get("input").get("signature").bytes();
         let valid = <[u8; 96]>::try_from(bytes.as_slice())
             .is_ok_and(|bytes| G2Affine::from_compressed(&bytes).is_ok());
@@ -526,6 +552,7 @@ fn hash_to_g2() {
 #[test]
 fn eth_aggregate_pubkeys() {
     run_suite(&altair_suite("eth_aggregate_pubkeys"), |case| {
+        // Empty lists, invalid keys, and infinite sums all expect null.
         let actual = public_keys(case.get("input"))
             .and_then(|keys| PublicKey::aggregate(&keys).ok())
             .map_or(Yaml::Null, |aggregate| to_hex(&aggregate.to_bytes()));
@@ -536,7 +563,9 @@ fn eth_aggregate_pubkeys() {
 #[test]
 fn eth_fast_aggregate_verify() {
     run_suite(&altair_suite("eth_fast_aggregate_verify"), |case| {
+        // Fixture state: possibly no keys, one message, one signature.
         let input = case.get("input");
+        // The Altair rule accepts no keys with the infinity signature.
         let valid = match (
             public_keys(input.get("pubkeys")),
             signature(input.get("signature")),

@@ -36,7 +36,7 @@ pub(crate) trait PippengerGroup:
     fn double_point(&self) -> Self;
 }
 
-/// Computes sum_i scalars[i] * points[i].
+/// Computes sum_i k_i P_i over paired points and scalars.
 ///
 /// The running time depends on the scalars, so they must be public.
 ///
@@ -71,7 +71,8 @@ pub(crate) fn multi_exp<G: PippengerGroup>(points: &[G::Affine], scalars: &[Scal
             result = result.double_point();
         }
 
-        // Drop each point into the bucket of its digit; digit 0 contributes nothing.
+        // Drop each point into the bucket of its digit.
+        // Digit 0 contributes nothing.
         buckets.fill(G::NEUTRAL);
         for (point, scalar) in points.iter().zip(&digits) {
             let digit = read_digit(scalar, window * width, width);
@@ -106,7 +107,8 @@ fn window_width(n: usize) -> usize {
 
 /// Number of significant bits of a little-endian integer, zero for zero.
 fn bit_length(limbs: &[u64; 4]) -> usize {
-    // The highest nonzero limb decides; each limb below it contributes 64 bits.
+    // The highest nonzero limb decides.
+    // Each limb below it contributes 64 bits.
     limbs
         .iter()
         .rposition(|limb| *limb != 0)

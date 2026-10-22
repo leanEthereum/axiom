@@ -34,6 +34,7 @@ impl Flags {
 
     /// Reads the flags from the first byte and clears them, leaving only coordinate bits.
     pub(crate) const fn take(bytes: &mut [u8]) -> Self {
+        // Keep the original byte, then clear the three flag bits in place.
         let first = bytes[0];
         bytes[0] &= !(Self::COMPRESSION | Self::INFINITY | Self::SORT);
         Self {
@@ -45,6 +46,7 @@ impl Flags {
 
     /// Writes the flags into the first byte, which must have its top three bits clear.
     pub(crate) const fn put(self, bytes: &mut [u8]) {
+        // OR each set flag into the top three bits.
         if self.compression {
             bytes[0] |= Self::COMPRESSION;
         }
@@ -70,16 +72,17 @@ impl Flags {
         if self.compression != compressed {
             return Err(PointDecodeError::InvalidCompressionFlag);
         }
-        // Only the compressed form needs a sign; uncompressed carries y itself.
-        if !compressed && self.sort {
-            return Err(PointDecodeError::UnexpectedSortFlag);
-        }
         if self.infinity {
             // Infinity has no coordinates and no sign: every other bit must be zero.
             if self.sort || payload.iter().any(|byte| *byte != 0) {
                 return Err(PointDecodeError::InvalidInfinityEncoding);
             }
             return Ok(true);
+        }
+        // Only the compressed form needs a sign.
+        // Uncompressed carries y itself.
+        if !compressed && self.sort {
+            return Err(PointDecodeError::UnexpectedSortFlag);
         }
         Ok(false)
     }

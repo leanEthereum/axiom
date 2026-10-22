@@ -1,4 +1,4 @@
-//! The cubic extension F_{p^6} = F_{p^2}[v] / (v^3 - xi), with xi = 1 + u.
+//! The cubic extension F_{p^6} = F_{p^2}\[v\] / (v^3 - xi), with xi = 1 + u.
 //!
 //! xi is neither a square nor a cube in F_{p^2}, so v^3 = xi defines a field.
 //! This is the middle floor of the tower 2 -> 6 -> 12 used by the pairing.
@@ -75,7 +75,8 @@ impl Fp6 {
     /// Multiplies by v, the non-residue that defines the quadratic floor above this field.
     #[must_use]
     pub fn mul_by_nonresidue(&self) -> Self {
-        // Shift the coefficients up one power of v; the overflow v^3 wraps to xi.
+        // Shift the coefficients up one power of v.
+        // The overflow v^3 wraps to xi.
         //
         //     (c0 + c1 v + c2 v^2) v = c2 xi + c0 v + c1 v^2
         Self::new(self.c2.mul_by_nonresidue(), self.c0, self.c1)
@@ -213,6 +214,7 @@ impl Fp6 {
 
 impl fmt::Debug for Fp6 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Coefficients in increasing powers of v.
         write!(
             f,
             "({:?}) + ({:?}) * v + ({:?}) * v^2",
@@ -385,9 +387,11 @@ pub(crate) mod tests {
     proptest! {
         #[test]
         fn field_axioms_hold(a in arb_fp6(), b in arb_fp6(), c in arb_fp6()) {
+            // Associativity and commutativity of the product, then distributivity.
             prop_assert_eq!((a * b) * c, a * (b * c));
             prop_assert_eq!(a * b, b * a);
             prop_assert_eq!(a * (b + c), a * b + a * c);
+            // The dedicated squaring agrees with the generic product.
             prop_assert_eq!(a.square(), a * a);
         }
 

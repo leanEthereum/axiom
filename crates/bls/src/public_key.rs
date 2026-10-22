@@ -22,7 +22,9 @@ impl PublicKey {
     ///
     /// Rejects encodings that are malformed, off the curve, outside G1, or the point at infinity.
     pub fn from_bytes(bytes: &[u8; G1_COMPRESSED_BYTES]) -> Result<Self, BlsError> {
+        // Decoding checks flags, canonical coordinates, the curve, and the subgroup.
         let point = G1Affine::from_compressed(bytes).map_err(BlsError::InvalidPublicKey)?;
+        // KeyValidate additionally rejects the identity.
         if point.is_identity() {
             return Err(BlsError::InfinityPublicKey);
         }
@@ -36,6 +38,9 @@ impl PublicKey {
     }
 
     /// Sums keys, as eth_aggregate_pubkeys of the Altair specification.
+    ///
+    /// The specification would return an infinite sum, but no valid key is infinite.
+    /// Reaching it requires knowing secret keys that cancel, which proofs of possession tie to their owners.
     ///
     /// # Errors
     ///
@@ -91,6 +96,7 @@ impl PublicKey {
 
 impl fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The compressed encoding identifies the key compactly.
         f.write_str("PublicKey(0x")?;
         for byte in self.to_bytes() {
             write!(f, "{byte:02x}")?;
