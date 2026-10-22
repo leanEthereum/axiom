@@ -144,6 +144,8 @@ pub(crate) struct NetworkService<P: Preset> {
     peers: PeerManager,
     /// Peer management metrics.
     peer_metrics: PeerMetrics,
+    /// Pings in flight.
+    pings: HashMap<RequestId, PeerId>,
     /// Goodbye requests in flight; each peer is disconnected once its goodbye is done.
     goodbyes: HashMap<RequestId, PeerId>,
     /// Metadata requests in flight, with the version asked.
@@ -270,6 +272,7 @@ impl<P: Preset> NetworkService<P> {
             handshakes: Handshakes::default(),
             peers: PeerManager::new(peer_limits),
             peer_metrics,
+            pings: HashMap::new(),
             goodbyes: HashMap::new(),
             metadata_requests: HashMap::new(),
             config,
@@ -510,6 +513,7 @@ impl<P: Preset> NetworkService<P> {
                 let now = self.now();
                 self.peers.on_disconnected(&peer, now);
                 self.goodbyes.retain(|_, known| *known != peer);
+                self.pings.retain(|_, known| *known != peer);
                 self.metadata_requests
                     .retain(|_, (known, _)| *known != peer);
                 self.handshakes.forget(&peer);
@@ -563,7 +567,16 @@ impl<P: Preset> NetworkService<P> {
             } => self.on_request_failure(request, peer, error).await,
             NetworkEvent::RateLimited { peer, protocol } => {
                 debug!(%peer, ?protocol, "peer over its rate limit");
-                self.report(&peer, PeerAction::MidTolerance).await;
+                // The handshake methods are cheap and rarely needed: overusing them costs more.
+                let action = match protocol {
+                    Protocol::GoodbyeV1
+                    | Protocol::MetaDataV2
+                    | Protocol::MetaDataV3
+                    | Protocol::StatusV1
+                    | Protocol::StatusV2 => PeerAction::LowTolerance,
+                    _ => PeerAction::MidTolerance,
+                };
+                self.report(&peer, action).await;
             }
             NetworkEvent::ConnectionFailed { address, error } => {
                 debug!(%address, %error, "connection failed");
@@ -578,9 +591,21 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
-    /// Routes a response chunk to the metadata, handshake or sync request it answers.
+    /// Routes a response chunk to the ping, metadata, handshake or sync request it answers.
     async fn on_response(&mut self, request: RequestId, chunk: &ResponseChunk) {
-        if let Some((peer, _)) = self.metadata_requests.get(&request) {
+        if let Some(peer) = self.pings.remove(&request) {
+            // A pong carries the peer's metadata sequence number: a higher one means new metadata.
+            let seq = <[u8; 8]>::try_from(chunk.payload.as_slice()).map(u64::from_le_bytes);
+            match seq {
+                Ok(seq) if chunk.code == ResponseCode::Success => {
+                    if self.peers.on_pong(&peer, seq) {
+                        self.request_metadata(peer, Protocol::MetaDataV3).await;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => self.report(&peer, PeerAction::Fatal).await,
+            }
+        } else if let Some((peer, _)) = self.metadata_requests.get(&request) {
             // A metadata response states the peer's subnets.
             if chunk.code == ResponseCode::Success {
                 let peer = peer.clone();
@@ -617,20 +642,56 @@ impl<P: Preset> NetworkService<P> {
             let _ = self.network.disconnect(peer).await;
             return;
         }
-        if let Some((peer, protocol)) = self.metadata_requests.remove(&request) {
-            // A peer that refuses the third metadata version may speak the second.
-            if protocol == Protocol::MetaDataV3 && matches!(error, RequestError::Unsupported { .. })
-            {
-                self.request_metadata(peer, Protocol::MetaDataV2).await;
+        // A broken answer to any request is malice or breakage, whatever the method.
+        if matches!(error, RequestError::InvalidResponse { .. }) {
+            self.report(&peer, PeerAction::Fatal).await;
+        }
+        if self.pings.remove(&request).is_some() {
+            match error {
+                // A peer must answer pings in time, and must serve them at all.
+                RequestError::Timeout { .. } => self.report(&peer, PeerAction::LowTolerance).await,
+                RequestError::Unsupported { .. } => self.report(&peer, PeerAction::Fatal).await,
+                _ => {}
             }
             return;
         }
-        if let Some(action) = Self::fault_of(&error) {
-            self.report(&peer, action).await;
+        if let Some((peer, protocol)) = self.metadata_requests.remove(&request) {
+            if matches!(error, RequestError::Unsupported { .. }) {
+                // A peer that refuses the third metadata version may speak the second; one that
+                // serves neither breaks the protocol.
+                if protocol == Protocol::MetaDataV3 {
+                    self.request_metadata(peer, Protocol::MetaDataV2).await;
+                } else {
+                    self.report(&peer, PeerAction::Fatal).await;
+                }
+            }
+            return;
         }
-        // A peer that refused the newest status version gets the older one right away.
-        if let Some(peer) = self.handshakes.failed(request, &error) {
-            self.send_status(peer).await;
+        if self.handshakes.owns(request) {
+            // A peer that refused the newest status version gets the older one right away.
+            // One that serves no status version breaks the protocol.
+            match self.handshakes.failed(request, &error) {
+                Some(peer) => self.send_status(peer).await,
+                None if matches!(error, RequestError::Unsupported { .. }) => {
+                    self.report(&peer, PeerAction::Fatal).await;
+                }
+                None => {}
+            }
+            return;
+        }
+        if self.sync.owns(request) {
+            match error {
+                // A block, blob or column request that times out costs a mid-tolerance fault.
+                RequestError::Timeout { .. } => self.report(&peer, PeerAction::MidTolerance).await,
+                RequestError::Negotiation { .. } => {
+                    self.report(&peer, PeerAction::LowTolerance).await;
+                }
+                // A stream that broke mid-answer may be the network's doing.
+                RequestError::StreamClosed => {
+                    self.report(&peer, PeerAction::HighTolerance).await;
+                }
+                _ => {}
+            }
         }
         self.sync.on_failure(request).await;
         self.punish_dropped().await;
@@ -641,7 +702,7 @@ impl<P: Preset> NetworkService<P> {
         Duration::from_millis(self.clock.now_ms())
     }
 
-    /// Keeps the peer set in shape: prunes past the target, refreshes metadata, and seeks peers.
+    /// Keeps the peer set in shape: prunes past the target, pings, and seeks peers.
     ///
     /// A lookup serves the most starved subnet first; with every subnet served, it seeks any peer.
     async fn manage_peers(&mut self, digest: ForkDigest) {
@@ -651,14 +712,8 @@ impl<P: Preset> NetworkService<P> {
         for (peer, reason) in upkeep.disconnect {
             self.say_goodbye(peer, reason).await;
         }
-        for peer in upkeep.metadata_due {
-            if !self
-                .metadata_requests
-                .values()
-                .any(|(known, _)| *known == peer)
-            {
-                self.request_metadata(peer, Protocol::MetaDataV3).await;
-            }
+        for peer in upkeep.pings {
+            self.ping(peer).await;
         }
         if let Some(discovery) = &mut self.discovery {
             if upkeep.starved.is_empty() {
@@ -681,18 +736,6 @@ impl<P: Preset> NetworkService<P> {
         self.metrics.peers.set_count(self.peers.len() as u64);
     }
 
-    /// The fault a failed request reveals, if any.
-    ///
-    /// A timeout may be the network's doing, a malformed response rarely is.
-    /// Refusals and closed streams are the peer's right and cost nothing.
-    const fn fault_of(error: &RequestError) -> Option<PeerAction> {
-        match error {
-            RequestError::Timeout { .. } => Some(PeerAction::HighTolerance),
-            RequestError::InvalidResponse { .. } => Some(PeerAction::LowTolerance),
-            _ => None,
-        }
-    }
-
     /// Records a fault, and says goodbye when it pushed the peer out.
     async fn report(&mut self, peer: &PeerId, action: PeerAction) {
         self.peer_metrics.fault(action);
@@ -703,10 +746,10 @@ impl<P: Preset> NetworkService<P> {
         }
     }
 
-    /// Bans the peers sync dropped for bad data.
+    /// Scores the peers sync dropped for a faulty batch: a low-tolerance fault each.
     async fn punish_dropped(&mut self) {
         for peer in self.sync.take_dropped() {
-            self.report(&peer, PeerAction::Fatal).await;
+            self.report(&peer, PeerAction::LowTolerance).await;
         }
     }
 
@@ -724,6 +767,21 @@ impl<P: Preset> NetworkService<P> {
             Err(_) => {
                 let _ = self.network.disconnect(peer).await;
             }
+        }
+    }
+
+    /// Pings a peer with this node's metadata sequence number.
+    async fn ping(&mut self, peer: PeerId) {
+        let seq = self.metadata.seq_number.load(Ordering::Relaxed);
+        match self
+            .network
+            .send_request(peer.clone(), Protocol::PingV1, seq.to_le_bytes().to_vec())
+            .await
+        {
+            Ok(request) => {
+                self.pings.insert(request, peer);
+            }
+            Err(error) => debug!(%error, %peer, "could not ping"),
         }
     }
 

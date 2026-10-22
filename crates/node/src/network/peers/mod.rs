@@ -11,6 +11,8 @@
 //!   An attacker can flood inbound connections, but it cannot choose whom this node dials.
 //! - Each address may hold only a few peers, so one host cannot fill the table with identities.
 //! - Faults lower a decaying score; a low score disconnects, a very low one bans.
+//! - An address that produced several banned identities is banned too.
+//! - Each peer is pinged regularly; a higher metadata sequence number prompts a metadata request.
 //!
 //! It keeps every subnet the node needs served:
 //!
@@ -20,7 +22,6 @@
 //! The decisions protect liveness: an eclipsed or starved node cannot follow the chain.
 //! None of them affects safety, which rests on signatures and fork choice alone.
 
-mod bans;
 mod metrics;
 mod score;
 mod subnets;
@@ -32,7 +33,6 @@ use std::{
 };
 
 use axiom_p2p::{Multiaddr, PeerId, Protocol as Layer, eth::reqresp::GoodbyeReason};
-use bans::BanList;
 pub(crate) use metrics::PeerMetrics;
 pub(crate) use score::PeerAction;
 use score::{PeerScore, Standing};
@@ -50,13 +50,22 @@ pub(crate) mod goodbye {
     pub(crate) const BANNED: GoodbyeReason = GoodbyeReason(251);
 }
 
-/// Scores of disconnected peers remembered, so a peer cannot reconnect to clear its record.
+/// Disconnected peers remembered, so a peer cannot reconnect to clear its record.
 ///
-/// Threshold: beyond this, the scores closest to forgiven are forgotten first.
-const REMEMBERED_SCORES: usize = 4096;
+/// Threshold: beyond this, the peers already forgiven are forgotten.
+const REMEMBERED_PEERS: usize = 1500;
 
-/// How long a peer's metadata is trusted before it is asked for again.
-const METADATA_REFRESH: Duration = Duration::from_mins(10);
+/// Banned identities from one address beyond which the address itself is banned.
+///
+/// Adversary: identities are free, addresses are not.
+/// A few honest nodes may share a NAT, but more than five banned identities do not happen by chance.
+const BANNED_PEERS_PER_IP: usize = 5;
+
+/// How often an outbound peer is pinged.
+const PING_OUTBOUND: Duration = Duration::from_secs(15);
+
+/// How often an inbound peer is pinged.
+const PING_INBOUND: Duration = Duration::from_secs(20);
 
 /// The node's targets for its peer set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,10 +125,19 @@ struct Peer {
     score: PeerScore,
     /// The subnets the peer serves, once its metadata arrived.
     subnets: Option<PeerSubnets>,
-    /// When the metadata was last asked for.
-    metadata_asked: Option<Duration>,
+    /// When the peer was last pinged.
+    pinged: Duration,
     /// Whether a goodbye is on its way, so the peer is no longer counted on.
     leaving: bool,
+}
+
+/// A peer that left, remembered for its score.
+#[derive(Clone, Copy, Debug)]
+struct PastPeer {
+    /// The score it left with.
+    score: PeerScore,
+    /// The address's IP, for address bans.
+    ip: Option<IpAddr>,
 }
 
 /// What the upkeep decided.
@@ -131,8 +149,8 @@ pub(crate) struct Upkeep {
     pub(crate) dials: usize,
     /// Subnets with too few peers, most starved first.
     pub(crate) starved: Vec<Subnet>,
-    /// Connected peers whose metadata is unknown.
-    pub(crate) metadata_due: Vec<PeerId>,
+    /// Peers due for a ping.
+    pub(crate) pings: Vec<PeerId>,
 }
 
 /// Connected peers and the rules that shape the set.
@@ -142,10 +160,8 @@ pub(crate) struct PeerManager {
     limits: PeerLimits,
     /// Connected peers.
     peers: BTreeMap<PeerId, Peer>,
-    /// Bans by peer and address.
-    bans: BanList,
-    /// Scores of peers that left, until forgiven.
-    past_scores: HashMap<PeerId, PeerScore>,
+    /// Peers that left with a score not yet forgiven.
+    past: HashMap<PeerId, PastPeer>,
 }
 
 impl PeerManager {
@@ -154,8 +170,7 @@ impl PeerManager {
         Self {
             limits,
             peers: BTreeMap::new(),
-            bans: BanList::default(),
-            past_scores: HashMap::new(),
+            past: HashMap::new(),
         }
     }
 
@@ -186,10 +201,33 @@ impl PeerManager {
         }
     }
 
-    /// Whether a dial to an address is allowed: the address is not banned.
+    /// Whether a peer is banned: its score is at or below the ban threshold.
+    fn is_banned(&self, peer: &PeerId, now: Duration) -> bool {
+        let score = self
+            .peers
+            .get(peer)
+            .map(|known| known.score)
+            .or_else(|| self.past.get(peer).map(|past| past.score));
+        score.is_some_and(|score| score.standing(now) == Standing::Ban)
+    }
+
+    /// Whether an address is banned: more than five banned identities came from it.
+    fn is_ip_banned(&self, ip: IpAddr, now: Duration) -> bool {
+        let connected = self
+            .peers
+            .values()
+            .filter(|peer| peer.ip == Some(ip) && peer.score.standing(now) == Standing::Ban);
+        let past = self
+            .past
+            .values()
+            .filter(|peer| peer.ip == Some(ip) && peer.score.standing(now) == Standing::Ban);
+        connected.count() + past.count() > BANNED_PEERS_PER_IP
+    }
+
+    /// Whether a dial is allowed: neither the peer nor its address is banned.
     pub(crate) fn may_dial(&self, peer: &PeerId, address: &Multiaddr, now: Duration) -> bool {
-        !self.bans.is_banned(peer, now)
-            && Self::ip_of(address).is_none_or(|ip| !self.bans.is_ip_banned(&ip, now))
+        !self.is_banned(peer, now)
+            && Self::ip_of(address).is_none_or(|ip| !self.is_ip_banned(ip, now))
     }
 
     /// Admits a new connection, or says why it must close.
@@ -205,7 +243,7 @@ impl PeerManager {
         now: Duration,
     ) -> Result<(), GoodbyeReason> {
         let ip = Self::ip_of(address);
-        if self.bans.is_banned(peer, now) || ip.is_some_and(|ip| self.bans.is_ip_banned(&ip, now)) {
+        if self.is_banned(peer, now) || ip.is_some_and(|ip| self.is_ip_banned(ip, now)) {
             return Err(goodbye::BANNED);
         }
         if let Some(ip) = ip
@@ -228,9 +266,9 @@ impl PeerManager {
         }
         // A returning peer resumes its old score, so reconnecting does not wash it clean.
         let score = self
-            .past_scores
+            .past
             .remove(peer)
-            .unwrap_or_else(|| PeerScore::new(now));
+            .map_or_else(|| PeerScore::new(now), |past| past.score);
         if score.standing(now) != Standing::Good {
             return Err(goodbye::BAD_SCORE);
         }
@@ -243,8 +281,7 @@ impl PeerManager {
                 quic,
                 score,
                 subnets: None,
-                // The node asks for metadata on connection.
-                metadata_asked: Some(now),
+                pinged: now,
                 leaving: false,
             },
         );
@@ -257,10 +294,16 @@ impl PeerManager {
             return;
         };
         if !gone.score.is_forgiven(now) {
-            if self.past_scores.len() >= REMEMBERED_SCORES {
-                self.past_scores.retain(|_, score| !score.is_forgiven(now));
+            if self.past.len() >= REMEMBERED_PEERS {
+                self.past.retain(|_, past| !past.score.is_forgiven(now));
             }
-            self.past_scores.insert(peer.clone(), gone.score);
+            self.past.insert(
+                peer.clone(),
+                PastPeer {
+                    score: gone.score,
+                    ip: gone.ip,
+                },
+            );
         }
     }
 
@@ -282,10 +325,7 @@ impl PeerManager {
         let reason = match known.score.apply(action, now) {
             Standing::Good => return None,
             Standing::Disconnect => goodbye::BAD_SCORE,
-            Standing::Ban => {
-                self.bans.ban(peer, known.ip, now);
-                goodbye::BANNED
-            }
+            Standing::Ban => goodbye::BANNED,
         };
         known.leaving = true;
         Some(reason)
@@ -296,6 +336,16 @@ impl PeerManager {
         if let Some(known) = self.peers.get_mut(peer) {
             known.subnets = Some(subnets);
         }
+    }
+
+    /// Takes a ping answer, returning whether the peer's metadata changed and must be fetched.
+    pub(crate) fn on_pong(&self, peer: &PeerId, seq_number: u64) -> bool {
+        self.peers.get(peer).is_some_and(|known| {
+            known
+                .subnets
+                .as_ref()
+                .is_none_or(|subnets| seq_number > subnets.seq_number)
+        })
     }
 
     /// Peers serving a subnet.
@@ -318,7 +368,7 @@ impl PeerManager {
     ///
     /// - `needed`: the subnets the node subscribes to.
     pub(crate) fn upkeep(&mut self, needed: &BTreeSet<Subnet>, now: Duration) -> Upkeep {
-        self.bans.prune(now);
+        self.past.retain(|_, past| !past.score.is_forgiven(now));
         let mut upkeep = Upkeep::default();
 
         // Subnets below their share of peers, the emptiest first.
@@ -337,15 +387,16 @@ impl PeerManager {
         let below_target = self.limits.target.saturating_sub(counted.len());
         let outbound_deficit = self.limits.min_outbound().saturating_sub(outbound);
         upkeep.dials = below_target.max(outbound_deficit);
-        // Metadata is asked for on connection, then again whenever it grows stale.
-        // Long-lived attestation subnets rotate every 256 epochs, so a refresh every 10 minutes keeps up.
+        // Pings carry the metadata sequence number, so changed metadata is noticed within seconds.
         for (id, peer) in &mut self.peers {
-            let due = peer
-                .metadata_asked
-                .is_none_or(|asked| now.saturating_sub(asked) >= METADATA_REFRESH);
-            if !peer.leaving && due {
-                peer.metadata_asked = Some(now);
-                upkeep.metadata_due.push(id.clone());
+            let interval = if peer.outbound {
+                PING_OUTBOUND
+            } else {
+                PING_INBOUND
+            };
+            if !peer.leaving && now.saturating_sub(peer.pinged) >= interval {
+                peer.pinged = now;
+                upkeep.pings.push(id.clone());
             }
         }
         upkeep
@@ -409,7 +460,11 @@ impl PeerManager {
     /// Counts for the metrics: inbound, outbound, QUIC and TCP peers, and active bans.
     pub(crate) fn census(&self, now: Duration) -> Census {
         let mut census = Census {
-            banned: self.bans.active(now),
+            banned: self
+                .past
+                .values()
+                .filter(|past| past.score.standing(now) == Standing::Ban)
+                .count(),
             ..Census::default()
         };
         for peer in self.peers.values() {
@@ -584,7 +639,7 @@ mod tests {
             Ok(())
         );
 
-        // A fatal fault bans: the peer and dials to it are refused for 30 minutes.
+        // A fatal fault bans: the peer and dials to it are refused for twelve hours and more.
         assert_eq!(
             peers.report(&alice, PeerAction::Fatal, 11 * MINUTE),
             Some(goodbye::BANNED)
@@ -620,20 +675,67 @@ mod tests {
                 dials: 2,
                 // Subnet 0 has no peer, subnet 1 one: the emptiest first.
                 starved: vec![Subnet::Attestation(0), Subnet::Attestation(1)],
-                // Both were asked for metadata on connection.
-                metadata_due: Vec::new(),
+                // Both were pinged in effect on connection.
+                pings: Vec::new(),
             }
         );
+    }
 
-        // Ten minutes on, the metadata is stale and asked for again, once.
-        let mut due = peers.upkeep(&needed, 10 * MINUTE).metadata_due;
-        due.sort();
-        let mut expected = vec![peer(1), peer(2)];
-        expected.sort();
-        assert_eq!(due, expected);
+    #[test]
+    fn pings_are_due_every_15_or_20_seconds_and_reveal_new_metadata() {
+        let mut peers = PeerManager::new(LIMITS);
+        let needed = BTreeSet::new();
+        peers
+            .on_connected(&peer(1), &address(1), true, Duration::ZERO)
+            .unwrap();
+        peers
+            .on_connected(&peer(2), &address(2), false, Duration::ZERO)
+            .unwrap();
+        // At 15 s the outbound peer is due, at 20 s the inbound one; each once.
         assert_eq!(
-            peers.upkeep(&needed, 10 * MINUTE).metadata_due,
+            peers.upkeep(&needed, Duration::from_secs(15)).pings,
+            vec![peer(1)]
+        );
+        assert_eq!(
+            peers.upkeep(&needed, Duration::from_secs(20)).pings,
+            vec![peer(2)]
+        );
+        assert_eq!(
+            peers.upkeep(&needed, Duration::from_secs(21)).pings,
             Vec::<PeerId>::new()
+        );
+
+        // Without metadata any pong asks for it; with sequence 1 known, only a higher one does.
+        assert!(peers.on_pong(&peer(1), 0));
+        peers.set_subnets(&peer(1), serving(&peer(1), &[]));
+        assert!(!peers.on_pong(&peer(1), 1));
+        assert!(peers.on_pong(&peer(1), 2));
+        assert!(!peers.on_pong(&peer(9), 2));
+    }
+
+    #[test]
+    fn an_address_with_more_than_five_banned_peers_is_banned() {
+        let mut peers = PeerManager::new(PeerLimits {
+            per_ip: 10,
+            target: 20,
+            ..LIMITS
+        });
+        let now = Duration::ZERO;
+        let host = address(7);
+        // Five banned identities from one host leave it welcome.
+        for seed in 1..=5 {
+            peers.on_connected(&peer(seed), &host, false, now).unwrap();
+            peers.report(&peer(seed), PeerAction::Fatal, now);
+            peers.on_disconnected(&peer(seed), now);
+        }
+        assert!(peers.may_dial(&peer(20), &host, now));
+        // The sixth bans the address, for any identity.
+        peers.on_connected(&peer(6), &host, false, now).unwrap();
+        peers.report(&peer(6), PeerAction::Fatal, now);
+        assert!(!peers.may_dial(&peer(20), &host, now));
+        assert_eq!(
+            peers.on_connected(&peer(21), &host, true, now),
+            Err(goodbye::BANNED)
         );
     }
 

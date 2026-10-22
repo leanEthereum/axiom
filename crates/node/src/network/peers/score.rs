@@ -11,8 +11,11 @@
 //!
 //! Two thresholds act on it:
 //!
-//! - below the disconnect threshold the peer is dropped, and may reconnect later
-//! - below the ban threshold the peer is dropped and refused for a while
+//! - at or below the disconnect threshold the peer is dropped, and may reconnect later
+//! - at or below the ban threshold the peer is dropped and refused
+//!
+//! Crossing the ban threshold freezes the decay for 12 hours.
+//! The ban lifts once the frozen score has then decayed back above the threshold.
 //!
 //! Adversary: a peer that sends bad data now and then must not keep its slot.
 //! An honest peer that times out once in a while must never reach the thresholds.
@@ -23,25 +26,28 @@ use std::time::Duration;
 /// The lowest score; a fatal fault lands here at once.
 const MIN_SCORE: f64 = -100.0;
 
-/// Below this score the peer is disconnected.
-pub(crate) const DISCONNECT_THRESHOLD: f64 = -20.0;
+/// At or below this score the peer is disconnected.
+const DISCONNECT_THRESHOLD: f64 = -20.0;
 
-/// Below this score the peer is banned.
-pub(crate) const BAN_THRESHOLD: f64 = -50.0;
+/// At or below this score the peer is banned.
+const BAN_THRESHOLD: f64 = -50.0;
 
 /// The time for a penalty to halve.
-const HALF_LIFE: Duration = Duration::from_secs(600);
+const HALF_LIFE: Duration = Duration::from_mins(10);
+
+/// How long a fresh ban holds the score before it decays.
+const BAN_FREEZE: Duration = Duration::from_hours(12);
 
 /// How severe a fault is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) enum PeerAction {
-    /// Proof of malice or of a broken peer, such as an invalid block range: ban at once.
+    /// Proof of malice or of a broken peer, such as undecodable data: ban at once.
     Fatal,
-    /// A fault an honest peer rarely makes, such as a malformed response.
+    /// A fault an honest peer rarely makes, such as a faulty batch.
     LowTolerance,
     /// A fault an honest peer makes under load, such as exceeding a rate limit.
     MidTolerance,
-    /// A fault of the network as much as the peer, such as a timeout.
+    /// A fault of the network as much as the peer.
     HighTolerance,
 }
 
@@ -81,9 +87,9 @@ pub(crate) enum Standing {
 /// A decaying score.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PeerScore {
-    /// The value at the last update.
+    /// The value at the reference time.
     value: f64,
-    /// When the value was last updated.
+    /// The time decay counts from; a ban moves it into the future.
     updated: Duration,
 }
 
@@ -96,7 +102,7 @@ impl PeerScore {
         }
     }
 
-    /// The score at a time, decayed since the last update.
+    /// The score at a time, decayed since the reference time.
     pub(crate) fn at(&self, now: Duration) -> f64 {
         let elapsed = now.saturating_sub(self.updated).as_secs_f64();
         self.value * (-elapsed / HALF_LIFE.as_secs_f64()).exp2()
@@ -104,8 +110,13 @@ impl PeerScore {
 
     /// Applies a fault and returns the standing it leaves.
     pub(crate) fn apply(&mut self, action: PeerAction, now: Duration) -> Standing {
-        self.value = (self.at(now) - action.penalty()).max(MIN_SCORE);
-        self.updated = now;
+        let before = self.at(now);
+        self.value = (before - action.penalty()).max(MIN_SCORE);
+        // A frozen score keeps its freeze; otherwise decay restarts from now.
+        self.updated = self.updated.max(now);
+        if before > BAN_THRESHOLD && self.value <= BAN_THRESHOLD {
+            self.updated = now + BAN_FREEZE;
+        }
         self.standing(now)
     }
 
@@ -131,7 +142,7 @@ impl PeerScore {
 mod tests {
     use super::*;
 
-    const MINUTE: Duration = Duration::from_secs(60);
+    const MINUTE: Duration = Duration::from_mins(1);
 
     #[test]
     fn faults_accumulate_and_cross_the_thresholds() {
@@ -163,14 +174,29 @@ mod tests {
     }
 
     #[test]
-    fn penalties_halve_every_ten_minutes() {
+    fn a_ban_freezes_the_score_for_twelve_hours_then_decays() {
         let mut score = PeerScore::new(Duration::ZERO);
         score.apply(PeerAction::Fatal, Duration::ZERO);
-        assert_eq!(score.at(10 * MINUTE), -50.0);
-        assert_eq!(score.at(20 * MINUTE), -25.0);
-        assert_eq!(score.standing(30 * MINUTE), Standing::Good);
-        assert!(!score.is_forgiven(60 * MINUTE));
-        assert!(score.is_forgiven(70 * MINUTE));
+        // Twelve hours on, the score is still -100.
+        assert_eq!(score.at(BAN_FREEZE), MIN_SCORE);
+        // Then it halves every ten minutes: -50 is still a ban, -25 is not.
+        assert_eq!(score.standing(BAN_FREEZE + 10 * MINUTE), Standing::Ban);
+        assert_eq!(
+            score.standing(BAN_FREEZE + 20 * MINUTE),
+            Standing::Disconnect
+        );
+        assert_eq!(score.standing(BAN_FREEZE + 30 * MINUTE), Standing::Good);
+        assert!(score.is_forgiven(BAN_FREEZE + 70 * MINUTE));
+    }
+
+    #[test]
+    fn penalties_halve_every_ten_minutes() {
+        let mut score = PeerScore::new(Duration::ZERO);
+        // Two low-tolerance faults: -20, which halves to -10 after ten minutes.
+        score.apply(PeerAction::LowTolerance, Duration::ZERO);
+        score.apply(PeerAction::LowTolerance, Duration::ZERO);
+        assert_eq!(score.at(10 * MINUTE), -10.0);
+        assert_eq!(score.at(20 * MINUTE), -5.0);
     }
 
     #[test]
