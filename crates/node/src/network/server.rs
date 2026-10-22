@@ -70,7 +70,7 @@ impl<P: Preset> RequestServer<P> {
         self.chain
             .run(Self::status_of)
             .await
-            .map_err(|_| ChainError::Missing("running chain"))?
+            .map_err(|_| ChainError::Stopped)?
     }
 
     /// Answers one request and closes its stream.

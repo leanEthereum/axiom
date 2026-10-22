@@ -2,7 +2,7 @@
 
 use std::{marker::PhantomData, path::Path, sync::Arc};
 
-use axiom_ssz::Ssz;
+use axiom_ssz::{DecodeError, Ssz};
 use axiom_store::{Batch, Options, Store, Table};
 use axiom_types::{
     BeaconState, Checkpoint, ColumnIndex, DataColumnSidecar, Preset, Root, SignedBeaconBlock, Slot,
@@ -156,9 +156,14 @@ impl<P: Preset> ChainDatabase<P> {
         let Some(key) = self.store.snapshot().entries(self.canonical)?.keys().next() else {
             return Ok(None);
         };
-        let bytes: [u8; 8] = key
-            .try_into()
-            .map_err(|_| ChainError::Missing("well-formed canonical index key"))?;
+        let actual = key.len();
+        let bytes: [u8; 8] = key.try_into().map_err(|_| ChainError::Corrupt {
+            what: "canonical index key",
+            error: DecodeError::InvalidLength {
+                expected: 8,
+                actual,
+            },
+        })?;
         Ok(Some(Slot(u64::from_be_bytes(bytes))))
     }
 

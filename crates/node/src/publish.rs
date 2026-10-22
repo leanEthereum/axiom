@@ -201,7 +201,7 @@ impl<P: Preset> Publisher<P> {
                 Published::Imported(submission.root())
             }
             Ok(Err(error)) => Published::BroadcastOnly(error),
-            Err(_) => Published::BroadcastOnly(ChainError::Missing("running chain")),
+            Err(_) => Published::BroadcastOnly(ChainError::Stopped),
         }
     }
 }

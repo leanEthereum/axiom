@@ -29,6 +29,10 @@ pub enum ChainError {
     Missing(&'static str),
     /// A block the chain needs has no post-state in the fork choice store.
     MissingState(Root),
+    /// A vote does not match the committees it names.
+    InvalidVote(&'static str),
+    /// The chain thread stopped before answering.
+    Stopped,
 }
 
 impl fmt::Display for ChainError {
@@ -39,6 +43,8 @@ impl fmt::Display for ChainError {
             Self::Corrupt { what, error } => write!(f, "corrupt {what} in database: {error}"),
             Self::Missing(what) => write!(f, "database has no {what}"),
             Self::MissingState(root) => write!(f, "no state for block {root}"),
+            Self::InvalidVote(reason) => write!(f, "invalid vote: {reason}"),
+            Self::Stopped => f.write_str("chain service stopped"),
         }
     }
 }
@@ -49,7 +55,7 @@ impl Error for ChainError {
             Self::ForkChoice(error) => Some(error),
             Self::Database(error) => Some(error),
             Self::Corrupt { error, .. } => Some(error),
-            Self::Missing(_) | Self::MissingState(_) => None,
+            Self::Missing(_) | Self::MissingState(_) | Self::InvalidVote(_) | Self::Stopped => None,
         }
     }
 }
