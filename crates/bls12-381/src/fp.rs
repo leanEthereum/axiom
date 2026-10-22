@@ -17,7 +17,7 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::arithmetic::{adc, limbs_from_be_bytes, limbs_to_be_bytes, mac, mask, sbb};
+use crate::arithmetic::{Uint, mac, mask};
 
 /// The field modulus p, as little-endian 64-bit limbs.
 ///
@@ -141,17 +141,17 @@ impl Fp {
     /// The element, or nothing when the integer is not below p.
     #[must_use]
     pub fn from_bytes_be(bytes: &[u8; FP_BYTES]) -> Option<Self> {
-        let limbs: [u64; 6] = limbs_from_be_bytes(bytes);
+        let limbs = Uint::<6>::from_be_bytes(bytes).0;
 
         // Subtract p and watch the final borrow.
         //
-        //     limbs <  p: the subtraction underflows, the borrow mask is all ones
+        //     limbs <  p: the subtraction underflows and borrows
         //     limbs >= p: no underflow, the encoding is not canonical
-        let mut borrow = 0;
+        let mut borrow = false;
         for (limb, modulus) in limbs.iter().zip(MODULUS) {
-            (_, borrow) = sbb(*limb, modulus, borrow);
+            (_, borrow) = limb.borrowing_sub(modulus, borrow);
         }
-        if borrow == 0 {
+        if !borrow {
             return None;
         }
 
@@ -163,7 +163,7 @@ impl Fp {
     #[must_use]
     pub fn to_bytes_be(&self) -> [u8; FP_BYTES] {
         let mut out = [0; FP_BYTES];
-        limbs_to_be_bytes(&self.to_canonical(), &mut out);
+        Uint(self.to_canonical()).write_be_bytes(&mut out);
         out
     }
 
@@ -175,8 +175,8 @@ impl Fp {
         // Split the 512-bit integer into two 256-bit halves, both below p.
         //
         //     n = high * 2^256 + low
-        let high: [u64; 4] = limbs_from_be_bytes(&bytes[..32]);
-        let low: [u64; 4] = limbs_from_be_bytes(&bytes[32..]);
+        let high = Uint::<4>::from_be_bytes(&bytes[..32]).0;
+        let low = Uint::<4>::from_be_bytes(&bytes[32..]).0;
         let high = [high[0], high[1], high[2], high[3], 0, 0];
         let low = [low[0], low[1], low[2], low[3], 0, 0];
 
@@ -278,12 +278,12 @@ impl Fp {
         //     canonical >  (p - 1) / 2: no borrow, the element is the larger of the pair
         //     canonical <= (p - 1) / 2: borrow
         //
-        // An incoming borrow mask of all ones subtracts the extra 1.
-        let mut borrow = u64::MAX;
+        // An incoming borrow subtracts the extra 1.
+        let mut borrow = true;
         for (limb, half) in canonical.iter().zip(HALF_MODULUS) {
-            (_, borrow) = sbb(*limb, half, borrow);
+            (_, borrow) = limb.borrowing_sub(half, borrow);
         }
-        borrow == 0
+        !borrow
     }
 
     /// Whether the canonical integer is odd.
@@ -409,18 +409,66 @@ impl Fp {
     /// Maps a value in [0, 2p) to [0, p) without branching.
     fn subtract_modulus_if_needed(value: [u64; 6]) -> [u64; 6] {
         // Tentatively subtract p.
-        let mut reduced = [0; 6];
-        let mut borrow = 0;
-        for ((out, limb), modulus) in reduced.iter_mut().zip(value).zip(MODULUS) {
-            (*out, borrow) = sbb(limb, modulus, borrow);
-        }
+        let (reduced, borrow) = Uint(value).sub_with_borrow_mask(Uint(MODULUS));
 
         // A borrow means value < p already, so keep the original.
         let mut out = [0; 6];
-        for ((out, reduced), original) in out.iter_mut().zip(reduced).zip(value) {
+        for ((out, reduced), original) in out.iter_mut().zip(reduced.0).zip(value) {
             *out = (reduced & !borrow) | (original & borrow);
         }
         out
+    }
+
+    /// Returns self + rhs mod p.
+    #[inline]
+    fn add_impl(&self, rhs: &Self) -> Self {
+        // Both inputs are below p < 2^382, so the sum fits in six limbs with no carry out.
+        let mut sum = [0; 6];
+        let mut carry = false;
+        for ((out, a), b) in sum.iter_mut().zip(self.0).zip(rhs.0) {
+            (*out, carry) = a.carrying_add(b, carry);
+        }
+        // The sum is below 2p, so one conditional subtraction reduces it.
+        Self(Self::subtract_modulus_if_needed(sum))
+    }
+
+    /// Returns self - rhs mod p.
+    #[inline]
+    fn sub_impl(&self, rhs: &Self) -> Self {
+        // Subtract limb by limb, keeping the final borrow mask.
+        let (difference, borrow) = Uint(self.0).sub_with_borrow_mask(Uint(rhs.0));
+        let mut difference = difference.0;
+
+        // On underflow add p back, masked so both paths cost the same.
+        let mut carry = false;
+        for (out, modulus) in difference.iter_mut().zip(MODULUS) {
+            (*out, carry) = out.carrying_add(modulus & borrow, carry);
+        }
+        Self(difference)
+    }
+
+    /// Returns self * rhs mod p.
+    #[inline]
+    fn mul_impl(&self, rhs: &Self) -> Self {
+        Self(Self::montgomery_mul(&self.0, &rhs.0))
+    }
+
+    /// Returns -self mod p.
+    #[inline]
+    fn neg_impl(&self) -> Self {
+        // Compute p - a limb by limb.
+        let mut negated = [0; 6];
+        let mut borrow = false;
+        for ((out, modulus), a) in negated.iter_mut().zip(MODULUS).zip(self.0) {
+            (*out, borrow) = modulus.borrowing_sub(a, borrow);
+        }
+
+        // Zero must map to zero, not to p, so mask the result away when the input is zero.
+        let keep = mask(!self.is_zero());
+        for out in &mut negated {
+            *out &= keep;
+        }
+        Self(negated)
     }
 }
 
@@ -439,63 +487,6 @@ impl fmt::Display for Fp {
             write!(f, "{byte:02x}")?;
         }
         Ok(())
-    }
-}
-
-impl Fp {
-    /// Returns self + rhs mod p.
-    #[inline]
-    fn add_impl(&self, rhs: &Self) -> Self {
-        // Both inputs are below p < 2^382, so the sum fits in six limbs with no carry out.
-        let mut sum = [0; 6];
-        let mut carry = 0;
-        for ((out, a), b) in sum.iter_mut().zip(self.0).zip(rhs.0) {
-            (*out, carry) = adc(a, b, carry);
-        }
-        // The sum is below 2p, so one conditional subtraction reduces it.
-        Self(Self::subtract_modulus_if_needed(sum))
-    }
-
-    /// Returns self - rhs mod p.
-    #[inline]
-    fn sub_impl(&self, rhs: &Self) -> Self {
-        // Subtract limb by limb, keeping the final borrow mask.
-        let mut difference = [0; 6];
-        let mut borrow = 0;
-        for ((out, a), b) in difference.iter_mut().zip(self.0).zip(rhs.0) {
-            (*out, borrow) = sbb(a, b, borrow);
-        }
-
-        // On underflow add p back, masked so both paths cost the same.
-        let mut carry = 0;
-        for (out, modulus) in difference.iter_mut().zip(MODULUS) {
-            (*out, carry) = adc(*out, modulus & borrow, carry);
-        }
-        Self(difference)
-    }
-
-    /// Returns self * rhs mod p.
-    #[inline]
-    fn mul_impl(&self, rhs: &Self) -> Self {
-        Self(Self::montgomery_mul(&self.0, &rhs.0))
-    }
-
-    /// Returns -self mod p.
-    #[inline]
-    fn neg_impl(&self) -> Self {
-        // Compute p - a limb by limb.
-        let mut negated = [0; 6];
-        let mut borrow = 0;
-        for ((out, modulus), a) in negated.iter_mut().zip(MODULUS).zip(self.0) {
-            (*out, borrow) = sbb(modulus, a, borrow);
-        }
-
-        // Zero must map to zero, not to p, so mask the result away when the input is zero.
-        let keep = mask(!self.is_zero());
-        for out in &mut negated {
-            *out &= keep;
-        }
-        Self(negated)
     }
 }
 
@@ -692,7 +683,7 @@ pub(crate) mod tests {
     fn decoding_rejects_the_modulus_and_accepts_its_predecessor() {
         // Fixture state: the 48-byte big-endian encoding of p.
         let mut bytes = [0_u8; 48];
-        limbs_to_be_bytes(&MODULUS, &mut bytes);
+        Uint(MODULUS).write_be_bytes(&mut bytes);
         assert_eq!(Fp::from_bytes_be(&bytes), None);
 
         // Mutation: p - 1 has last byte 0xaa instead of 0xab and is canonical.

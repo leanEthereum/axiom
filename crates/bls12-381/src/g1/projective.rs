@@ -12,10 +12,7 @@ use std::{
 };
 
 use super::{B, B3, G1Affine};
-use crate::{
-    BLS_X, Fp, Scalar,
-    msm::{self, PippengerGroup},
-};
+use crate::{BLS_X, Fp, Scalar, msm::PippengerGroup};
 
 /// A point of E(F_p) in homogeneous projective coordinates.
 #[derive(Clone, Copy, Debug)]
@@ -134,7 +131,7 @@ impl G1Projective {
     /// Panics when the two slices differ in length.
     #[must_use]
     pub fn multi_exp(points: &[G1Affine], scalars: &[Scalar]) -> Self {
-        msm::multi_exp(points, scalars)
+        <Self as PippengerGroup>::pippenger(points, scalars)
     }
 
     /// Converts many points to affine form with a single field inversion.

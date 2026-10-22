@@ -12,7 +12,7 @@ use std::{
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use crate::{Fp, Fp2, Fp6};
+use crate::{BLS_X, Fp, Fp2, Fp6};
 
 /// The value xi^{(p-1)/6}, so that w^p = xi^{(p-1)/6} * w.
 const FROBENIUS_C1: Fp2 = Fp2::new(
@@ -130,6 +130,23 @@ impl Fp12 {
         let norm = self.c0.square() - self.c1.square().mul_by_nonresidue();
         let inverse_norm = norm.invert()?;
         Some(Self::new(self.c0 * inverse_norm, -(self.c1 * inverse_norm)))
+    }
+
+    /// Raises an element of the cyclotomic subgroup to the curve parameter x = -0xd201000000010000.
+    ///
+    /// The result is wrong for elements outside that subgroup, as for the cyclotomic square.
+    #[must_use]
+    pub(crate) fn cyclotomic_exp_by_x(&self) -> Self {
+        // Square-and-multiply over |x|, whose top bit 63 seeds the accumulator.
+        let mut acc = *self;
+        for bit in (0..63).rev() {
+            acc = acc.cyclotomic_square();
+            if (BLS_X >> bit) & 1 == 1 {
+                acc *= self;
+            }
+        }
+        // x is negative, and inversion in the cyclotomic subgroup is conjugation.
+        acc.conjugate()
     }
 
     /// Squares an element of the cyclotomic subgroup, the elements with x^{p^4 - p^2 + 1} = 1.

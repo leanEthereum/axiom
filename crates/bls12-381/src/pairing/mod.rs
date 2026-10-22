@@ -12,12 +12,13 @@
 //! Moving everything to one side turns it into "a product of pairings equals one".
 //! That product shares one Miller loop and one final exponentiation, so it costs far less than two pairings.
 
-mod final_exponentiation;
 mod miller_loop;
 
 use std::ops::{Mul, MulAssign};
 
-use crate::{BLS_X, Fp12, G1Affine, G2Affine};
+use miller_loop::MillerLoopResult;
+
+use crate::{Fp12, G1Affine, G2Affine};
 
 /// An element of GT, the order-r subgroup of the multiplicative group of F_{p^12}.
 ///
@@ -41,8 +42,7 @@ impl Gt {
     /// An empty product, or a product of pairs with an infinite point, is the identity.
     #[must_use]
     pub fn multi_pairing(terms: &[(G1Affine, G2Affine)]) -> Self {
-        let f = miller_loop::multi_miller_loop(terms);
-        Self(final_exponentiation::final_exponentiation(&f))
+        MillerLoopResult::new(terms).final_exponentiation()
     }
 
     /// Whether this is the identity of GT.
@@ -105,7 +105,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        G1Projective, G2Projective, Scalar, fp12::tests::arb_fp12, scalar::tests::arb_scalar,
+        BLS_X, G1Projective, G2Projective, Scalar, fp12::tests::arb_fp12, scalar::tests::arb_scalar,
     };
 
     /// Raises an element of F_{p^12} to a power given as little-endian limbs.
@@ -191,7 +191,7 @@ mod tests {
         // On a cyclotomic element, the sign of x turns into a conjugation.
         let e = Gt::pairing(&G1Affine::GENERATOR, &G2Affine::GENERATOR).0;
         let expected = pow(&e, &[BLS_X]).conjugate();
-        assert_eq!(final_exponentiation::exp_by_x(&e), expected);
+        assert_eq!(e.cyclotomic_exp_by_x(), expected);
     }
 
     proptest! {
@@ -225,7 +225,7 @@ mod tests {
             let t = f.conjugate() * f.invert().unwrap();
             let t = t.frobenius_map().frobenius_map() * t;
             let expected = pow(&t, &HARD_EXPONENT_TIMES_3);
-            prop_assert_eq!(final_exponentiation::final_exponentiation(&f), expected);
+            prop_assert_eq!(MillerLoopResult(f).final_exponentiation().0, expected);
         }
     }
 }
