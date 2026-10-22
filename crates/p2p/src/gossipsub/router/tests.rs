@@ -197,7 +197,7 @@ fn idontwant_suppresses_forwarding() {
     let mut router = router_with_peers(2);
     let now = Duration::ZERO;
     let message = message_rpc(b"m");
-    let id = (router.config.message_id)(&topic(), &message.publish[0].data);
+    let id = (router.config().message_id)(&topic(), &message.publish[0].data);
     // Peer 2 says it does not want the message.
     let notice = Rpc {
         control: Some(ControlMessage {
@@ -244,7 +244,7 @@ fn ihave_is_answered_with_iwant_and_tracked_as_a_promise() {
     );
     // The peer never delivers: after the 3 s follow-up time, one behaviour penalty.
     router.heartbeat(Duration::from_secs(4));
-    assert_eq!(router.promises.len(), 0);
+    assert_eq!(router.gossip.promises.len(), 0);
     // A single penalty stays under the threshold of 6, so the score is unaffected.
     assert!(router.peer_score(&peer(1), Duration::from_secs(4)) >= 0.0);
 }
@@ -326,7 +326,13 @@ fn heartbeat_prunes_an_oversized_mesh() {
     router.heartbeat(Duration::from_millis(700));
     let members: Vec<PeerId> = router.mesh_peers(&topic()).cloned().collect();
     assert_eq!(members.len(), 8);
-    assert!(members.iter().filter(|p| router.is_outbound(p)).count() >= 2);
+    assert!(
+        members
+            .iter()
+            .filter(|p| router.cx.peers.is_outbound(p))
+            .count()
+            >= 2
+    );
 }
 
 #[test]
