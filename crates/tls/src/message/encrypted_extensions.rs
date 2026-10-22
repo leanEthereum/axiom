@@ -40,7 +40,7 @@ impl<'a> EncryptedExtensions<'a> {
                 }
                 if let Some(parameters) = quic_parameters {
                     Extensions::write(block, ExtensionType::QUIC_TRANSPORT_PARAMETERS, |body| {
-                        body.bytes(parameters)
+                        body.bytes(parameters);
                     });
                 }
             });

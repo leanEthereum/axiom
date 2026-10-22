@@ -148,7 +148,7 @@ impl<'a> ClientHello<'a> {
         }
         if let Some(parameters) = offer.quic_parameters {
             Extensions::write(block, ExtensionType::QUIC_TRANSPORT_PARAMETERS, |body| {
-                body.bytes(parameters)
+                body.bytes(parameters);
             });
         }
     }

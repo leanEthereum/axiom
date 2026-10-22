@@ -2,9 +2,10 @@
 
 use std::{io, time::Duration};
 
+use axiom_tls::TlsError;
 use thiserror::Error;
 
-use crate::StatusCode;
+use crate::{StatusCode, TlsSetupError};
 
 /// A message that breaks HTTP/1.1 framing or a configured limit.
 ///
@@ -143,9 +144,17 @@ pub enum HttpError {
     #[error("connection closed before a response")]
     Closed,
 
-    /// The URL is not an http URL with a host.
-    #[error("not an http URL with a host")]
+    /// The URL is not an http or https URL with a host.
+    #[error("not an http or https URL with a host")]
     InvalidUrl,
+
+    /// The TLS handshake or a record failed.
+    #[error("TLS failure: {0}")]
+    Tls(#[from] TlsError),
+
+    /// The trusted roots could not be loaded.
+    #[error("TLS setup failure: {0}")]
+    TlsSetup(#[from] TlsSetupError),
 
     /// A cross-origin policy names neither the wildcard nor an origin.
     #[error("{origin:?} is neither * nor an origin such as http://localhost:5062")]

@@ -126,13 +126,13 @@ impl RootStore {
 
     /// The number of roots.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.anchors.len()
     }
 
     /// Whether the store holds no root.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.anchors.is_empty()
     }
 

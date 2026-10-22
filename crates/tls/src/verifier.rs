@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::{CertificateRejection, x509::PublicKey};
+use crate::{CertificateError, CertificateRejection, x509::PublicKey};
 
 /// Checks a peer's certificate chain and names the key that must sign the handshake.
 pub trait Verifier {
@@ -28,4 +28,23 @@ pub trait Verifier {
         chain: &[&[u8]],
         now_unix_secs: u64,
     ) -> Result<(Self::Peer, PublicKey), Self::Error>;
+}
+
+/// The verifier of a server that never asks for a client certificate.
+///
+/// It has no values, so a server holding none of them can never run a client check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoClientCertificate {}
+
+impl Verifier for NoClientCertificate {
+    type Peer = ();
+    type Error = CertificateError;
+
+    #[expect(
+        clippy::uninhabited_references,
+        reason = "no value exists, so this body never runs"
+    )]
+    fn verify(&self, _: &[&[u8]], _: u64) -> Result<((), PublicKey), CertificateError> {
+        match *self {}
+    }
 }

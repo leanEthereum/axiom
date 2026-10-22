@@ -23,12 +23,9 @@ impl<'a> Prf<'a> {
 
     /// Fills an output with PRF(secret, label, seed).
     pub(crate) fn expand(&self, label: &[u8], seed: &[&[u8]], out: &mut [u8]) {
-        let mut a = self.mac(
-            &[label]
-                .into_iter()
-                .chain(seed.iter().copied())
-                .collect::<Vec<_>>(),
-        );
+        let mut first: Vec<&[u8]> = vec![label];
+        first.extend_from_slice(seed);
+        let mut a = self.mac(&first);
         for chunk in out.chunks_mut(HmacSha256::OUTPUT_LEN) {
             let mut parts: Vec<&[u8]> = vec![&a, label];
             parts.extend_from_slice(seed);

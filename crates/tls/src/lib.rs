@@ -62,4 +62,4 @@ pub use secret::{Secrets, TrafficSecret};
 pub use signature::SignatureScheme;
 pub use suite::{CipherSuite, Level};
 pub use tls12::{Tls12Key, Tls12Secrets, Tls12Suite};
-pub use verifier::Verifier;
+pub use verifier::{NoClientCertificate, Verifier};

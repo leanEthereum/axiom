@@ -210,10 +210,28 @@ impl SigningKey {
             *number = fields.unsigned_integer()?;
         }
         fields.finish()?;
-        let [n, e, d, p, q, dp, dq, qinv] = numbers;
-        RsaPrivateKey::from_components(n, e, d, p, q, dp, dq, qinv)
-            .map(|key| Self::Rsa(Box::new(key)))
-            .map_err(|_| KeyError::InvalidKey)
+        let [
+            modulus,
+            public,
+            private,
+            prime1,
+            prime2,
+            exponent1,
+            exponent2,
+            coefficient,
+        ] = numbers;
+        RsaPrivateKey::from_components(
+            modulus,
+            public,
+            private,
+            prime1,
+            prime2,
+            exponent1,
+            exponent2,
+            coefficient,
+        )
+        .map(|key| Self::Rsa(Box::new(key)))
+        .map_err(|_| KeyError::InvalidKey)
     }
 
     /// The public key.

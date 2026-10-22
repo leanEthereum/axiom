@@ -101,14 +101,14 @@ impl Pump {
     /// A pump whose client expects a peer and checks certificates at an instant.
     fn with(expected: Option<PeerId>, now: u64, suites: &[CipherSuite]) -> Self {
         let client = TlsSession::client(
-            identity(&host(1), 11),
+            &identity(&host(1), 11),
             CLIENT_PARAMETERS.to_vec(),
             expected,
             [21; 64],
             now,
         );
         let server = TlsSession::server(
-            identity(&host(2), 12),
+            &identity(&host(2), 12),
             SERVER_PARAMETERS.to_vec(),
             [22; 64],
             NOW,

@@ -82,8 +82,8 @@ mod tests {
         let a = Randomness::from_seed([1; 32]);
         let b = Randomness::from_seed([1; 32]);
         let c = Randomness::from_seed([2; 32]);
-        assert!(a == b);
-        assert!(a != c);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
         // Distinct labels give distinct values from one seed.
         assert_ne!(a.random, a.x25519);
         assert_ne!(a.x25519, a.p256);

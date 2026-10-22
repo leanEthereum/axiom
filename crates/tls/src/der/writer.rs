@@ -11,11 +11,13 @@ pub struct DerWriter {
 
 impl DerWriter {
     /// An empty writer.
+    #[must_use]
     pub const fn new() -> Self {
         Self { out: Vec::new() }
     }
 
     /// The encoded values.
+    #[must_use]
     pub fn into_bytes(self) -> Vec<u8> {
         self.out
     }

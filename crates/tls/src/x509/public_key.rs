@@ -102,7 +102,7 @@ impl PublicKey {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), X509Error> {
-        let hash = algorithm.hash();
+        let hash = algorithm.hash_function();
         let digest = hash.digest(message);
         match (self, algorithm) {
             (
@@ -154,7 +154,7 @@ impl PublicKey {
     }
 
     /// Refuses an RSA modulus below the minimum size.
-    fn check_rsa_size(key: &RsaPublicKey) -> Result<(), X509Error> {
+    const fn check_rsa_size(key: &RsaPublicKey) -> Result<(), X509Error> {
         let bits = key.bits();
         if bits < MIN_RSA_BITS {
             return Err(X509Error::RsaKeyTooSmall {

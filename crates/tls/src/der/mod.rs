@@ -71,13 +71,15 @@ impl Tag {
     /// SET, universal 17, constructed.
     pub const SET: Self = Self(0x31);
 
-    /// The context-specific constructed tag [n], as an EXPLICIT field carries it.
+    /// The context-specific constructed tag of number n, as an EXPLICIT field carries it.
+    #[must_use]
     pub const fn explicit(number: u8) -> Self {
         // Class bits 10, constructed bit 1, then the number.
         Self(0xa0 | number)
     }
 
-    /// The context-specific primitive tag [n], as an IMPLICIT primitive field carries it.
+    /// The context-specific primitive tag of number n, as an IMPLICIT primitive field carries it.
+    #[must_use]
     pub const fn implicit(number: u8) -> Self {
         // Class bits 10, constructed bit 0, then the number.
         Self(0x80 | number)

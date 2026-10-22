@@ -14,16 +14,19 @@ pub struct DerReader<'a> {
 
 impl<'a> DerReader<'a> {
     /// A reader over a run of values.
+    #[must_use]
     pub const fn new(bytes: &'a [u8]) -> Self {
         Self { rest: bytes }
     }
 
     /// Whether every value has been read.
+    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.rest.is_empty()
     }
 
     /// The tag of the next value, without reading it.
+    #[must_use]
     pub fn peek_tag(&self) -> Option<Tag> {
         self.rest.first().map(|&tag| Tag(tag))
     }

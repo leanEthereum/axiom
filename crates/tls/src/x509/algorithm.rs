@@ -77,7 +77,7 @@ impl SignatureAlgorithm {
 
     /// The hash the signature is computed over.
     #[must_use]
-    pub const fn hash(self) -> HashAlgorithm {
+    pub const fn hash_function(self) -> HashAlgorithm {
         match self {
             Self::EcdsaSha256 | Self::RsaPkcs1Sha256 | Self::RsaPssSha256 => HashAlgorithm::Sha256,
             Self::EcdsaSha384 | Self::RsaPkcs1Sha384 | Self::RsaPssSha384 => HashAlgorithm::Sha384,

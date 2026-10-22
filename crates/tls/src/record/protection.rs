@@ -194,7 +194,7 @@ impl Protection {
     /// Opens one protected record body, returning the content type and the content.
     pub(crate) fn open(
         &mut self,
-        header: &[u8; 5],
+        header: [u8; 5],
         body: &mut Vec<u8>,
     ) -> Result<ContentType, ProtocolError> {
         let sequence = self.next_sequence()?;
@@ -202,7 +202,7 @@ impl Protection {
             Format::Tls13 => {
                 let tag = Self::split_tag(body)?;
                 let nonce = self.nonce(sequence);
-                self.aead.open(&nonce, header, body, &tag)?;
+                self.aead.open(&nonce, &header, body, &tag)?;
                 // RFC 8446, section 5.4: strip the zero padding; the last nonzero byte is the type.
                 let end = body
                     .iter()

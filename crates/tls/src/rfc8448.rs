@@ -15,9 +15,9 @@ use std::{iter, sync::Arc};
 use axiom_crypto::rsa::{RsaHash, RsaPrivateKey};
 
 use crate::{
-    CertificateError, CertifiedKey, CipherSuite, Connection, Handshake, HashAlgorithm, Level,
-    NamedGroup, ProtocolError, Randomness, ServerConfig, SignatureScheme, SigningKey, TlsOutput,
-    TrafficSecret, Verifier,
+    CertifiedKey, CipherSuite, Connection, Handshake, HashAlgorithm, Level, NamedGroup,
+    NoClientCertificate, ProtocolError, Randomness, ServerConfig, SignatureScheme, SigningKey,
+    TlsOutput, TrafficSecret,
     buffer::HandshakeBuffer,
     extension::ExtensionType,
     group::KeyShareSecret,
@@ -162,10 +162,10 @@ const SERVER_DATA_RECORD: &str = concat!(
 );
 
 /// The client alert record, 24 bytes.
-const CLIENT_ALERT_RECORD: &str = concat!("1703030013c9872760655666b74d7ff1153efd6db6d0b0e3",);
+const CLIENT_ALERT_RECORD: &str = "1703030013c9872760655666b74d7ff1153efd6db6d0b0e3";
 
 /// The server alert record, 24 bytes.
-const SERVER_ALERT_RECORD: &str = concat!("1703030013b58fd67166ebf599d24720cfbe7efa7a8864a9",);
+const SERVER_ALERT_RECORD: &str = "1703030013b58fd67166ebf599d24720cfbe7efa7a8864a9";
 
 /// The plaintext of the client data record, 50 bytes.
 const CLIENT_DATA_PAYLOAD: &str = concat!(
@@ -187,7 +187,7 @@ const RSA_MODULUS: &str = concat!(
 );
 
 /// The server key's public exponent, from RFC 8448, section 2.
-const RSA_PUBLIC_EXPONENT: &str = concat!("010001",);
+const RSA_PUBLIC_EXPONENT: &str = "010001";
 
 /// The server key's private exponent, from RFC 8448, section 2.
 const RSA_PRIVATE_EXPONENT: &str = concat!(
@@ -590,7 +590,7 @@ fn records_reproduce_the_trace() {
 
         // Opening: the receiver's view.
         let mut body = record[5..].to_vec();
-        assert_eq!(at_position().open(&header, &mut body), Ok(kind));
+        assert_eq!(at_position().open(header, &mut body), Ok(kind));
         assert_eq!(body, content);
 
         // Sealing: the sender's view gives the trace record byte for byte.
@@ -601,7 +601,7 @@ fn records_reproduce_the_trace() {
         let last = body.len() - 1;
         body[last] ^= 1;
         assert_eq!(
-            at_position().open(&header, &mut body),
+            at_position().open(header, &mut body),
             Err(ProtocolError::BadRecordMac)
         );
     }
@@ -610,7 +610,7 @@ fn records_reproduce_the_trace() {
 #[test]
 fn server_reproduces_the_server_hello() {
     // Fixture state: the trace server's certificate and key, random, and X25519 secret.
-    let mut connection: Connection<NoClientAuth> =
+    let mut connection: Connection<NoClientCertificate> =
         Connection::server(server_config(), None, server_randomness(), 1_500_000_000);
     connection.read_tls(&hex(CLIENT_HELLO_RECORD)).unwrap();
 
@@ -621,7 +621,7 @@ fn server_reproduces_the_server_hello() {
 
     // The handshake keys are the trace's.
     let mut handshake =
-        Handshake::<NoClientAuth>::server(server_config(), None, server_randomness(), 0);
+        Handshake::<NoClientCertificate>::server(server_config(), None, server_randomness(), 0);
     handshake
         .read_handshake(Level::Initial, &hex(CLIENT_HELLO))
         .unwrap();
@@ -635,17 +635,4 @@ fn server_reproduces_the_server_hello() {
     assert_eq!(keys[0].1.local, secret(SERVER_HANDSHAKE));
     assert_eq!(keys[0].1.remote, secret(CLIENT_HANDSHAKE));
     assert_eq!(keys[1].0, Level::Application);
-}
-
-/// A verifier for servers that ask for no client certificate; it is never called.
-#[derive(Clone, Debug)]
-struct NoClientAuth;
-
-impl Verifier for NoClientAuth {
-    type Peer = ();
-    type Error = CertificateError;
-
-    fn verify(&self, _: &[&[u8]], _: u64) -> Result<((), PublicKey), CertificateError> {
-        Err(CertificateError::EmptyChain)
-    }
 }

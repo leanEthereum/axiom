@@ -301,7 +301,9 @@ impl ProtocolError {
             Self::NoCommonCipherSuite
             | Self::NoKeyShare
             | Self::HelloRetryRequest
-            | Self::NoCommonSignatureScheme => Alert::HANDSHAKE_FAILURE,
+            | Self::NoCommonSignatureScheme
+            // RFC 5746, section 3.4: a bad renegotiation value aborts with handshake_failure.
+            | Self::InvalidRenegotiationInfo => Alert::HANDSHAKE_FAILURE,
             Self::DuplicateExtension(_)
             | Self::InvalidExtension(_)
             | Self::NonEmptySessionId(_)
@@ -330,8 +332,6 @@ impl ProtocolError {
             | Self::InvalidFinished => Alert::DECRYPT_ERROR,
             Self::InvalidLegacyVersion(_) | Self::UnsupportedVersion => Alert::PROTOCOL_VERSION,
             Self::SequenceExhausted | Self::SigningFailed => Alert::INTERNAL_ERROR,
-            // RFC 5746, section 3.4: a bad renegotiation value aborts with handshake_failure.
-            Self::InvalidRenegotiationInfo => Alert::HANDSHAKE_FAILURE,
             Self::MissingExtension(_) => Alert::MISSING_EXTENSION,
             Self::UnsupportedExtension(_) | Self::CertificateExtensions => {
                 Alert::UNSUPPORTED_EXTENSION

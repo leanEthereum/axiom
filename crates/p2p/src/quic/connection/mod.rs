@@ -242,7 +242,7 @@ impl Connection {
         let mut params = Self::local_parameters(&setup.config);
         params.initial_source_connection_id = Some(setup.local_cid);
         let tls = TlsSession::client(
-            Arc::clone(&setup.config.identity),
+            &setup.config.identity,
             params.encode(),
             expected,
             entropy.array(),
@@ -271,7 +271,7 @@ impl Connection {
         params.original_destination_connection_id = Some(original_dcid);
         params.initial_source_connection_id = Some(setup.local_cid);
         let tls = TlsSession::server(
-            Arc::clone(&setup.config.identity),
+            &setup.config.identity,
             params.encode(),
             entropy.array(),
             setup.unix_seconds,

@@ -103,15 +103,15 @@ impl<'a> Name<'a> {
 /// One GeneralName, per RFC 5280, section 4.2.1.6.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GeneralName<'a> {
-    /// rfc822Name [1]: an email address, or in a constraint a host or domain.
+    /// rfc822Name, tag 1: an email address, or in a constraint a host or domain.
     Rfc822Name(&'a [u8]),
-    /// dNSName [2]: a host name, or in a constraint a domain.
+    /// dNSName, tag 2: a host name, or in a constraint a domain.
     DnsName(&'a [u8]),
-    /// directoryName [4]: a distinguished name.
+    /// directoryName, tag 4: a distinguished name.
     DirectoryName(Name<'a>),
-    /// uniformResourceIdentifier [6].
+    /// uniformResourceIdentifier, tag 6.
     Uri(&'a [u8]),
-    /// iPAddress [7]: 4 or 16 bytes, or in a constraint an address then a mask.
+    /// iPAddress, tag 7: 4 or 16 bytes, or in a constraint an address then a mask.
     IpAddress(&'a [u8]),
     /// otherName, x400Address, ediPartyName or registeredID, with its tag.
     Other(Tag),
@@ -135,7 +135,7 @@ impl<'a> GeneralName<'a> {
     }
 
     /// Checks an IA5String holds only 7-bit characters.
-    fn ia5(content: &'a [u8]) -> Result<&'a [u8], X509Error> {
+    const fn ia5(content: &'a [u8]) -> Result<&'a [u8], X509Error> {
         if content.is_ascii() {
             Ok(content)
         } else {
@@ -145,7 +145,7 @@ impl<'a> GeneralName<'a> {
 }
 
 /// A SEQUENCE of GeneralName, read lazily.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GeneralNames<'a> {
     /// The names not yet read.
     reader: DerReader<'a>,
@@ -157,7 +157,7 @@ impl<'a> GeneralNames<'a> {
         let names = Self {
             reader: DerReader::new(content),
         };
-        for name in names {
+        for name in names.clone() {
             name?;
         }
         Ok(names)

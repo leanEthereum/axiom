@@ -11,12 +11,14 @@ pub struct Timestamp(i64);
 
 impl Timestamp {
     /// The instant a number of seconds after the epoch.
+    #[must_use]
     pub fn from_unix_secs(seconds: u64) -> Self {
         // Every u64 below 2^63 fits; later instants clamp, far past any certificate.
         Self(i64::try_from(seconds).unwrap_or(i64::MAX))
     }
 
     /// Seconds since the epoch, negative before it.
+    #[must_use]
     pub const fn unix_seconds(self) -> i64 {
         self.0
     }
@@ -33,6 +35,7 @@ impl Timestamp {
     /// doy = (153 (m + 9 mod 12) + 2) / 5 + d - 1
     /// days = 146097 era + 365 yoe + yoe / 4 - yoe / 100 + doy - 719468
     /// ```
+    #[must_use]
     pub const fn from_civil(year: i64, month: u32, day: u32, seconds_of_day: i64) -> Self {
         let year = if month <= 2 { year - 1 } else { year };
         let era = year.div_euclid(400);

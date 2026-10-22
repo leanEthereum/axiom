@@ -36,6 +36,10 @@ const FATAL: u8 = 2;
 
 /// One TLS endpoint over a byte stream.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent facts of one stream, not a state that an enum would name"
+)]
 pub struct Connection<V: Verifier> {
     /// The handshake, which decides the keys.
     handshake: Handshake<V>,
@@ -119,7 +123,7 @@ impl<V: Verifier> Connection<V> {
 
     /// Whether records wait to be sent.
     #[must_use]
-    pub fn wants_write(&self) -> bool {
+    pub const fn wants_write(&self) -> bool {
         !self.outgoing.is_empty()
     }
 
@@ -203,7 +207,7 @@ impl<V: Verifier> Connection<V> {
     }
 
     /// A connection around a handshake.
-    fn new(handshake: Handshake<V>, client: bool) -> Self {
+    const fn new(handshake: Handshake<V>, client: bool) -> Self {
         Self {
             handshake,
             client,
@@ -284,7 +288,7 @@ impl<V: Verifier> Connection<V> {
                 if !self.handshake.is_tls12() && kind != ContentType::APPLICATION_DATA {
                     return Err(ProtocolError::UnexpectedRecord(kind.0).into());
                 }
-                let inner = protection.open(&header, &mut fragment)?;
+                let inner = protection.open(header, &mut fragment)?;
                 if fragment.len() > MAX_PLAINTEXT {
                     return Err(ProtocolError::RecordOverflow {
                         length: fragment.len(),

@@ -228,6 +228,7 @@ dependencies = [
 name = "axiom-http"
 version = "0.1.0"
 dependencies = [
+ "axiom-tls",
  "proptest",
  "thiserror",
  "tokio",

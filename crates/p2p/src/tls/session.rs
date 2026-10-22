@@ -1,7 +1,5 @@
 //! One side of a libp2p TLS handshake, driven by the QUIC transport.
 
-use std::sync::Arc;
-
 use axiom_tls::{
     ClientConfig, Handshake, NamedGroup, Randomness, ServerConfig, SignatureScheme, Transport,
 };
@@ -30,7 +28,7 @@ impl TlsSession {
     /// - `now_unix_secs`: seconds since the Unix epoch, for the certificate validity check.
     #[must_use]
     pub fn client(
-        identity: Arc<TlsIdentity>,
+        identity: &TlsIdentity,
         transport_parameters: Vec<u8>,
         expected: Option<PeerId>,
         entropy: [u8; 64],
@@ -62,7 +60,7 @@ impl TlsSession {
     /// The server side, with the same arguments as the client but no expected peer.
     #[must_use]
     pub fn server(
-        identity: Arc<TlsIdentity>,
+        identity: &TlsIdentity,
         transport_parameters: Vec<u8>,
         entropy: [u8; 64],
         now_unix_secs: u64,
@@ -156,6 +154,8 @@ impl TlsSession {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use axiom_crypto::p256::SecretKey;
     use axiom_tls::Alert;
 
@@ -186,8 +186,9 @@ mod tests {
         let client_identity = Arc::new(TlsIdentity::with_certificate(key, bare));
         let host = Keypair::from_secret_bytes(&[8; 32]).unwrap();
         let server_identity = Arc::new(TlsIdentity::generate(&host, [9; 32]).unwrap());
-        let mut client = TlsSession::client(client_identity, vec![1], None, [1; 64], 1_792_000_000);
-        let mut server = TlsSession::server(server_identity, vec![2], [2; 64], 1_792_000_000);
+        let mut client =
+            TlsSession::client(&client_identity, vec![1], None, [1; 64], 1_792_000_000);
+        let mut server = TlsSession::server(&server_identity, vec![2], [2; 64], 1_792_000_000);
 
         // ClientHello, server flight, then the client flight the server refuses.
         assert_eq!(deliver(&mut client, &mut server), Ok(()));
