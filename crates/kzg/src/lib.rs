@@ -11,8 +11,7 @@
 //! ```
 //!
 //! The quotient exists exactly when f(z) = y, and s is unknown, so the check is binding.
-//! This is the scheme of Kate, Zaverucha, and Goldberg, "Constant-Size Commitments to Polynomials
-//! and Their Applications", ASIACRYPT 2010.
+//! The scheme is named after Kate, Zaverucha, and Goldberg, who introduced it.
 //!
 //! EIP-4844 opens a blob at a Fiat-Shamir challenge, to tie the blob to its commitment.
 //! EIP-7594 extends each blob to 8192 evaluations and opens 64 of them at a time, one cell each.
@@ -24,6 +23,12 @@
 //! - `specs/fulu/polynomial-commitments-sampling.md` of the consensus specs.
 //!
 //! Every input is public, so no operation here needs constant time.
+//!
+//! References:
+//!
+//! - Kate, Zaverucha, Goldberg, "Constant-Size Commitments to Polynomials and Their Applications", ASIACRYPT 2010.
+//! - Feist, Khovratovich, "Fast amortized KZG proofs", eprint 2023/033, for all cell proofs at once.
+//! - EIP-4844, shard blob transactions, and EIP-7594, peer data availability sampling.
 //!
 //! # Examples
 //!

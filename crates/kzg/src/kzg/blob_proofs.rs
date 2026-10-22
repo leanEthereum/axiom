@@ -236,7 +236,8 @@ impl Kzg {
         let roots = &self.blob_roots_brp;
         let y = self.evaluate(blob, z);
 
-        // Phase 1: invert every omega_i - z at once; a zero entry marks z on the domain.
+        // Phase 1: invert every omega_i - z at once.
+        // A zero entry marks z on the domain, and batch inversion leaves it zero.
         let mut inverses: Vec<Scalar> = roots.iter().map(|root| root - z).collect();
         let on_domain = inverses.iter().position(Scalar::is_zero);
         Scalar::batch_invert(&mut inverses);
@@ -330,7 +331,9 @@ impl Kzg {
 
         let proof_lincomb = G1Projective::multi_exp(&proofs, &r_powers);
         let proof_z_lincomb = G1Projective::multi_exp(&proofs, &z_weights);
-        // sum r^i (C_i - [y_i]) = sum r^i C_i - [sum r^i y_i]
+        // One MSM and one scalar multiplication replace n subtractions.
+        //
+        //     sum r^i (C_i - [y_i]) = sum r^i C_i - [sum r^i y_i]
         let c_minus_y_lincomb = G1Projective::multi_exp(&commitments, &r_powers)
             - G1Projective::GENERATOR.mul_vartime(&y_sum);
 

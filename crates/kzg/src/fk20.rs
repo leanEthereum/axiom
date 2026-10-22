@@ -17,7 +17,15 @@
 //! Every proof is then the G1 polynomial H(Y) = sum_m h_m Y^m at Y = a_k.
 //! The a_k are exactly the 128-th roots of unity, so one G1 FFT of size 128 yields all proofs.
 //!
-//! Computing the h_m is a sum over u of 64 Toeplitz matrix-vector products.
+//! Computing the h_m is a sum over u of 64 Toeplitz matrix-vector products:
+//!
+//! ```text
+//!     [ h_0  ]       [ c_63  c_62  ...  c_1  ] [ x_0  ]        c_t = f_{64 t + u}
+//!     [ h_1  ]       [  0    c_63  ...  c_2  ] [ x_1  ]        x_i = [s^{u + 64 (62 - i)}]
+//!     [ ...  ]  +=   [            ...        ] [ ...  ]
+//!     [ h_62 ]       [  0     0    ...  c_63 ] [ x_62 ]
+//! ```
+//!
 //! Each embeds in a circulant product of size 128, which FFTs diagonalize.
 //! The FFTs of the setup vectors are fixed and precomputed once.
 //!
