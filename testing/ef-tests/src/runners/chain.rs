@@ -17,7 +17,7 @@ use axiom_types::{
 use axiom_yaml::Yaml;
 
 use super::{StoreReplay, config_of};
-use crate::{Case, Failure, Runner};
+use crate::{Case, Failure, Meta, Runner};
 
 /// Distinguishes the database directories of cases running in parallel.
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -157,7 +157,7 @@ impl<P: Preset> Runner for ChainReplay<P> {
         // The node always checks signatures, so cases built without them cannot run here.
         case.meta()
             .ok()
-            .filter(|meta| meta.bls_ignored())
+            .filter(Meta::bls_ignored)
             .map(|_| "the node always verifies signatures")
     }
 
