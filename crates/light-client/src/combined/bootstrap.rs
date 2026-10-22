@@ -1,5 +1,7 @@
 //! A light client bootstrap of any format.
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, ForkedJson};
+use axiom_json::Json;
 use axiom_ssz::Ssz;
 use axiom_types::{ChainConfig, ForkName, Preset, Slot, altair, capella, deneb, electra, gloas};
 
@@ -161,6 +163,30 @@ impl<P: Preset> LightClientBootstrap<P> {
             self = self.upgrade(config)?;
         }
         Ok(self)
+    }
+}
+
+impl<P: Preset> ForkedJson for LightClientBootstrap<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Altair(value) => value.to_json(),
+            Self::Capella(value) => value.to_json(),
+            Self::Deneb(value) => value.to_json(),
+            Self::Electra(value) => value.to_json(),
+            Self::Gloas(value) => value.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
+        let format =
+            Format::of(fork).map_err(|_| ApiJsonError::absent(fork, "light client bootstrap"))?;
+        Ok(match format {
+            Format::Altair => Self::Altair(ApiJson::from_json(value)?),
+            Format::Capella => Self::Capella(ApiJson::from_json(value)?),
+            Format::Deneb => Self::Deneb(ApiJson::from_json(value)?),
+            Format::Electra => Self::Electra(ApiJson::from_json(value)?),
+            Format::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+        })
     }
 }
 

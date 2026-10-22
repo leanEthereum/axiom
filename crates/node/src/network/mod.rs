@@ -48,19 +48,19 @@ pub(crate) use self::{
     discovery::{DialPlan, Discovery, RecordSetup},
     forks::ForkDigests,
     nat::NatMetrics,
-    peers::{PeerLimits, PeerMetrics},
+    peers::{PeerLimits, PeerMetrics, PeerRecord},
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
 use self::{
     gossip::GossipHandler,
     handshake::Handshakes,
-    peers::{PeerAction, PeerManager, PeerSubnets},
+    peers::{PeerAction, PeerBook, PeerManager, PeerSubnets},
     server::RequestServer,
-    sync::{BatchOutcome, RangeSync},
+    sync::{BackfillOutcome, BackfillSync, BatchOutcome, RangeSync},
     topics::Subscriptions,
 };
-use crate::{ChainHandle, Clock, ExecutionLayer, NodeError, race::Either};
+use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
 
 /// Who the node is on the network, and what it custodies.
 #[derive(Clone, Debug)]
@@ -132,6 +132,10 @@ pub(crate) struct NetworkService<P: Preset> {
     sync: RangeSync<P>,
     /// Processed batches, until the run loop takes them.
     sync_outcomes: Option<UnboundedReceiver<BatchOutcome>>,
+    /// Backfill below the stored history.
+    backfill: BackfillSync<P>,
+    /// Processed backfill batches, until the run loop takes them.
+    backfill_outcomes: Option<UnboundedReceiver<BackfillOutcome>>,
     /// Inbound requests answered at once.
     requests: Arc<Semaphore>,
     /// Gossip messages in validation at once.
@@ -156,6 +160,10 @@ pub(crate) struct NetworkService<P: Preset> {
     config: ChainConfig,
     /// Which starved subnet the next lookup serves, rotating.
     subnet_turn: usize,
+    /// Peers met, published for the node routes.
+    peer_book: PeerBook,
+    /// A reader of the published peers, handed to the identity.
+    peer_reader: watch::Receiver<Arc<Vec<PeerRecord>>>,
     /// Peer counts and gossip outcomes.
     metrics: NodeMetrics,
     /// Peer discovery, when enabled.
@@ -181,6 +189,8 @@ pub(crate) struct NodeIdentity {
     pub(crate) discovery_address: Option<String>,
     /// The metadata peers fetch.
     pub(crate) metadata: Arc<LocalMetadata>,
+    /// The peers met, as the network task last published them.
+    pub(crate) peers: watch::Receiver<Arc<Vec<PeerRecord>>>,
 }
 
 /// Inbound requests answered at once.
@@ -224,6 +234,7 @@ impl<P: Preset> NetworkService<P> {
             peer_metrics,
             peer_limits,
             discovery,
+            events,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
         let (discovery, discovery_events) = discovery
@@ -237,11 +248,18 @@ impl<P: Preset> NetworkService<P> {
             config.clone(),
             Arc::clone(&forks),
         );
+        let (backfill, backfill_outcomes) = BackfillSync::new(
+            chain.clone(),
+            network.clone(),
+            config.clone(),
+            Arc::clone(&forks),
+        );
         let metadata = Arc::new(LocalMetadata {
             seq_number: AtomicU64::new(0),
             attnets: AtomicU64::new(0),
             custody_group_count: identity.custody_group_count,
         });
+        let (peer_book, peer_reader) = PeerBook::new();
         let mut service = Self {
             gossip: GossipHandler::new(
                 chain.clone(),
@@ -250,6 +268,7 @@ impl<P: Preset> NetworkService<P> {
                 network.clone(),
                 metrics.clone(),
                 Arc::clone(&forks),
+                events,
             ),
             server: Arc::new(RequestServer::new(
                 chain.clone(),
@@ -258,6 +277,8 @@ impl<P: Preset> NetworkService<P> {
             )),
             sync,
             sync_outcomes: Some(sync_outcomes),
+            backfill,
+            backfill_outcomes: Some(backfill_outcomes),
             requests: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             validations: Arc::new(Semaphore::new(MAX_CONCURRENT_VALIDATIONS)),
             subscriptions: Subscriptions::new(
@@ -279,6 +300,8 @@ impl<P: Preset> NetworkService<P> {
             metadata_requests: HashMap::new(),
             config,
             subnet_turn: 0,
+            peer_book,
+            peer_reader,
             metrics,
             discovery,
             discovery_events,
@@ -310,6 +333,7 @@ impl<P: Preset> NetworkService<P> {
                 format!("/{family}/{}/udp/{}", address.ip(), address.port())
             }),
             metadata: Arc::clone(&self.metadata),
+            peers: self.peer_reader.clone(),
         }
     }
 
@@ -318,6 +342,7 @@ impl<P: Preset> NetworkService<P> {
         let mut upkeep = time::interval(Duration::from_millis(self.slots.slot_duration_ms()));
         let mut discovered = self.discovery_events.take();
         let mut outcomes = self.sync_outcomes.take();
+        let mut backfilled = self.backfill_outcomes.take();
         loop {
             // Without discovery, its branch simply never completes.
             let found = async {
@@ -333,7 +358,16 @@ impl<P: Preset> NetworkService<P> {
                     None => pending().await,
                 }
             };
-            let others = Either::race(found, Either::race(processed, upkeep.tick()));
+            let backfill = async {
+                match &mut backfilled {
+                    Some(receiver) => receiver.recv().await,
+                    None => pending().await,
+                }
+            };
+            let others = Either::race(
+                found,
+                Either::race(processed, Either::race(backfill, upkeep.tick())),
+            );
             match Either::race(events.next(), others).await {
                 Either::Left(Some(event)) => self.handle(event).await,
                 Either::Left(None) => break,
@@ -361,7 +395,15 @@ impl<P: Preset> NetworkService<P> {
                     self.punish_dropped().await;
                 }
                 Either::Right(Either::Right(Either::Left(None))) => outcomes = None,
-                Either::Right(Either::Right(Either::Right(_))) => self.maintain().await,
+                Either::Right(Either::Right(Either::Right(Either::Left(Some(outcome))))) => {
+                    self.backfill.on_outcome(outcome).await;
+                }
+                Either::Right(Either::Right(Either::Right(Either::Left(None)))) => {
+                    backfilled = None;
+                }
+                Either::Right(Either::Right(Either::Right(Either::Right(_)))) => {
+                    self.maintain().await;
+                }
             }
         }
         if let Some(discovery) = &self.discovery {
@@ -505,6 +547,7 @@ impl<P: Preset> NetworkService<P> {
                     self.say_goodbye(peer, reason).await;
                     return;
                 }
+                self.peer_book.connected(&peer, &address, outbound);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 // The dialer opens the handshake; the listener answers it.
                 if outbound {
@@ -519,9 +562,11 @@ impl<P: Preset> NetworkService<P> {
                 self.pings.retain(|_, known| *known != peer);
                 self.metadata_requests
                     .retain(|_, (known, _)| *known != peer);
+                self.peer_book.disconnected(&peer);
                 self.handshakes.forget(&peer);
                 self.metrics.peers.set_count(self.peers.len() as u64);
                 self.sync.on_disconnect(&peer).await;
+                self.backfill.on_disconnect(&peer).await;
             }
             NetworkEvent::GossipMessage {
                 id, topic, data, ..
@@ -548,6 +593,7 @@ impl<P: Preset> NetworkService<P> {
                     StatusVersion::of(protocol).and_then(|version| version.decode(&payload).ok())
                 {
                     self.sync.on_status(peer.clone(), status).await;
+                    self.backfill.on_status(peer.clone(), status).await;
                 }
                 // Answers run in their own tasks, so one slow query never blocks the loop.
                 let Ok(permit) = Arc::clone(&self.requests).acquire_owned().await else {
@@ -619,11 +665,16 @@ impl<P: Preset> NetworkService<P> {
             }
         } else if let Some((peer, status)) = self.handshakes.answered(request, chunk) {
             match status {
-                Some(status) => self.sync.on_status(peer, status).await,
+                Some(status) => {
+                    self.sync.on_status(peer.clone(), status).await;
+                    self.backfill.on_status(peer, status).await;
+                }
                 None => debug!(%peer, "peer sent no usable status"),
             }
         } else if self.sync.owns(request) {
             self.sync.on_chunk(request, chunk);
+        } else if self.backfill.owns(request) {
+            self.backfill.on_chunk(request, chunk);
         }
     }
 
@@ -635,6 +686,7 @@ impl<P: Preset> NetworkService<P> {
             return;
         }
         self.sync.on_end(request).await;
+        self.backfill.on_end(request).await;
         self.punish_dropped().await;
     }
 
@@ -682,7 +734,7 @@ impl<P: Preset> NetworkService<P> {
             }
             return;
         }
-        if self.sync.owns(request) {
+        if self.sync.owns(request) || self.backfill.owns(request) {
             match error {
                 // A block, blob or column request that times out costs a mid-tolerance fault.
                 RequestError::Timeout { .. } => self.report(&peer, PeerAction::MidTolerance).await,
@@ -697,6 +749,7 @@ impl<P: Preset> NetworkService<P> {
             }
         }
         self.sync.on_failure(request).await;
+        self.backfill.on_failure(request).await;
         self.punish_dropped().await;
     }
 
@@ -873,4 +926,6 @@ pub(crate) struct NetworkSetup {
     pub(crate) peer_limits: PeerLimits,
     /// Peer discovery and its events, when enabled.
     pub(crate) discovery: Option<(Discovery, Discv5Events)>,
+    /// Where accepted gossip goes out to event stream clients.
+    pub(crate) events: EventSender,
 }

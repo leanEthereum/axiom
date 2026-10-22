@@ -7,5 +7,7 @@ mod block_contents;
 mod data_column;
 mod envelope;
 mod execution;
+mod light_client;
 mod payload_attestation;
 mod proposer_preferences;
+mod state;

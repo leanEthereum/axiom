@@ -76,8 +76,8 @@ pub struct AttestationRewards<'a, P: Preset> {
     participation: &'a PendingParticipation,
     /// Validators active in the previous epoch, or slashed and not yet withdrawable.
     eligible: Vec<ValidatorIndex>,
-    /// Square root of the total active balance, the denominator of every base reward.
-    total_root: u64,
+    /// The base reward under the epoch's total active balance.
+    base: BaseReward,
 }
 
 impl<'a, P: Preset> AttestationRewards<'a, P> {
@@ -88,8 +88,48 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
             state,
             participation,
             eligible: state.eligible_validator_indices(),
-            total_root: participation.total_active_balance().0.0.isqrt(),
+            base: BaseReward::new(participation.total_active_balance()),
         }
+    }
+
+    /// Validators the epoch's rewards and penalties apply to, in index order.
+    #[must_use]
+    pub fn eligible(&self) -> &[ValidatorIndex] {
+        &self.eligible
+    }
+
+    /// What a correct vote on one part earns a validator with an effective balance.
+    ///
+    /// This is the reward of the vote deltas, for a validator that made that part right.
+    #[must_use]
+    pub fn vote_reward(&self, part: VotePart, effective_balance: Gwei) -> Gwei {
+        let base_reward = self.base.of::<P>(effective_balance);
+        if self.state.is_in_inactivity_leak() {
+            return base_reward;
+        }
+        // The increment is factored out of both balances so the product stays within 64 bits.
+        let increment = P::EFFECTIVE_BALANCE_INCREMENT;
+        let attesting = self.participation.previous_balance(part) / increment;
+        let total = self.participation.total_active_balance().0 / increment;
+        Gwei(base_reward.0 * attesting / total)
+    }
+
+    /// What an inclusion in the very next slot earns a validator with an effective balance.
+    #[must_use]
+    pub fn prompt_inclusion_reward(&self, effective_balance: Gwei) -> Gwei {
+        self.base.of::<P>(effective_balance) - self.base.proposer_share::<P>(effective_balance)
+    }
+
+    /// What the inactivity leak charges a validator that voted the target correctly.
+    ///
+    /// Outside a leak it charges nothing.
+    #[must_use]
+    pub fn leak_penalty(&self, effective_balance: Gwei) -> Gwei {
+        if !self.state.is_in_inactivity_leak() {
+            return Gwei::ZERO;
+        }
+        self.base.of::<P>(effective_balance) * BASE_REWARDS_PER_EPOCH
+            - self.base.proposer_share::<P>(effective_balance)
     }
 
     /// The deltas of one part of the vote.
@@ -101,20 +141,13 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
     #[must_use]
     pub fn vote_deltas(&self, part: VotePart) -> Deltas {
         let mut deltas = Deltas::zero(self.state.validators.len());
-        // The increment is factored out of both balances so the product stays within 64 bits.
-        let increment = P::EFFECTIVE_BALANCE_INCREMENT;
-        let attesting = self.participation.previous_balance(part) / increment;
-        let total = self.participation.total_active_balance().0 / increment;
-        let in_leak = self.state.is_in_inactivity_leak();
         for index in &self.eligible {
             let index = index.as_usize();
-            let base_reward = self.base_reward(index);
-            if !self.participation.has_previous(index, part) {
-                deltas.penalties[index] += base_reward;
-            } else if in_leak {
-                deltas.rewards[index] += base_reward;
+            if self.participation.has_previous(index, part) {
+                let effective_balance = self.state.validators[index].effective_balance;
+                deltas.rewards[index] += self.vote_reward(part, effective_balance);
             } else {
-                deltas.rewards[index] += Gwei(base_reward.0 * attesting / total);
+                deltas.penalties[index] += self.base_reward(index);
             }
         }
         deltas
@@ -131,14 +164,32 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
     ///
     /// Fails when an including proposer is not in the registry.
     pub fn inclusion_delay_deltas(&self) -> Result<Deltas, StateError> {
+        let shares = self.inclusion_shares()?;
+        let mut deltas = shares.attesters;
+        deltas.add(&shares.proposers);
+        Ok(deltas)
+    }
+
+    /// The inclusion rewards, split between what voters earn and what proposers earn.
+    ///
+    /// Their sum is the inclusion delay deltas.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an including proposer is not in the registry.
+    pub fn inclusion_shares(&self) -> Result<InclusionShares, StateError> {
         let registry_size = self.state.validators.len();
-        let mut deltas = Deltas::zero(registry_size);
+        let mut shares = InclusionShares {
+            attesters: Deltas::zero(registry_size),
+            proposers: Deltas::zero(registry_size),
+        };
         for index in 0..registry_size {
             let Some(inclusion) = self.participation.earliest_inclusion(index) else {
                 continue;
             };
             let proposer_reward = self.proposer_reward(index);
-            let proposer = deltas
+            let proposer = shares
+                .proposers
                 .rewards
                 .get_mut(inclusion.proposer.as_usize())
                 .ok_or(StateError::UnknownValidator {
@@ -148,9 +199,9 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
             *proposer += proposer_reward;
             // Invariant: block processing admits votes at least one slot old, so the delay is positive.
             let delay = inclusion.delay.max(1);
-            deltas.rewards[index] += (self.base_reward(index) - proposer_reward) / delay;
+            shares.attesters.rewards[index] += (self.base_reward(index) - proposer_reward) / delay;
         }
-        Ok(deltas)
+        Ok(shares)
     }
 
     /// Penalties of the inactivity leak, which start once finality stalls.
@@ -170,9 +221,8 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
         let quotient = u128::from(BeaconState::<P>::FORK.inactivity_penalty_quotient::<P>());
         for index in &self.eligible {
             let index = index.as_usize();
-            let base_reward = self.base_reward(index);
             deltas.penalties[index] +=
-                base_reward * BASE_REWARDS_PER_EPOCH - self.proposer_reward(index);
+                self.leak_penalty(self.state.validators[index].effective_balance);
             if !self.participation.has_previous(index, VotePart::Target) {
                 let effective_balance =
                     u128::from(self.state.validators[index].effective_balance.0);
@@ -204,15 +254,59 @@ impl<'a, P: Preset> AttestationRewards<'a, P> {
     ///
     /// See `get_base_reward` in the phase0 beacon chain spec.
     fn base_reward(&self, index: usize) -> Gwei {
-        let effective_balance = self.state.validators[index].effective_balance.0;
-        Gwei(effective_balance * P::BASE_REWARD_FACTOR / self.total_root / BASE_REWARDS_PER_EPOCH)
+        self.base
+            .of::<P>(self.state.validators[index].effective_balance)
     }
 
     /// The proposer's share of a voter's inclusion reward.
     ///
     /// See `get_proposer_reward` in the phase0 beacon chain spec.
     fn proposer_reward(&self, index: usize) -> Gwei {
-        self.base_reward(index) / P::PROPOSER_REWARD_QUOTIENT
+        self.base
+            .proposer_share::<P>(self.state.validators[index].effective_balance)
+    }
+}
+
+/// The inclusion delay rewards, by who earns them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InclusionShares {
+    /// What each voter earns for its earliest inclusion.
+    pub attesters: Deltas,
+    /// What each proposer earns for the votes it included first.
+    pub proposers: Deltas,
+}
+
+/// Phase0's base reward under one epoch's total active balance.
+///
+/// The square root of the total is taken once, since every validator's reward divides by it.
+/// See `get_base_reward` in the phase0 beacon chain spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BaseReward {
+    /// Square root of the total active balance.
+    total_root: u64,
+}
+
+impl BaseReward {
+    /// The base reward under a total active balance.
+    #[must_use]
+    pub const fn new(total_active_balance: ActiveBalance) -> Self {
+        Self {
+            total_root: total_active_balance.0.0.isqrt(),
+        }
+    }
+
+    /// One component's share of issuance for a validator with an effective balance.
+    #[must_use]
+    pub const fn of<P: Preset>(self, effective_balance: Gwei) -> Gwei {
+        Gwei(effective_balance.0 * P::BASE_REWARD_FACTOR / self.total_root / BASE_REWARDS_PER_EPOCH)
+    }
+
+    /// The share of a voter's base reward its including proposer earns.
+    ///
+    /// See `get_proposer_reward` in the phase0 beacon chain spec.
+    #[must_use]
+    pub const fn proposer_share<P: Preset>(self, effective_balance: Gwei) -> Gwei {
+        Gwei(self.of::<P>(effective_balance).0 / P::PROPOSER_REWARD_QUOTIENT)
     }
 }
 

@@ -37,4 +37,5 @@ axiom-execution.workspace = true
 axiom-http.workspace = true
 axiom-json.workspace = true
 axiom-p2p.workspace = true
+axiom-slasher.workspace = true
 tokio.workspace = true

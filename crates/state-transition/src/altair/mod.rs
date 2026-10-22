@@ -8,15 +8,15 @@ pub mod flags;
 mod upgrade;
 
 use axiom_types::{
-    Preset, ValidatorIndex,
-    accessors::{ParticipationState, SyncCommitteeState},
+    ChainConfig, Preset, ValidatorIndex,
+    accessors::{ForkState, ParticipationState, SyncCommitteeState},
     altair::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
 
 use crate::{
-    BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
-    StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
+    PayloadEngine, Registry, StateError,
     altair::{
         block::{FlaggedAttestation, ParticipantDeposit},
         epoch::{
@@ -28,6 +28,7 @@ use crate::{
         ExitQueue, Phase0Epoch, Slashing, SlotRoots,
         block::{DepositQuota, RandaoReveal},
     },
+    rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
 
@@ -85,6 +86,13 @@ impl<P: Preset> Fork for BeaconState<P> {
         step: EpochStep,
     ) -> Result<(), StateError> {
         AltairEpoch::run(processor, step)
+    }
+
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        Ok(AltairEpoch::attester_rewards(state.beacon(), config))
     }
 
     /// Runs Altair's block processing.
@@ -169,5 +177,15 @@ impl AltairEpoch {
             }
             _ => Phase0Epoch::run(processor, step),
         }
+    }
+
+    /// The attestation rewards of a state's previous epoch, scored by participation flags.
+    #[must_use]
+    pub fn attester_rewards<S>(state: &S, config: &ChainConfig) -> AttesterRewards
+    where
+        S: ParticipationState + ForkState,
+    {
+        let participation = Participation::new(state, ActiveBalance::of(state));
+        AttesterRewards::of_participation(&participation, config)
     }
 }

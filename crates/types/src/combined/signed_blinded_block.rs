@@ -27,6 +27,45 @@ pub enum SignedBlindedBeaconBlock<P: Preset> {
 }
 
 impl<P: Preset> SignedBlindedBeaconBlock<P> {
+    /// A signed block with its payload replaced by the payload's header.
+    ///
+    /// The header commits to the payload field by field, so the block root and its signature carry over.
+    /// Blocks without a payload, before Bellatrix and from Gloas on, have no blinded form.
+    #[must_use]
+    pub fn blinding(signed: &SignedBeaconBlock<P>) -> Option<Self> {
+        Some(match signed {
+            SignedBeaconBlock::Phase0(_)
+            | SignedBeaconBlock::Altair(_)
+            | SignedBeaconBlock::Gloas(_) => return None,
+            SignedBeaconBlock::Bellatrix(signed) => {
+                Self::Bellatrix(bellatrix::SignedBlindedBeaconBlock {
+                    message: signed.message.clone().into(),
+                    signature: signed.signature,
+                })
+            }
+            SignedBeaconBlock::Capella(signed) => {
+                Self::Capella(capella::SignedBlindedBeaconBlock {
+                    message: signed.message.clone().into(),
+                    signature: signed.signature,
+                })
+            }
+            SignedBeaconBlock::Deneb(signed) => Self::Deneb(deneb::SignedBlindedBeaconBlock {
+                message: signed.message.clone().into(),
+                signature: signed.signature,
+            }),
+            SignedBeaconBlock::Electra(signed) => {
+                Self::Electra(electra::SignedBlindedBeaconBlock {
+                    message: signed.message.clone().into(),
+                    signature: signed.signature,
+                })
+            }
+            SignedBeaconBlock::Fulu(signed) => Self::Fulu(fulu::SignedBlindedBeaconBlock {
+                message: signed.message.clone().into(),
+                signature: signed.signature,
+            }),
+        })
+    }
+
     /// A blinded block and its proposer's signature, in the block's fork.
     #[must_use]
     pub fn from_parts(message: BlindedBeaconBlock<P>, signature: BlsSignature) -> Self {

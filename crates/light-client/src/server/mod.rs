@@ -218,6 +218,51 @@ impl<P: Preset> LightClientServer<P> {
             .retain(|_, bootstrap| bootstrap.context_slot() >= earliest);
     }
 
+    /// The settled best update of each period, by period.
+    ///
+    /// Finality fixed them, so a node can persist them and restore them after a restart.
+    pub fn settled_updates(&self) -> impl Iterator<Item = (u64, &LightClientUpdate<P>)> {
+        self.settled
+            .iter()
+            .map(|(period, candidate)| (*period, &candidate.update))
+    }
+
+    /// The most recent settled update, and the most recent settled one that proves finality.
+    ///
+    /// They seed the latest updates served until a new block derives fresher ones.
+    pub fn latest_settled(&self) -> impl Iterator<Item = &LightClientUpdate<P>> {
+        self.settled_latest
+            .iter()
+            .chain(self.settled_finality.iter())
+            .map(|candidate| &candidate.update)
+    }
+
+    /// Takes back an update that was settled before a restart.
+    ///
+    /// It ranks against the settled updates exactly as when it first settled.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the update's headers have different formats.
+    pub fn restore_settled(
+        &mut self,
+        update: LightClientUpdate<P>,
+    ) -> Result<(), LightClientError> {
+        self.keep_settled(Candidate::new(update)?);
+        self.select();
+        Ok(())
+    }
+
+    /// Every bootstrap the node offers, by block root.
+    pub fn bootstraps(&self) -> impl Iterator<Item = (&Root, &LightClientBootstrap<P>)> {
+        self.bootstraps.iter()
+    }
+
+    /// Takes back a bootstrap that was offered before a restart.
+    pub fn restore_bootstrap(&mut self, block_root: Root, bootstrap: LightClientBootstrap<P>) {
+        self.bootstraps.insert(block_root, bootstrap);
+    }
+
     /// Checks a finality update from gossip, or of the node's own, and records it as forwarded.
     ///
     /// # Algorithm

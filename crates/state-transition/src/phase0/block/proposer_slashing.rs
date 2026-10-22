@@ -46,6 +46,11 @@ impl<S: Fork> Operation<S> for ProposerSlashing {
         }
 
         processor.registry().slash(proposer, None)?;
+        processor
+            .state
+            .caches
+            .proposer_ledger
+            .settle_proposer_slashing();
         Ok(())
     }
 }

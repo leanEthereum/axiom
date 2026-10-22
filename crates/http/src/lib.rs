@@ -53,6 +53,7 @@ mod router;
 mod server;
 mod session;
 mod status;
+mod stream;
 mod wire;
 
 pub use client::{Client, ClientConfig};
@@ -65,4 +66,5 @@ pub use method::Method;
 pub use router::Router;
 pub use server::{Server, ServerConfig};
 pub use status::StatusCode;
+pub use stream::BodyStream;
 pub use wire::{BodyLength, ChunkedDecoder, RequestHead, ResponseHead};

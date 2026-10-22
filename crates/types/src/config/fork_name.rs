@@ -239,6 +239,17 @@ impl ForkName {
         }
     }
 
+    /// Whether an attestation subnet carries one validator's vote alone, naming its committee.
+    ///
+    /// From Electra, subnets carry single attestations and aggregates span committees, see EIP-7549.
+    #[must_use]
+    pub const fn single_attestations(self) -> bool {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => false,
+            Self::Electra | Self::Fulu | Self::Gloas => true,
+        }
+    }
+
     /// Whether fork choice weighs a block's payload apart from the block itself.
     ///
     /// Gloas blocks commit to a builder's bid, and the payload follows in an envelope.
@@ -313,6 +324,17 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra => false,
             Self::Fulu | Self::Gloas => true,
+        }
+    }
+    /// The fork whose version signs a voluntary exit while this fork is in force.
+    ///
+    /// From Deneb on, exits sign under the Capella version forever.
+    /// A signed exit then never expires at a later fork, see EIP-7044.
+    #[must_use]
+    pub const fn voluntary_exit_fork(self) -> Self {
+        match self {
+            Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella => self,
+            Self::Deneb | Self::Electra | Self::Fulu | Self::Gloas => Self::Capella,
         }
     }
 }
@@ -421,6 +443,28 @@ mod tests {
         assert_eq!(
             builder_api,
             [false, false, true, true, true, true, true, false]
+        );
+    }
+
+    #[test]
+    fn exits_sign_under_capella_from_deneb_on() {
+        // EIP-7044: each fork's exit version, in fork order.
+        let forks: Vec<ForkName> = ForkName::ALL
+            .into_iter()
+            .map(ForkName::voluntary_exit_fork)
+            .collect();
+        assert_eq!(
+            forks,
+            [
+                ForkName::Phase0,
+                ForkName::Altair,
+                ForkName::Bellatrix,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+                ForkName::Capella,
+            ]
         );
     }
 }

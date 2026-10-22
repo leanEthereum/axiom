@@ -13,8 +13,9 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use crate::{
-    ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey,
-    ProposerService, ProposerSettings, Publisher,
+    ChainHandle, Clock, EventHub, EventSender, ExecutionLayer, NetworkSettings, NodeConfig,
+    NodeError, NodeKey, ProposerService, ProposerSettings, Publisher,
+    api::ApiServices,
     network::{
         AttestationSubnets, Discovery, ForkDigests, NatMetrics, NetworkIdentity, NetworkService,
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
@@ -81,6 +82,7 @@ impl<P: Preset> StartedChain<'_, P> {
         services: SharedServices,
     ) -> Result<(NetworkHandle, JoinHandle<()>, NodeIdentity), NodeError> {
         let SharedServices {
+            events: api_events,
             execution,
             clock,
             metrics,
@@ -146,6 +148,7 @@ impl<P: Preset> StartedChain<'_, P> {
                     ..PeerLimits::default()
                 },
                 discovery,
+                events: api_events,
             },
         )
         .await;
@@ -157,6 +160,8 @@ impl<P: Preset> StartedChain<'_, P> {
 /// The services every network component shares.
 #[derive(Clone, Debug)]
 struct SharedServices {
+    /// Where accepted gossip goes out to event stream clients.
+    events: EventSender,
     /// The execution engine.
     execution: Arc<ExecutionLayer>,
     /// The wall clock.
@@ -172,12 +177,14 @@ struct SharedServices {
 impl SharedServices {
     /// The shared services, with the network's own metrics registered beside the node's.
     fn new(
+        events: EventSender,
         execution: Arc<ExecutionLayer>,
         clock: Arc<dyn Clock>,
         metrics: NodeMetrics,
         registry: &Registry,
     ) -> Result<Self, NodeError> {
         Ok(Self {
+            events,
             execution,
             clock,
             metrics,
@@ -222,21 +229,18 @@ impl<P: Preset> Node<P> {
             warn!(%error, "process metrics unavailable");
         }
 
-        // The chain, from the database's anchor or from genesis.
-        let mut chain = config
-            .open_chain::<P>(chain_config)?
-            .with_metrics(metrics.clone());
+        // The event stream: the chain and the network publish, the API subscribes.
+        let (hub, event_sender, streams) = EventHub::new();
+        let hub = task::spawn(hub.run());
 
-        // The network identity fixes which columns the node custodies.
-        let identity = match &config.network {
-            Some(settings) => {
-                let identity = config.open_identity(settings)?;
-                let columns = identity.1.sampling_columns::<P>(chain.config())?;
-                chain = chain.with_custody(columns);
-                Some(identity)
-            }
-            None => None,
-        };
+        // The chain, with its slasher, telemetry, event feed, and the network identity's custody.
+        let (chain, identity) = Box::pin(config.start_chain::<P>(
+            chain_config,
+            clock.as_ref(),
+            metrics.clone(),
+            event_sender.clone(),
+        ))
+        .await?;
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.
@@ -261,6 +265,7 @@ impl<P: Preset> Node<P> {
                     slots,
                 };
                 let services = SharedServices::new(
+                    event_sender,
                     Arc::clone(&execution),
                     Arc::clone(&clock),
                     metrics,
@@ -278,14 +283,6 @@ impl<P: Preset> Node<P> {
             None => (None, None),
         };
 
-        // Proposed blocks go out on the network, when there is one, before import.
-        let publisher = Arc::new(Publisher::new(
-            handle.clone(),
-            Arc::clone(&execution),
-            Arc::clone(&clock),
-            network.as_ref().map(|(p2p, _)| p2p.clone()),
-        ));
-
         // The proposal desk builds payloads ahead of prepared validators' slots.
         let started = StartedChain {
             handle: &handle,
@@ -293,12 +290,22 @@ impl<P: Preset> Node<P> {
         };
         let (proposer, preparer) = started.start_proposer(&execution, &clock, &config.proposer)?;
 
+        // Proposed blocks go out on the network, when there is one, before import.
+        let api = ApiServices {
+            publisher: Arc::new(Publisher::new(
+                handle.clone(),
+                Arc::clone(&execution),
+                Arc::clone(&clock),
+                network.as_ref().map(|(p2p, _)| p2p.clone()),
+            )),
+            proposer,
+            identity,
+            events: streams,
+        };
+
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);
-        let servers = Box::pin(
-            config.start_servers(&handle, publisher, proposer, identity, registry, &stopped),
-        )
-        .await?;
+        let servers = Box::pin(config.start_servers(&handle, api, registry, &stopped)).await?;
 
         // Background loops run until aborted.
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
@@ -325,12 +332,7 @@ impl<P: Preset> Node<P> {
             service.abort();
             let _cancelled = service.await;
         }
-        ticker.abort();
-        follower.abort();
-        preparer.abort();
-        let _cancelled = ticker.await;
-        let _cancelled = follower.await;
-        let _cancelled = preparer.await;
+        Self::abort_all([ticker, follower, preparer, hub]).await;
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);
@@ -340,5 +342,13 @@ impl<P: Preset> Node<P> {
         }
         info!("stopped");
         Ok(())
+    }
+
+    /// Aborts background loops and waits until each has stopped.
+    async fn abort_all(tasks: impl IntoIterator<Item = JoinHandle<()>>) {
+        for task in tasks {
+            task.abort();
+            let _cancelled = task.await;
+        }
     }
 }

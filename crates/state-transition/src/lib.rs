@@ -66,6 +66,7 @@ pub mod gloas;
 pub mod phase0;
 mod pubkeys;
 mod registry;
+pub mod rewards;
 mod sampling;
 mod shuffle;
 mod signatures;

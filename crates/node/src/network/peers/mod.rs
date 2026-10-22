@@ -22,6 +22,7 @@
 //! The decisions protect liveness: an eclipsed or starved node cannot follow the chain.
 //! None of them affects safety, which rests on signatures and fork choice alone.
 
+mod book;
 mod metrics;
 mod score;
 mod subnets;
@@ -33,6 +34,7 @@ use std::{
 };
 
 use axiom_p2p::{Multiaddr, PeerId, Protocol as Layer, eth::reqresp::GoodbyeReason};
+pub(crate) use book::{PeerBook, PeerRecord};
 pub(crate) use metrics::PeerMetrics;
 pub(crate) use score::PeerAction;
 use score::{PeerScore, Standing};

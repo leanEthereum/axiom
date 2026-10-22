@@ -5,14 +5,14 @@ pub mod epoch;
 mod upgrade;
 
 use axiom_types::{
-    Preset, ValidatorIndex,
+    ChainConfig, Preset, ValidatorIndex,
     capella::{BeaconBlock, BeaconState},
     phase0::BeaconBlockHeader,
 };
 
 use crate::{
-    BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine, Registry,
-    StateError,
+    BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork, PayloadEngine,
+    Registry, StateError,
     altair::{
         AltairEpoch,
         block::{FlaggedAttestation, ParticipantDeposit},
@@ -25,6 +25,7 @@ use crate::{
         ExitQueue, Slashing, SlotRoots,
         block::{DepositQuota, RandaoReveal},
     },
+    rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
 
@@ -88,6 +89,13 @@ impl<P: Preset> Fork for BeaconState<P> {
             }
             _ => AltairEpoch::run(processor, step),
         }
+    }
+
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        Ok(AltairEpoch::attester_rewards(state.beacon(), config))
     }
 
     /// Runs Capella's block processing.

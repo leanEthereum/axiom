@@ -97,15 +97,17 @@ Adding a crate requires a reason recorded in the commit message and in the root 
 Dependencies point one way only.
 
 ```text
-L0  ssz, yaml, snappy, json, rlp            encodings                          pure
-L0  bls12-381, bls, kzg, crypto             curves, signatures, commitments    pure
-L0  types                                   newtypes, presets, containers      pure
-L1  state-transition                        per-slot, per-block, per-epoch     pure
-L2  fork-choice, das, gossip, light-client  the store and the network's rules  pure
-L3  store, http, execution, p2p, discv5     database, sockets, engine API      effects
-L3  telemetry                               logs and metrics                   effects
-L4  node                                    chain thread, services, sync       async
-L5  bin/axiom                               the command line                   async
+L0  ssz, yaml, snappy, json, rlp               encodings                            pure
+L0  bls12-381, bls, kzg, crypto                curves, signatures, commitments      pure
+L0  types                                      newtypes, presets, containers        pure
+L1  state-transition                           per-slot, per-block, per-epoch       pure
+L1  beacon-json                                the API's JSON form of containers    pure
+L2  fork-choice, das, gossip, light-client     the store and the network's rules    pure
+L2  operation-pool, block-production           packing and assembling blocks        pure
+L3  store, http, execution, p2p, discv5        database, sockets, engine API        effects
+L3  builder-client, slasher, telemetry         relays, slashing history, metrics    effects
+L4  node                                       chain thread, services, sync         async
+L5  bin/axiom                                  the command line                     async
 ```
 
 Nothing in L0 to L2 reads a clock, opens a socket, touches a disk, spawns a task, or logs.
@@ -314,7 +316,7 @@ A comment in the house style:
 - Benchmarks are criterion benches under `benches/`, never ignored tests.
   Each bench target sets `harness = false` and drives criterion from a plain `main`, without its macros.
 - The tree keeps only the benchmarks that guard the client's critical paths:
-  - signing and verification, the baseline for signature scheme work
+  - signing and verification
   - block and epoch processing, and the state root
 - A performance change measures with a throwaway harness or a local bench.
   Its numbers go in the pull request, and the bench code stays out of the tree.

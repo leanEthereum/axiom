@@ -7,4 +7,6 @@ mod blinded_block;
 mod block;
 mod block_contents;
 mod builder;
+mod light_client;
 mod requests;
+mod state;

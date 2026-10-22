@@ -42,11 +42,16 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "axiom"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
  "axiom-discv5",
+ "axiom-http",
+ "axiom-json",
  "axiom-node",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-telemetry",
  "axiom-types",
+ "axiom-validator",
  "axiom-yaml",
  "thiserror",
  "tokio",
@@ -169,6 +174,7 @@ dependencies = [
  "axiom-node",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-state-transition",
@@ -251,7 +257,9 @@ dependencies = [
 name = "axiom-light-client"
 version = "0.1.0"
 dependencies = [
+ "axiom-beacon-json",
  "axiom-bls",
+ "axiom-json",
  "axiom-ssz",
  "axiom-types",
  "thiserror",
@@ -277,6 +285,7 @@ dependencies = [
  "axiom-light-client",
  "axiom-operation-pool",
  "axiom-p2p",
+ "axiom-slasher",
  "axiom-ssz",
  "axiom-state-transition",
  "axiom-store",
@@ -320,6 +329,19 @@ name = "axiom-rlp"
 version = "0.1.0"
 dependencies = [
  "axiom-json",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
+name = "axiom-slasher"
+version = "0.1.0"
+dependencies = [
+ "axiom-operation-pool",
+ "axiom-snappy",
+ "axiom-ssz",
+ "axiom-store",
+ "axiom-types",
  "proptest",
  "thiserror",
 ]
@@ -382,6 +404,28 @@ dependencies = [
  "axiom-yaml",
  "proptest",
  "thiserror",
+]
+
+[[package]]
+name = "axiom-validator"
+version = "0.1.0"
+dependencies = [
+ "axiom-beacon-json",
+ "axiom-bls",
+ "axiom-crypto",
+ "axiom-ef-tests",
+ "axiom-http",
+ "axiom-json",
+ "axiom-node",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-store",
+ "axiom-types",
+ "proptest",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

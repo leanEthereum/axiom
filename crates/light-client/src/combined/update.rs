@@ -1,5 +1,7 @@
 //! Light client updates of any format: full, finality, and optimistic.
 
+use axiom_beacon_json::{ApiJson, ApiJsonError, ForkedJson};
+use axiom_json::Json;
 use axiom_ssz::{Root, Ssz};
 use axiom_types::{
     ChainConfig, ForkName, Preset, Slot, altair, capella, combined::SignedBeaconBlock, deneb,
@@ -275,6 +277,30 @@ impl<P: Preset> LightClientUpdate<P> {
     }
 }
 
+impl<P: Preset> ForkedJson for LightClientUpdate<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Altair(value) => value.to_json(),
+            Self::Capella(value) => value.to_json(),
+            Self::Deneb(value) => value.to_json(),
+            Self::Electra(value) => value.to_json(),
+            Self::Gloas(value) => value.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
+        let format =
+            Format::of(fork).map_err(|_| ApiJsonError::absent(fork, "light client update"))?;
+        Ok(match format {
+            Format::Altair => Self::Altair(ApiJson::from_json(value)?),
+            Format::Capella => Self::Capella(ApiJson::from_json(value)?),
+            Format::Deneb => Self::Deneb(ApiJson::from_json(value)?),
+            Format::Electra => Self::Electra(ApiJson::from_json(value)?),
+            Format::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+        })
+    }
+}
+
 /// A finality update in the format of one fork.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LightClientFinalityUpdate<P: Preset> {
@@ -368,6 +394,30 @@ impl<P: Preset> LightClientFinalityUpdate<P> {
             Format::Gloas => Self::Gloas(Gloas::finality_update(
                 LightClientHeader::unwrap_update(data, LightClientHeader::into_gloas)?,
             )?),
+        })
+    }
+}
+
+impl<P: Preset> ForkedJson for LightClientFinalityUpdate<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Altair(value) => value.to_json(),
+            Self::Capella(value) => value.to_json(),
+            Self::Deneb(value) => value.to_json(),
+            Self::Electra(value) => value.to_json(),
+            Self::Gloas(value) => value.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
+        let format = Format::of(fork)
+            .map_err(|_| ApiJsonError::absent(fork, "light client finality update"))?;
+        Ok(match format {
+            Format::Altair => Self::Altair(ApiJson::from_json(value)?),
+            Format::Capella => Self::Capella(ApiJson::from_json(value)?),
+            Format::Deneb => Self::Deneb(ApiJson::from_json(value)?),
+            Format::Electra => Self::Electra(ApiJson::from_json(value)?),
+            Format::Gloas => Self::Gloas(ApiJson::from_json(value)?),
         })
     }
 }
@@ -468,6 +518,30 @@ impl<P: Preset> LightClientOptimisticUpdate<P> {
             Format::Gloas => Self::Gloas(Gloas::optimistic_update(
                 LightClientHeader::unwrap_update(data, LightClientHeader::into_gloas)?,
             )),
+        })
+    }
+}
+
+impl<P: Preset> ForkedJson for LightClientOptimisticUpdate<P> {
+    fn to_json(&self) -> Json {
+        match self {
+            Self::Altair(value) => value.to_json(),
+            Self::Capella(value) => value.to_json(),
+            // Electra kept Deneb's optimistic update.
+            Self::Deneb(value) | Self::Electra(value) => value.to_json(),
+            Self::Gloas(value) => value.to_json(),
+        }
+    }
+
+    fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
+        let format = Format::of(fork)
+            .map_err(|_| ApiJsonError::absent(fork, "light client optimistic update"))?;
+        Ok(match format {
+            Format::Altair => Self::Altair(ApiJson::from_json(value)?),
+            Format::Capella => Self::Capella(ApiJson::from_json(value)?),
+            Format::Deneb => Self::Deneb(ApiJson::from_json(value)?),
+            Format::Electra => Self::Electra(ApiJson::from_json(value)?),
+            Format::Gloas => Self::Gloas(ApiJson::from_json(value)?),
         })
     }
 }

@@ -80,6 +80,12 @@ impl Draft {
         })
     }
 
+    /// The same inputs, with a randao reveal the proposer supplied.
+    pub(crate) const fn with_reveal(mut self, reveal: BlsSignature) -> Self {
+        self.reveal = reveal;
+        self
+    }
+
     /// The block of the state's fork, claiming a post-state root.
     ///
     /// Each fork's body carries no operations, so only the mandatory fields vary.

@@ -9,11 +9,18 @@ use axiom_fork_choice::ForkChoiceError;
 use axiom_light_client::LightClientError;
 use axiom_operation_pool::PoolError;
 use axiom_p2p::swarm::NetworkError;
+use axiom_slasher::SlasherError;
 use axiom_ssz::DecodeError;
+use axiom_state_transition::{StateError, TransitionError};
 use axiom_store::Error as StoreError;
 use axiom_telemetry::RegistryError;
 use axiom_types::{CommitteeIndex, ForkName, Root, Slot};
 use thiserror::Error;
+
+use crate::{
+    CheckpointError,
+    chain::{SchemaVersion, WeakSubjectivityError},
+};
 
 /// Why the chain refused an input or could not persist it.
 #[derive(Debug, Error)]
@@ -64,6 +71,55 @@ pub enum ChainError {
     /// The chain thread stopped before answering.
     #[error("chain service stopped")]
     Stopped,
+    /// The database was written in a layout this build does not know.
+    #[error(
+        "database schema version {found} is unknown; this build reads versions 1 to {supported}"
+    )]
+    UnknownSchema {
+        /// The version the database records.
+        found: SchemaVersion,
+        /// The newest version this build reads.
+        supported: SchemaVersion,
+    },
+    /// A backfill segment was checked against another history start than the stored one.
+    #[error(
+        "segment extends history from slot {extends}, but the stored history starts at {stored:?}"
+    )]
+    StaleSegment {
+        /// The start slot the segment was checked against.
+        extends: Slot,
+        /// The stored start slot, if any.
+        stored: Option<Slot>,
+    },
+    /// A finalized block failed to apply while rebuilding a past state.
+    #[error("replaying the finalized block at slot {slot}: {source}")]
+    Replay {
+        /// The block's slot.
+        slot: Slot,
+        /// Why the block did not apply.
+        #[source]
+        source: TransitionError,
+    },
+    /// Empty slots failed to run while rebuilding a past state.
+    #[error("running empty slots up to slot {slot}: {source}")]
+    ReplaySlots {
+        /// The slot the state was carried to.
+        slot: Slot,
+        /// Why the slots did not run.
+        #[source]
+        source: StateError,
+    },
+    /// The chain conflicts with the operator's weak subjectivity checkpoint.
+    #[error("weak subjectivity: {0}")]
+    WeakSubjectivity(#[from] WeakSubjectivityError),
+    /// A genesis state is not the one this chain started from.
+    #[error("genesis state root is {actual}, but the chain names {expected}")]
+    GenesisMismatch {
+        /// The root the chain commits to.
+        expected: Root,
+        /// The root of the state given.
+        actual: Root,
+    },
 }
 
 /// Why the node failed to start or stopped abnormally.
@@ -124,6 +180,9 @@ pub enum NodeError {
     /// Neither a database to resume nor a genesis state was given.
     #[error("no database to resume and no genesis or checkpoint given")]
     NoAnchor,
+    /// The slasher could not open its history.
+    #[error("slasher: {0}")]
+    Slasher(#[source] SlasherError),
     /// The engine endpoint is unusable.
     #[error("execution engine at {url}: {source}")]
     Engine {
@@ -151,6 +210,9 @@ pub enum NodeError {
     /// The peer-to-peer stack failed to start.
     #[error("network: {0}")]
     Network(#[source] NetworkError),
+    /// The checkpoint could not be downloaded.
+    #[error("checkpoint sync: {0}")]
+    Checkpoint(#[from] CheckpointError),
     /// The chain thread stopped before the node did.
     #[error("chain service stopped unexpectedly")]
     ChainStopped,

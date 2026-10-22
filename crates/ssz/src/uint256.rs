@@ -76,6 +76,31 @@ impl U256 {
         Some(Self(value))
     }
 
+    /// The value written in decimal, without leading zeros.
+    ///
+    /// The beacon API writes wei amounts this way.
+    #[must_use]
+    pub fn to_decimal(self) -> String {
+        // Divide by 10 repeatedly, collecting remainders from the least significant digit.
+        let mut value = self.0;
+        let mut digits = Vec::new();
+        loop {
+            let mut remainder = 0_u16;
+            for byte in value.iter_mut().rev() {
+                let current = (remainder << 8) | u16::from(*byte);
+                *byte = (current / 10) as u8;
+                remainder = current % 10;
+            }
+            digits.push(b'0' + remainder as u8);
+            if value.iter().all(|byte| *byte == 0) {
+                break;
+            }
+        }
+        digits.reverse();
+        // Invariant: every pushed byte is an ASCII digit.
+        String::from_utf8(digits).expect("decimal digits are ASCII")
+    }
+
     /// The little-endian bytes.
     #[must_use]
     pub const fn to_le_bytes(self) -> [u8; 32] {
@@ -113,6 +138,32 @@ impl fmt::Debug for U256 {
     }
 }
 
+impl fmt::Display for U256 {
+    /// Renders decimal, the form the spec's configuration files write it in.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut value = self.0;
+        let mut digits = Vec::new();
+        // Divide by 10 from the high byte down; each remainder is the next digit up.
+        // Bound: remainder * 256 + byte <= 9 * 256 + 255 = 2559 fits in a u16.
+        while value.iter().any(|byte| *byte != 0) {
+            let mut remainder = 0_u16;
+            for byte in value.iter_mut().rev() {
+                let current = (remainder << 8) | u16::from(*byte);
+                *byte = (current / 10) as u8;
+                remainder = current % 10;
+            }
+            digits.push(char::from(b'0' + remainder as u8));
+        }
+        if digits.is_empty() {
+            return f.write_str("0");
+        }
+        digits
+            .iter()
+            .rev()
+            .try_for_each(|digit| write!(f, "{digit}"))
+    }
+}
+
 impl Ssz for U256 {
     const FIXED_SIZE: Option<usize> = Some(32);
     const PACKED_SIZE: Option<usize> = Some(32);
@@ -136,7 +187,26 @@ impl Ssz for U256 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    #[test]
+    fn display_is_decimal() {
+        // Zero, the mainnet terminal total difficulty, and the largest value.
+        let ttd = "58750000000000000000000";
+        let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        assert_eq!(U256::ZERO.to_string(), "0");
+        assert_eq!(U256::from_decimal(ttd).unwrap().to_string(), ttd);
+        assert_eq!(U256::MAX.to_string(), max);
+    }
+
+    proptest! {
+        #[test]
+        fn display_matches_native_integers(value in any::<u128>()) {
+            prop_assert_eq!(U256::from_u128(value).to_string(), value.to_string());
+        }
+    }
 
     #[test]
     fn decimal_parses_little_endian() {
@@ -147,6 +217,18 @@ mod tests {
         assert_eq!(U256::from_decimal("65536"), Some(U256(expected)));
         assert_eq!(U256::from_decimal("12a"), None);
         assert_eq!(U256::from_decimal(""), None);
+    }
+
+    #[test]
+    fn decimal_writes_back_what_it_reads() {
+        // Zero, a small value, and 2^256 - 1 write as they were read.
+        for text in [
+            "0",
+            "65536",
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        ] {
+            assert_eq!(U256::from_decimal(text).unwrap().to_decimal(), text);
+        }
     }
 
     #[test]

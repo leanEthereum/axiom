@@ -1,22 +1,38 @@
-//! The node namespace: version, health, and sync status.
+//! The node namespace: version, health, sync status, identity, and peers.
 
 use std::{
     future::{Ready, ready},
     sync::atomic::Ordering,
 };
 
+use axiom_beacon_json::{ApiJson, api::SyncStatus};
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_types::Preset;
 
 use super::{
     ApiContext,
+    query::Query,
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::Chain;
+use crate::{Chain, network::PeerRecord};
 
 /// The client's name and version, as reported to peers and tools.
 const VERSION: &str = concat!("axiom/v", env!("CARGO_PKG_VERSION"));
+
+/// The client's two-letter code, in the engine API's client identification format.
+///
+/// The engine API's list of codes has no entry for Axiom, so these are its initials.
+/// See the identification section of the engine API.
+const CLIENT_CODE: &str = "AX";
+
+/// The first four bytes of the source commit, when the build names one.
+///
+/// A build without the variable reports zeros, as the identification format allows.
+const COMMIT: &str = match option_env!("AXIOM_COMMIT") {
+    Some(commit) => commit,
+    None => "0x00000000",
+};
 
 /// A head this many slots behind the clock or more means the node is syncing.
 ///
@@ -32,6 +48,10 @@ impl NodeRoutes {
     pub(crate) fn register<P: Preset>(routes: Routes<ApiContext<P>>) -> Routes<ApiContext<P>> {
         routes
             .get("/eth/v1/node/version", Self::version::<P>)
+            .get("/eth/v2/node/version", Self::version_v2::<P>)
+            .get("/eth/v1/node/peers", Self::peers::<P>)
+            .get("/eth/v1/node/peers/{peer_id}", Self::peer::<P>)
+            .get("/eth/v1/node/peer_count", Self::peer_count::<P>)
             .get("/eth/v1/node/health", Self::health::<P>)
             .get("/eth/v1/node/syncing", Self::syncing::<P>)
             .get("/eth/v1/node/identity", Self::identity::<P>)
@@ -44,6 +64,143 @@ impl NodeRoutes {
             Json::from([("version", VERSION.into())]),
             None,
         )))
+    }
+
+    /// The client's version in the engine API's identification format.
+    ///
+    /// The engine is not asked for its own version, so only the beacon node is reported.
+    fn version_v2<P: Preset>(_context: ApiContext<P>, _request: Request) -> Ready<ApiResult> {
+        let beacon_node = Json::from([
+            ("code", Json::from(CLIENT_CODE)),
+            ("name", Json::from("Axiom")),
+            (
+                "version",
+                Json::from(concat!("v", env!("CARGO_PKG_VERSION"))),
+            ),
+            ("commit", Json::from(COMMIT)),
+        ]);
+        ready(Ok(Reply::data(
+            Json::from([("beacon_node", beacon_node)]),
+            None,
+        )))
+    }
+
+    /// The peers the node has met, filtered by connection state and direction.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the route table hands every handler its own context and request"
+    )]
+    fn peers<P: Preset>(context: ApiContext<P>, request: Request) -> Ready<ApiResult> {
+        ready(Self::peers_now(&context, &request))
+    }
+
+    /// The peer list, built from the latest snapshot.
+    fn peers_now<P: Preset>(context: &ApiContext<P>, request: &Request) -> ApiResult {
+        let query = Query::of(request);
+        let states = query.list("state");
+        let directions = query.list("direction");
+        for state in &states {
+            if !["disconnected", "connecting", "connected", "disconnecting"].contains(state) {
+                return Err(ApiError::bad_request(format!(
+                    "invalid peer state: {state}"
+                )));
+            }
+        }
+        for direction in &directions {
+            if !["inbound", "outbound"].contains(direction) {
+                return Err(ApiError::bad_request(format!(
+                    "invalid peer direction: {direction}"
+                )));
+            }
+        }
+        let peers = Self::snapshot(context);
+        let data: Vec<Json> = peers
+            .iter()
+            .filter(|peer| states.is_empty() || states.contains(&Self::state(peer)))
+            .filter(|peer| directions.is_empty() || directions.contains(&Self::direction(peer)))
+            .map(Self::peer_json)
+            .collect();
+        let count = data.len() as u64;
+        let body = Json::from([
+            ("data", Json::Array(data)),
+            ("meta", Json::from([("count", Reply::number(count))])),
+        ]);
+        Ok(Reply::json(StatusCode::OK, &body))
+    }
+
+    /// One peer, by its libp2p identifier.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the route table hands every handler its own context and request"
+    )]
+    fn peer<P: Preset>(context: ApiContext<P>, request: Request) -> Ready<ApiResult> {
+        let found = request
+            .param("peer_id")
+            .ok_or_else(|| ApiError::bad_request("missing peer id"))
+            .and_then(|id| {
+                Self::snapshot(&context)
+                    .iter()
+                    .find(|peer| peer.peer_id == id)
+                    .map(|peer| Reply::data(Self::peer_json(peer), None))
+                    .ok_or_else(|| ApiError::not_found(format!("peer {id} not found")))
+            });
+        ready(found)
+    }
+
+    /// How many peers are in each connection state.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the route table hands every handler its own context and request"
+    )]
+    fn peer_count<P: Preset>(context: ApiContext<P>, _request: Request) -> Ready<ApiResult> {
+        let peers = Self::snapshot(&context);
+        let connected = peers.iter().filter(|peer| peer.connected).count() as u64;
+        let disconnected = peers.len() as u64 - connected;
+        // Connections open and close inside the network task, so no peer is seen halfway.
+        ready(Ok(Reply::data(
+            Json::from([
+                ("disconnected", Reply::number(disconnected)),
+                ("connecting", Reply::number(0)),
+                ("connected", Reply::number(connected)),
+                ("disconnecting", Reply::number(0)),
+            ]),
+            None,
+        )))
+    }
+
+    /// The latest published peers; none without a network.
+    fn snapshot<P: Preset>(context: &ApiContext<P>) -> Vec<PeerRecord> {
+        context
+            .identity
+            .as_ref()
+            .map(|identity| identity.peers.borrow().as_ref().clone())
+            .unwrap_or_default()
+    }
+
+    /// A peer in the beacon API's form.
+    fn peer_json(peer: &PeerRecord) -> Json {
+        Json::from([
+            ("peer_id", Json::from(peer.peer_id.as_str())),
+            // The record a peer was discovered with is not kept per connection.
+            ("enr", Json::Null),
+            ("last_seen_p2p_address", Json::from(peer.address.as_str())),
+            ("state", Json::from(Self::state(peer))),
+            ("direction", Json::from(Self::direction(peer))),
+        ])
+    }
+
+    /// The connection state's name.
+    const fn state(peer: &PeerRecord) -> &'static str {
+        if peer.connected {
+            "connected"
+        } else {
+            "disconnected"
+        }
+    }
+
+    /// The connection direction's name.
+    const fn direction(peer: &PeerRecord) -> &'static str {
+        if peer.outbound { "outbound" } else { "inbound" }
     }
 
     /// Ready, syncing, or not working.
@@ -66,17 +223,15 @@ impl NodeRoutes {
         let (head, distance) = context
             .query(|chain| Ok((chain.head(), Self::distance(chain))))
             .await?;
-        Ok(Reply::data(
-            Json::from([
-                ("head_slot", Reply::number(head.slot.0)),
-                ("sync_distance", Reply::number(distance)),
-                ("is_syncing", (distance >= SYNCING_DISTANCE).into()),
-                ("is_optimistic", head.optimistic.into()),
-                // The engine is never probed directly, so it is assumed reachable.
-                ("el_offline", false.into()),
-            ]),
-            None,
-        ))
+        let status = SyncStatus {
+            head_slot: head.slot,
+            sync_distance: distance,
+            is_syncing: distance >= SYNCING_DISTANCE,
+            is_optimistic: head.optimistic,
+            // The engine is never probed directly, so it is assumed reachable.
+            el_offline: false,
+        };
+        Ok(Reply::data(status.to_json(), None))
     }
 
     /// The node's network identity: peer id, record, addresses, and metadata.

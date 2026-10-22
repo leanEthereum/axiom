@@ -18,8 +18,9 @@ use axiom_types::{
 pub use envelope::{EnvelopeError, PayloadEnvelope};
 
 use crate::{
-    ActiveBalance, BlockError, BlockProcessor, EpochProcessor, EpochStep, Fork, PayloadEngine,
-    Registry, StateError,
+    ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, Fork,
+    PayloadEngine, Registry, StateError,
+    altair::AltairEpoch,
     electra::{
         ElectraEpoch,
         block::Exit,
@@ -32,6 +33,7 @@ use crate::{
         ptc::PtcWindow,
     },
     phase0::{Slashing, SlotRoots, block::RandaoReveal},
+    rewards::AttesterRewards,
 };
 
 impl<P: Preset> Fork for BeaconState<P> {
@@ -128,6 +130,13 @@ impl<P: Preset> Fork for BeaconState<P> {
             EpochStep::PtcWindow => PtcWindow::shift(&mut processor.state),
             _ => ElectraEpoch::run(processor, step),
         }
+    }
+
+    fn attester_rewards(
+        state: CachedState<'_, Self>,
+        config: &ChainConfig,
+    ) -> Result<AttesterRewards, StateError> {
+        Ok(AltairEpoch::attester_rewards(state.beacon(), config))
     }
 
     /// Runs Gloas's block processing.

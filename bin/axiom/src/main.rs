@@ -1,7 +1,9 @@
 //! Axiom: an Ethereum consensus client.
 
+mod account;
 mod cli;
 mod run;
+mod validator;
 
 use std::{
     env,
@@ -34,6 +36,20 @@ fn main() -> ExitCode {
             let _unwritable = writeln!(io::stdout(), "axiom {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Command::Account(account) => match account.execute() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _unwritable = writeln!(io::stderr(), "error: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Validator(validator) => match validator.execute() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                error!(%error, "validator client failed");
+                ExitCode::FAILURE
+            }
+        },
         Command::Run(run) => match run.execute() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {

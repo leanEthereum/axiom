@@ -54,7 +54,8 @@ impl ApiJsonError {
     }
 
     /// The error for a fork that has no container of a kind.
-    pub(crate) const fn absent(fork: ForkName, container: &'static str) -> Self {
+    #[must_use]
+    pub const fn absent(fork: ForkName, container: &'static str) -> Self {
         Self::new(ApiJsonErrorKind::AbsentInFork { fork, container })
     }
 
@@ -175,6 +176,10 @@ pub enum ApiJsonErrorKind {
     /// The bytes of a bitlist or bitvector are not a canonical SSZ encoding.
     #[error("{0}")]
     Bits(DecodeError),
+
+    /// A string names none of the values a field may take.
+    #[error("unknown value {0:?}")]
+    UnknownName(String),
 
     /// The fork has no container of the requested kind.
     #[error("the {fork} fork has no {container}")]

@@ -18,6 +18,8 @@
 //! A decimal must be canonical: digits only, no sign, no leading zero, within the type's range.
 //! A list over its limit is refused before any element is decoded.
 //!
+//! The API's own messages around the containers, such as duties, live in the api module.
+//!
 //! Decoding ignores unknown members, so a server that adds a field still interoperates.
 //!
 //! A container whose shape varies by fork travels without its fork.
@@ -26,6 +28,7 @@
 //! No type implements both traits, so the shared encoder name never clashes at a call site.
 
 mod altair;
+pub mod api;
 mod bellatrix;
 mod capella;
 mod collections;
@@ -46,6 +49,7 @@ use axiom_json::Json;
 use axiom_types::ForkName;
 pub use decimal::DecimalError;
 pub use error::{ApiJsonError, ApiJsonErrorKind};
+pub use reader::Fields;
 
 /// A value with one JSON form in the beacon node and builder APIs.
 pub trait ApiJson: Sized {

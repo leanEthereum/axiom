@@ -1,0 +1,25 @@
+[package]
+name = "axiom-slasher"
+description = "Detection of double votes, surround votes, and double proposals, with durable history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-snappy.workspace = true
+axiom-ssz.workspace = true
+axiom-store.workspace = true
+axiom-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axiom-operation-pool.workspace = true
+proptest.workspace = true
