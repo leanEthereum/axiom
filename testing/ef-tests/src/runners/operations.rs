@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use axiom_ssz::{DecodeError, Ssz};
 use axiom_state_transition::{BlockError, BlockProcessor, Fork, Operation, State, Verification};
-use axiom_types::{ChainConfig, Preset, accessors::ForkState};
+use axiom_types::{ChainConfig, Preset, Slot, accessors::ForkState};
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
@@ -87,6 +87,30 @@ impl<S: Fork> OperationInput<'_, '_, '_, S> {
             .get("execution_valid")
             .and_then(Yaml::as_bool)
             .ok_or_else(|| Failure::new("execution.yaml has no verdict"))
+    }
+
+    /// Runs a step that reads only the state, for handlers whose case has no input file.
+    ///
+    /// # Errors
+    ///
+    /// Never fails as a broken case; a rejection counts as an invalid operation.
+    pub fn apply_state_step(
+        &mut self,
+        step: impl FnOnce(&mut BlockProcessor<'_, S>) -> Result<(), BlockError>,
+    ) -> Applied {
+        Ok(step(self.processor).map_err(Rejection::from))
+    }
+
+    /// Slot of the parent of the block that would include the operation, from the metadata.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the metadata does not parse or names no parent slot.
+    pub fn parent_slot(&self) -> Result<Slot, Failure> {
+        self.case
+            .meta()?
+            .parent_slot
+            .ok_or_else(|| Failure::new("meta.yaml has no parent slot"))
     }
 }
 

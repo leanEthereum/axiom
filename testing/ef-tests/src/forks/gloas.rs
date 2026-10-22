@@ -1,9 +1,14 @@
 //! The vectors of Gloas, which enshrines proposer-builder separation.
 
+use axiom_state_transition::{
+    electra::block::Exit,
+    fulu::block::QueuedDeposit,
+    gloas::block::{CommittedWithdrawals, IncludedAttestation, ParentPayload},
+};
 use axiom_types::{ForkName, Preset, gloas};
 
 use super::{Fulu, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, OperationInput};
 
 /// The Gloas fork.
 ///
@@ -112,6 +117,66 @@ impl SpecFork for Gloas {
             }
             "SignedProposerPreferences" => case.round_trip::<gloas::SignedProposerPreferences>(),
             _ => Fulu::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, gloas::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => {
+                let parent_slot = input.parent_slot()?;
+                input.apply_with::<gloas::Attestation<P>>(
+                    "attestation",
+                    |attestation, processor| {
+                        processor.apply(&IncludedAttestation::new(attestation, parent_slot))
+                    },
+                )
+            }
+            "attester_slashing" => input.apply::<gloas::AttesterSlashing>("attester_slashing"),
+            "proposer_slashing" => input.apply::<gloas::ProposerSlashing>("proposer_slashing"),
+            "voluntary_exit" | "voluntary_exit_churn" => input
+                .apply_with::<gloas::SignedVoluntaryExit>("voluntary_exit", |exit, processor| {
+                    processor.apply(&Exit(exit))
+                }),
+            "bls_to_execution_change" => {
+                input.apply::<gloas::SignedBlsToExecutionChange>("address_change")
+            }
+            "deposit_request" => input
+                .apply_with::<gloas::DepositRequest>("deposit_request", |request, processor| {
+                    processor.apply(&QueuedDeposit(request))
+                }),
+            "withdrawal_request" => input.apply::<gloas::WithdrawalRequest>("withdrawal_request"),
+            "consolidation_request" => {
+                input.apply::<gloas::ConsolidationRequest>("consolidation_request")
+            }
+            "builder_deposit_request" => {
+                input.apply::<gloas::BuilderDepositRequest>("builder_deposit_request")
+            }
+            "builder_exit_request" => {
+                input.apply::<gloas::BuilderExitRequest>("builder_exit_request")
+            }
+            "block_header" => input
+                .apply_with::<gloas::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "sync_aggregate" => input.apply::<gloas::SyncAggregate<P>>("sync_aggregate"),
+            // Gloas withdrawals read only the state, so the case has no input file.
+            "withdrawals" => {
+                input.apply_state_step(|processor| processor.apply(&CommittedWithdrawals))
+            }
+            "execution_payload_bid" => {
+                input.apply::<gloas::SignedExecutionPayloadBid>("execution_payload_bid")
+            }
+            "parent_execution_payload" => input
+                .apply_with::<gloas::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&ParentPayload::of(&block.body))
+                }),
+            "payload_attestation" => {
+                input.apply::<gloas::PayloadAttestation<P>>("payload_attestation")
+            }
+            other => Err(Failure(format!("unsupported operation {other} in gloas"))),
         }
     }
 }

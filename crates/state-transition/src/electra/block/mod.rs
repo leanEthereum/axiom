@@ -13,4 +13,5 @@ pub use deposit::{BridgeDeposit, BridgeDeposits};
 pub use deposit_request::RequestedDeposit;
 pub use execution_payload::PayloadExecution;
 pub use voluntary_exit::Exit;
+pub(crate) use withdrawals::WithdrawalPlan;
 pub use withdrawals::{ExpectedWithdrawals, PayloadWithdrawals};

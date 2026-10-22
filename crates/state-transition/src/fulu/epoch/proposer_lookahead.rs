@@ -56,13 +56,29 @@ impl ProposerLookahead {
     ///
     /// Fails when the new epoch has no active validator.
     pub fn shift<S: LookaheadState + ForkState>(self, state: &mut S) -> Result<(), StateError> {
-        let epoch = self.ending + S::Preset::MIN_SEED_LOOKAHEAD + 1;
-        let proposers = WeightedSampler::proposers(&*state, epoch)?;
+        let proposers = WeightedSampler::proposers(&*state, self.appended_epoch::<S::Preset>())?;
+        Self::advance(state, &proposers);
+        Ok(())
+    }
+
+    /// The epoch whose proposers the shift appends.
+    #[must_use]
+    pub fn appended_epoch<P: Preset>(self) -> Epoch {
+        self.ending + P::MIN_SEED_LOOKAHEAD + 1
+    }
+
+    /// Drops the oldest epoch of proposers, and appends one epoch drawn elsewhere.
+    ///
+    /// Gloas draws the appended epoch from a smaller pool, then shifts the same way.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the proposers do not fill exactly one epoch.
+    pub fn advance<S: LookaheadState>(state: &mut S, proposers: &[ValidatorIndex]) {
         let lookahead = state.proposer_lookahead_mut();
         let slots = S::Preset::SLOTS_PER_EPOCH as usize;
         lookahead.rotate_left(slots);
         let tail = lookahead.len() - slots;
-        lookahead[tail..].copy_from_slice(&proposers);
-        Ok(())
+        lookahead[tail..].copy_from_slice(proposers);
     }
 }

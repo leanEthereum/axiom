@@ -117,11 +117,26 @@ impl<'a, S: ForkState> WeightedSampler<'a, S> {
     ///
     /// Fails when the epoch has no active validator.
     pub(crate) fn proposers(state: &S, epoch: Epoch) -> Result<Vec<ValidatorIndex>, StateError> {
-        let candidates = state.active_validator_indices(epoch);
+        Self::proposers_among(state, epoch, &state.active_validator_indices(epoch))
+    }
+
+    /// Proposers of every slot of an epoch, among some candidates.
+    ///
+    /// Gloas draws only among the unslashed active validators, see EIP-8045.
+    /// See `compute_proposer_indices` in the Fulu and Gloas beacon chain specs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when there is no candidate.
+    pub(crate) fn proposers_among(
+        state: &S,
+        epoch: Epoch,
+        candidates: &[ValidatorIndex],
+    ) -> Result<Vec<ValidatorIndex>, StateError> {
         let seed = state.seed(epoch, DOMAIN_BEACON_PROPOSER);
         let start = epoch.start_slot::<S::Preset>();
         (0..S::Preset::SLOTS_PER_EPOCH)
-            .map(|offset| Self::proposer(state, &candidates, seed, Slot(start.0 + offset)))
+            .map(|offset| Self::proposer(state, candidates, seed, Slot(start.0 + offset)))
             .collect()
     }
 

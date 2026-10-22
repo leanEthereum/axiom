@@ -61,7 +61,12 @@ impl<P: Preset, F: SpecFork> Runner for EpochProcessing<P, F> {
     }
 
     fn run_case(&self, handler: &str, case: &Case) -> Result<(), Failure> {
-        let step = EpochStep::from_name(handler)
+        // Gloas checks its activation churn cap in a handler of its own, over the same step.
+        let step_name = match handler {
+            "pending_deposits_churn" => "pending_deposits",
+            other => other,
+        };
+        let step = EpochStep::from_name(step_name)
             .ok_or_else(|| Failure(format!("unsupported epoch step {handler}")))?;
         let config = ChainConfig::for_preset::<P>().with_forks_at_genesis(F::FORK);
         let verification = if case.meta()?.bls_ignored() {
