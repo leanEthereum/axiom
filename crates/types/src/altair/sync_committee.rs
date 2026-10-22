@@ -1,6 +1,8 @@
 //! Sync committees, the rotating set that signs heads for light clients.
 
-use axiom_ssz::{BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, PersistentVector, Ssz, Vector};
+use axiom_ssz::{
+    BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, PersistentVector, Ssz, Vector,
+};
 
 use crate::{BlsPubkey, BlsSignature, Preset, Root, Slot, ValidatorIndex};
 

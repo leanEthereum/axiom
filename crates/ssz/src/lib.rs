@@ -7,6 +7,11 @@
 //! - The serialization is a compact byte string, sent over the wire and stored on disk.
 //! - The hash tree root is a 32-byte commitment, signed by validators and proven against.
 //!
+//! Lists and vectors also come in a persistent form, for the beacon state's huge collections.
+//! A clone shares the elements, and a root re-hashes only what changed since the last one.
+//! The cache lives inside the value, invisible to equality, encoding, and every caller.
+//! The design and its rationale sit in `src/persistent/mod.rs`.
+//!
 //! The specification lives in `ethereum/ssz-specs`.
 //! Merkle proofs follow the consensus specs' `ssz/merkle-proofs.md`.
 

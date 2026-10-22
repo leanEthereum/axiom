@@ -32,9 +32,11 @@
 //!
 //! # Performance
 //!
-//! A two-level table, not a deep tree, holds the packs.
-//! Indexing is then two loads, about as fast as a plain buffer.
+//! A flat table, not a deep tree, holds the packs.
+//! Indexing is a shift, a mask, and a few loads, with no walk down a tree.
 //! The fold over pack roots is linear in the pack count, a few milliseconds for a mainnet registry.
+//!
+//! An edit through an index checks two reference counts, so long loops prefer the edit iterator.
 //!
 //! Memory stays close to the plain buffers: one cached root per 64 leaves.
 //!
