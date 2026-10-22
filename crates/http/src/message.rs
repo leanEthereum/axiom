@@ -223,7 +223,10 @@ impl Response {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::{BodyLength, Limits, RequestHead, ResponseHead};
 
     #[test]
     fn request_bytes() {
@@ -273,5 +276,91 @@ mod tests {
         // A target with a space would split the request line.
         let request = Request::new(Method::Get, "/a b");
         assert!(matches!(request.encode("h"), Err(HttpError::Protocol(_))));
+    }
+
+    /// Any supported method.
+    fn method() -> impl Strategy<Value = Method> {
+        prop_oneof![
+            Just(Method::Get),
+            Just(Method::Head),
+            Just(Method::Post),
+            Just(Method::Put),
+            Just(Method::Delete),
+            Just(Method::Options),
+            Just(Method::Patch),
+        ]
+    }
+
+    /// Header fields with token names and values free of control bytes.
+    fn fields() -> impl Strategy<Value = Vec<(String, String)>> {
+        proptest::collection::vec(("x-[a-z0-9-]{1,12}", "[!-~]([ !-~]{0,20}[!-~])?"), 0..8)
+    }
+
+    proptest! {
+        #[test]
+        fn request_encode_then_parse(
+            method in method(),
+            path in "/[a-z0-9/_.-]{0,30}",
+            query in proptest::option::of("[a-z0-9=&]{0,20}"),
+            fields in fields(),
+            body in proptest::collection::vec(any::<u8>(), 0..300),
+        ) {
+            // Build the request the way a caller would.
+            let target = match &query {
+                Some(query) => format!("{path}?{query}"),
+                None => path,
+            };
+            let mut request = Request::new(method, &target);
+            for (name, value) in &fields {
+                request.headers.append(name, value.as_str());
+            }
+            request.body = body.clone();
+
+            // Encode, then parse the head back from the bytes.
+            let bytes = request.encode("host:1").unwrap();
+            let (head, used) = RequestHead::parse(&bytes, &Limits::DEFAULT).unwrap().unwrap();
+            prop_assert_eq!(head.method, method);
+            prop_assert_eq!(&head.target, &target);
+            for (name, value) in &fields {
+                prop_assert!(head.headers.get_all(name).any(|v| v == value));
+            }
+
+            // The declared length frames exactly the body that was sent.
+            let expected = match head.body_length().unwrap() {
+                BodyLength::Fixed(length) => length as usize,
+                BodyLength::Empty => 0,
+                other => panic!("unexpected framing {other:?}"),
+            };
+            prop_assert_eq!(&bytes[used..], &body[..]);
+            prop_assert_eq!(expected, body.len());
+        }
+
+        #[test]
+        fn response_encode_then_parse(
+            code in 200_u16..600,
+            fields in fields(),
+            body in proptest::collection::vec(any::<u8>(), 0..300),
+        ) {
+            let status = StatusCode::new(code).unwrap();
+            let mut response = Response::new(status);
+            for (name, value) in &fields {
+                response.headers.append(name, value.as_str());
+            }
+            response.body = body.clone();
+
+            // Parse the head back and frame the body from its declared length.
+            let bytes = response.encode(false).unwrap();
+            let (head, used) = ResponseHead::parse(&bytes, &Limits::DEFAULT).unwrap().unwrap();
+            prop_assert_eq!(head.status, status);
+            match head.body_length(Method::Get).unwrap() {
+                BodyLength::Fixed(length) => {
+                    prop_assert_eq!(length as usize, body.len());
+                    prop_assert_eq!(&bytes[used..], &body[..]);
+                }
+                // 204 and 304 carry nothing.
+                BodyLength::Empty => prop_assert_eq!(used, bytes.len()),
+                other => panic!("unexpected framing {other:?}"),
+            }
+        }
     }
 }

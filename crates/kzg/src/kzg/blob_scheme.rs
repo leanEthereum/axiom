@@ -311,8 +311,14 @@ impl BlobScheme {
 
 #[cfg(test)]
 mod tests {
+    use proptest::{collection::vec, prelude::*};
+
     use super::*;
-    use crate::{Kzg, setup::TrustedSetup};
+    use crate::{
+        Kzg,
+        blob::tests::{arb_blob, blob_from_seed},
+        setup::TrustedSetup,
+    };
 
     #[test]
     fn evaluation_on_and_off_the_domain_agree_with_the_coefficients() {
@@ -356,5 +362,80 @@ mod tests {
         let s = TrustedSetup::mainnet().g1_monomial.points()[1];
         let expected = G1Projective::from(s) + G1Projective::GENERATOR.mul_vartime(&z);
         assert_eq!(proof, expected);
+    }
+
+    /// A field element below 2^254, as 32 big-endian bytes.
+    fn arb_field_element() -> impl Strategy<Value = Bytes32> {
+        any::<[u8; 32]>().prop_map(|mut bytes| {
+            bytes[0] &= 0x3f;
+            Bytes32(bytes)
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        #[test]
+        fn opening_round_trips(blob in arb_blob(), z in arb_field_element()) {
+            let kzg = Kzg::mainnet();
+            let commitment = kzg.blob_to_kzg_commitment(&blob);
+
+            // Completeness: an honest opening at any z verifies.
+            let (proof, y) = kzg.compute_kzg_proof(&blob, &z).unwrap();
+            prop_assert_eq!(kzg.verify_kzg_proof(&commitment, &z, &y, &proof), Ok(true));
+
+            // Mutation: the claimed value moves from y to y + 1 (the low byte of a value below 2^254 + 1).
+            //
+            //     pi (s - z) = C - [y]  holds,  so  C - [y + 1] has no matching proof.
+            let mut wrong = y;
+            let (sum, carry) = wrong.0[31].overflowing_add(1);
+            wrong.0[31] = sum;
+            prop_assume!(!carry);
+            prop_assert_eq!(kzg.verify_kzg_proof(&commitment, &z, &wrong, &proof), Ok(false));
+        }
+
+        #[test]
+        fn blob_proof_round_trips(blob in arb_blob(), other in arb_blob()) {
+            prop_assume!(blob != other);
+            let kzg = Kzg::mainnet();
+            let commitment = kzg.blob_to_kzg_commitment(&blob);
+            let proof = kzg.compute_blob_kzg_proof(&blob, &commitment).unwrap();
+
+            // Completeness: the blob verifies against its own commitment and proof.
+            prop_assert_eq!(kzg.verify_blob_kzg_proof(&blob, &commitment, &proof), Ok(true));
+            // Soundness spot check: a different blob under the same commitment fails.
+            prop_assert_eq!(kzg.verify_blob_kzg_proof(&other, &commitment, &proof), Ok(false));
+        }
+
+        #[test]
+        fn blob_batch_equals_individual_checks(
+            seeds in vec(any::<u64>(), 1..4),
+            corrupt in vec(any::<bool>(), 4),
+        ) {
+            let kzg = Kzg::mainnet();
+            let blobs: Vec<Blob> = seeds.into_iter().map(blob_from_seed).collect();
+            let commitments: Vec<Bytes48> = blobs.iter().map(|blob| kzg.blob_to_kzg_commitment(blob)).collect();
+            let mut proofs: Vec<Bytes48> = blobs
+                .iter()
+                .zip(&commitments)
+                .map(|(blob, commitment)| kzg.compute_blob_kzg_proof(blob, commitment).unwrap())
+                .collect();
+
+            // Mutation: a flagged entry takes the proof of the generator, valid as a point, wrong as a proof.
+            let generator = Bytes48(G1Affine::GENERATOR.to_compressed());
+            for (proof, flag) in proofs.iter_mut().zip(&corrupt) {
+                if *flag {
+                    *proof = generator;
+                }
+            }
+
+            // The batch accepts exactly when every single check accepts.
+            let individual = blobs
+                .iter()
+                .zip(&commitments)
+                .zip(&proofs)
+                .all(|((blob, commitment), proof)| kzg.verify_blob_kzg_proof(blob, commitment, proof) == Ok(true));
+            prop_assert_eq!(kzg.verify_blob_kzg_proof_batch(&blobs, &commitments, &proofs), Ok(individual));
+        }
     }
 }

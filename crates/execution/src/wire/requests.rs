@@ -168,7 +168,11 @@ impl<P: Preset> JsonCodec for ExecutionRequests<P> {
 #[cfg(test)]
 mod tests {
     use axiom_ssz::List;
-    use axiom_types::{ConsolidationRequest, DepositRequest, ExecutionAddress, Minimal};
+    use axiom_types::{
+        BlsPubkey, BlsSignature, Bytes32, ConsolidationRequest, DepositRequest, ExecutionAddress,
+        Gwei, Minimal, WithdrawalRequest,
+    };
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -247,5 +251,69 @@ mod tests {
             RequestsList::from(vec![truncated]).decode::<Minimal>(),
             Err(RequestsError::Ssz(0x00, _))
         ));
+    }
+
+    /// Any requests with up to three of each type.
+    fn execution_requests() -> impl Strategy<Value = ExecutionRequests<Minimal>> {
+        let deposit =
+            (any::<u8>(), any::<u64>(), any::<u64>()).prop_map(|(byte, amount, index)| {
+                DepositRequest {
+                    pubkey: BlsPubkey([byte; 48]),
+                    withdrawal_credentials: Bytes32([byte; 32]),
+                    amount: Gwei(amount),
+                    signature: BlsSignature([byte; 96]),
+                    index,
+                }
+            });
+        let withdrawal = (any::<u8>(), any::<u64>()).prop_map(|(byte, amount)| WithdrawalRequest {
+            source_address: ExecutionAddress([byte; 20]),
+            validator_pubkey: BlsPubkey([byte; 48]),
+            amount: Gwei(amount),
+        });
+        let consolidation = any::<u8>().prop_map(|byte| ConsolidationRequest {
+            source_address: ExecutionAddress([byte; 20]),
+            source_pubkey: BlsPubkey([byte; 48]),
+            target_pubkey: BlsPubkey([byte.wrapping_add(1); 48]),
+        });
+        (
+            proptest::collection::vec(deposit, 0..3),
+            proptest::collection::vec(withdrawal, 0..3),
+            proptest::collection::vec(consolidation, 0..=2),
+        )
+            .prop_map(
+                |(deposits, withdrawals, consolidations)| ExecutionRequests {
+                    deposits: List::try_from(deposits).expect("within the limit"),
+                    withdrawals: List::try_from(withdrawals).expect("within the limit"),
+                    consolidations: List::try_from(consolidations).expect("within the limit"),
+                },
+            )
+    }
+
+    proptest! {
+        #[test]
+        fn requests_list_round_trip(requests in execution_requests()) {
+            // The list holds one element per non-empty type, in ascending type order.
+            let list = RequestsList::encode(&requests);
+            let elements = list.as_slice();
+            let non_empty = [
+                !requests.deposits.is_empty(),
+                !requests.withdrawals.is_empty(),
+                !requests.consolidations.is_empty(),
+            ];
+            prop_assert_eq!(elements.len(), non_empty.iter().filter(|&&present| present).count());
+            prop_assert!(elements.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+            prop_assert_eq!(list.decode::<Minimal>(), Ok(requests.clone()));
+
+            // The JSON array form decodes back too.
+            prop_assert_eq!(ExecutionRequests::<Minimal>::from_json(&requests.to_json()), Ok(requests));
+        }
+
+        #[test]
+        fn requests_decoder_never_panics(
+            list in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..400), 0..4),
+        ) {
+            // Arbitrary elements either decode or fail; nothing in between.
+            let _ = RequestsList::from(list).decode::<Minimal>();
+        }
     }
 }

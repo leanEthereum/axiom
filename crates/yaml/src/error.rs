@@ -148,3 +148,23 @@ impl fmt::Display for Unsupported {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Yaml;
+
+    #[test]
+    fn display_names_the_position_and_the_rule() {
+        let err = Yaml::parse("a: 1\na: 2\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "line 2, column 1: duplicate mapping key \"a\""
+        );
+
+        let err = Yaml::parse("a: &x 1").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "line 1, column 4: anchors are not supported"
+        );
+    }
+}

@@ -123,7 +123,7 @@ impl CellIndex {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -155,5 +155,12 @@ mod tests {
         let cell = Cell::from_bytes(&bytes).unwrap();
         assert_eq!(cell.evaluations()[63], Scalar::from_u64(0x0102));
         assert_eq!(cell.to_bytes(), bytes);
+    }
+
+    /// Every cell index.
+    pub(crate) fn all_indices() -> Vec<CellIndex> {
+        (0..CELLS_PER_EXT_BLOB as u64)
+            .map(|index| CellIndex::new(index).expect("index below 128"))
+            .collect()
     }
 }

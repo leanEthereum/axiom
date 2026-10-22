@@ -216,6 +216,8 @@ pub enum JwtError {
 mod tests {
     use std::array;
 
+    use proptest::prelude::*;
+
     use super::*;
 
     /// The secret 0x00 0x01 ... 0x1f.
@@ -302,5 +304,25 @@ mod tests {
 
         // Debug output never shows key material.
         assert_eq!(format!("{:?}", secret()), "JwtSecret(..)");
+    }
+
+    proptest! {
+        #[test]
+        fn jwt_round_trip_and_tamper_detection(
+            key in any::<[u8; 32]>(),
+            issued_at in 0_u64..4_000_000_000,
+            position in any::<prop::sample::Index>(),
+        ) {
+            let secret = JwtSecret::new(key);
+            let token = secret.token(issued_at);
+            prop_assert_eq!(secret.verify(&token, issued_at).map(|claims| claims.issued_at), Ok(issued_at));
+
+            // Replacing any one character with a different symbol breaks the token.
+            let mut bytes = token.into_bytes();
+            let at = position.index(bytes.len());
+            bytes[at] = if bytes[at] == b'A' { b'B' } else { b'A' };
+            let tampered = String::from_utf8(bytes).unwrap();
+            prop_assert!(secret.verify(&tampered, issued_at).is_err());
+        }
     }
 }

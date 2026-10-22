@@ -112,7 +112,10 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::Decoder;
 
     fn encode_uint(value: u64) -> Vec<u8> {
         let mut encoder = Encoder::new();
@@ -163,5 +166,18 @@ mod tests {
             encoder.finish(),
             [0xc8, 0x83, b'd', b'o', b'g', 0x83, b'g', b'o', b'd']
         );
+    }
+
+    proptest! {
+        #[test]
+        fn integers_round_trip(value in any::<u64>()) {
+            // The minimal big-endian form decodes back to the value.
+            let mut encoder = Encoder::new();
+            encoder.uint(value);
+            let encoded = encoder.finish();
+            let mut decoder = Decoder::new(&encoded);
+            prop_assert_eq!(decoder.uint(), Ok(value));
+            prop_assert!(decoder.finish().is_ok());
+        }
     }
 }

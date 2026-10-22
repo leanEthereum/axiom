@@ -132,3 +132,32 @@ impl JsonCodec for PayloadStatus {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    proptest! {
+        #[test]
+        fn status_round_trip(
+            kind in 0_usize..5,
+            hash in proptest::option::of(any::<[u8; 32]>()),
+            message in proptest::option::of(".{0,20}"),
+        ) {
+            let status = PayloadStatus {
+                status: [
+                    PayloadStatusKind::Valid,
+                    PayloadStatusKind::Invalid,
+                    PayloadStatusKind::Syncing,
+                    PayloadStatusKind::Accepted,
+                    PayloadStatusKind::InvalidBlockHash,
+                ][kind],
+                latest_valid_hash: hash.map(Hash32),
+                validation_error: message,
+            };
+            prop_assert_eq!(PayloadStatus::from_json(&status.to_json()), Ok(status));
+        }
+    }
+}

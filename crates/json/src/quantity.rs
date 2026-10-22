@@ -94,6 +94,8 @@ impl Quantity for U256 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -145,5 +147,28 @@ mod tests {
         // Sixty-five digits is past 256 bits.
         let over = format!("0x1{}", "0".repeat(64));
         assert_eq!(U256::from_quantity(&over), Err(HexError::Overflow));
+    }
+
+    proptest! {
+        #[test]
+        fn quantity_u64_round_trip(value in any::<u64>()) {
+            // The minimal form decodes back and carries no leading zero.
+            let text = value.to_quantity();
+            prop_assert!(value == 0 || !text.starts_with("0x0"));
+            prop_assert_eq!(u64::from_quantity(&text), Ok(value));
+        }
+
+        #[test]
+        fn quantity_u256_round_trip(bytes in any::<[u8; 32]>()) {
+            // Same law over 256 bits.
+            let value = U256(bytes);
+            prop_assert_eq!(U256::from_quantity(&value.to_quantity()), Ok(value));
+        }
+
+        #[test]
+        fn quantity_widths_agree(value in any::<u64>()) {
+            // A 64-bit value has the same text whether read as 64 or 256 bits.
+            prop_assert_eq!(U256::from_u64(value).to_quantity(), value.to_quantity());
+        }
     }
 }

@@ -174,7 +174,10 @@ impl<'a> Decoder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::Item;
 
     #[test]
     fn integers_refuse_padding_and_overflow() {
@@ -236,5 +239,18 @@ mod tests {
         assert_eq!(decoder.peek_kind(), Ok(Kind::String));
         assert_eq!(decoder.raw(), Ok(&input[5..]));
         assert!(decoder.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn decoding_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+            // Every typed read returns a value or an error.
+            let _ = Item::decode(&bytes);
+            let mut decoder = Decoder::new(&bytes);
+            let _ = decoder.uint();
+            let _ = Decoder::new(&bytes).u16();
+            let _ = Decoder::new(&bytes).array::<32>();
+            let _ = Decoder::new(&bytes).list().map(|mut list| list.raw());
+        }
     }
 }

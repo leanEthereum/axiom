@@ -105,3 +105,42 @@ impl CellProver {
         cells
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::{prelude::*, sample::subsequence};
+
+    use super::*;
+    use crate::{CellIndex, Kzg, blob::tests::arb_blob, cell::tests::all_indices};
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(4))]
+
+        #[test]
+        fn cells_extend_the_blob_and_verify(blob in arb_blob(), picked in subsequence(all_indices(), 1..12)) {
+            let kzg = Kzg::mainnet();
+            let commitment = kzg.blob_to_kzg_commitment(&blob);
+            let (cells, proofs) = kzg.compute_cells_and_kzg_proofs(&blob);
+
+            // The cells alone agree with the cells computed alongside proofs.
+            prop_assert_eq!(&kzg.compute_cells(&blob), &cells);
+
+            // Systematic code: the first 64 cells, concatenated, are the blob itself.
+            let prefix: Vec<u8> = cells[..CELLS_PER_EXT_BLOB / 2].iter().flat_map(Cell::to_bytes).collect();
+            prop_assert_eq!(prefix, blob.to_bytes());
+
+            // Completeness: any subset of cells verifies in one batch.
+            let chosen: Vec<Cell> = picked.iter().map(|index| cells[index.get() as usize].clone()).collect();
+            let chosen_proofs: Vec<Bytes48> = picked.iter().map(|index| proofs[index.get() as usize]).collect();
+            let commitments = vec![commitment; picked.len()];
+            prop_assert_eq!(kzg.verify_cell_kzg_proof_batch(&commitments, &picked, &chosen, &chosen_proofs), Ok(true));
+
+            // Mutation: the first chosen cell claims to sit at the next position.
+            //
+            //     cell k evaluated on coset k+1 is not the blob there, so the batch fails.
+            let mut shifted = picked.clone();
+            shifted[0] = CellIndex::new((picked[0].get() + 1) % CELLS_PER_EXT_BLOB as u64).unwrap();
+            prop_assert_eq!(kzg.verify_cell_kzg_proof_batch(&commitments, &shifted, &chosen, &chosen_proofs), Ok(false));
+        }
+    }
+}

@@ -67,6 +67,8 @@ impl<const N: usize> Data for [u8; N] {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -109,5 +111,15 @@ mod tests {
                 actual: 3
             })
         );
+    }
+
+    proptest! {
+        #[test]
+        fn data_round_trip(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            // Every byte string encodes to 2 + 2n characters and decodes back.
+            let text = bytes.to_data();
+            prop_assert_eq!(text.len(), 2 + 2 * bytes.len());
+            prop_assert_eq!(Vec::<u8>::from_data(&text), Ok(bytes));
+        }
     }
 }
