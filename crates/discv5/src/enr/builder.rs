@@ -12,7 +12,7 @@ use axiom_types::ForkDigest;
 
 use super::{
     Attnets, Enr, EnrError, EnrForkId, Syncnets,
-    endpoint::{KEY_IP, KEY_IP6, KEY_TCP, KEY_TCP6, KEY_UDP, KEY_UDP6},
+    endpoint::{KEY_IP, KEY_IP6, KEY_QUIC, KEY_QUIC6, KEY_TCP, KEY_TCP6, KEY_UDP, KEY_UDP6},
     eth2::{KEY_ATTNETS, KEY_CGC, KEY_ETH2, KEY_NFD, KEY_SYNCNETS},
     record::{KEY_ID, KEY_SECP256K1, SCHEME_V4},
 };
@@ -108,6 +108,18 @@ impl EnrBuilder {
     #[must_use]
     pub fn tcp6(self, port: u16) -> Self {
         self.uint(KEY_TCP6, u64::from(port))
+    }
+
+    /// Sets the libp2p QUIC port.
+    #[must_use]
+    pub fn quic4(self, port: u16) -> Self {
+        self.uint(KEY_QUIC, u64::from(port))
+    }
+
+    /// Sets the IPv6-specific libp2p QUIC port.
+    #[must_use]
+    pub fn quic6(self, port: u16) -> Self {
+        self.uint(KEY_QUIC6, u64::from(port))
     }
 
     /// Sets the fork identifier.

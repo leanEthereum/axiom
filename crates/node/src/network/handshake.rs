@@ -81,6 +81,11 @@ impl Handshakes {
     }
 
     /// Removes a request from those in flight.
+    /// Whether a request is a status handshake in flight.
+    pub(crate) fn owns(&self, request: RequestId) -> bool {
+        self.in_flight.iter().any(|(id, ..)| *id == request)
+    }
+
     fn take(&mut self, request: RequestId) -> Option<(PeerId, StatusVersion)> {
         let position = self.in_flight.iter().position(|(id, ..)| *id == request)?;
         let (_, peer, version) = self.in_flight.swap_remove(position);

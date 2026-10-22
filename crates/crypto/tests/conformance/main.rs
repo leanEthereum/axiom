@@ -15,6 +15,7 @@ mod ecdh;
 mod ecdsa;
 mod keccak;
 mod mac;
+mod p256;
 mod pbkdf2;
 mod vectors;
 mod wycheproof;

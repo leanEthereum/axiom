@@ -22,8 +22,8 @@ use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, Stat
 use axiom_json::{Data, Json};
 use axiom_node::{
     AnchorSource, Chain, ChainDatabase, ChainError, EngineConfig, HistorySegment, HistorySettings,
-    HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError, Reconstruction,
-    SegmentContext, SegmentError, SnapshotInterval, StorageMode, WeakSubjectivity,
+    HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError, PortMappingSettings,
+    Reconstruction, SegmentContext, SegmentError, SnapshotInterval, StorageMode, WeakSubjectivity,
     WeakSubjectivityError,
 };
 use axiom_p2p::Multiaddr;
@@ -700,6 +700,9 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
     runtime.block_on(async {
         let settings = |listen_address, boot_nodes| NetworkSettings {
             listen_address,
+            quic_port: None,
+            target_peers: 64,
+            port_mapping: PortMappingSettings::default(),
             boot_nodes,
             custody_group_count: 4,
             discovery: None,

@@ -1,12 +1,17 @@
-//! Two tokio nodes over real TCP sockets: gossip, req/resp, identify, and disconnection.
+//! Two tokio nodes over real sockets: gossip, req/resp, identify, and disconnection.
 //!
-//! The scenario runs twice: over real Noise, the production channel, and over plaintext.
+//! The scenario runs three times:
+//!
+//! - over QUIC, the primary transport, with TLS 1.3
+//! - over TCP with Noise, the fallback transport
+//! - over TCP with plaintext, the test channel
+//!
 //! A second scenario pairs a node with one that speaks only the first status version.
 
 use std::{sync::Arc, time::Duration};
 
 use axiom_p2p::{
-    Keypair, PeerId,
+    Keypair, Multiaddr, PeerId,
     eth::{
         GossipKind, GossipTopic,
         reqresp::{Protocol, ResponseChunk, ResponseCode, Status, StatusVersion},
@@ -53,9 +58,11 @@ impl Inbox {
     }
 }
 
-/// Which secure channel the nodes speak.
+/// Which transport and secure channel the nodes speak.
 #[derive(Clone, Copy, Debug)]
 enum Channel {
+    /// QUIC with libp2p TLS.
+    Quic,
     /// Noise XX with secp256k1 identities, the default.
     Noise,
     /// The unauthenticated test channel.
@@ -67,6 +74,11 @@ async fn node(seed: u8, channel: Channel, protocols: &[Protocol]) -> (NetworkHan
     let identity = Keypair::from_secret_bytes(&[seed; 32]).expect("seed is a valid scalar");
     let mut config = match channel {
         Channel::Noise => NetworkConfig::new(identity).expect("entropy available"),
+        Channel::Quic => {
+            let mut config = NetworkConfig::new(identity).expect("entropy available");
+            config.quic_listen_addr = Some(Multiaddr::from_quic(([127, 0, 0, 1], 0).into()));
+            config
+        }
         Channel::Plaintext => {
             let security = Arc::new(PlaintextConfig::new(identity.public_key().clone()));
             NetworkConfig::with_security(identity, security)
@@ -82,6 +94,11 @@ async fn node(seed: u8, channel: Channel, protocols: &[Protocol]) -> (NetworkHan
             backlog: Vec::new(),
         },
     )
+}
+
+#[test]
+fn gossip_and_status_over_quic() {
+    run(Channel::Quic);
 }
 
 #[test]
@@ -137,6 +154,93 @@ async fn scenario(channel: Channel) {
     identify_and_disconnect(&mut pair).await;
 }
 
+#[test]
+fn simultaneous_dials_over_quic_leave_one_working_connection() {
+    block_on(simultaneous_dials(Channel::Quic));
+}
+
+#[test]
+fn simultaneous_dials_over_noise_leave_one_working_connection() {
+    block_on(simultaneous_dials(Channel::Noise));
+}
+
+/// Alice and bob dial each other at once; both must settle on the same connection.
+///
+/// Each side keeps a single connection per peer.
+/// If each kept its own first connection, each would close the other's, and none would remain.
+async fn simultaneous_dials(channel: Channel) {
+    let (alice, mut alice_events) = node(1, channel, &Protocol::ALL).await;
+    let (bob, mut bob_events) = node(2, channel, &Protocol::ALL).await;
+    let address = |handle: &NetworkHandle| match channel {
+        Channel::Quic => handle.quic_listen_addr().expect("QUIC listens").clone(),
+        Channel::Noise | Channel::Plaintext => handle.listen_addr().clone(),
+    };
+    alice.dial(address(&bob)).await.expect("dial queued");
+    bob.dial(address(&alice)).await.expect("dial queued");
+    for events in [&mut alice_events, &mut bob_events] {
+        events
+            .wait_for(|event| matches!(event, NetworkEvent::PeerConnected { .. }).then_some(()))
+            .await;
+    }
+
+    // A status round trip in each direction proves a connection survived on both sides.
+    exchange_status(&alice, &bob, &mut alice_events, &mut bob_events).await;
+    exchange_status(&bob, &alice, &mut bob_events, &mut alice_events).await;
+    alice.shutdown().await.expect("shutdown queued");
+    bob.shutdown().await.expect("shutdown queued");
+}
+
+/// One status request from one node, answered by the other with success.
+///
+/// A request sent while the duplicate connection is being retired fails, and is sent again.
+async fn exchange_status(
+    from: &NetworkHandle,
+    to: &NetworkHandle,
+    from_events: &mut Inbox,
+    to_events: &mut Inbox,
+) {
+    loop {
+        let request = from
+            .send_request(
+                to.local_peer().clone(),
+                Protocol::StatusV2,
+                Status::default().encode(),
+            )
+            .await
+            .expect("request queued");
+        // Either the request reaches the other node, or it fails on the retired connection.
+        let inbound = to_events.wait_for(|event| match event {
+            NetworkEvent::Request { id, .. } => Some(*id),
+            _ => None,
+        });
+        let Ok(inbound) = timeout(Duration::from_millis(500), inbound).await else {
+            from_events
+                .wait_for(|event| match event {
+                    NetworkEvent::RequestFailed { request: r, .. } if *r == request => Some(()),
+                    _ => None,
+                })
+                .await;
+            continue;
+        };
+        to.respond(
+            inbound,
+            vec![ResponseChunk::success(None, Status::default().encode())],
+        )
+        .await
+        .expect("response queued");
+        let chunk = from_events
+            .wait_for(|event| match event {
+                NetworkEvent::Response {
+                    request: r, chunk, ..
+                } if *r == request => Some(chunk.clone()),
+                _ => None,
+            })
+            .await;
+        assert_eq!(chunk.code, ResponseCode::Success);
+        return;
+    }
+}
+
 /// Phase 1: alice dials bob and both see the connection.
 async fn connect(channel: Channel, bob_serves: &[Protocol]) -> Pair {
     let (alice, mut alice_events) = node(1, channel, &Protocol::ALL).await;
@@ -145,7 +249,11 @@ async fn connect(channel: Channel, bob_serves: &[Protocol]) -> Pair {
     let bob_id = bob.local_peer().clone();
 
     // Phase 1: alice dials bob's address, naming his identity in a /p2p layer.
-    let address = bob.listen_addr().clone().with(Layer::P2p(bob_id.clone()));
+    let listen = match channel {
+        Channel::Quic => bob.quic_listen_addr().expect("QUIC listens").clone(),
+        Channel::Noise | Channel::Plaintext => bob.listen_addr().clone(),
+    };
+    let address = listen.with(Layer::P2p(bob_id.clone()));
     alice.dial(address).await.expect("dial queued");
     let connected = alice_events
         .wait_for(|event| match event {

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use axiom_types::ChainConfig;
 
+use super::VoteConfig;
 use crate::table::TableConfig;
 
 /// Timeouts, concurrency, and maintenance periods of the service.
@@ -35,6 +36,8 @@ pub struct Config {
     pub ping_interval: Duration,
     /// How often a lookup for a random id refreshes the table.
     pub refresh_interval: Duration,
+    /// How PONG reports confirm the external address.
+    pub address_votes: VoteConfig,
     /// The chain parameters custody filters need.
     pub chain: ChainConfig,
 }
@@ -52,6 +55,7 @@ impl Default for Config {
             max_nodes_response: 16,
             ping_interval: Duration::from_secs(10),
             refresh_interval: Duration::from_secs(60),
+            address_votes: VoteConfig::default(),
             chain: ChainConfig::mainnet(),
         }
     }

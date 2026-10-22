@@ -21,11 +21,9 @@ mod error;
 mod field;
 mod keys;
 mod point;
-mod rfc6979;
 mod scalar;
 mod signature;
 mod table;
-mod uint;
 
 pub use error::Secp256k1Error;
 pub use keys::{PublicKey, SecretKey, SharedSecret};

@@ -314,6 +314,7 @@ name = "axiom-p2p"
 version = "0.1.0"
 dependencies = [
  "axiom-crypto",
+ "axiom-json",
  "axiom-snappy",
  "axiom-ssz",
  "axiom-types",

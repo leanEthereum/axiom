@@ -1,8 +1,9 @@
-//! One connection: a yamux session and the protocol handler of each stream.
+//! One connection: a transport's streams and the protocol handler of each stream.
 //!
 //! # Overview
 //!
-//! Every yamux stream first negotiates its protocol, then runs one handler.
+//! The streams come from yamux over TCP or from QUIC; the handlers cannot tell which.
+//! Every stream first negotiates its protocol, then runs one handler.
 //!
 //! ```text
 //! /meshsub/*         length-prefixed RPCs, long-lived
@@ -19,24 +20,23 @@
 //!
 //! 1. Feed the input to the handlers.
 //! 2. Send events to the swarm, waiting if its queue is full.
-//! 3. Grant yamux credit.
+//! 3. Grant stream credit.
 //! 4. Top up the responses.
 //! 5. Write to the socket.
 //!
 //! Credit follows delivery, so a peer can never get further ahead than its receive windows.
 //! Responses enter yamux only as fast as its send buffer drains.
 
-use std::{collections::BTreeMap, io, mem, sync::Arc};
+use std::{collections::BTreeMap, io, mem, net::SocketAddr, sync::Arc};
 
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-    spawn,
-    sync::mpsc,
-    task::JoinHandle,
+use tokio::{io::AsyncReadExt, net::tcp::OwnedReadHalf, spawn, sync::mpsc, time::timeout_at};
+
+use super::{
+    RequestError, RequestId,
+    driver::SwarmInput,
+    transport::{MuxEvent, QuicLink, ReaderGuard, StreamId, TcpLink, Transport},
+    upgrade::Upgraded,
 };
-
-use super::{RequestError, RequestId, driver::SwarmInput, upgrade::Upgraded};
 use crate::{
     eth::reqresp::{Protocol, RequestDecoder, ResponseChunk, ResponseCode, ResponseDecoder},
     gossipsub::{ProtocolVersion, Rpc},
@@ -46,8 +46,8 @@ use crate::{
     multistream::{Dialer, Listener, Negotiated, NegotiationError},
     ping::PingResponder,
     protobuf::{LengthPrefixedDecoder, ProtoMessage},
-    secure::{Open, Seal},
-    yamux::{self, GoAwayCode, Mode, Session, SessionEvent, StreamId},
+    secure::Open,
+    yamux::{self, Mode, Session},
 };
 
 /// Identifies a connection within the swarm.
@@ -117,8 +117,10 @@ pub(super) enum ConnectionEvent {
 /// What the connection task waits on.
 #[derive(Debug)]
 pub(super) enum ConnectionInput {
-    /// Plaintext from the reader task.
+    /// Plaintext from the TCP reader task.
     Bytes(Vec<u8>),
+    /// A datagram the QUIC endpoint routed here.
+    Datagram(SocketAddr, Vec<u8>),
     /// The socket closed or failed.
     Eof,
     /// Send a gossip RPC.
@@ -173,12 +175,8 @@ enum StreamState {
 pub(super) struct Connection {
     /// This connection's identifier.
     id: ConnectionId,
-    /// The yamux session.
-    session: Session,
-    /// Seals outbound bytes.
-    sealer: Box<dyn Seal>,
-    /// The socket's write half.
-    writer: OwnedWriteHalf,
+    /// The streams and the bytes under them.
+    transport: Transport,
     /// Stream handlers by stream.
     streams: BTreeMap<StreamId, StreamState>,
     /// The ready outbound gossip stream.
@@ -197,17 +195,15 @@ pub(super) struct Connection {
     remote_addr: Multiaddr,
     /// Whether the connection should end.
     closing: bool,
-    /// The task reading the socket, stopped when the connection ends.
-    _reader: ReaderGuard,
 }
 
 impl Connection {
-    /// Announces an upgraded connection to the swarm and starts reading its socket.
+    /// Announces an upgraded TCP connection to the swarm and starts reading its socket.
     ///
     /// # Returns
     ///
     /// The connection and its input queue, or nothing when the swarm has stopped.
-    pub(super) async fn establish(
+    pub(super) async fn establish_tcp(
         id: ConnectionId,
         upgraded: Upgraded,
         mode: Mode,
@@ -222,14 +218,7 @@ impl Connection {
         } = upgraded;
         let (input_tx, input_rx) = mpsc::channel(shared.connection_queue.max(1));
         let peer = secure.remote_peer.clone();
-        let established = SwarmInput::Connection(
-            id,
-            ConnectionEvent::Established {
-                peer,
-                commands: input_tx.clone(),
-            },
-        );
-        if swarm.send(established).await.is_err() {
+        if !Self::announce(id, peer, input_tx.clone(), &swarm).await {
             return None;
         }
 
@@ -241,12 +230,69 @@ impl Connection {
             opener: secure.opener,
             output: input_tx,
         };
-
-        let mut connection = Self {
-            id,
+        let transport = Transport::Tcp(TcpLink {
             session: Session::new(mode, shared.yamux),
             sealer: secure.sealer,
             writer,
+            _reader: reader.spawn(),
+        });
+        let mut connection = Self::begin(id, transport, remote_addr, shared, swarm);
+        // Plaintext that trailed the multiplexer negotiation comes before anything the reader sees.
+        if !yamux_remainder.is_empty() {
+            connection.handle_input(ConnectionInput::Bytes(yamux_remainder));
+        }
+        Some((connection, input_rx))
+    }
+
+    /// Announces a QUIC connection whose handshake completed.
+    ///
+    /// # Returns
+    ///
+    /// The connection, or nothing when the swarm has stopped.
+    pub(super) async fn establish_quic(
+        id: ConnectionId,
+        link: QuicLink,
+        peer: PeerId,
+        commands: mpsc::Sender<ConnectionInput>,
+        remote_addr: Multiaddr,
+        shared: Arc<Shared>,
+        swarm: mpsc::Sender<SwarmInput>,
+    ) -> Option<Self> {
+        if !Self::announce(id, peer, commands, &swarm).await {
+            return None;
+        }
+        Some(Self::begin(
+            id,
+            Transport::Quic(link),
+            remote_addr,
+            shared,
+            swarm,
+        ))
+    }
+
+    /// Tells the swarm the connection is up, returning false when the swarm has stopped.
+    async fn announce(
+        id: ConnectionId,
+        peer: PeerId,
+        commands: mpsc::Sender<ConnectionInput>,
+        swarm: &mpsc::Sender<SwarmInput>,
+    ) -> bool {
+        let established =
+            SwarmInput::Connection(id, ConnectionEvent::Established { peer, commands });
+        swarm.send(established).await.is_ok()
+    }
+
+    /// A connection on a transport, with its gossip and identify streams opening.
+    fn begin(
+        id: ConnectionId,
+        transport: Transport,
+        remote_addr: Multiaddr,
+        shared: Arc<Shared>,
+        swarm: mpsc::Sender<SwarmInput>,
+    ) -> Self {
+        let mut connection = Self {
+            id,
+            transport,
             streams: BTreeMap::new(),
             gossip_stream: None,
             gossip_queue: Vec::new(),
@@ -256,7 +302,6 @@ impl Connection {
             shared,
             remote_addr,
             closing: false,
-            _reader: reader.spawn(),
         };
         // Open the gossip and identify streams at once.
         connection.open(
@@ -269,11 +314,9 @@ impl Connection {
             .map(ProtocolVersion::protocol_id),
         );
         connection.open(Purpose::Identify, &[identify::PROTOCOL]);
-        // Plaintext that trailed the multiplexer negotiation comes before anything the reader sees.
-        if !yamux_remainder.is_empty() {
-            connection.handle_input(ConnectionInput::Bytes(yamux_remainder));
-        }
-        Some((connection, input_rx))
+        // Events that arrived with the handshake come first.
+        connection.drain_transport();
+        connection
     }
 
     /// Runs the connection until it closes.
@@ -288,19 +331,17 @@ impl Connection {
             self.grant_credit();
             // Phase 3: move pending responses into whatever send buffer freed up.
             self.pump_responses();
-            // Phase 4: write what the session produced.
+            // Phase 4: write what the transport produced.
             if self.flush().await.is_err() || self.closing {
                 break;
             }
-            let Some(input) = inputs.recv().await else {
+            let Some(input) = self.next_input(&mut inputs).await else {
                 break;
             };
             self.handle_input(input);
         }
         // Best effort: tell the peer, then stop.
-        self.session.go_away(GoAwayCode::Normal);
-        let _ = self.flush().await;
-        let _ = self.writer.shutdown().await;
+        self.transport.shut_down().await;
         // Fail requests still in flight.
         for state in mem::take(&mut self.streams).into_values() {
             if let StreamState::RequestOut(request, ..)
@@ -314,6 +355,34 @@ impl Connection {
         }
         self.report(ConnectionEvent::Closed);
         let _ = self.deliver().await;
+    }
+
+    /// Waits for the next input, or for the transport's timer when it fires first.
+    ///
+    /// # Returns
+    ///
+    /// The input, or nothing when every sender is gone.
+    async fn next_input(
+        &mut self,
+        inputs: &mut mpsc::Receiver<ConnectionInput>,
+    ) -> Option<ConnectionInput> {
+        loop {
+            let Some(deadline) = self.transport.deadline() else {
+                return inputs.recv().await;
+            };
+            if let Ok(input) = timeout_at(deadline, inputs.recv()).await {
+                return input;
+            }
+            // The timer fired: let the transport act, then deliver whatever it produced.
+            self.transport.on_timeout();
+            self.drain_transport();
+            if self.transport.is_closed()
+                || self.deliver().await.is_err()
+                || self.flush().await.is_err()
+            {
+                return None;
+            }
+        }
     }
 
     /// Queues an event for the swarm, delivered at the end of the turn.
@@ -339,7 +408,7 @@ impl Connection {
     /// Credits the peer for the data this turn handled.
     fn grant_credit(&mut self) {
         for (stream, len) in mem::take(&mut self.credit) {
-            self.session.consume(stream, len);
+            self.transport.consume(stream, len);
         }
     }
 
@@ -356,18 +425,18 @@ impl Connection {
                 continue;
             };
             // Hand over what fits; a stream that is gone takes nothing and is abandoned.
-            let room = self.session.writable(stream).min(bytes.len());
-            if room == 0 && !self.session.is_open(stream) {
+            let room = self.transport.writable(stream).min(bytes.len());
+            if room == 0 && !self.transport.is_open(stream) {
                 continue;
             }
-            if room > 0 && self.session.send(stream, &bytes[..room]).is_err() {
-                let _ = self.session.reset(stream);
+            if room > 0 && !self.transport.send(stream, &bytes[..room]) {
+                self.transport.reset(stream);
                 continue;
             }
             bytes.drain(..room);
             // The last byte is handed over: half-close, and the FIN follows the data.
             if bytes.is_empty() {
-                let _ = self.session.close(stream);
+                self.transport.close(stream);
             } else {
                 self.streams.insert(stream, StreamState::Responding(bytes));
             }
@@ -381,35 +450,33 @@ impl Connection {
     /// Whether the stream took the bytes.
     fn write(&mut self, stream: StreamId, bytes: &[u8]) -> bool {
         // A full send buffer means the peer stopped reading this stream.
-        if self.session.send(stream, bytes).is_ok() {
+        if self.transport.send(stream, bytes) {
             return true;
         }
-        let _ = self.session.reset(stream);
+        self.transport.reset(stream);
         false
     }
 
-    /// Writes everything the session produced, sealed.
+    /// Writes everything the transport produced.
     async fn flush(&mut self) -> io::Result<()> {
-        let plaintext = self.session.take_output();
-        if plaintext.is_empty() {
-            return Ok(());
-        }
-        let mut wire = Vec::with_capacity(plaintext.len() + 64);
-        self.sealer
-            .seal(&plaintext, &mut wire)
-            .map_err(io::Error::other)?;
-        self.writer.write_all(&wire).await
+        self.transport.flush().await
     }
 
     /// Applies one input.
     fn handle_input(&mut self, input: ConnectionInput) {
         match input {
             ConnectionInput::Bytes(bytes) => {
-                if self.session.receive(&bytes).is_err() {
-                    // The session already queued a go-away with the protocol error code.
+                if !self.transport.receive_bytes(&bytes) {
                     self.closing = true;
                 }
-                self.drain_session();
+                self.drain_transport();
+            }
+            ConnectionInput::Datagram(from, bytes) => {
+                self.transport.receive_datagram(from, &bytes);
+                self.drain_transport();
+                if self.transport.is_closed() {
+                    self.closing = true;
+                }
             }
             ConnectionInput::Eof | ConnectionInput::Close => self.closing = true,
             ConnectionInput::SendGossip(rpc) => match self.gossip_stream {
@@ -437,7 +504,7 @@ impl Connection {
                 });
                 if let Some(stream) = found {
                     self.streams.remove(&stream);
-                    let _ = self.session.reset(stream);
+                    self.transport.reset(stream);
                 }
             }
         }
@@ -446,9 +513,8 @@ impl Connection {
     /// Opens a stream and proposes protocols for a purpose.
     fn open(&mut self, purpose: Purpose, protocols: &[&str]) {
         let opened = self
-            .session
+            .transport
             .open_stream()
-            .ok()
             .zip(Dialer::new(protocols.iter().copied()).ok());
         let Some((stream, mut dialer)) = opened else {
             // No stream: a request fails at once; gossip and identify are best effort.
@@ -460,29 +526,29 @@ impl Connection {
             }
             return;
         };
-        let _ = self.session.send(stream, &dialer.take_output());
+        let _ = self.transport.send(stream, &dialer.take_output());
         self.streams
             .insert(stream, StreamState::Dialing(dialer, purpose));
     }
 
-    /// Handles every event the session has queued.
-    fn drain_session(&mut self) {
-        while let Some(event) = self.session.poll_event() {
+    /// Handles every event the transport has queued.
+    fn drain_transport(&mut self) {
+        while let Some(event) = self.transport.poll_event() {
             match event {
-                SessionEvent::InboundStream(stream) => {
+                MuxEvent::InboundStream(stream) => {
                     let mut listener =
                         Listener::new(self.shared.identify.protocols.iter().cloned());
-                    let _ = self.session.send(stream, &listener.take_output());
+                    let _ = self.transport.send(stream, &listener.take_output());
                     self.streams
                         .insert(stream, StreamState::Listening(listener));
                 }
-                SessionEvent::Data { stream, data } => {
+                MuxEvent::Data { stream, data } => {
                     // Credit waits until the events this data produces reach the swarm.
                     self.credit.push((stream, data.len()));
                     self.on_data(stream, &data);
                 }
-                SessionEvent::StreamFinished(stream) => self.on_finished(stream),
-                SessionEvent::StreamReset(stream) => {
+                MuxEvent::StreamFinished(stream) => self.on_finished(stream),
+                MuxEvent::StreamReset(stream) => {
                     if let Some(
                         StreamState::RequestOut(request, ..)
                         | StreamState::Dialing(_, Purpose::Request(request, ..)),
@@ -494,15 +560,14 @@ impl Connection {
                         ));
                     }
                 }
-                SessionEvent::GoAway(_) => self.closing = true,
-                SessionEvent::Pong(_) => {}
+                MuxEvent::Closing => self.closing = true,
             }
         }
     }
 
     /// Feeds data to a stream's handler.
     fn on_data(&mut self, stream: StreamId, data: &[u8]) {
-        // Take the handler out, so it can use the session freely, and put it back if it lives on.
+        // Take the handler out, so it can use the transport freely, and put it back if it lives on.
         let Some(state) = self.streams.remove(&stream) else {
             return;
         };
@@ -517,7 +582,7 @@ impl Connection {
             StreamState::Dialing(mut dialer, purpose) => match dialer.receive(data) {
                 Ok(Some(negotiated)) => self.dialed(stream, purpose, &negotiated),
                 Ok(None) => {
-                    let _ = self.session.send(stream, &dialer.take_output());
+                    let _ = self.transport.send(stream, &dialer.take_output());
                     Some(StreamState::Dialing(dialer, purpose))
                 }
                 Err(error) => {
@@ -531,18 +596,18 @@ impl Connection {
                         };
                         self.report(ConnectionEvent::RequestFailed(request, error));
                     }
-                    let _ = self.session.reset(stream);
+                    self.transport.reset(stream);
                     None
                 }
             },
             StreamState::Listening(mut listener) => {
                 let outcome = listener.receive(data);
-                let _ = self.session.send(stream, &listener.take_output());
+                let _ = self.transport.send(stream, &listener.take_output());
                 match outcome {
                     Ok(Some(negotiated)) => self.listened(stream, negotiated),
                     Ok(None) => Some(StreamState::Listening(listener)),
                     Err(_) => {
-                        let _ = self.session.reset(stream);
+                        self.transport.reset(stream);
                         None
                     }
                 }
@@ -567,7 +632,7 @@ impl Connection {
                 frames.feed(data);
                 // A peer sending far more than one message is broken.
                 if frames.buffered().len() > identify::MAX_MESSAGE_LEN + 10 {
-                    let _ = self.session.reset(stream);
+                    self.transport.reset(stream);
                     return None;
                 }
                 Some(StreamState::IdentifyOut(frames))
@@ -607,16 +672,16 @@ impl Connection {
             Purpose::Request(request, protocol, payload) => {
                 // Write the request, then half-close: the responder reads until EOF.
                 let _ = self
-                    .session
+                    .transport
                     .send(stream, &protocol.encode_request(&payload));
-                let _ = self.session.close(stream);
+                self.transport.close(stream);
                 let mut decoder = ResponseDecoder::new(protocol, self.shared.max_payload_size);
                 decoder.feed(&negotiated.remainder);
                 self.read_response(stream, request, protocol, decoder)
             }
             Purpose::Identify => {
                 // This side only listens on its own identify stream.
-                let _ = self.session.close(stream);
+                self.transport.close(stream);
                 let mut frames = LengthPrefixedDecoder::new(identify::MAX_MESSAGE_LEN);
                 frames.feed(&negotiated.remainder);
                 Some(StreamState::IdentifyOut(frames))
@@ -647,14 +712,14 @@ impl Connection {
             info.observed_addr = Some(self.remote_addr.clone());
             let mut bytes = Vec::new();
             info.encode_length_prefixed(&mut bytes);
-            let _ = self.session.send(stream, &bytes);
-            let _ = self.session.close(stream);
+            let _ = self.transport.send(stream, &bytes);
+            self.transport.close(stream);
             return None;
         }
         // Only ping remains among the supported protocols.
         let mut responder = PingResponder::default();
         let echo = responder.receive(&remainder);
-        let _ = self.session.send(stream, &echo);
+        let _ = self.transport.send(stream, &echo);
         Some(StreamState::Ping(responder))
     }
 
@@ -669,13 +734,13 @@ impl Connection {
                 Ok(Some(frame)) => match Rpc::decode(frame) {
                     Ok(rpc) => self.report(ConnectionEvent::GossipRpc(rpc)),
                     Err(_) => {
-                        let _ = self.session.reset(stream);
+                        self.transport.reset(stream);
                         return None;
                     }
                 },
                 Ok(None) => return Some(StreamState::GossipIn(frames)),
                 Err(_) => {
-                    let _ = self.session.reset(stream);
+                    self.transport.reset(stream);
                     return None;
                 }
             }
@@ -707,7 +772,7 @@ impl Connection {
                         request,
                         RequestError::InvalidResponse { protocol, error },
                     ));
-                    let _ = self.session.reset(stream);
+                    self.transport.reset(stream);
                     return None;
                 }
             }
@@ -762,7 +827,7 @@ impl Connection {
             }
             // The peer stopped writing: close our side too.
             StreamState::GossipIn(_) | StreamState::Ping(_) | StreamState::Listening(_) => {
-                let _ = self.session.close(stream);
+                self.transport.close(stream);
             }
             // Our side still has something to write; keep the handler.
             state @ (StreamState::AwaitingResponse
@@ -794,8 +859,8 @@ impl Connection {
     fn answer_error(&mut self, stream: StreamId, code: ResponseCode, message: &str) {
         let mut bytes = Vec::new();
         ResponseChunk::error(code, message).encode_to(&mut bytes);
-        let _ = self.session.send(stream, &bytes);
-        let _ = self.session.close(stream);
+        let _ = self.transport.send(stream, &bytes);
+        self.transport.close(stream);
     }
 
     /// Writes one gossip RPC as a length-prefixed frame.
@@ -804,7 +869,7 @@ impl Connection {
     fn write_gossip(&mut self, stream: StreamId, rpc: &Rpc) {
         let mut bytes = Vec::new();
         rpc.encode_length_prefixed(&mut bytes);
-        let _ = self.session.send(stream, &bytes);
+        let _ = self.transport.send(stream, &bytes);
     }
 }
 
@@ -850,15 +915,5 @@ impl SocketReader {
             }
         }
         let _ = self.output.send(ConnectionInput::Eof).await;
-    }
-}
-
-/// Aborts the reader task when dropped.
-struct ReaderGuard(JoinHandle<()>);
-
-impl Drop for ReaderGuard {
-    fn drop(&mut self) {
-        // The reader holds the socket's read half; it must not outlive the connection.
-        self.0.abort();
     }
 }

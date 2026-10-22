@@ -1,6 +1,6 @@
 //! What the service hands back to its driver.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 
 use super::{Datagram, LookupId};
 use crate::{enr::Enr, message::RequestId, node_id::NodeId};
@@ -21,6 +21,16 @@ pub enum Event {
         enr_seq: u64,
         /// The local endpoint as the peer sees it.
         observed: SocketAddr,
+    },
+
+    /// Enough peers agreed on a new external endpoint for this node.
+    ///
+    /// Every PONG counts, those answering liveness checks included.
+    ExternalAddress {
+        /// The IPv4 endpoint peers see.
+        address: SocketAddrV4,
+        /// Distinct voter networks that agreed.
+        votes: usize,
     },
 
     /// A peer answered an application FINDNODE.

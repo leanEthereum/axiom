@@ -29,9 +29,9 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainError, ChainHandle, CheckpointServer, Clock,
-    DiscoverySettings, EventSender, ExecutionLayer, NodeError, NodeKey, StorageMode,
-    WeakSubjectivity, WeakSubjectivityError, api::ApiServices, network::NetworkIdentity,
-    slasher::SlasherFeed,
+    DiscoverySettings, EventSender, ExecutionLayer, NodeError, NodeKey, PortMappingSettings,
+    StorageMode, WeakSubjectivity, WeakSubjectivityError, api::ApiServices,
+    network::NetworkIdentity, slasher::SlasherFeed,
 };
 
 /// Where the node reaches its execution engine.
@@ -69,8 +69,14 @@ impl EngineConfig {
 pub struct NetworkSettings {
     /// TCP address libp2p listens on.
     pub listen_address: SocketAddr,
+    /// UDP port libp2p QUIC listens on, on the listen address's interface; none runs TCP alone.
+    pub quic_port: Option<u16>,
     /// Peers to dial at startup.
     pub boot_nodes: Vec<Multiaddr>,
+    /// Peers the node aims to keep connected.
+    pub target_peers: usize,
+    /// Port mapping on the gateway, NAT-PMP then UPnP.
+    pub port_mapping: PortMappingSettings,
     /// Custody groups to keep, at least the spec's custody requirement.
     pub custody_group_count: u64,
     /// Peer discovery; none relies on boot nodes alone.
@@ -84,9 +90,12 @@ impl NetworkSettings {
         key: &NodeKey,
         message_ids: MessageIds,
     ) -> Result<(NetworkHandle, NetworkEvents), NodeError> {
-        // Noise secures every connection under the node's secp256k1 identity.
+        // TLS secures QUIC and Noise secures TCP, both under the node's secp256k1 identity.
         let mut p2p = NetworkConfig::new(key.keypair()).map_err(NodeError::Network)?;
         p2p.listen_addr = Multiaddr::from_tcp(self.listen_address);
+        p2p.quic_listen_addr = self
+            .quic_port
+            .map(|port| Multiaddr::from_quic(SocketAddr::new(self.listen_address.ip(), port)));
         p2p.gossipsub.message_id = message_ids;
         swarm::start(p2p).await.map_err(NodeError::Network)
     }

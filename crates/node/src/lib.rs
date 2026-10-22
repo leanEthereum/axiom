@@ -44,7 +44,7 @@ pub use events::{
     ApiEvent, EventHub, EventSender, EventSubscriptions, EventTopic, HubStopped, TopicSet,
     UnknownTopic,
 };
-pub use network::{DiscoverySettings, NodeKey};
+pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
 pub use proposer::{BlockOrder, ProposerError, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

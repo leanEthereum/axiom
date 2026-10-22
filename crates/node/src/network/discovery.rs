@@ -13,12 +13,13 @@ use axiom_discv5::{
     service::{Config, EnrFilter, Event},
 };
 use axiom_p2p::{Multiaddr, PeerId, PublicKey};
-use axiom_types::{ChainConfig, Epoch, ForkDigest, Root};
+use axiom_types::{ChainConfig, Epoch, Root};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use super::{
     NodeKey,
+    nat::{ListenPorts, NatMetrics, NatTraversal, PortMappingSettings},
     record::{LocalRecord, RecordEntries},
 };
 
@@ -46,6 +47,8 @@ pub struct DiscoverySettings {
 pub(crate) struct RecordSetup {
     /// The libp2p TCP port peers dial.
     pub(crate) tcp_port: u16,
+    /// The libp2p QUIC port peers dial first, when QUIC listens.
+    pub(crate) quic_port: Option<u16>,
     /// The wall-clock epoch.
     pub(crate) epoch: Epoch,
     /// The genesis validators root.
@@ -54,6 +57,47 @@ pub(crate) struct RecordSetup {
     pub(crate) attnets: u64,
     /// Custody groups the node keeps.
     pub(crate) custody_group_count: u64,
+}
+
+/// The addresses to try for a discovered peer, best first.
+///
+/// QUIC is the primary transport, so a peer reachable over both is dialed over QUIC first.
+/// TCP is the fallback when the QUIC dial fails.
+/// See "Transport" in the phase0 p2p-interface specification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DialPlan {
+    /// The peer the record names.
+    pub(crate) peer: PeerId,
+    /// The first address to dial.
+    pub(crate) primary: Multiaddr,
+    /// The address to dial when the first fails.
+    pub(crate) fallback: Option<Multiaddr>,
+}
+
+impl DialPlan {
+    /// The plan for a record, or nothing when it advertises no dialable endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// - `quic`: whether this node speaks QUIC; without it, QUIC endpoints are ignored.
+    fn new(peer: PeerId, enr: &Enr, quic: bool) -> Option<Self> {
+        let endpoints = enr.endpoints();
+        let quic = endpoints
+            .quic_socket()
+            .filter(|_| quic)
+            .map(Multiaddr::from_quic);
+        let tcp = endpoints.tcp_socket().map(Multiaddr::from_tcp);
+        let (primary, fallback) = match (quic, tcp) {
+            (Some(quic), tcp) => (quic, tcp),
+            (None, Some(tcp)) => (tcp, None),
+            (None, None) => return None,
+        };
+        Some(Self {
+            peer,
+            primary,
+            fallback,
+        })
+    }
 }
 
 /// The node's discovery service.
@@ -86,6 +130,10 @@ pub(crate) struct Discovery {
     dialed: HashSet<NodeId>,
     /// Randomness for lookup targets.
     rng: Csprng,
+    /// Whether this node speaks QUIC, so records' QUIC endpoints come first.
+    quic: bool,
+    /// The external endpoint, from port mapping and peers' votes.
+    nat: NatTraversal,
 }
 
 impl Discovery {
@@ -128,6 +176,8 @@ impl Discovery {
                 searching: None,
                 dialed: HashSet::new(),
                 rng: Csprng::from_seed(seed),
+                quic: setup.quic_port.is_some(),
+                nat: NatTraversal::new(settings.enr_address.is_some()),
             },
             events,
         ))
@@ -152,8 +202,8 @@ impl Discovery {
         }
     }
 
-    /// Starts a lookup for peers on a fork, unless one is already running.
-    pub(crate) async fn search(&mut self, fork_digest: ForkDigest) {
+    /// Starts a lookup for peers meeting a condition, unless one is already running.
+    pub(crate) async fn search(&mut self, filter: EnrFilter) {
         // A lookup that never reports back is given up after a few upkeeps.
         if let Some(waited) = &mut self.searching {
             *waited += 1;
@@ -165,18 +215,14 @@ impl Discovery {
         self.dialed.clear();
         // A random target spreads lookups across the whole identifier space.
         let target = NodeId(self.rng.bytes());
-        match self
-            .discv5
-            .lookup(target, EnrFilter::ForkDigest(fork_digest), LOOKUP_PEERS)
-            .await
-        {
+        match self.discv5.lookup(target, filter, LOOKUP_PEERS).await {
             Ok(_) => self.searching = Some(0),
             Err(_) => warn!("discovery stopped"),
         }
     }
 
-    /// Takes a discovery event, returning the addresses of new peers worth dialing.
-    pub(crate) fn on_event(&mut self, event: Event) -> Vec<(PeerId, Multiaddr)> {
+    /// Takes a discovery event, returning how to dial the new peers worth dialing.
+    pub(crate) fn on_event(&mut self, event: Event) -> Vec<DialPlan> {
         match event {
             Event::LookupFinished { peers, .. } => {
                 self.searching = None;
@@ -184,7 +230,46 @@ impl Discovery {
                 peers.iter().filter_map(|enr| self.dialable(enr)).collect()
             }
             Event::Discovered(enr) => self.dialable(&enr).into_iter().collect(),
+            Event::ExternalAddress { address, votes } => {
+                info!(%address, votes, "peers confirmed the external address");
+                self.nat.on_vote(address, votes);
+                Vec::new()
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Exports the NAT metrics, and starts port mapping for the record's ports when enabled.
+    ///
+    /// The ports are the local ones the record states at startup.
+    pub(crate) fn start_nat(&mut self, settings: PortMappingSettings, metrics: NatMetrics) {
+        let endpoints = self.record.enr().endpoints();
+        let ports = ListenPorts {
+            tcp: endpoints.tcp4,
+            quic: endpoints.quic4,
+            discovery: endpoints.udp4,
+        };
+        self.nat.start(settings, ports, metrics);
+    }
+
+    /// Re-signs the record when the confirmed external endpoint differs from the one it states.
+    ///
+    /// An address the operator configured is never replaced.
+    pub(crate) async fn publish_external(&mut self) {
+        let Some(endpoint) = self.nat.endpoint() else {
+            return;
+        };
+        match self.record.set_endpoint(endpoint, &self.key) {
+            Ok(false) => {}
+            Ok(true) => match self.discv5.set_local_enr(self.record.enr().clone()).await {
+                Ok(()) => {
+                    let text = self.record.enr().to_string();
+                    info!(enr = %text, "discovery record states the external address");
+                    self.published.send_replace(text);
+                }
+                Err(error) => warn!(%error, "could not update the discovery record"),
+            },
+            Err(error) => warn!(%error, "could not sign the discovery record"),
         }
     }
 
@@ -203,15 +288,13 @@ impl Discovery {
         self.discv5.shutdown();
     }
 
-    /// The peer and TCP address of a record not dialed since the last lookup.
+    /// How to dial a record not dialed since the last lookup.
     ///
     /// Discovery and libp2p share the secp256k1 key, so the record names the peer too.
-    fn dialable(&mut self, enr: &Enr) -> Option<(PeerId, Multiaddr)> {
-        let address = enr.endpoints().tcp_socket()?;
+    fn dialable(&mut self, enr: &Enr) -> Option<DialPlan> {
         let peer = PeerId::from_public_key(&PublicKey::secp256k1(enr.public_key().to_compressed()));
-        self.dialed
-            .insert(enr.node_id())
-            .then(|| (peer, Multiaddr::from_tcp(address)))
+        let plan = DialPlan::new(peer, enr, self.quic)?;
+        self.dialed.insert(enr.node_id()).then_some(plan)
     }
 
     /// The node's first signed record.
@@ -228,6 +311,9 @@ impl Discovery {
             .tcp4(setup.tcp_port)
             .udp4(settings.udp_port)
             .custody_group_count(setup.custody_group_count);
+        if let Some(port) = setup.quic_port {
+            base = base.quic4(port);
+        }
         // Without a known public address, peers learn this node's address from its packets.
         if let Some(address) = settings.enr_address {
             base = base.ip4(address);
@@ -240,5 +326,68 @@ impl Discovery {
         );
         LocalRecord::new(base, entries, key.secret())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    /// A record at 10.0.0.1 with the given ports, signed by a fixed key.
+    fn record(tcp: Option<u16>, quic: Option<u16>) -> Enr {
+        let key = SecretKey::from_bytes(&[7; 32]).unwrap();
+        let mut builder = Enr::builder().ip4(Ipv4Addr::new(10, 0, 0, 1));
+        if let Some(port) = tcp {
+            builder = builder.tcp4(port);
+        }
+        if let Some(port) = quic {
+            builder = builder.quic4(port);
+        }
+        builder.build(&key).unwrap()
+    }
+
+    fn peer() -> PeerId {
+        let key = SecretKey::from_bytes(&[7; 32]).unwrap();
+        PeerId::from_public_key(&PublicKey::secp256k1(key.public_key().to_compressed()))
+    }
+
+    #[test]
+    fn quic_comes_first_with_tcp_as_the_fallback() {
+        let tcp = Multiaddr::from_tcp(SocketAddr::from(([10, 0, 0, 1], 9000)));
+        let quic = Multiaddr::from_quic(SocketAddr::from(([10, 0, 0, 1], 9001)));
+
+        // Both endpoints: QUIC first, TCP behind it.
+        let both = record(Some(9000), Some(9001));
+        assert_eq!(
+            DialPlan::new(peer(), &both, true),
+            Some(DialPlan {
+                peer: peer(),
+                primary: quic.clone(),
+                fallback: Some(tcp.clone()),
+            })
+        );
+
+        // A node without QUIC ignores the QUIC endpoint.
+        assert_eq!(
+            DialPlan::new(peer(), &both, false),
+            Some(DialPlan {
+                peer: peer(),
+                primary: tcp,
+                fallback: None,
+            })
+        );
+
+        // QUIC alone has no fallback; a record without either is not dialable.
+        assert_eq!(
+            DialPlan::new(peer(), &record(None, Some(9001)), true),
+            Some(DialPlan {
+                peer: peer(),
+                primary: quic,
+                fallback: None,
+            })
+        );
+        assert_eq!(DialPlan::new(peer(), &record(None, None), true), None);
     }
 }

@@ -10,7 +10,7 @@ use std::{
 use axiom_discv5::Enr;
 use axiom_node::{
     AnchorSource, DiscoverySettings, EngineConfig, HistorySettings, NetworkSettings, NodeConfig,
-    SnapshotInterval, StorageMode, WeakSubjectivity,
+    PortMappingSettings, SnapshotInterval, StorageMode, WeakSubjectivity,
 };
 use axiom_p2p::Multiaddr;
 use axiom_slasher::{LayoutError, SlasherConfig};
@@ -51,7 +51,11 @@ OPTIONS:
     --no-http                    disable the beacon API
     --metrics-address <ADDR>     Prometheus endpoint address [default: disabled]
     --listen-address <ADDR>      libp2p TCP address [default: 0.0.0.0:9000]
+    --quic-port <PORT>           libp2p QUIC UDP port [default: the libp2p port + 1]
+    --no-quic                    listen and dial over TCP only
     --boot-node <MULTIADDR>      peer to dial at startup, repeatable
+    --target-peers <COUNT>       peers to keep connected [default: 64]
+    --nat                        map the ports on the gateway, over NAT-PMP or UPnP
     --custody-groups <COUNT>     custody groups to keep [default: the spec's requirement]
     --discovery-port <PORT>      discv5 UDP port [default: the libp2p port]
     --enr-address <IP>           public IPv4 address announced in the node record
@@ -74,8 +78,26 @@ OPTIONS:
 /// Default address of the beacon API, the port every client uses.
 const DEFAULT_HTTP_ADDRESS: &str = "127.0.0.1:5052";
 
+/// Default peer count target.
+///
+/// A mesh wants 6 to 12 peers per topic, per the phase0 gossipsub parameters.
+/// Sixty-four peers fill every topic's mesh and leave spares.
+const DEFAULT_TARGET_PEERS: usize = 64;
+
 /// Default libp2p address, the port every client uses.
 const DEFAULT_LISTEN_ADDRESS: &str = "0.0.0.0:9000";
+
+/// Whether and where libp2p listens on QUIC.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum QuicChoice {
+    /// The UDP port after the libp2p TCP port.
+    #[default]
+    Default,
+    /// A chosen UDP port.
+    Port(u16),
+    /// TCP only.
+    Off,
+}
 
 /// What the command line asks for.
 #[derive(Debug)]
@@ -181,8 +203,14 @@ pub(crate) struct Cli {
     metrics_address: Option<SocketAddr>,
     /// The libp2p address.
     listen_address: Option<SocketAddr>,
+    /// The libp2p QUIC choice.
+    quic: QuicChoice,
     /// Peers to dial at startup.
     boot_nodes: Vec<Multiaddr>,
+    /// Peers to keep connected.
+    target_peers: Option<usize>,
+    /// Gateway port mapping.
+    port_mapping: PortMappingSettings,
     /// Custody groups to keep.
     custody_groups: Option<u64>,
     /// Whether the network is off.
@@ -314,34 +342,6 @@ impl Cli {
                         value("--metrics-address")?,
                     )?);
                 }
-                "--listen-address" => {
-                    cli.listen_address = Some(Self::parsed(
-                        "--listen-address",
-                        value("--listen-address")?,
-                    )?);
-                }
-                "--boot-node" => {
-                    let text = value("--boot-node")?;
-                    cli.boot_nodes.push(Self::parsed("--boot-node", text)?);
-                }
-                "--custody-groups" => {
-                    let text = value("--custody-groups")?;
-                    cli.custody_groups = Some(Self::parsed("--custody-groups", text)?);
-                }
-                "--no-network" => cli.no_network = true,
-                "--discovery-port" => {
-                    let text = value("--discovery-port")?;
-                    cli.discovery_port = Some(Self::parsed("--discovery-port", text)?);
-                }
-                "--enr-address" => {
-                    let text = value("--enr-address")?;
-                    cli.enr_address = Some(Self::parsed("--enr-address", text)?);
-                }
-                "--boot-enr" => {
-                    let text = value("--boot-enr")?;
-                    cli.boot_enrs.push(Self::parsed("--boot-enr", text)?);
-                }
-                "--no-discovery" => cli.no_discovery = true,
                 "--execution-endpoint" => {
                     cli.execution_endpoint = Some(value("--execution-endpoint")?);
                 }
@@ -364,10 +364,64 @@ impl Cli {
                 "--log-format" => {
                     cli.log_format = Some(Self::log_format(value("--log-format")?)?);
                 }
-                _ => return Err(CliError::UnknownFlag(flag)),
+                _ => {
+                    if !cli.network_flag(&flag, &mut value)? {
+                        return Err(CliError::UnknownFlag(flag));
+                    }
+                }
             }
         }
         cli.resolve().map(|run| Command::Run(Box::new(run)))
+    }
+
+    /// Applies a networking flag, returning false when the flag is not one.
+    fn network_flag(
+        &mut self,
+        flag: &str,
+        value: &mut impl FnMut(&'static str) -> Result<String, CliError>,
+    ) -> Result<bool, CliError> {
+        match flag {
+            "--listen-address" => {
+                self.listen_address = Some(Self::parsed(
+                    "--listen-address",
+                    value("--listen-address")?,
+                )?);
+            }
+            "--quic-port" => {
+                let text = value("--quic-port")?;
+                self.quic = QuicChoice::Port(Self::parsed("--quic-port", text)?);
+            }
+            "--no-quic" => self.quic = QuicChoice::Off,
+            "--target-peers" => {
+                let text = value("--target-peers")?;
+                self.target_peers = Some(Self::parsed("--target-peers", text)?);
+            }
+            "--nat" => self.port_mapping.enabled = true,
+            "--boot-node" => {
+                let text = value("--boot-node")?;
+                self.boot_nodes.push(Self::parsed("--boot-node", text)?);
+            }
+            "--custody-groups" => {
+                let text = value("--custody-groups")?;
+                self.custody_groups = Some(Self::parsed("--custody-groups", text)?);
+            }
+            "--no-network" => self.no_network = true,
+            "--discovery-port" => {
+                let text = value("--discovery-port")?;
+                self.discovery_port = Some(Self::parsed("--discovery-port", text)?);
+            }
+            "--enr-address" => {
+                let text = value("--enr-address")?;
+                self.enr_address = Some(Self::parsed("--enr-address", text)?);
+            }
+            "--boot-enr" => {
+                let text = value("--boot-enr")?;
+                self.boot_enrs.push(Self::parsed("--boot-enr", text)?);
+            }
+            "--no-discovery" => self.no_discovery = true,
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     /// Turns the flags into a run, reading the config file if one is named.
@@ -391,9 +445,18 @@ impl Cli {
                 enr_address: self.enr_address,
                 boot_enrs: self.boot_enrs,
             });
+            // QUIC takes the next UDP port by default, since discovery holds the libp2p one.
+            let quic_port = match self.quic {
+                QuicChoice::Default => Some(listen_address.port().wrapping_add(1)),
+                QuicChoice::Port(port) => Some(port),
+                QuicChoice::Off => None,
+            };
             Some(NetworkSettings {
                 listen_address,
+                quic_port,
                 boot_nodes: self.boot_nodes,
+                target_peers: self.target_peers.unwrap_or(DEFAULT_TARGET_PEERS),
+                port_mapping: self.port_mapping,
                 discovery,
                 // Every node keeps at least the spec's minimum.
                 custody_group_count: self
@@ -556,7 +619,10 @@ mod tests {
                 http_address: Some("127.0.0.1:5052".parse().unwrap()),
                 network: Some(NetworkSettings {
                     listen_address: "0.0.0.0:9000".parse().unwrap(),
+                    quic_port: Some(9001),
                     boot_nodes: Vec::new(),
+                    target_peers: 64,
+                    port_mapping: PortMappingSettings::default(),
                     custody_group_count: 4,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9000,
@@ -593,6 +659,11 @@ mod tests {
             "json",
             "--listen-address",
             "127.0.0.1:9001",
+            "--quic-port",
+            "9101",
+            "--target-peers",
+            "32",
+            "--nat",
             "--boot-node",
             "/ip4/10.0.0.1/tcp/9000",
             "--custody-groups",
@@ -620,7 +691,10 @@ mod tests {
                 }),
                 network: Some(NetworkSettings {
                     listen_address: "127.0.0.1:9001".parse().unwrap(),
+                    quic_port: Some(9101),
                     boot_nodes: vec!["/ip4/10.0.0.1/tcp/9000".parse().unwrap()],
+                    target_peers: 32,
+                    port_mapping: PortMappingSettings { enabled: true },
                     custody_group_count: 128,
                     discovery: Some(DiscoverySettings {
                         udp_port: 9002,

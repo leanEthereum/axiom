@@ -12,7 +12,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     spawn,
     sync::mpsc::{self, error::TrySendError},
-    task::AbortHandle,
+    task::{AbortHandle, JoinHandle},
     time::{Instant, interval, sleep},
 };
 
@@ -20,6 +20,8 @@ use super::{
     Command, InboundRequestId, NetworkConfig, NetworkEvent, RequestError, RequestId,
     connection::{Connection, ConnectionEvent, ConnectionId, ConnectionInput, Shared},
     events::{Admission, EventQueue},
+    quic::{self, EndpointInput, QuicShared, QuicStart},
+    transport::StreamId,
     upgrade::Upgrade,
 };
 use crate::{
@@ -33,7 +35,7 @@ use crate::{
     multiaddr::{Multiaddr, Protocol as AddrProtocol},
     ping,
     secure::{Role, SecurityUpgrade},
-    yamux::{Mode, StreamId},
+    yamux::Mode,
 };
 
 /// Result code for a rate-limited request, from the client-specific range of the phase0 spec.
@@ -70,6 +72,8 @@ pub(super) enum SwarmInput {
     Dialed(ConnectionId, TcpStream, Option<PeerId>),
     /// An outbound socket failed to connect.
     DialFailed(Multiaddr, String),
+    /// The QUIC endpoint dialed or accepted a connection.
+    Quic(QuicStart),
     /// A connection reported something.
     Connection(ConnectionId, ConnectionEvent),
     /// Time for a router heartbeat.
@@ -173,21 +177,24 @@ pub(super) struct Swarm {
     input: mpsc::Sender<SwarmInput>,
     /// Events for the node.
     events: Arc<EventQueue>,
+    /// The QUIC socket and endpoint, when QUIC listens.
+    quic: Option<QuicShared>,
 }
 
 impl Swarm {
     /// A swarm with no connections, for a node listening at an address.
     pub(super) fn new(
         config: NetworkConfig,
-        listen_addr: Multiaddr,
+        listen_addrs: Vec<Multiaddr>,
         input: mpsc::Sender<SwarmInput>,
         events: Arc<EventQueue>,
+        quic: Option<QuicShared>,
     ) -> Self {
         let identify = IdentifyInfo {
             protocol_version: "eth2/1.0.0".to_owned(),
             agent_version: config.agent_version.clone(),
             public_key: config.identity.public_key().clone(),
-            listen_addrs: vec![listen_addr],
+            listen_addrs,
             observed_addr: None,
             protocols: ProtocolVersion::ALL
                 .iter()
@@ -227,11 +234,17 @@ impl Swarm {
             next_inbound: 1,
             input,
             events,
+            quic,
         }
     }
 
     /// Spawns the swarm task, with its accept loop and heartbeat tasks.
-    pub(super) fn spawn(mut self, listener: TcpListener, mut receiver: mpsc::Receiver<SwarmInput>) {
+    pub(super) fn spawn(
+        mut self,
+        listener: TcpListener,
+        quic_tasks: Vec<JoinHandle<()>>,
+        mut receiver: mpsc::Receiver<SwarmInput>,
+    ) {
         let heartbeat = self.config.gossipsub.heartbeat_interval;
         // The accept loop feeds sockets into the swarm.
         let accept_input = self.input.clone();
@@ -278,6 +291,9 @@ impl Swarm {
             self.events.finish();
             accept_task.abort();
             heartbeat_task.abort();
+            for task in quic_tasks {
+                task.abort();
+            }
         });
     }
 
@@ -311,6 +327,7 @@ impl Swarm {
             SwarmInput::DialFailed(address, error) => {
                 self.emit(NetworkEvent::ConnectionFailed { address, error });
             }
+            SwarmInput::Quic(start) => self.start_quic(start),
             SwarmInput::Connection(id, event) => self.handle_connection_event(id, event),
             SwarmInput::Heartbeat => {
                 let now = self.now();
@@ -385,20 +402,21 @@ impl Swarm {
                     self.send_to_connection(connection, ConnectionInput::Respond(stream, chunks));
                 }
             }
+            Command::GossipScores(reply) => {
+                let scores = self
+                    .peers
+                    .keys()
+                    .map(|peer| (peer.clone(), self.router.peer_score(peer, now)))
+                    .collect();
+                let _ = reply.send(scores);
+            }
             Command::Disconnect(peer) => self.send_to_peer(&peer, ConnectionInput::Close),
             Command::Shutdown => {}
         }
     }
 
-    /// Starts dialing an address in the background.
+    /// Starts dialing an address in the background, over QUIC or TCP as the address says.
     fn dial(&mut self, address: Multiaddr) {
-        let Some(socket) = address.tcp_socket_addr() else {
-            self.emit(NetworkEvent::ConnectionFailed {
-                address,
-                error: "not a TCP address".to_owned(),
-            });
-            return;
-        };
         // Do not dial a peer already connected.
         let expected = address.peer_id().cloned();
         if expected
@@ -407,6 +425,17 @@ impl Swarm {
         {
             return;
         }
+        if let Some(socket) = address.quic_socket_addr() {
+            self.dial_quic(address, socket, expected);
+            return;
+        }
+        let Some(socket) = address.tcp_socket_addr() else {
+            self.emit(NetworkEvent::ConnectionFailed {
+                address,
+                error: "neither a TCP nor a QUIC address".to_owned(),
+            });
+            return;
+        };
         // Connections are keyed by socket address; the identity layer is checked in the handshake.
         let id = self.new_connection(Multiaddr::from_tcp(socket), true);
         let input = self.input.clone();
@@ -417,6 +446,31 @@ impl Swarm {
             };
             let _ = input.send(event).await;
         });
+    }
+
+    /// Asks the QUIC endpoint to dial; the connection comes back as a QUIC start.
+    fn dial_quic(&mut self, address: Multiaddr, socket: SocketAddr, expected: Option<PeerId>) {
+        let Some(quic) = &self.quic else {
+            self.emit(NetworkEvent::ConnectionFailed {
+                address,
+                error: "QUIC is not enabled".to_owned(),
+            });
+            return;
+        };
+        let endpoint = quic.endpoint.clone();
+        let id = self.new_connection(Multiaddr::from_quic(socket), true);
+        let connect = EndpointInput::Connect {
+            id,
+            remote: socket,
+            expected,
+        };
+        if endpoint.try_send(connect).is_err() {
+            self.connections.remove(&id);
+            self.emit(NetworkEvent::ConnectionFailed {
+                address,
+                error: "QUIC endpoint busy".to_owned(),
+            });
+        }
     }
 
     /// Registers a connection and returns its identifier.
@@ -465,7 +519,7 @@ impl Swarm {
                         Role::Responder => Mode::Server,
                     };
                     if let Some((connection, inputs)) =
-                        Connection::establish(id, upgraded, mode, remote, shared, input).await
+                        Connection::establish_tcp(id, upgraded, mode, remote, shared, input).await
                     {
                         connection.run(inputs).await;
                     }
@@ -476,6 +530,53 @@ impl Swarm {
                             id,
                             ConnectionEvent::Failed(error.to_string()),
                         ))
+                        .await;
+                }
+            }
+        });
+        if let Some(entry) = self.connections.get_mut(&id) {
+            entry.task = Some(task.abort_handle());
+        }
+    }
+
+    /// Spawns the task that completes a QUIC handshake and then runs the connection.
+    fn start_quic(&mut self, start: QuicStart) {
+        let Some(quic) = self.quic.clone() else {
+            return;
+        };
+        let QuicStart {
+            id,
+            handle,
+            connection,
+            sender,
+            mut receiver,
+        } = start;
+        let remote = Multiaddr::from_quic(connection.remote());
+        // Dialed connections were registered at the dial; accepted ones register now.
+        let id = id.unwrap_or_else(|| self.new_connection(remote.clone(), false));
+        let shared = Arc::clone(&self.shared);
+        let input = self.input.clone();
+        let task = spawn(async move {
+            let mut link = quic.link(connection, handle);
+            match quic::handshake(&mut link, &mut receiver).await {
+                Ok(peer) => {
+                    if let Some(connection) = Connection::establish_quic(
+                        id,
+                        link,
+                        peer.peer_id,
+                        sender,
+                        remote,
+                        shared,
+                        input,
+                    )
+                    .await
+                    {
+                        connection.run(receiver).await;
+                    }
+                }
+                Err(error) => {
+                    let _ = input
+                        .send(SwarmInput::Connection(id, ConnectionEvent::Failed(error)))
                         .await;
                 }
             }
@@ -566,11 +667,61 @@ impl Swarm {
         peer: PeerId,
         commands: mpsc::Sender<ConnectionInput>,
     ) {
-        // One connection per peer: the later one is closed.
-        // Its queue is fresh and empty, so the close always fits.
-        if self.peers.contains_key(&peer) {
-            let _ = commands.try_send(ConnectionInput::Close);
-            self.connections.remove(&id);
+        // One connection per peer.
+        // When both sides dial at once, each would keep its first connection and close the other's.
+        // Both would end up with none, so both keep the connection the smaller identity dialed.
+        if let Some(&existing) = self.peers.get(&peer) {
+            let outbound =
+                |id: &ConnectionId| self.connections.get(id).is_some_and(|entry| entry.outbound);
+            let local = self.config.identity.peer_id();
+            let dialer = |outbound: bool| {
+                if outbound {
+                    local.clone()
+                } else {
+                    peer.clone()
+                }
+            };
+            let keep_new = outbound(&existing) != outbound(&id)
+                && dialer(outbound(&id)) < dialer(outbound(&existing));
+            if !keep_new {
+                // The new queue is fresh and empty, so the close always fits.
+                let _ = commands.try_send(ConnectionInput::Close);
+                self.connections.remove(&id);
+                return;
+            }
+            // Retire the existing connection quietly: the peer stays connected through the new one.
+            if let Some(mut old) = self.connections.remove(&existing) {
+                old.peer = None;
+                if old.deliver(ConnectionInput::Close) != Delivery::Sent
+                    && let Some(task) = &old.task
+                {
+                    task.abort();
+                }
+            }
+            self.inbound
+                .retain(|_, (connection, _)| *connection != existing);
+            // Requests in flight rode the retired connection, the only one until now.
+            let failed: Vec<RequestId> = self
+                .requests
+                .iter()
+                .filter(|(_, known)| **known == peer)
+                .map(|(request, _)| *request)
+                .collect();
+            for request in failed {
+                self.requests.remove(&request);
+                self.emit(NetworkEvent::RequestFailed {
+                    request,
+                    peer: peer.clone(),
+                    error: RequestError::StreamClosed,
+                });
+            }
+            let Some(entry) = self.connections.get_mut(&id) else {
+                let _ = commands.try_send(ConnectionInput::Close);
+                return;
+            };
+            entry.peer = Some(peer.clone());
+            entry.commands = Some(commands);
+            self.peers.insert(peer, id);
             return;
         }
         let Some(entry) = self.connections.get_mut(&id) else {
@@ -645,6 +796,10 @@ impl Swarm {
             if limiter.allow(peer, protocol, cost, now).is_err() {
                 let chunk = ResponseChunk::error(RATE_LIMITED, "rate limited");
                 self.send_to_connection(id, ConnectionInput::Respond(stream, vec![chunk]));
+                self.emit(NetworkEvent::RateLimited {
+                    peer: peer.clone(),
+                    protocol,
+                });
                 return;
             }
         }

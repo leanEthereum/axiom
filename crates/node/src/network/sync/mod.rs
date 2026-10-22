@@ -4,7 +4,7 @@
 
 mod backfill;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, mem, sync::Arc};
 
 use axiom_das::{ColumnSidecar, PayloadColumnSidecar};
 use axiom_fork_choice::ForkChoiceError;
@@ -415,6 +415,8 @@ pub(crate) struct RangeSync<P: Preset> {
     peers: HashMap<PeerId, Status>,
     /// Failed batches per peer.
     strikes: HashMap<PeerId, u32>,
+    /// Peers dropped for bad data, until peer management takes them.
+    dropped: Vec<PeerId>,
     /// The batch being fetched, if any.
     batch: Option<Batch<P>>,
     /// Whether a fetched batch is being processed.
@@ -445,6 +447,7 @@ impl<P: Preset> RangeSync<P> {
             forks,
             peers: HashMap::new(),
             strikes: HashMap::new(),
+            dropped: Vec::new(),
             batch: None,
             processing: false,
             cursor: Slot(0),
@@ -631,10 +634,16 @@ impl<P: Preset> RangeSync<P> {
         *self.strikes.entry(peer.clone()).or_default() += 1;
     }
 
+    /// Peers dropped for bad data since the last call, for peer management to ban.
+    pub(crate) fn take_dropped(&mut self) -> Vec<PeerId> {
+        mem::take(&mut self.dropped)
+    }
+
     /// Stops using a peer and disconnects it.
     async fn drop_peer(&mut self, peer: &PeerId) {
         self.peers.remove(peer);
         self.strikes.insert(peer.clone(), MAX_STRIKES);
+        self.dropped.push(peer.clone());
         // A disconnect only fails when the network is gone, which ends sync anyway.
         let _stopped = self.network.disconnect(peer.clone()).await;
     }
