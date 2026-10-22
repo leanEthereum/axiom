@@ -31,4 +31,4 @@ pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use network::{DiscoverySettings, NodeKey};
 pub use publish::{PublishError, Published, Publisher};
-pub use service::{EngineConfig, NetworkSettings, Node, NodeConfig};
+pub use service::{AnchorSource, EngineConfig, NetworkSettings, Node, NodeConfig};

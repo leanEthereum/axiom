@@ -1,7 +1,12 @@
 //! The running node: every service started, wired, and stopped together.
 
 use std::{
-    fs, future::Future, marker::PhantomData, net::SocketAddr, path::PathBuf, sync::Arc,
+    fs,
+    future::Future,
+    marker::PhantomData,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -13,7 +18,7 @@ use axiom_p2p::{
 };
 use axiom_ssz::Ssz;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
-use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, Slot};
+use axiom_types::{BeaconState, ChainConfig, ColumnIndex, Preset, SignedBeaconBlock, Slot};
 use tokio::{
     sync::{
         broadcast::{self, error::RecvError},
@@ -61,13 +66,27 @@ pub struct NetworkSettings {
     pub discovery: Option<DiscoverySettings>,
 }
 
+/// Where a node with an empty database starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnchorSource {
+    /// An SSZ genesis state.
+    Genesis(PathBuf),
+    /// A trusted block and its post-state, both SSZ, as a checkpoint sync obtains them.
+    Checkpoint {
+        /// The block's post-state.
+        state: PathBuf,
+        /// The signed block.
+        block: PathBuf,
+    },
+}
+
 /// Everything an operator chooses about a node.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeConfig {
     /// Directory of the database; none keeps everything in memory.
     pub data_dir: Option<PathBuf>,
-    /// SSZ genesis state, used when the database holds no anchor yet.
-    pub genesis_state: Option<PathBuf>,
+    /// Where to start when the database holds no anchor yet.
+    pub anchor: Option<AnchorSource>,
     /// Address of the beacon API; none disables it.
     pub http_address: Option<SocketAddr>,
     /// Address of the Prometheus endpoint; none disables it.
@@ -322,17 +341,35 @@ impl<P: Preset> Node<P> {
             info!("resuming from the database");
             return Ok(Chain::resume(chain_config, database)?);
         }
-        let path = config.genesis_state.as_ref().ok_or(NodeError::NoAnchor)?;
-        let bytes = fs::read(path).map_err(|error| NodeError::Io {
-            context: "reading the genesis state",
-            error,
-        })?;
-        let genesis = BeaconState::<P>::decode(&bytes).map_err(NodeError::Genesis)?;
-        info!(
-            validators = genesis.validators.len(),
-            "starting from genesis"
-        );
-        Ok(Chain::from_genesis(chain_config, genesis, database)?)
+        match config.anchor.as_ref().ok_or(NodeError::NoAnchor)? {
+            AnchorSource::Genesis(path) => {
+                let genesis: BeaconState<P> = Self::read_ssz(path, "reading the genesis state")?;
+                info!(
+                    validators = genesis.validators.len(),
+                    "starting from genesis"
+                );
+                Ok(Chain::from_genesis(chain_config, genesis, database)?)
+            }
+            AnchorSource::Checkpoint { state, block } => {
+                let state: BeaconState<P> = Self::read_ssz(state, "reading the checkpoint state")?;
+                let block: SignedBeaconBlock<P> =
+                    Self::read_ssz(block, "reading the checkpoint block")?;
+                // The store refuses a block whose state root is not this state's.
+                info!(slot = %block.message.slot, "starting from a checkpoint");
+                Ok(Chain::from_anchor(
+                    chain_config,
+                    state,
+                    block.message,
+                    database,
+                )?)
+            }
+        }
+    }
+
+    /// Reads and decodes an SSZ file.
+    fn read_ssz<T: Ssz>(path: &Path, context: &'static str) -> Result<T, NodeError> {
+        let bytes = fs::read(path).map_err(|error| NodeError::Io { context, error })?;
+        T::decode(&bytes).map_err(NodeError::Genesis)
     }
 
     /// Loads or creates the node key, and derives the network identity from it.

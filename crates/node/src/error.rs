@@ -78,7 +78,7 @@ pub enum NodeError {
         /// The operating system's error.
         error: io::Error,
     },
-    /// The genesis state file does not decode.
+    /// The genesis or checkpoint file does not decode.
     Genesis(DecodeError),
     /// Neither a database to resume nor a genesis state was given.
     NoAnchor,
@@ -101,8 +101,10 @@ impl fmt::Display for NodeError {
         match self {
             Self::Chain(error) => write!(f, "chain: {error}"),
             Self::Io { context, error } => write!(f, "{context}: {error}"),
-            Self::Genesis(error) => write!(f, "genesis state does not decode: {error}"),
-            Self::NoAnchor => f.write_str("no database to resume and no genesis state given"),
+            Self::Genesis(error) => write!(f, "anchor file does not decode: {error}"),
+            Self::NoAnchor => {
+                f.write_str("no database to resume and no genesis or checkpoint given")
+            }
             Self::Engine(error) => write!(f, "execution engine: {error}"),
             Self::Jwt(error) => write!(f, "JWT secret: {error}"),
             Self::Metrics(error) => write!(f, "metrics: {error}"),

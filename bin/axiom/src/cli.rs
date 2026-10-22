@@ -9,7 +9,7 @@ use std::{
 };
 
 use axiom_discv5::Enr;
-use axiom_node::{DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
+use axiom_node::{AnchorSource, DiscoverySettings, EngineConfig, NetworkSettings, NodeConfig};
 use axiom_p2p::Multiaddr;
 use axiom_telemetry::{LogConfig, LogFormat};
 use axiom_types::{ChainConfig, ConfigError};
@@ -28,6 +28,8 @@ OPTIONS:
     --network <NAME>             mainnet or minimal [default: mainnet]
     --config <FILE>              chain config YAML; its PRESET_BASE picks the preset
     --genesis-state <FILE>       SSZ genesis state, used when the database is empty
+    --checkpoint-state <FILE>    SSZ post-state of a trusted block, instead of genesis
+    --checkpoint-block <FILE>    SSZ signed trusted block, with --checkpoint-state
     --datadir <DIR>              database directory [default: in memory]
     --http-address <ADDR>        beacon API address [default: 127.0.0.1:5052]
     --no-http                    disable the beacon API
@@ -81,6 +83,8 @@ pub(crate) enum CliError {
     },
     /// Only one of the engine endpoint and its secret was given.
     IncompleteEngine,
+    /// Genesis and checkpoint files were mixed, or a checkpoint file is missing.
+    ConflictingAnchors,
     /// The config file cannot be read.
     ConfigFile(io::Error),
     /// The config file is not valid YAML.
@@ -98,6 +102,9 @@ impl fmt::Display for CliError {
             Self::IncompleteEngine => {
                 f.write_str("--execution-endpoint and --jwt-secret go together")
             }
+            Self::ConflictingAnchors => f.write_str(
+                "give either --genesis-state, or both --checkpoint-state and --checkpoint-block",
+            ),
             Self::ConfigFile(error) => write!(f, "cannot read the config file: {error}"),
             Self::ConfigYaml(error) => write!(f, "config file is not YAML: {error}"),
             Self::Config(error) => write!(f, "config file: {error}"),
@@ -116,6 +123,10 @@ pub(crate) struct Cli {
     config: Option<PathBuf>,
     /// The genesis state file.
     genesis_state: Option<PathBuf>,
+    /// The checkpoint state file.
+    checkpoint_state: Option<PathBuf>,
+    /// The checkpoint block file.
+    checkpoint_block: Option<PathBuf>,
     /// The database directory.
     datadir: Option<PathBuf>,
     /// The beacon API address.
@@ -169,6 +180,12 @@ impl Cli {
                 "--network" => cli.network = Some(value("--network")?),
                 "--config" => cli.config = Some(value("--config")?.into()),
                 "--genesis-state" => cli.genesis_state = Some(value("--genesis-state")?.into()),
+                "--checkpoint-state" => {
+                    cli.checkpoint_state = Some(value("--checkpoint-state")?.into());
+                }
+                "--checkpoint-block" => {
+                    cli.checkpoint_block = Some(value("--checkpoint-block")?.into());
+                }
                 "--datadir" => cli.datadir = Some(value("--datadir")?.into()),
                 "--http-address" => {
                     cli.http_address =
@@ -254,6 +271,17 @@ impl Cli {
                     .max(chain.custody_requirement),
             })
         };
+        // A checkpoint needs both its files, and replaces genesis.
+        let anchor = match (
+            self.genesis_state,
+            self.checkpoint_state,
+            self.checkpoint_block,
+        ) {
+            (None, None, None) => None,
+            (Some(genesis), None, None) => Some(AnchorSource::Genesis(genesis)),
+            (None, Some(state), Some(block)) => Some(AnchorSource::Checkpoint { state, block }),
+            _ => return Err(CliError::ConflictingAnchors),
+        };
         let http_address = if self.no_http {
             None
         } else {
@@ -267,7 +295,7 @@ impl Cli {
             chain,
             node: NodeConfig {
                 data_dir: self.datadir,
-                genesis_state: self.genesis_state,
+                anchor,
                 http_address,
                 metrics_address: self.metrics_address,
                 engine,
@@ -418,7 +446,7 @@ mod tests {
             run.node,
             NodeConfig {
                 data_dir: Some("data".into()),
-                genesis_state: Some("genesis.ssz".into()),
+                anchor: Some(AnchorSource::Genesis("genesis.ssz".into())),
                 http_address: None,
                 metrics_address: Some("0.0.0.0:5054".parse().unwrap()),
                 engine: Some(EngineConfig {
@@ -484,6 +512,22 @@ mod tests {
                 flag: "--boot-node",
                 ..
             })
+        ));
+        // A checkpoint needs both files, and excludes a genesis state.
+        assert!(matches!(
+            parse(&["--checkpoint-state", "state.ssz"]),
+            Err(CliError::ConflictingAnchors)
+        ));
+        assert!(matches!(
+            parse(&[
+                "--genesis-state",
+                "g.ssz",
+                "--checkpoint-state",
+                "s.ssz",
+                "--checkpoint-block",
+                "b.ssz"
+            ]),
+            Err(CliError::ConflictingAnchors)
         ));
         // An engine needs both its endpoint and its secret.
         assert!(matches!(

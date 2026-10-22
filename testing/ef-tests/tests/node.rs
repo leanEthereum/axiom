@@ -13,9 +13,12 @@ use axiom_discv5::Enr;
 use axiom_ef_tests::{Case, Vectors, config_of};
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::Json;
-use axiom_node::{DiscoverySettings, ManualClock, NetworkSettings, Node, NodeConfig, NodeError};
+use axiom_node::{
+    AnchorSource, DiscoverySettings, ManualClock, NetworkSettings, Node, NodeConfig, NodeError,
+};
 use axiom_p2p::Multiaddr;
 use axiom_ssz::Ssz;
+use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{BeaconState, Minimal, SignedBeaconBlock, SignedBlockContents};
 use tokio::{
     runtime::Builder,
@@ -109,11 +112,16 @@ impl TestNode {
     async fn start(fixture: &Fixture, network: Option<NetworkSettings>) -> Self {
         let address = free_address();
         let config = NodeConfig {
-            genesis_state: Some(fixture.genesis.clone()),
+            anchor: Some(AnchorSource::Genesis(fixture.genesis.clone())),
             http_address: Some(address),
             network,
             ..NodeConfig::default()
         };
+        Self::start_with(fixture, config, address).await
+    }
+
+    /// Starts a node with a full configuration whose API listens on an address.
+    async fn start_with(fixture: &Fixture, config: NodeConfig, address: SocketAddr) -> Self {
         let (stop, stopped) = oneshot::channel::<()>();
         let task = task::spawn(Node::<Minimal>::run(
             config_of::<Minimal>(),
@@ -368,5 +376,58 @@ fn a_node_finds_its_peer_through_discovery() {
 
         b.stop().await;
         a.stop().await;
+    });
+}
+
+#[test]
+fn a_node_starts_from_a_checkpoint() {
+    let Some(fixture) = Fixture::load("checkpoint") else {
+        return;
+    };
+
+    // Fixture state: block 2 and its post-state, computed by running both blocks on genesis.
+    //
+    //     genesis ──block 1──> state 1 ──block 2──> state 2      checkpoint = (block 2, state 2)
+    let genesis =
+        BeaconState::<Minimal>::decode(&fixture.case.ssz_bytes("anchor_state").unwrap()).unwrap();
+    let mut state = State::new(genesis);
+    let mut last = None;
+    for name in BLOCKS {
+        let block = fixture
+            .case
+            .ssz::<SignedBeaconBlock<Minimal>>(name)
+            .unwrap();
+        state
+            .state_transition(
+                &config_of::<Minimal>(),
+                &block,
+                Verification::Verify,
+                &KnownVerdict(true),
+            )
+            .unwrap();
+        last = Some(block);
+    }
+    let block = last.unwrap();
+    let state_path = fixture.directory.join("checkpoint_state.ssz");
+    let block_path = fixture.directory.join("checkpoint_block.ssz");
+    fs::write(&state_path, state.beacon().encode()).unwrap();
+    fs::write(&block_path, block.encode()).unwrap();
+
+    let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let address = free_address();
+        let config = NodeConfig {
+            anchor: Some(AnchorSource::Checkpoint {
+                state: state_path,
+                block: block_path,
+            }),
+            http_address: Some(address),
+            ..NodeConfig::default()
+        };
+        let node = TestNode::start_with(&fixture, config, address).await;
+
+        // The checkpoint block is the head, with no block before it to replay.
+        assert_eq!(node.head_root().await.as_deref(), Some(HEAD));
+        node.stop().await;
     });
 }
