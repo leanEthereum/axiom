@@ -19,7 +19,7 @@ const LAST_EPOCH: u64 = 20;
 /// A small layout, so votes cross span, row, and record chunk boundaries.
 ///
 /// The history of 64 epochs holds every generated vote.
-fn config() -> SlasherConfig {
+const fn config() -> SlasherConfig {
     SlasherConfig {
         history_length: 64,
         chunk_size: 4,

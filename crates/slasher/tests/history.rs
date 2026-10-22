@@ -18,7 +18,7 @@ use axiom_types::{
 };
 
 /// A window of 16 epochs in chunks of 4, over rows of 2 validators.
-fn config() -> SlasherConfig {
+const fn config() -> SlasherConfig {
     SlasherConfig {
         history_length: 16,
         chunk_size: 4,
@@ -29,7 +29,11 @@ fn config() -> SlasherConfig {
 }
 
 fn slasher() -> Slasher<Minimal> {
-    Slasher::open(config(), SlasherDatabase::in_memory().expect("memory store")).expect("valid")
+    Slasher::open(
+        config(),
+        SlasherDatabase::in_memory().expect("memory store"),
+    )
+    .expect("valid")
 }
 
 /// A vote of some validators from a source to a target, for a head named by one byte.
@@ -66,9 +70,13 @@ fn header(slot: u64, parent: u8) -> SignedBeaconBlockHeader {
     }
 }
 
-fn run(slasher: &mut Slasher<Minimal>, epoch: u64, votes: &[IndexedVote]) -> Pass {
+fn run<const N: usize>(
+    slasher: &mut Slasher<Minimal>,
+    epoch: u64,
+    votes: [IndexedVote; N],
+) -> Pass {
     for vote in votes {
-        slasher.accept_vote(vote.clone());
+        slasher.accept_vote(vote);
     }
     slasher.process(Epoch(epoch)).expect("pass succeeds")
 }
@@ -97,8 +105,8 @@ fn a_double_vote_is_found_with_both_votes() {
     let mut slasher = slasher();
     let first = vote(&[1, 4], 2, 3, 0xa);
     let second = vote(&[4], 2, 3, 0xb);
-    assert_eq!(run(&mut slasher, 3, &[first.clone()]).slashings, []);
-    let pass = run(&mut slasher, 3, &[second.clone()]);
+    assert_eq!(run(&mut slasher, 3, [first.clone()]).slashings, []);
+    let pass = run(&mut slasher, 3, [second.clone()]);
     assert_eq!(
         pass,
         Pass {
@@ -114,8 +122,8 @@ fn a_repeated_vote_is_no_offence() {
     // The same vote arrives in a gossip aggregate and in a block.
     let mut slasher = slasher();
     let once = vote(&[0, 1], 4, 5, 0xa);
-    run(&mut slasher, 5, &[once.clone()]);
-    let pass = run(&mut slasher, 5, &[once]);
+    run(&mut slasher, 5, [once.clone()]);
+    let pass = run(&mut slasher, 5, [once]);
     assert_eq!(pass.slashings, []);
 }
 
@@ -125,9 +133,9 @@ fn surround_votes_are_found_in_both_directions_with_the_outer_vote_first() {
     let mut slasher = slasher();
     let inner = vote(&[5], 6, 7, 0xa);
     let outer = vote(&[5], 5, 8, 0xb);
-    run(&mut slasher, 8, &[inner.clone()]);
+    run(&mut slasher, 8, [inner.clone()]);
     assert_eq!(
-        run(&mut slasher, 8, &[outer.clone()]).slashings,
+        run(&mut slasher, 8, [outer.clone()]).slashings,
         [Slashing::Attester(ConflictingVotes {
             first: outer,
             second: inner,
@@ -137,9 +145,9 @@ fn surround_votes_are_found_in_both_directions_with_the_outer_vote_first() {
     // Validator 6 votes (2, 9), then (4, 6) which it surrounds.
     let outer = vote(&[6], 2, 9, 0xc);
     let inner = vote(&[6], 4, 6, 0xd);
-    run(&mut slasher, 9, &[outer.clone()]);
+    run(&mut slasher, 9, [outer.clone()]);
     assert_eq!(
-        run(&mut slasher, 9, &[inner.clone()]).slashings,
+        run(&mut slasher, 9, [inner.clone()]).slashings,
         [Slashing::Attester(ConflictingVotes {
             first: outer,
             second: inner,
@@ -154,7 +162,7 @@ fn the_window_keeps_its_first_epoch_and_drops_the_one_before() {
     let pass = run(
         &mut slasher,
         30,
-        &[vote(&[0], 15, 30, 0xa), vote(&[1], 14, 30, 0xa)],
+        [vote(&[0], 15, 30, 0xa), vote(&[1], 14, 30, 0xa)],
     );
     assert_eq!(
         pass,
@@ -167,17 +175,17 @@ fn the_window_keeps_its_first_epoch_and_drops_the_one_before() {
     );
     // Validator 0 then votes (16, 29), inside its first vote: found at the window's edge.
     let inner = vote(&[0], 16, 29, 0xb);
-    assert_eq!(run(&mut slasher, 30, &[inner]).slashings.len(), 1);
+    assert_eq!(run(&mut slasher, 30, [inner]).slashings.len(), 1);
 }
 
 #[test]
 fn a_vote_for_a_future_target_waits_for_its_epoch() {
     // At epoch 3 a vote with target 4 is deferred, then checked at epoch 4.
     let mut slasher = slasher();
-    let early = run(&mut slasher, 3, &[vote(&[2], 3, 4, 0xa)]);
+    let early = run(&mut slasher, 3, [vote(&[2], 3, 4, 0xa)]);
     assert_eq!(early.deferred, 1);
     assert_eq!(slasher.queued(), 1);
-    let due = run(&mut slasher, 4, &[vote(&[2], 3, 4, 0xb)]);
+    let due = run(&mut slasher, 4, [vote(&[2], 3, 4, 0xb)]);
     assert_eq!((due.votes, due.slashings.len()), (2, 1));
 }
 
@@ -190,8 +198,8 @@ fn reused_columns_forget_the_epochs_that_left_the_window() {
     //
     // Without clearing, (33, 34) would look surrounded by a target 14 epochs ahead.
     let mut slasher = slasher();
-    run(&mut slasher, 15, &[vote(&[0], 0, 15, 0xa)]);
-    let pass = run(&mut slasher, 34, &[vote(&[0], 33, 34, 0xb)]);
+    run(&mut slasher, 15, [vote(&[0], 0, 15, 0xa)]);
+    let pass = run(&mut slasher, 34, [vote(&[0], 33, 34, 0xb)]);
     assert_eq!(pass.slashings, []);
     // Pruning deleted the old vote, its record chunk, and its counter.
     assert_eq!(pass.pruned, 4);
@@ -231,7 +239,7 @@ fn a_restarted_slasher_remembers_votes_headers_and_its_epoch() {
         let database = SlasherDatabase::open(&directory.0).expect("opens");
         let mut slasher = Slasher::<Minimal>::open(config(), database).expect("valid");
         slasher.accept_header(first_header.clone());
-        run(&mut slasher, 5, &[first_vote.clone()]);
+        run(&mut slasher, 5, [first_vote.clone()]);
     }
 
     // Phase 2: reopen; the epoch survives and a conflicting vote and header are found.
@@ -242,7 +250,7 @@ fn a_restarted_slasher_remembers_votes_headers_and_its_epoch() {
     let second_header = header(33, 2);
     slasher.accept_header(second_header.clone());
     // An earlier epoch is raised to the remembered one, so the window does not move back.
-    let pass = run(&mut slasher, 2, &[second_vote.clone()]);
+    let pass = run(&mut slasher, 2, [second_vote.clone()]);
     assert_eq!(
         pass.slashings,
         [

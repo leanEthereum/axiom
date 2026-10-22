@@ -9,8 +9,8 @@ use axiom_operation_pool::{PoolError, PoolFork};
 use axiom_slasher::{Slasher, SlasherConfig, SlasherDatabase, Slashing};
 use axiom_ssz::{List, ProgressiveList};
 use axiom_types::{
-    BlsSignature, CommitteeIndex, Epoch, Minimal, Root, ValidatorIndex, altair, bellatrix,
-    capella, deneb, electra, fulu, gloas,
+    BlsSignature, CommitteeIndex, Epoch, Minimal, Root, ValidatorIndex, altair, bellatrix, capella,
+    deneb, electra, fulu, gloas,
     phase0::{self, AttestationData, Checkpoint},
     vote::{ConflictingVotes, IndexedVote},
 };

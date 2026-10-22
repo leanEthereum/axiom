@@ -9,13 +9,7 @@ use axiom_types::{
     phase0::{AttestationData, SignedBeaconBlockHeader},
 };
 
-use crate::{
-    Geometry, SlasherError,
-    chunk::Chunk,
-    records::VoteId,
-    signers::Signers,
-    span::Span,
-};
+use crate::{Geometry, SlasherError, chunk::Chunk, records::VoteId, signers::Signers, span::Span};
 
 /// Key of the layout in the metadata table.
 const GEOMETRY_KEY: &[u8] = b"geometry";
@@ -115,7 +109,9 @@ impl SlasherDatabase {
     /// Records the layout on first use, and refuses any other layout later.
     pub(crate) fn adopt(&self, geometry: Geometry) -> Result<(), SlasherError> {
         match self.store.get(self.meta, GEOMETRY_KEY)? {
-            None => Ok(self.store.put(self.meta, GEOMETRY_KEY, &geometry.encode())?),
+            None => Ok(self
+                .store
+                .put(self.meta, GEOMETRY_KEY, &geometry.encode())?),
             Some(bytes) => {
                 let stored = Geometry::decode(&bytes).ok_or(SlasherError::Corrupt {
                     table: "meta",
@@ -187,13 +183,13 @@ impl SlasherDatabase {
 
     /// The signers of a stored vote.
     pub(crate) fn vote_signers(&self, vote: VoteId) -> Result<Signers, SlasherError> {
-        let bytes = self
-            .store
-            .get(self.signers, &vote.key())?
-            .ok_or(SlasherError::MissingVote {
-                target: vote.target,
-                id: vote.number,
-            })?;
+        let bytes =
+            self.store
+                .get(self.signers, &vote.key())?
+                .ok_or(SlasherError::MissingVote {
+                    target: vote.target,
+                    id: vote.number,
+                })?;
         Signers::decode(&bytes)
     }
 
@@ -202,13 +198,15 @@ impl SlasherDatabase {
         match self.store.get(self.counters, &target.0.to_be_bytes())? {
             None => Ok(0),
             Some(bytes) => {
-                let array: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
-                    SlasherError::Corrupt {
-                        table: "counters",
-                        len: bytes.len(),
-                        reason: "counter of the wrong length",
-                    }
-                })?;
+                let array: [u8; 4] =
+                    bytes
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| SlasherError::Corrupt {
+                            table: "counters",
+                            len: bytes.len(),
+                            reason: "counter of the wrong length",
+                        })?;
                 Ok(u32::from_be_bytes(array))
             }
         }

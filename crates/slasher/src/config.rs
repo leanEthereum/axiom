@@ -202,7 +202,12 @@ impl Geometry {
         if bytes.len() != Self::ENCODED_LEN {
             return None;
         }
-        let mut words = bytes.as_chunks::<8>().0.iter().copied().map(u64::from_be_bytes);
+        let mut words = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .copied()
+            .map(u64::from_be_bytes);
         Some(Self {
             history_length: words.next()?,
             chunk_size: words.next()?,
@@ -219,7 +224,9 @@ mod tests {
     #[test]
     fn the_default_layout_is_valid() {
         // 4096 epochs split into 256 chunks of 16.
-        let geometry = SlasherConfig::default().geometry().expect("defaults are valid");
+        let geometry = SlasherConfig::default()
+            .geometry()
+            .expect("defaults are valid");
         assert_eq!(geometry.history_length(), 4096);
         assert_eq!(geometry.span_cells(), 16 * 1024);
     }
