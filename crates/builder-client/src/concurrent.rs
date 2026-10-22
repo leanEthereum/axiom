@@ -55,30 +55,37 @@ impl<F: Future> Concurrent<F> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use tokio::time::sleep;
+    use tokio::sync::oneshot;
 
     use super::*;
 
     #[test]
     fn outputs_come_in_completion_order() {
-        // Fixture state: three timers of 30, 10, and 20 milliseconds, at positions 0, 1, and 2.
+        // Fixture state: three futures at positions 0, 1, and 2, each waiting on its own signal.
+        // The test fires the signals in the order 1, 2, 0, so no timer decides the order.
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
             .build()
             .unwrap();
         let order = runtime.block_on(async {
-            let mut set = Concurrent::new([30_u64, 10, 20].map(|millis| async move {
-                sleep(Duration::from_millis(millis)).await;
-                millis
-            }));
+            let (senders, receivers): (Vec<_>, Vec<_>) =
+                (0..3).map(|_| oneshot::channel::<u64>()).unzip();
+            let mut set = Concurrent::new(
+                receivers
+                    .into_iter()
+                    .map(|receiver| async move { receiver.await.unwrap() }),
+            );
+            let mut senders: Vec<_> = senders.into_iter().map(Some).collect();
             let mut order = Vec::new();
-            while let Some(output) = set.next().await {
-                order.push(output);
+            for position in [1, 2, 0] {
+                // Only this position's signal fires, so only it can finish next.
+                let sender = senders[position].take().unwrap();
+                sender.send(position as u64 * 10).unwrap();
+                order.push(set.next().await.unwrap());
             }
+            // Every future finished, so the set reports the end.
+            assert_eq!(set.next().await, None);
             order
         });
-        assert_eq!(order, vec![(1, 10), (2, 20), (0, 30)]);
+        assert_eq!(order, vec![(1, 10), (2, 20), (0, 0)]);
     }
 }
