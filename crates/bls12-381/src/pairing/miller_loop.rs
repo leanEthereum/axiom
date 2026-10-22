@@ -77,7 +77,8 @@ impl MillerPoint {
 
     /// Doubles R in place and returns the tangent line at the old R.
     ///
-    /// Adapted from Costello, Lange, and Naehrig, "Faster pairing computations on curves with high-degree twists", eprint 2009/615, as refined in Aranha et al., eprint 2010/354, algorithm 26.
+    /// Adapted from Costello, Lange, and Naehrig, eprint 2009/615.
+    /// Refined in Aranha et al., eprint 2010/354, algorithm 26.
     fn double_step(&mut self) -> Line {
         // Phase 1: Jacobian doubling 2R, with the textbook names in brackets.
         //

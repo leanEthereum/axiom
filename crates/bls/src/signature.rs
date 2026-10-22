@@ -130,7 +130,8 @@ impl Signature {
     /// ```
     ///
     /// The proof-of-possession scheme, section 3.3, does not require distinct messages.
-    /// Only the basic scheme of section 3.1 needs that rule, to stop rogue-key attacks that proofs of possession already stop.
+    /// Only the basic scheme of section 3.1 needs that rule.
+    /// It stops rogue-key attacks, which proofs of possession already stop.
     #[must_use]
     pub fn aggregate_verify(&self, keys: &[&PublicKey], messages: &[&[u8]]) -> bool {
         // The draft rejects empty inputs and mismatched lengths outright.

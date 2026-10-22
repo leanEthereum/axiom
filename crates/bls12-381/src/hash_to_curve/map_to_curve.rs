@@ -3,7 +3,8 @@
 //! # Overview
 //!
 //! Simplified SWU needs a curve y^2 = x^3 + A x + B with A B != 0, which the twist (A = 0) is not.
-//! RFC 9380 section 6.6.3 therefore maps to a 3-isogenous curve E2' with A' B' != 0, then carries the point back.
+//! RFC 9380 section 6.6.3 therefore maps to a 3-isogenous curve E2' with A' B' != 0.
+//! An isogeny then carries the point back.
 //!
 //! The map runs in two steps:
 //!

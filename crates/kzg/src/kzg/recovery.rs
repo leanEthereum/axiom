@@ -137,7 +137,9 @@ impl CellRecovery {
         extended
     }
 
-    /// The polynomial of degree at most 4096 vanishing on every missing cell, construct_vanishing_polynomial in the Fulu spec.
+    /// The polynomial of degree at most 4096 that vanishes on every missing cell.
+    ///
+    /// See `construct_vanishing_polynomial` in the Fulu spec.
     ///
     /// ```text
     ///     z(Y) = prod_{k missing} (Y - h_k^64)        Z(X) = z(X^64)

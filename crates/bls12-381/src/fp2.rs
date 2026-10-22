@@ -30,7 +30,10 @@ const HALF: Fp = Fp::from_montgomery([
 
 /// The exponent (p - 3) / 4, as little-endian limbs.
 ///
-/// For a nonzero t, y = t^{(p-3)/4} gives both t y = t^{(p+1)/4}, a root candidate, and t y^2, the Legendre symbol.
+/// For a nonzero t, one power y = t^{(p-3)/4} gives two values:
+///
+/// - t y = t^{(p+1)/4}, the root candidate.
+/// - t y^2, the Legendre symbol.
 const P_MINUS_3_OVER_4: [u64; 6] = [
     0xee7f_bfff_ffff_eaaa,
     0x07aa_ffff_ac54_ffff,

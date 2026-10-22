@@ -156,7 +156,7 @@ impl Fp12 {
     ///
     /// # Algorithm
     ///
-    /// Granger and Scott, "Faster squaring in the cyclotomic subgroup of sixth degree extensions", eprint 2009/565, section 3.2.
+    /// See Granger and Scott, eprint 2009/565, section 3.2.
     /// View the element as three F_{p^4} coordinates over F_{p^2}, with s = w^3 and s^2 = xi:
     ///
     /// ```text
