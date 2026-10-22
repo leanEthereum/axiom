@@ -100,7 +100,7 @@ impl<P: Preset> Chain<P> {
             message: block,
             signature: BlsSignature::default(),
         };
-        Self::from_anchor(config, genesis, block, database)
+        Self::from_anchor(config, genesis, &block, database)
     }
 
     /// A chain starting from a trusted block and its post-state, as a checkpoint sync does.
@@ -113,7 +113,7 @@ impl<P: Preset> Chain<P> {
     pub fn from_anchor(
         config: ChainConfig,
         state: BeaconState<P>,
-        signed: SignedBeaconBlock<P>,
+        signed: &SignedBeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
         let root = signed.message.hash_tree_root();
@@ -124,7 +124,7 @@ impl<P: Preset> Chain<P> {
         let slot = signed.message.slot;
         // The anchor is trusted, so its signature is kept as given and never checked.
         let chain = Self::with_anchor(config, state, &signed.message, database)?;
-        chain.database.put_block(root, &signed)?;
+        chain.database.put_block(root, signed)?;
         let anchor_state = chain
             .store
             .block_state(&root)

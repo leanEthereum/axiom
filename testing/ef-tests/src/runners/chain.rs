@@ -207,7 +207,7 @@ impl<P: Preset> Runner for ChainReplay<P> {
         let chain = Chain::from_anchor(
             config_of::<P>(),
             anchor_state,
-            SignedBeaconBlock {
+            &SignedBeaconBlock {
                 message: anchor_block,
                 signature: BlsSignature::default(),
             },
