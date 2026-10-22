@@ -284,7 +284,7 @@ mod tests {
             ),
             (StatusCode::OK, Some("GET"))
         );
-        assert!(response.body.is_empty());
+        assert_eq!(response.body, Vec::<u8>::new());
 
         // Another page is refused before routing.
         let other =
