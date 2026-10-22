@@ -21,16 +21,17 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_node::{
-    AnchorSource, Chain, ChainDatabase, EngineConfig, HistorySegment, HistorySettings,
+    AnchorSource, Chain, ChainDatabase, ChainError, EngineConfig, HistorySegment, HistorySettings,
     HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError, Reconstruction,
-    SegmentContext, SegmentError, SnapshotInterval, StorageMode,
+    SegmentContext, SegmentError, SnapshotInterval, StorageMode, WeakSubjectivity,
+    WeakSubjectivityError,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
 use axiom_state_transition::State;
 use axiom_types::{
     BlsSignature, ChainConfig, Epoch, ForkName, Hash32, Minimal, Root, Slot, accessors::CoreState,
-    bellatrix::PowBlock, combined, deneb, electra, fulu,
+    bellatrix::PowBlock, combined, deneb, electra, fulu, phase0::Checkpoint,
 };
 use tokio::{
     runtime::Builder,
@@ -396,6 +397,63 @@ fn a_backfill_segment_must_link_to_the_stored_history_and_be_signed() {
     let start = chain.import_history(&verified).unwrap();
     assert!(start.reaches_genesis());
     assert_eq!(chain.backfill_target().unwrap(), None);
+}
+
+#[test]
+fn a_weak_subjectivity_checkpoint_the_anchor_contradicts_is_refused() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: a checkpoint at block 24, whose state lists the block roots of slots 0 to 23.
+    let mut builder = builder(&vectors);
+    let config = builder.config().clone();
+    let built = BuiltChain::build(&mut builder, 24, &[]);
+    let anchored = || {
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        Chain::from_anchor(
+            config.clone(),
+            built.states[24].beacon().clone(),
+            built.block_at(24),
+            database,
+        )
+        .unwrap()
+    };
+    let trusted = |epoch, root| {
+        WeakSubjectivity(Checkpoint {
+            epoch: Epoch(epoch),
+            root,
+        })
+    };
+
+    // Block 8 starts epoch 1, and the anchor state proves it.
+    assert!(
+        anchored()
+            .with_weak_subjectivity(trusted(1, built.root_at(8)))
+            .is_ok()
+    );
+
+    // Mutation: the operator trusts another root at epoch 1.
+    let error = anchored()
+        .with_weak_subjectivity(trusted(1, Root([9; 32])))
+        .unwrap_err();
+    let ChainError::WeakSubjectivity(error) = error else {
+        panic!("expected a weak subjectivity error, got {error}");
+    };
+    assert_eq!(
+        error,
+        WeakSubjectivityError::Conflict {
+            epoch: Epoch(1),
+            expected: Root([9; 32]),
+            actual: built.root_at(8),
+        }
+    );
+
+    // A checkpoint past the anchor waits for finality to reach it.
+    assert!(
+        anchored()
+            .with_weak_subjectivity(trusted(5, Root([9; 32])))
+            .is_ok()
+    );
 }
 
 /// A node in the test's runtime, with a client for its API.
