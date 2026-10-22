@@ -21,6 +21,7 @@ use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root, Slot,
     accessors::CoreState,
+    combined,
     fulu::{
         AggregationBits, Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState,
         Checkpoint, CommitteeBits, DataColumnSidecar, SignedBeaconBlock, SingleAttestation,
@@ -161,7 +162,8 @@ impl<P: Preset> Chain<P> {
         block: &BeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
-        let mut store = Store::new(config, state, block)?;
+        let anchor = combined::BeaconBlock::Fulu(block.clone());
+        let mut store = Store::new(config, State::new(state), &anchor)?;
         let head = Self::read_head(&mut store)?;
         info!(slot = %head.slot, root = %head.root, "chain anchored");
         Ok(Self {
@@ -319,9 +321,11 @@ impl<P: Preset> Chain<P> {
     ) -> Result<Root, ChainError> {
         let root = block.message.hash_tree_root();
         let timer = self.metrics.block_import_seconds.start_timer();
+        // The store reads blocks of every fork through the combined enum.
+        let any_block = combined::SignedBeaconBlock::Fulu(block.clone());
         if let Err(error) =
             self.store
-                .import_block(block, availability, Verification::Verify, payload)
+                .import_block(&any_block, availability, Verification::Verify, payload)
         {
             // Refused blocks fail early, so timing them would skew the import latency.
             timer.discard();
@@ -461,7 +465,7 @@ impl<P: Preset> Chain<P> {
     /// Fails when the fork choice refuses the vote.
     pub fn on_attestation(&mut self, attestation: &Attestation<P>) -> Result<(), ChainError> {
         self.store
-            .on_attestation(attestation, false, Verification::Verify)?;
+            .on_attestation(&attestation.committee_vote(), false, Verification::Verify)?;
         Ok(())
     }
 
@@ -500,7 +504,7 @@ impl<P: Preset> Chain<P> {
             return Err(invalid("committee index past the slot's committees"));
         }
         committee_bits.set(index, true);
-        let attestation = Attestation {
+        let attestation = Attestation::<P> {
             aggregation_bits,
             data: single.data.clone(),
             signature: single.signature,
@@ -509,7 +513,7 @@ impl<P: Preset> Chain<P> {
         // The signature is checked again against the committee the store resolves.
         // A committee read from a fork with another shuffling then fails instead of crediting the wrong validator.
         self.store
-            .on_attestation(&attestation, false, Verification::Verify)?;
+            .on_attestation(&attestation.committee_vote(), false, Verification::Verify)?;
         Ok(())
     }
 
@@ -542,7 +546,7 @@ impl<P: Preset> Chain<P> {
         slashing: &AttesterSlashing<P>,
     ) -> Result<(), ChainError> {
         self.store
-            .on_attester_slashing(slashing, Verification::Verify)?;
+            .on_attester_slashing(&slashing.conflicting_votes(), Verification::Verify)?;
         Ok(())
     }
 
@@ -678,7 +682,7 @@ impl<P: Preset> Chain<P> {
 
     /// Reads the head and its checkpoints from the store.
     fn read_head(store: &mut Store<P>) -> Result<Head, ChainError> {
-        let root = store.head()?;
+        let root = store.head()?.root;
         let node = *store
             .blocks()
             .get(&root)

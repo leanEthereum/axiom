@@ -170,11 +170,17 @@ impl<P: Preset> BeaconBlock<P> {
     pub fn carries_execution_payload(&self) -> bool {
         match self {
             Self::Phase0(_) | Self::Altair(_) | Self::Gloas(_) => false,
-            Self::Bellatrix(block) => block.body.execution_payload != Default::default(),
-            Self::Capella(block) => block.body.execution_payload != Default::default(),
-            Self::Deneb(block) => block.body.execution_payload != Default::default(),
+            Self::Bellatrix(block) => {
+                block.body.execution_payload != bellatrix::ExecutionPayload::default()
+            }
+            Self::Capella(block) => {
+                block.body.execution_payload != capella::ExecutionPayload::default()
+            }
+            Self::Deneb(block) => {
+                block.body.execution_payload != deneb::ExecutionPayload::default()
+            }
             Self::Electra(block) | Self::Fulu(block) => {
-                block.body.execution_payload != Default::default()
+                block.body.execution_payload != electra::ExecutionPayload::default()
             }
         }
     }
@@ -199,13 +205,48 @@ impl<P: Preset> BeaconBlock<P> {
     #[must_use]
     pub fn committee_votes(&self) -> Vec<CommitteeVote> {
         match self {
-            Self::Phase0(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
-            Self::Altair(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
-            Self::Bellatrix(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
-            Self::Capella(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
-            Self::Deneb(block) => block.body.attestations.iter().map(phase0::Attestation::committee_vote).collect(),
-            Self::Electra(block) | Self::Fulu(block) => block.body.attestations.iter().map(electra::Attestation::committee_vote).collect(),
-            Self::Gloas(block) => block.body.attestations.iter().map(gloas::Attestation::committee_vote).collect(),
+            Self::Phase0(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(phase0::Attestation::committee_vote)
+                .collect(),
+            Self::Altair(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(phase0::Attestation::committee_vote)
+                .collect(),
+            Self::Bellatrix(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(phase0::Attestation::committee_vote)
+                .collect(),
+            Self::Capella(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(phase0::Attestation::committee_vote)
+                .collect(),
+            Self::Deneb(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(phase0::Attestation::committee_vote)
+                .collect(),
+            Self::Electra(block) | Self::Fulu(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(electra::Attestation::committee_vote)
+                .collect(),
+            Self::Gloas(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(gloas::Attestation::committee_vote)
+                .collect(),
         }
     }
 
@@ -213,13 +254,48 @@ impl<P: Preset> BeaconBlock<P> {
     #[must_use]
     pub fn conflicting_votes(&self) -> Vec<ConflictingVotes> {
         match self {
-            Self::Phase0(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
-            Self::Altair(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
-            Self::Bellatrix(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
-            Self::Capella(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
-            Self::Deneb(block) => block.body.attester_slashings.iter().map(phase0::AttesterSlashing::conflicting_votes).collect(),
-            Self::Electra(block) | Self::Fulu(block) => block.body.attester_slashings.iter().map(electra::AttesterSlashing::conflicting_votes).collect(),
-            Self::Gloas(block) => block.body.attester_slashings.iter().map(gloas::AttesterSlashing::conflicting_votes).collect(),
+            Self::Phase0(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(phase0::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Altair(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(phase0::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Bellatrix(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(phase0::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Capella(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(phase0::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Deneb(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(phase0::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Electra(block) | Self::Fulu(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(electra::AttesterSlashing::conflicting_votes)
+                .collect(),
+            Self::Gloas(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(gloas::AttesterSlashing::conflicting_votes)
+                .collect(),
         }
     }
 

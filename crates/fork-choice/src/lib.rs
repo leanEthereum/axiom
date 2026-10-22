@@ -1,4 +1,4 @@
-//! LMD-GHOST and Casper FFG fork choice, over a pure store.
+//! LMD-GHOST and Casper FFG fork choice, over a pure store, for every fork.
 //!
 //! # Overview
 //!
@@ -11,24 +11,40 @@
 //!
 //! The store is a pure state machine.
 //! Time, blocks, votes, and data availability verdicts are inputs, never side effects.
+//!
+//! # Layout
+//!
+//! Phase0 through Fulu share one rule set, with blocks and states read through the combined enums.
+//! Votes enter as fork-agnostic views, converted once from each fork's container.
+//!
+//! Two forks wrote rules of their own, and each has a folder.
+//! Bellatrix checks the merge block against the terminal proof-of-work block.
+//! Gloas weighs each block's payload apart from the block, with a payload committee voting on it.
 
 mod availability;
+pub mod bellatrix;
 mod block_tree;
 mod checkpoints;
 mod committee_weight;
 mod error;
 mod fast_confirmation;
+pub mod gloas;
 mod head;
+mod node;
 mod payload;
 mod proposer_head;
 mod store;
+mod timeliness;
 mod votes;
 
 pub use availability::DataAvailability;
-pub use block_tree::{BlockNode, BlockTree, ExecutionStatus};
+pub use block_tree::{BlockNode, BlockTree, ExecutionStatus, PayloadArrival};
 pub use error::ForkChoiceError;
 pub use fast_confirmation::FastConfirmation;
+pub use gloas::{PayloadGhost, PayloadVotes};
 pub use head::Ghost;
+pub use node::{ForkChoiceNode, NodePayload};
 pub use payload::PayloadStatus;
 pub use store::Store;
-pub use votes::{LatestMessage, Votes};
+pub use timeliness::Timeliness;
+pub use votes::{LatestMessage, VoteOrder, Votes};

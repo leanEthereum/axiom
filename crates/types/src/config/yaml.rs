@@ -1,11 +1,10 @@
 //! Reading a configuration from the YAML files the consensus specs and networks publish.
 
+use axiom_ssz::U256;
 use axiom_yaml::Yaml;
 use thiserror::Error;
 
 use super::{BlobParameters, BlobSchedule, ChainConfig};
-use axiom_ssz::U256;
-
 use crate::{Epoch, ExecutionAddress, Gwei, Hash32, Version};
 
 /// A configuration file that does not describe a valid configuration.

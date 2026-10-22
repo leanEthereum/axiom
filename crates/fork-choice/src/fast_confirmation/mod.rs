@@ -4,11 +4,11 @@ mod safety;
 mod slot_range;
 mod target;
 
-use axiom_types::{Epoch, Hash32, Preset, Root, fulu::Checkpoint};
+use axiom_types::{Epoch, Hash32, Preset, Root, phase0::Checkpoint};
 use safety::Safety;
 use target::CurrentTarget;
 
-use crate::{ForkChoiceError, Store};
+use crate::{BlockNode, ForkChoiceError, Store};
 
 /// What the fast confirmation rule tracks between slots.
 ///
@@ -73,13 +73,13 @@ impl FastConfirmation {
 
     /// Execution block hash of the confirmed block, the engine's safe head.
     ///
-    /// See `get_safe_execution_block_hash` in the Bellatrix fast confirmation spec.
+    /// See `get_safe_execution_block_hash` in the Bellatrix and Gloas fast confirmation specs.
     #[must_use]
     pub fn safe_execution_block_hash<P: Preset>(&self, store: &Store<P>) -> Hash32 {
         store
             .blocks()
             .get(&self.confirmed_root)
-            .map_or(Hash32::ZERO, |node| node.execution_block_hash)
+            .map_or(Hash32::ZERO, BlockNode::safe_execution_block_hash)
     }
 
     /// Rotates the slot heads and the observed checkpoints.
@@ -87,7 +87,7 @@ impl FastConfirmation {
     /// See `update_fast_confirmation_variables` in the phase0 fast confirmation spec.
     fn update_variables<P: Preset>(&mut self, store: &mut Store<P>) -> Result<(), ForkChoiceError> {
         self.previous_slot_head = self.current_slot_head;
-        self.current_slot_head = store.head()?;
+        self.current_slot_head = store.head()?.root;
         let slot = store.current_slot();
         if (slot + 1).is_epoch_start::<P>() {
             self.previous_epoch_greatest_unrealized_checkpoint =

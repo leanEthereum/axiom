@@ -21,7 +21,10 @@ pub use altair::Altair;
 use axiom_gossip::{GossipFork, GossipValidator};
 use axiom_ssz::{Container, Ssz};
 use axiom_state_transition::{Fork, SignedBlock};
-use axiom_types::{ForkName, Preset};
+use axiom_types::{
+    ForkName, Preset,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 pub use bellatrix::Bellatrix;
 pub use capella::Capella;
 pub use deneb::Deneb;
@@ -51,6 +54,18 @@ pub trait SpecFork: Copy + Debug + Default + Send + Sync + 'static {
 
     /// The body of the fork's block, for merkle proofs into it.
     type BeaconBlockBody<P: Preset>: Ssz;
+
+    /// The fork's attestation, as fork choice vectors carry it.
+    type Attestation<P: Preset>: Ssz;
+
+    /// The fork's attester slashing, as fork choice vectors carry it.
+    type AttesterSlashing<P: Preset>: Ssz;
+
+    /// The vote an attestation casts, in the fork-agnostic form the fork choice reads.
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote;
+
+    /// The votes an attester slashing proves conflicting, in the fork-agnostic form.
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes;
 
     /// Applies one operations vector, choosing the operation type and rule by handler.
     ///

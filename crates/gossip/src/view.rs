@@ -7,8 +7,8 @@ use axiom_state_transition::State;
 use axiom_types::{
     ChainConfig, Epoch, Preset, Root, Slot,
     accessors::CoreState,
-    fulu::{AttestationData, Checkpoint},
     gloas::{ExecutionPayloadBid, ExecutionPayloadEnvelope},
+    phase0::{AttestationData, Checkpoint},
 };
 
 use crate::{Detail, GossipError, fork::Verdict};
@@ -108,7 +108,7 @@ impl<'a, P: Preset> ChainView<'a, P> {
     ///
     /// Fails when the head's state is missing.
     pub fn head_state(&mut self) -> Result<State<P>, ForkChoiceError> {
-        let head = self.store.head()?;
+        let head = self.store.head()?.root;
         self.store
             .block_state(&head)
             .cloned()

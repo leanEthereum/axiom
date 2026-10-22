@@ -1,7 +1,10 @@
 //! The vectors of phase0, the launch of the beacon chain.
 
 use axiom_state_transition::phase0::block::AttestationRecord;
-use axiom_types::{ForkName, Preset, phase0};
+use axiom_types::{
+    ForkName, Preset, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::SpecFork;
 use crate::{Applied, Case, Failure, FieldNames, OperationInput};
@@ -62,6 +65,18 @@ impl SpecFork for Phase0 {
         }
     }
     type BeaconBlockBody<P: Preset> = phase0::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = phase0::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = phase0::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn ssz_static<P: Preset>(container: &str, case: &Case) -> Result<(), Failure> {
         match container {

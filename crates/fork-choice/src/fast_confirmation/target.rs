@@ -3,7 +3,7 @@
 use axiom_state_transition::State;
 use axiom_types::{
     Gwei, Preset, Root, ValidatorIndex, accessors::CoreState, combined::BeaconState,
-    fulu::Checkpoint,
+    phase0::Checkpoint,
 };
 
 use super::{safety::Safety, slot_range::SlotRange};
@@ -96,8 +96,11 @@ impl<'a, P: Preset> CurrentTarget<'a, P> {
                 continue;
             }
             if let Some(message) = self.store.votes.counted(ValidatorIndex::from(index))
-                && self.store.checkpoint_block(message.root, message.epoch) == Some(target.root)
-                && message.epoch == target.epoch
+                && self
+                    .store
+                    .checkpoint_block(message.root, message.epoch::<P>())
+                    == Some(target.root)
+                && message.epoch::<P>() == target.epoch
             {
                 score += validator.effective_balance;
             }

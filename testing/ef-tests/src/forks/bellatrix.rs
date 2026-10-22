@@ -6,7 +6,10 @@ use axiom_state_transition::{
     altair::block::{FlaggedAttestation, ParticipantDeposit},
     bellatrix::block::PayloadExecution,
 };
-use axiom_types::{ForkName, Preset, bellatrix};
+use axiom_types::{
+    ForkName, Preset, bellatrix, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Altair, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -53,6 +56,18 @@ impl SpecFork for Bellatrix {
     type SignedBeaconBlock<P: Preset> = bellatrix::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = bellatrix::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = phase0::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = phase0::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

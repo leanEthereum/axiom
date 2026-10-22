@@ -6,7 +6,10 @@ use axiom_state_transition::{
     altair::block::{FlaggedAttestation, ParticipantDeposit},
     capella::block::{PayloadExecution, PayloadWithdrawals},
 };
-use axiom_types::{ForkName, Preset, capella};
+use axiom_types::{
+    ForkName, Preset, capella, phase0,
+    vote::{CommitteeVote, ConflictingVotes},
+};
 
 use super::{Bellatrix, SpecFork};
 use crate::{Applied, Case, Failure, FieldNames, GossipMessage, OperationInput, Verdict};
@@ -56,6 +59,18 @@ impl SpecFork for Capella {
     type SignedBeaconBlock<P: Preset> = capella::SignedBeaconBlock<P>;
 
     type BeaconBlockBody<P: Preset> = capella::BeaconBlockBody<P>;
+
+    type Attestation<P: Preset> = phase0::Attestation<P>;
+
+    type AttesterSlashing<P: Preset> = phase0::AttesterSlashing<P>;
+
+    fn committee_vote<P: Preset>(attestation: &Self::Attestation<P>) -> CommitteeVote {
+        attestation.committee_vote()
+    }
+
+    fn conflicting_votes<P: Preset>(slashing: &Self::AttesterSlashing<P>) -> ConflictingVotes {
+        slashing.conflicting_votes()
+    }
 
     fn gossip<P: Preset>(
         topic: &str,

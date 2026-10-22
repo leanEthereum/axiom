@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axiom_types::{Epoch, Gwei, Preset, Root, accessors::CoreState, combined::BeaconState};
+use axiom_state_transition::EpochCommittees;
+use axiom_types::{
+    CommitteeIndex, Epoch, Gwei, Preset, Root, Slot, accessors::CoreState, combined::BeaconState,
+};
 
 use crate::{ExecutionStatus, Store, committee_weight::CommitteeWeight};
 
@@ -216,8 +219,40 @@ impl<'a, P: Preset> Ghost<'a, P> {
         viable
     }
 
+    /// Whether a block's support is below the reorg threshold.
+    ///
+    /// Equivocators in the committees of the block's slot count toward the block.
+    /// More votes can then only make the block stronger, which keeps the rule monotonic.
+    /// A proposer reorgs a weak late head, and Gloas withholds the boost from a weak parent's rival.
+    ///
+    /// See `is_head_weak` in the phase0 and Gloas fork choice specs.
+    pub(crate) fn is_weak(
+        &self,
+        scores: &HashMap<Root, Gwei>,
+        root: Root,
+        slot: Slot,
+        committees: &EpochCommittees,
+    ) -> bool {
+        let threshold = self.committee_fraction(self.store.config.reorg_head_weight_threshold);
+        let validators = self.balance_source.validators();
+        let mut weight = scores.get(&root).copied().unwrap_or_default();
+        for index in 0..committees.committees_per_slot() {
+            let committee = committees
+                .committee(slot, CommitteeIndex(index))
+                .unwrap_or(&[]);
+            let equivocating: Gwei = committee
+                .iter()
+                .filter(|validator| self.store.votes.is_equivocating(**validator))
+                .filter_map(|validator| validators.get(validator.as_usize()))
+                .map(|validator| validator.effective_balance)
+                .sum();
+            weight += equivocating;
+        }
+        weight < threshold
+    }
+
     /// Whether a leaf's checkpoints agree with the store's.
-    fn is_viable_leaf(&self, root: Root) -> bool {
+    pub(crate) fn is_viable_leaf(&self, root: Root) -> bool {
         let store = self.store;
         let current_epoch = store.current_epoch();
         let justified = store.checkpoints.justified();

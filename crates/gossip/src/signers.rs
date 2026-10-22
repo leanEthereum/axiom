@@ -3,12 +3,13 @@
 use axiom_types::{
     BlsPubkey, BlsSignature, Preset, ValidatorIndex,
     accessors::CoreState,
+    altair::{SignedContributionAndProof, SyncAggregatorSelectionData},
     combined::BeaconState,
     constants::{
         DOMAIN_AGGREGATE_AND_PROOF, DOMAIN_BEACON_ATTESTER, DOMAIN_CONTRIBUTION_AND_PROOF,
         DOMAIN_SELECTION_PROOF, DOMAIN_SYNC_COMMITTEE_SELECTION_PROOF, SYNC_COMMITTEE_SUBNET_COUNT,
     },
-    fulu::{AttestationData, SignedContributionAndProof, SyncAggregatorSelectionData},
+    phase0::AttestationData,
 };
 
 use crate::{

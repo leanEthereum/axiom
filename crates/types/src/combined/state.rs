@@ -188,11 +188,22 @@ impl<P: Preset> BeaconState<P> {
     pub fn is_merge_transition_complete(&self) -> bool {
         match self {
             Self::Phase0(_) | Self::Altair(_) => false,
-            Self::Bellatrix(state) => state.latest_execution_payload_header != Default::default(),
-            Self::Capella(state) => state.latest_execution_payload_header != Default::default(),
-            Self::Deneb(state) => state.latest_execution_payload_header != Default::default(),
-            Self::Electra(state) => state.latest_execution_payload_header != Default::default(),
-            Self::Fulu(state) => state.latest_execution_payload_header != Default::default(),
+            Self::Bellatrix(state) => {
+                state.latest_execution_payload_header
+                    != bellatrix::ExecutionPayloadHeader::default()
+            }
+            Self::Capella(state) => {
+                state.latest_execution_payload_header != capella::ExecutionPayloadHeader::default()
+            }
+            Self::Deneb(state) => {
+                state.latest_execution_payload_header != deneb::ExecutionPayloadHeader::default()
+            }
+            Self::Electra(state) => {
+                state.latest_execution_payload_header != electra::ExecutionPayloadHeader::default()
+            }
+            Self::Fulu(state) => {
+                state.latest_execution_payload_header != fulu::ExecutionPayloadHeader::default()
+            }
             Self::Gloas(_) => true,
         }
     }

@@ -8,7 +8,7 @@ use axiom_types::{
 };
 
 use super::slot_range::SlotRange;
-use crate::{ForkChoiceError, Ghost, Store, committee_weight::CommitteeWeight};
+use crate::{ForkChoiceError, ForkChoiceNode, Ghost, Store, committee_weight::CommitteeWeight};
 
 /// The store, weighed by a balance source, under the head's committee shuffling.
 ///
@@ -136,19 +136,24 @@ impl<'a, P: Preset> Safety<'a, P> {
             return Ok(Gwei::ZERO);
         }
         let range = SlotRange::new(parent_slot + 1, block.slot.saturating_sub(1));
+        // From Gloas on, the parent node keeps the payload status the block builds on.
         let parent = store
             .blocks
-            .ancestor(root, parent_slot)
-            .unwrap_or(block.parent_root);
+            .ancestor_node(ForkChoiceNode::pending(root), parent_slot)
+            .unwrap_or_else(|| ForkChoiceNode::pending(block.parent_root));
         let support = self.node_support_in(parent, range)?;
         let adversarial = self.adversarial_weight_in(range)?;
         Ok(support.saturating_sub(adversarial))
     }
 
-    /// Stake of the committees of a slot range voting exactly for a block.
+    /// Stake of the committees of a slot range whose vote supports exactly a node.
     ///
     /// See `get_node_support_between_slots` in the phase0 fast confirmation spec.
-    fn node_support_in(&self, node: Root, range: SlotRange) -> Result<Gwei, ForkChoiceError> {
+    fn node_support_in(
+        &self,
+        node: ForkChoiceNode,
+        range: SlotRange,
+    ) -> Result<Gwei, ForkChoiceError> {
         let state = self.balance_source;
         let epoch = state.current_epoch();
         let support = self
@@ -160,7 +165,8 @@ impl<'a, P: Preset> Safety<'a, P> {
                     .store
                     .votes
                     .counted(index)
-                    .is_some_and(|message| message.root == node);
+                    .and_then(|message| self.store.blocks.supported_node(message))
+                    .is_some_and(|supported| supported == node);
                 (!validator.slashed && validator.is_active_at(epoch) && votes_for_node)
                     .then_some(validator.effective_balance)
             })

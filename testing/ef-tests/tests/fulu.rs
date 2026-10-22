@@ -129,22 +129,30 @@ fn shuffling_mainnet() {
 
 #[test]
 fn fork_choice_minimal() {
-    Suite::run(&StoreReplay::<Minimal>::fork_choice(), "minimal", "fulu");
+    Suite::run(
+        &StoreReplay::<Minimal, Fulu>::fork_choice(),
+        "minimal",
+        "fulu",
+    );
 }
 
 #[test]
 fn fork_choice_mainnet() {
-    Suite::run(&StoreReplay::<Mainnet>::fork_choice(), "mainnet", "fulu");
+    Suite::run(
+        &StoreReplay::<Mainnet, Fulu>::fork_choice(),
+        "mainnet",
+        "fulu",
+    );
 }
 
 #[test]
 fn chain_replay_minimal() {
-    Suite::run(&ChainReplay::<Minimal>::new(), "minimal", "fulu");
+    Suite::run(&ChainReplay::<Minimal, Fulu>::new(), "minimal", "fulu");
 }
 
 #[test]
 fn chain_replay_mainnet() {
-    Suite::run(&ChainReplay::<Mainnet>::new(), "mainnet", "fulu");
+    Suite::run(&ChainReplay::<Mainnet, Fulu>::new(), "mainnet", "fulu");
 }
 
 #[test]
@@ -196,7 +204,7 @@ fn light_client_mainnet() {
 #[test]
 fn fast_confirmation_minimal() {
     Suite::run(
-        &StoreReplay::<Minimal>::fast_confirmation(),
+        &StoreReplay::<Minimal, Fulu>::fast_confirmation(),
         "minimal",
         "fulu",
     );
@@ -204,10 +212,10 @@ fn fast_confirmation_minimal() {
 
 #[test]
 fn sync_minimal() {
-    Suite::run(&StoreReplay::<Minimal>::sync(), "minimal", "fulu");
+    Suite::run(&StoreReplay::<Minimal, Fulu>::sync(), "minimal", "fulu");
 }
 
 #[test]
 fn sync_mainnet() {
-    Suite::run(&StoreReplay::<Mainnet>::sync(), "mainnet", "fulu");
+    Suite::run(&StoreReplay::<Mainnet, Fulu>::sync(), "mainnet", "fulu");
 }
