@@ -1,5 +1,7 @@
 //! What each fork's rules say about the operations a block may carry.
 
+use std::fmt::Debug;
+
 use axiom_ssz::{Length, List, ProgressiveList};
 use axiom_state_transition::{
     ActiveBalance, BlockError, BlockProcessor, CachedState, Fork, altair::flags::Inclusion,
@@ -30,9 +32,9 @@ use crate::{
 /// Dispatch on the fork happens once, by the caller, at the proposal's boundary.
 pub trait PoolFork: Fork {
     /// The fork's block attestation.
-    type Attestation;
+    type Attestation: Clone + Debug + PartialEq + Eq;
     /// The fork's attester slashing.
-    type AttesterSlashing;
+    type AttesterSlashing: Clone + Debug + PartialEq + Eq;
 
     /// Most attestations a block body holds.
     const ATTESTATION_LIMIT: u64;

@@ -94,7 +94,7 @@ impl<'a> Eth1Vote<'a> {
     /// Whether a block lies between one and two follow distances before the period's start.
     ///
     /// See `is_candidate_block` in the phase0 validator spec.
-    fn is_candidate(self, block: &Eth1Candidate, period_start: u64) -> bool {
+    const fn is_candidate(self, block: &Eth1Candidate, period_start: u64) -> bool {
         let distance = self.config.seconds_per_eth1_block * self.config.eth1_follow_distance;
         block.timestamp.saturating_add(distance) <= period_start
             && block.timestamp.saturating_add(2 * distance) >= period_start
