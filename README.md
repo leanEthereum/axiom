@@ -70,7 +70,8 @@ testing/ef-tests/       the consensus spec test runner
 ```
 
 Pure crates never read a clock, open a socket, or touch a disk.
-`CLAUDE.md` holds the engineering, documentation, and testing standards.
+`AGENTS.md` holds the engineering, documentation, and testing standards, for humans and agents alike.
+`CLAUDE.md` imports it, so Claude Code reads the same rules.
 
 ## Testing
 
