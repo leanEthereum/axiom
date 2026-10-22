@@ -21,6 +21,8 @@ mod frame;
 mod packet;
 mod range_set;
 mod reader;
+mod recovery;
+mod space;
 mod stream;
 #[cfg(test)]
 mod testing;
