@@ -240,6 +240,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-operation-pool"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "proptest",
+ "thiserror",
+]
+
+[[package]]
 name = "axiom-p2p"
 version = "0.1.0"
 dependencies = [

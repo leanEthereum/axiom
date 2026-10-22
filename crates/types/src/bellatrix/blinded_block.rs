@@ -33,7 +33,8 @@ pub enum UnblindError {
 impl UnblindError {
     /// Accepts a payload only when it hashes like the committed header.
     ///
-    /// A header and its payload share one root, so equal roots mean the payload is the one committed.
+    /// A header and its payload share one root.
+    /// So equal roots mean the payload is the committed one.
     pub(crate) fn check_payload(header: &impl Ssz, payload: &impl Ssz) -> Result<(), Self> {
         let committed = header.hash_tree_root();
         let actual = payload.hash_tree_root();
@@ -277,8 +278,10 @@ pub struct SignedBlindedBeaconBlock<P: Preset> {
 }
 
 impl<P: Preset> Container for SignedBlindedBeaconBlock<P> {
-    const FIELDS: &'static [Option<usize>] =
-        &[<BlindedBeaconBlock<P>>::FIXED_SIZE, BlsSignature::FIXED_SIZE];
+    const FIELDS: &'static [Option<usize>] = &[
+        <BlindedBeaconBlock<P>>::FIXED_SIZE,
+        BlsSignature::FIXED_SIZE,
+    ];
 
     fn visit_fields<V: FieldVisitor>(&self, visitor: &mut V) {
         visitor.field(&self.message);
