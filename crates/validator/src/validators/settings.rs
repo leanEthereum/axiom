@@ -75,7 +75,7 @@ impl ProposerSettings {
     /// 3. The validator turns builders off: zero, so the local payload wins.
     /// 4. The client prefers builders: the largest factor.
     /// 5. The client sets a factor: that factor.
-    /// 6. Builders are off for the validator, by its override or the client: zero.
+    /// 6. The client turns builders off: zero, even for a validator that turns them on.
     ///
     /// The neutral factor of 100 is sent as no factor, which the beacon API treats alike.
     #[must_use]
@@ -93,7 +93,7 @@ impl ProposerSettings {
         } else {
             defaults
                 .builder_boost_factor
-                .or_else(|| (!builder).then_some(0))
+                .or_else(|| (!defaults.builder).then_some(0))
         };
         Self {
             fee_recipient: overrides.fee_recipient.unwrap_or(defaults.fee_recipient),
@@ -178,13 +178,14 @@ mod tests {
             builder_proposals: Some(true),
             ..ValidatorSettings::default()
         };
+        // The validator registers with builders, but the client's builders-off rule still sends 0.
         assert_eq!(
             ProposerSettings::resolve(&client, &overrides),
             ProposerSettings {
                 fee_recipient: ExecutionAddress([7; 20]),
                 gas_limit: 30_000_000,
                 builder: true,
-                builder_boost_factor: None,
+                builder_boost_factor: Some(0),
             }
         );
     }
