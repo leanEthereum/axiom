@@ -26,6 +26,7 @@ pub mod multibase;
 pub mod multistream;
 pub mod ping;
 pub mod protobuf;
+pub mod quic;
 mod rng;
 pub mod secure;
 pub mod swarm;
