@@ -1,4 +1,12 @@
 //! GHASH with the x86_64 PCLMULQDQ carry-less multiplier.
+//!
+//! # Overview
+//!
+//! PCLMULQDQ returns the exact 128-bit carry-less product of two 64-bit polynomials.
+//! Karatsuba builds the 256-bit product from three of them, and two folds reduce it.
+//! The result equals the portable field product bit for bit.
+//!
+//! The multiplier takes the same time for every operand, and no branch or address depends on H.
 
 use std::arch::x86_64::{
     __m128i, _mm_and_si128, _mm_clmulepi64_si128, _mm_loadu_si128, _mm_or_si128, _mm_set_epi64x,
@@ -6,7 +14,7 @@ use std::arch::x86_64::{
     _mm_srli_si128, _mm_storeu_si128, _mm_xor_si128,
 };
 
-use super::BLOCK_LEN;
+use crate::aes::BLOCK_LEN;
 
 /// Bit reversal of each nibble value, placed in the high nibble of the byte.
 const REVERSE_INTO_HIGH: [u8; 16] = [

@@ -12,7 +12,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Release mode: the spec suite runs real BLS and KZG over thousands of cases.
+  # Thin LTO over one codegen unit makes each of the sixty test binaries slow to link.
+  # The tests keep full optimization without it, which is all their run time needs.
+  CARGO_PROFILE_RELEASE_LTO: "off"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
+# Job names are required status checks, so a renamed leg leaves a check that never reports.
+# A new platform, group, or feature set goes in a leg of its own.
 jobs:
   fmt:
     name: Format
@@ -37,26 +44,177 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features --locked
 
-  test:
-    name: Test
+  # The consensus spec, BLS, and KZG vectors are large and versioned, so they are cached.
+  # This job fills the cache once, and every leg that needs them only restores it.
+  vectors:
+    name: Vectors
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: testing/vectors
+          key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
+          lookup-only: true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: make -C testing/ef-tests
+
+  # Every test of the workspace, split into groups that build and run in parallel.
+  # The groups are those the test script defines, balanced by build and run time.
+  # Both architectures run every group, so the aarch64 fast paths meet every vector.
+  test-group:
+    name: Test (${{ matrix.platform.name }}, ${{ matrix.group }})
+    needs: vectors
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: x86_64, os: ubuntu-latest }
+          - { name: arm64, os: ubuntu-24.04-arm }
+        group: [gloas, fulu, early-forks, late-forks, standards, rest]
+    env:
+      AXIOM_VECTORS: ${{ github.workspace }}/testing/vectors
+      # Missing vectors fail the run instead of skipping it.
+      AXIOM_REQUIRE_VECTORS: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
-      # The consensus spec, BLS, and KZG vectors are large and versioned, so they are cached.
-      - uses: actions/cache@v4
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache/restore@v4
         with:
           path: testing/vectors
           key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
-      - run: make -C testing/ef-tests
-      # Release mode: the spec suite runs real BLS and KZG over thousands of cases.
-      # Missing vectors fail the run instead of skipping it.
-      - run: cargo test --workspace --all-features --locked --release
-        env:
-          AXIOM_REQUIRE_VECTORS: "1"
+          fail-on-cache-miss: true
+      - run: >-
+          .github/ci/test-binaries.sh run ${{ matrix.group }}
+          ran-${{ matrix.platform.name }}-${{ matrix.group }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ran-${{ matrix.platform.name }}-${{ matrix.group }}
+          path: ran-${{ matrix.platform.name }}-${{ matrix.group }}
+          retention-days: 1
+
+  # The one check to require for the test matrix.
+  # It passes when every group passed, and the groups of each platform ran every test target once.
+  # A group missing from the matrix above leaves its targets unrun, which fails here.
+  test:
+    name: Test
+    needs: test-group
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.test-group.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ran-x86_64-*
+          path: records/x86_64
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ran-arm64-*
+          path: records/arm64
+          merge-multiple: true
+      - run: .github/ci/test-binaries.sh check records/x86_64
+      - run: .github/ci/test-binaries.sh check records/arm64
+
+  # Apple silicon builds every test target and runs every unit test.
+  # The vectors stay on Linux, so the suites that need them skip here.
+  macos:
+    name: Test (macOS arm64, unit)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --workspace --all-features --locked --release --no-run
+      - run: cargo test --workspace --all-features --locked --release --lib --bins
+
+  # Target features the hosted runners may lack, enabled at compile time.
+  # Each leg only builds and lints, since the hardware to run it is not guaranteed.
+  # An explicit target keeps the features off build scripts, which run on the host.
+  build-only:
+    name: Build only (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # VAES and VPCLMULQDQ widen AES and GHASH to 256 and 512 bits.
+          - name: x86_64, avx512f+vaes+vpclmulqdq
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: +avx512f,+avx512vl,+vaes,+vpclmulqdq
+          # SHA3 adds the three-way exclusive or that Keccak rounds use.
+          - name: arm64, sha3
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: +sha3
+    env:
+      RUSTFLAGS: -D warnings -C target-feature=${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: >-
+          cargo clippy --workspace --all-targets --all-features --locked
+          --target ${{ matrix.target }}
+
+  # The reference fallbacks, run on hardware that has the extensions their fast paths use.
+  #
+  # The axiom_portable cfg makes every runtime dispatch pick the portable path.
+  # It is a cfg, not a cargo feature, so the all-features builds above never turn it on.
+  portable:
+    name: Portable (${{ matrix.platform.name }})
+    needs: vectors
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { name: x86_64, os: ubuntu-latest }
+          - { name: arm64, os: ubuntu-24.04-arm }
+    env:
+      RUSTFLAGS: -D warnings --cfg axiom_portable
+      AXIOM_VECTORS: ${{ github.workspace }}/testing/vectors
+      AXIOM_REQUIRE_VECTORS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: testing/vectors
+          key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
+          fail-on-cache-miss: true
+      # The crates with hardware fast paths, unit tests and conformance suites together.
+      - run: >-
+          cargo test --all-features --locked --release
+          -p axiom-crypto -p axiom-snappy -p axiom-bls12-381 -p axiom-bls -p axiom-kzg
 
   docs:
     name: Docs

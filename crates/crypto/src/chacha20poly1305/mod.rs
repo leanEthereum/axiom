@@ -1,7 +1,5 @@
 //! ChaCha20-Poly1305, the AEAD of RFC 8439 that seals libp2p Noise transport messages.
 
-#[cfg(target_arch = "x86_64")]
-mod avx2;
 mod chacha20;
 mod poly1305;
 

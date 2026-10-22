@@ -1,15 +1,21 @@
 //! The ChaCha20 stream cipher of RFC 8439, section 2.4.
+//!
+//! The scalar block function here is the portable reference of every vector path.
 
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+mod aarch64_neon;
+mod backend;
 #[cfg(target_arch = "x86_64")]
-use std::arch::is_x86_feature_detected;
+mod x86_64_avx2;
+
 use std::fmt;
 
-#[cfg(target_arch = "x86_64")]
-use super::avx2;
+use backend::Backend;
+
 use crate::ct::wipe;
 
 /// Bytes in one keystream block.
-pub(crate) const BLOCK_LEN: usize = 64;
+const BLOCK_LEN: usize = 64;
 
 /// The words "expand 32-byte k" in little-endian, per RFC 8439, section 2.3.
 const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
@@ -34,8 +40,9 @@ const COUNTER: usize = 12;
 ///
 /// # Performance
 ///
-/// On x86_64 with AVX2, eight blocks run side by side, one per 32-bit lane.
-/// Tests pin that path to the portable one.
+/// Vector paths run several blocks side by side, one per 32-bit lane.
+/// AVX2 on x86_64 takes eight, NEON on aarch64 takes four.
+/// Tests pin each path to the portable one.
 #[derive(Clone)]
 pub struct ChaCha20 {
     /// The input state of the next block.
@@ -46,12 +53,19 @@ pub struct ChaCha20 {
     used: usize,
     /// Blocks the 32-bit counter can still produce before it wraps.
     remaining_blocks: u64,
+    /// The implementation chosen for this CPU, once, at construction.
+    backend: Backend,
 }
 
 impl ChaCha20 {
     /// A keystream starting at the given block.
     #[must_use]
     pub fn new(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Self {
+        Self::with_backend(key, nonce, counter, Backend::detect())
+    }
+
+    /// A keystream starting at the given block, on a chosen path.
+    fn with_backend(key: &[u8; 32], nonce: &[u8; 12], counter: u32, backend: Backend) -> Self {
         // The four constant words come first.
         let mut state = [0_u32; 16];
         state[..4].copy_from_slice(&SIGMA);
@@ -72,6 +86,7 @@ impl ChaCha20 {
             leftover: [0; BLOCK_LEN],
             used: BLOCK_LEN,
             remaining_blocks: (1 << 32) - u64::from(counter),
+            backend,
         }
     }
 
@@ -110,7 +125,7 @@ impl ChaCha20 {
     }
 
     /// One keystream block, advancing the counter.
-    pub(crate) fn next_block(&mut self) -> [u8; BLOCK_LEN] {
+    pub(super) fn next_block(&mut self) -> [u8; BLOCK_LEN] {
         // Run the block function on the current state, then step the counter.
         let words = Self::block(&self.state);
         self.state[COUNTER] = self.state[COUNTER].wrapping_add(1);
@@ -133,33 +148,15 @@ impl ChaCha20 {
         self.remaining_blocks -= blocks;
     }
 
-    /// XORs whole blocks with the fastest path the CPU supports.
+    /// XORs whole blocks, vector batches first, then one block at a time.
     fn xor_whole_blocks(&mut self, data: &mut [u8]) {
-        // Hardware path first.
-        // It leaves fewer than eight blocks for the portable loop.
-        #[cfg(target_arch = "x86_64")]
-        let data = if is_x86_feature_detected!("avx2") {
-            // Eight blocks at a time in the vector lanes.
-            // The rest falls through.
-            let batch = avx2::BLOCKS * BLOCK_LEN;
-            let split = data.len() - data.len() % batch;
-            let (wide, rest) = data.split_at_mut(split);
-            for chunk in wide.as_chunks_mut::<{ avx2::BLOCKS * BLOCK_LEN }>().0 {
-                // SAFETY: the CPU reports AVX2, the only feature the function enables.
-                unsafe {
-                    avx2::EightBlocks::xor_keystream(&self.state, chunk);
-                }
-                self.state[COUNTER] = self.state[COUNTER].wrapping_add(avx2::BLOCKS as u32);
-            }
-            rest
-        } else {
-            data
-        };
-        self.xor_whole_blocks_portable(data);
+        // The vector path leaves fewer blocks than one batch for the portable loop.
+        let rest = self.backend.xor_batches(&mut self.state, data);
+        self.xor_whole_blocks_portable(rest);
     }
 
     /// XORs whole blocks one at a time, the reference for every vector path.
-    pub(crate) fn xor_whole_blocks_portable(&mut self, data: &mut [u8]) {
+    fn xor_whole_blocks_portable(&mut self, data: &mut [u8]) {
         // One 64-byte keystream block per 64 bytes of data.
         for chunk in data.as_chunks_mut::<BLOCK_LEN>().0 {
             let block = self.next_block();
@@ -184,7 +181,7 @@ impl ChaCha20 {
     /// ```
     ///
     /// Each vertical line of four is one quarter round.
-    pub(crate) fn block(input: &[u32; 16]) -> [u32; 16] {
+    fn block(input: &[u32; 16]) -> [u32; 16] {
         // Rounds run on a copy, so the input stays available for the feed-forward.
         let mut x = *input;
         for _ in 0..10 {
@@ -287,17 +284,18 @@ mod tests {
     fn rfc_8439_encryption() {
         // RFC 8439, section 2.4.2: the "sunscreen" plaintext from counter 1, two blocks and a tail.
         let nonce: [u8; 12] = hex("000000000000004a00000000").try_into().unwrap();
-        let mut data = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.".to_vec();
-        ChaCha20::new(&rfc_key(), &nonce, 1).apply_keystream(&mut data);
-        assert_eq!(
-            data,
-            hex(concat!(
-                "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b",
-                "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8",
-                "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736",
-                "5af90bbf74a35be6b40b8eedf2785e42874d",
-            ))
-        );
+        let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+        let expected = hex(concat!(
+            "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b",
+            "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8",
+            "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736",
+            "5af90bbf74a35be6b40b8eedf2785e42874d",
+        ));
+        for backend in Backend::supported() {
+            let mut data = plaintext.to_vec();
+            ChaCha20::with_backend(&rfc_key(), &nonce, 1, backend).apply_keystream(&mut data);
+            assert_eq!(data, expected);
+        }
     }
 
     #[test]
@@ -336,21 +334,46 @@ mod tests {
         }
 
         #[test]
-        fn dispatched_path_matches_the_portable_path(
+        fn every_path_matches_the_portable_path(
             key in any::<[u8; 32]>(),
             nonce in any::<[u8; 12]>(),
             counter in prop_oneof![any::<u32>().prop_map(|c| c / 2), Just(u32::MAX - 40)],
-            blocks in 0_usize..40,
+            blocks in prop_oneof![prop::sample::select(vec![0, 1, 3, 4, 5, 7, 8, 9, 16, 17]), 0_usize..40],
+            seed in any::<u8>(),
         ) {
-            // Whole blocks through the dispatcher, AVX2 when present, against block-by-block.
+            // Whole blocks around both batch sizes, 4 and 8, against block-by-block.
             // The second counter strategy runs a batch right up to the end of the counter range.
             let blocks = blocks.min((u32::MAX - counter) as usize + 1);
-            let data: Vec<u8> = (0..blocks * BLOCK_LEN).map(|i| (i * 7) as u8).collect();
-            let mut fast = data.clone();
-            ChaCha20::new(&key, &nonce, counter).xor_whole_blocks(&mut fast);
-            let mut reference = data;
-            ChaCha20::new(&key, &nonce, counter).xor_whole_blocks_portable(&mut reference);
-            prop_assert_eq!(fast, reference);
+            let data: Vec<u8> = (0..blocks * BLOCK_LEN).map(|i| (i * 7) as u8 ^ seed).collect();
+            let mut reference = data.clone();
+            ChaCha20::with_backend(&key, &nonce, counter, Backend::portable())
+                .xor_whole_blocks_portable(&mut reference);
+            for backend in Backend::supported() {
+                let mut fast = data.clone();
+                ChaCha20::with_backend(&key, &nonce, counter, backend).xor_whole_blocks(&mut fast);
+                prop_assert_eq!(&fast, &reference);
+            }
+        }
+
+        #[test]
+        fn every_path_streams_like_the_portable_path(
+            key in any::<[u8; 32]>(),
+            data in prop::collection::vec(any::<u8>(), 0..1500),
+            split in any::<prop::sample::Index>(),
+        ) {
+            // Uneven calls through the public stream: partial blocks, then batches, then tails.
+            let at = split.index(data.len() + 1);
+            let mut reference = data.clone();
+            let mut portable = ChaCha20::with_backend(&key, &[9; 12], 1, Backend::portable());
+            portable.apply_keystream(&mut reference[..at]);
+            portable.apply_keystream(&mut reference[at..]);
+            for backend in Backend::supported() {
+                let mut fast = data.clone();
+                let mut cipher = ChaCha20::with_backend(&key, &[9; 12], 1, backend);
+                cipher.apply_keystream(&mut fast[..at]);
+                cipher.apply_keystream(&mut fast[at..]);
+                prop_assert_eq!(&fast, &reference);
+            }
         }
     }
 }

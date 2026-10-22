@@ -1,6 +1,15 @@
-//! The AES-128 key schedule and the portable cipher, the reference for the hardware path.
+//! The AES-128 key schedule and the portable cipher, the fallback and the oracle of every hardware path.
+//!
+//! # Overview
+//!
+//! The S-box is a bitsliced Boolean circuit, so no step indexes a table by a secret byte.
+//! Every step runs the same instructions whatever the key and the data.
 
-use super::state::State;
+mod sbox;
+mod state;
+
+use state::State;
+
 use crate::ct::wipe;
 
 /// Rounds of AES-128, per FIPS 197, section 5.
@@ -9,7 +18,7 @@ pub(super) const ROUNDS: usize = 10;
 /// Round constants of the key schedule, per FIPS 197, section 5.2.
 ///
 /// They are the successive powers of x in GF(2^8).
-const RCON: [u8; ROUNDS] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+pub(super) const RCON: [u8; ROUNDS] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
 
 /// The eleven round keys of one AES-128 key, in the byte order of the state.
 ///
@@ -52,11 +61,15 @@ impl RoundKeys {
             }
             keys[round] = next;
         }
+        Self::from_blocks(keys)
+    }
+
+    /// Round keys a hardware key schedule expanded.
+    pub(super) const fn from_blocks(keys: [[u8; 16]; ROUNDS + 1]) -> Self {
         Self(keys)
     }
 
-    /// The round keys as raw blocks, the form the hardware path loads.
-    #[cfg(target_arch = "x86_64")]
+    /// The round keys as raw blocks, the form the hardware paths load.
     pub(super) const fn as_blocks(&self) -> &[[u8; 16]; ROUNDS + 1] {
         &self.0
     }
@@ -64,9 +77,10 @@ impl RoundKeys {
     /// Encrypts one block in place, per FIPS 197, section 5.1.
     pub(super) fn encrypt_block(&self, block: &mut [u8; 16]) {
         // Initial whitening, then nine full rounds.
+        let keys = self.as_blocks();
         let mut state = State::from_bytes(*block);
-        state.add_round_key(&self.0[0]);
-        for key in &self.0[1..ROUNDS] {
+        state.add_round_key(&keys[0]);
+        for key in &keys[1..ROUNDS] {
             state.sub_bytes();
             state.shift_rows();
             state.mix_columns();
@@ -75,7 +89,7 @@ impl RoundKeys {
         // The last round skips MixColumns.
         state.sub_bytes();
         state.shift_rows();
-        state.add_round_key(&self.0[ROUNDS]);
+        state.add_round_key(&keys[ROUNDS]);
         *block = state.to_bytes();
     }
 }

@@ -276,6 +276,8 @@ Plain text:
   A flow is a numbered list of short steps; a relation is one plain formula per line.
 - Small plain-ASCII tables and one-line formulas are fine, fenced as `text` in `///` docs and indented four spaces in `//` comments.
 - Math is plain ASCII: `_` for subscripts, `^` for exponents, `sum_i`, `prod_k`. No unicode symbols.
+- A list in a comment is a bulleted list, one item per line, never crammed into a sentence.
+  When the code can check the list, it becomes data the code asserts instead of a comment.
 
 Inline comments teach:
 

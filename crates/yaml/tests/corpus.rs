@@ -40,44 +40,51 @@ fn files_with_extension(root: &Path, extension: &str) -> Vec<PathBuf> {
     files
 }
 
+/// Parses and round-trips every YAML file below a directory, returning how many it read.
+fn round_trip_every_file(dir: &Path) -> usize {
+    let files = files_with_extension(dir, "yaml");
+    for path in &files {
+        let text = fs::read_to_string(path).expect("vector file is readable");
+        let value = Yaml::parse(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+
+        // Law: what the emitter writes parses back to the same document.
+        let emitted = value.to_string();
+        assert_eq!(
+            Yaml::parse(&emitted).as_ref(),
+            Ok(&value),
+            "{}: emitted text does not parse back",
+            path.display()
+        );
+    }
+    files.len()
+}
+
 #[test]
 fn parses_every_vector_file_and_round_trips_it() {
     let Some(root) = vectors_dir() else {
+        assert!(
+            env::var_os("AXIOM_REQUIRE_VECTORS").is_none(),
+            "vectors required but missing; run `make -C testing/ef-tests`"
+        );
         println!("skipped: no testing/vectors found; set AXIOM_VECTORS to run the corpus");
         return;
     };
 
-    // Vector roots, plus any extra directories listed in AXIOM_YAML_EXTRA.
-    //
-    //     AXIOM_YAML_EXTRA=specs/configs:specs/presets   (colon-separated)
-    let mut dirs = vec![
-        root.join("consensus-spec-tests/tests"),
-        root.join("bls12-381-tests"),
-        root.join("kzg/tests"),
+    // Each vector root, with its exact number of YAML files.
+    let expected = [
+        ("consensus-spec-tests/tests", 207_098),
+        ("bls12-381-tests", 98),
+        ("kzg/tests", 344),
     ];
+    let actual = expected.map(|(dir, _)| (dir, round_trip_every_file(&root.join(dir))));
+    assert_eq!(actual, expected);
+
+    // Extra directories listed in AXIOM_YAML_EXTRA, colon-separated, parse too.
+    //
+    //     AXIOM_YAML_EXTRA=specs/configs:specs/presets
     if let Some(extra) = env::var_os("AXIOM_YAML_EXTRA") {
-        dirs.extend(env::split_paths(&extra));
-    }
-
-    let mut total = 0;
-    for dir in dirs.iter().filter(|dir| dir.is_dir()) {
-        let files = files_with_extension(dir, "yaml");
-        for path in &files {
-            let text = fs::read_to_string(path).unwrap();
-            let value =
-                Yaml::parse(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-
-            // Law: what the emitter writes parses back to the same document.
-            let emitted = value.to_string();
-            assert_eq!(
-                Yaml::parse(&emitted).as_ref(),
-                Ok(&value),
-                "{}: emitted text does not parse back",
-                path.display()
-            );
+        for dir in env::split_paths(&extra) {
+            round_trip_every_file(&dir);
         }
-        println!("{}: {} files parsed", dir.display(), files.len());
-        total += files.len();
     }
-    println!("total: {total} YAML files parsed and round-tripped");
 }

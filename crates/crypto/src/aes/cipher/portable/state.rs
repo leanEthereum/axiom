@@ -85,7 +85,7 @@ pub(super) mod tests {
     use super::*;
 
     /// Multiplication in GF(2^8) by shift-and-add, branching freely: a test reference only.
-    pub(in crate::aes) fn gf_mul(mut a: u8, mut b: u8) -> u8 {
+    pub(in crate::aes::cipher::portable) fn gf_mul(mut a: u8, mut b: u8) -> u8 {
         let mut product = 0;
         while b != 0 {
             if b & 1 == 1 {

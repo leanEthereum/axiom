@@ -3,7 +3,7 @@
 use super::{outbox::Outbox, peers::Peers, scorer::Scorer};
 use crate::{gossipsub::GossipsubConfig, rng::Rng};
 
-/// What the mesh, the fanout, and gossip share: parameters, randomness, peers, scores, and outbox.
+/// The state the mesh, the fanout, and gossip share.
 ///
 /// Each part owns its own tables and borrows this for everything else.
 #[derive(Debug)]

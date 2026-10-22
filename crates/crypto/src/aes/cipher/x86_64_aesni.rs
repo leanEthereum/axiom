@@ -1,11 +1,19 @@
 //! AES-128 encryption with the x86_64 AES-NI instructions.
+//!
+//! # Overview
+//!
+//! AESENC performs exactly one FIPS 197 round, and AESENCLAST the last one.
+//! The round keys come from the portable key schedule, so both paths share one expansion.
+//!
+//! The instructions take the same time for every key and block, with no table lookups.
+//! No branch or address depends on a secret.
 
 use std::arch::x86_64::{
     __m128i, _mm_aesenc_si128, _mm_aesenclast_si128, _mm_loadu_si128, _mm_storeu_si128,
     _mm_xor_si128,
 };
 
-use super::soft::ROUNDS;
+use super::portable::ROUNDS;
 
 /// Blocks in flight at once.
 ///
@@ -14,8 +22,6 @@ use super::soft::ROUNDS;
 const LANES: usize = 8;
 
 /// The eleven round keys loaded into vector registers.
-///
-/// The round keys come from the portable key schedule, so both paths share one expansion.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct NiSchedule([__m128i; ROUNDS + 1]);
 

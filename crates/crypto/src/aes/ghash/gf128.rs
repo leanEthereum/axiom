@@ -1,4 +1,6 @@
 //! The GHASH field GF(2^128) = GF(2)[x] / (x^128 + x^7 + x^2 + x + 1), per NIST SP 800-38D, section 6.3.
+//!
+//! Its constant-time product is the portable reference of every carry-less multiplier.
 
 use std::ops::{BitXor, Mul};
 
@@ -28,23 +30,21 @@ impl Gf128 {
     pub(super) const fn from_block(block: &[u8; BLOCK_LEN]) -> Self {
         // The first byte's top bit is x^0.
         // As a big-endian integer it is bit 127, so reverse.
-        Self(u128::from_be_bytes(*block).reverse_bits())
+        Self::from_bits(u128::from_be_bytes(*block).reverse_bits())
     }
 
     /// The GCM block that encodes the element.
     pub(super) const fn to_block(self) -> [u8; BLOCK_LEN] {
         // Reversing all 128 bits undoes the entry conversion.
-        self.0.reverse_bits().to_be_bytes()
+        self.to_bits().reverse_bits().to_be_bytes()
     }
 
     /// The element whose coefficients are the bits of the integer.
-    #[cfg(target_arch = "x86_64")]
     pub(super) const fn from_bits(bits: u128) -> Self {
         Self(bits)
     }
 
     /// The coefficients of the element as the bits of an integer.
-    #[cfg(target_arch = "x86_64")]
     pub(super) const fn to_bits(self) -> u128 {
         self.0
     }
@@ -134,7 +134,7 @@ impl WideProduct {
     /// z0 = x0 y0 ^ x1 y3 ^ x2 y2 ^ x3 y1   every term lands on positions 0 mod 4
     /// ```
     ///
-    /// This is the constant-time multiplier of BearSSL.
+    /// The method is due to Thomas Pornin, from his 2017 notes on constant-time GHASH.
     /// It relies on integer multiplication taking constant time, as it does on 64-bit CPUs.
     const fn clmul_64_low(x: u64, y: u64) -> u64 {
         // Masks selecting the bit positions 0, 1, 2 and 3 mod 4.

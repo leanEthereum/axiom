@@ -9,7 +9,13 @@
 //! - plain, single-quoted, and double-quoted scalars, folded across lines,
 //! - comments, and the `---` and `...` document markers.
 //!
-//! Anchors, aliases, tags, block scalars, directives, explicit keys, and multiple documents are rejected.
+//! Every other feature is rejected:
+//!
+//! - anchors and aliases,
+//! - tags and directives,
+//! - block scalars and explicit keys,
+//! - multiple documents.
+//!
 //! A rejection names the feature, so a new vector shape fails loudly instead of misreading.
 //!
 //! Scalars keep their text.
