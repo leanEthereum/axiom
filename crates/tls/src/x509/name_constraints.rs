@@ -57,6 +57,12 @@ impl<'a> NameConstraints<'a> {
         })
     }
 
+    /// The number of subtrees, permitted and excluded.
+    #[must_use]
+    pub fn subtree_count(&self) -> usize {
+        self.permitted.as_ref().map_or(0, Vec::len) + self.excluded.as_ref().map_or(0, Vec::len)
+    }
+
     /// Whether every name a certificate presents satisfies the constraints.
     ///
     /// The names are the subject, unless empty, and each subject alternative name.

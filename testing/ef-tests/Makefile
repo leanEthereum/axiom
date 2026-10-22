@@ -23,6 +23,9 @@ KECCAK_KAT_SHA256 ?= af92d22d23527a0d168a6bbe70b28c840a43bba5bcea828a6d9a5e7ad79
 UNICODE_NORMALIZATION_SHA256 ?= d811971453e7075e1ad56fb1b301eece5aa80757b81f6156e74a1bfb3ae5ceb1
 # The beacon node API's OpenAPI definition, which the API conformance test walks.
 BEACON_APIS_COMMIT ?= 79b9b05e354da4f80d8f18879871af6f0068108d
+# The x509-limbo certificate path validation suite, which includes BetterTLS.
+LIMBO_COMMIT ?= 554528a9b0c0d95e071f55de018326f0b65a8364
+LIMBO_SHA256 ?= 611e337b9fb477b927bae65434650692cb9d2070ff5b05f975d0403510acd4de
 
 VECTORS := ../vectors
 SPEC_DIR := $(VECTORS)/consensus-spec-tests
@@ -39,6 +42,7 @@ BIP39_DIR := $(VECTORS)/bip39
 UNICODE_DIR := $(VECTORS)/unicode
 SPEC_CONFIG_DIR := $(VECTORS)/consensus-specs
 BEACON_APIS_DIR := $(VECTORS)/beacon-apis
+LIMBO_DIR := $(VECTORS)/x509-limbo
 
 SPEC_URL := https://github.com/ethereum/consensus-specs/releases/download/$(CONSENSUS_SPECS_VERSION)
 BLS_URL := https://github.com/ethereum/bls12-381-tests/releases/download/$(BLS_TESTS_VERSION)
@@ -56,12 +60,13 @@ BIP39_VECTORS_URL := https://raw.githubusercontent.com/trezor/python-mnemonic/$(
 UNICODE_NORMALIZATION_URL := https://www.unicode.org/Public/$(UNICODE_VERSION)/ucd/NormalizationTest.txt
 SPEC_SOURCE_URL := https://github.com/ethereum/consensus-specs/archive/refs/tags/$(CONSENSUS_SPECS_VERSION).tar.gz
 BEACON_APIS_URL := https://github.com/ethereum/beacon-APIs/archive/$(BEACON_APIS_COMMIT).tar.gz
+LIMBO_URL := https://raw.githubusercontent.com/C2SP/x509-limbo/$(LIMBO_COMMIT)/limbo.json
 
 .PHONY: all
 
 all: $(SPEC_DIR) $(BLS_DIR) $(KZG_DIR) $(GENERAL_DIR) $(WYCHEPROOF_DIR) $(JSON_SUITE_DIR) $(MULTIBASE_DIR) \
 	$(CAVP_DIR) $(KECCAK_KAT_DIR) $(SLASHING_INTERCHANGE_DIR) $(BIP39_DIR) $(UNICODE_DIR) \
-	$(SPEC_CONFIG_DIR) $(BEACON_APIS_DIR)
+	$(SPEC_CONFIG_DIR) $(BEACON_APIS_DIR) $(LIMBO_DIR)
 
 $(SPEC_DIR):
 	mkdir -p $@
@@ -149,3 +154,10 @@ $(BEACON_APIS_DIR):
 	mkdir -p $@
 	curl --location --fail --silent --show-error $(BEACON_APIS_URL) \
 		| tar -xz -C $@ --strip-components=1 --wildcards '*/beacon-node-oapi.yaml' '*/apis' '*/types' '*/params'
+
+# The x509-limbo suite: one JSON file of path validation cases, pinned by commit and SHA-256.
+$(LIMBO_DIR):
+	rm -rf $@.tmp && mkdir -p $@.tmp
+	curl --location --fail --silent --show-error $(LIMBO_URL) -o $@.tmp/limbo.json
+	echo "$(LIMBO_SHA256)  $@.tmp/limbo.json" | sha256sum --check --quiet
+	mv $@.tmp $@

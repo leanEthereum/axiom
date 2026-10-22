@@ -13,7 +13,8 @@
 //!
 //! - at most six intermediates in a path;
 //! - no certificate twice in one path;
-//! - at most 100 signature checks and 200000 candidate steps per verification.
+//! - at most 100 signature checks and 200000 candidate steps per verification;
+//! - at most 250000 name constraint comparisons per verification.
 //!
 //! Every input is public, so the search may take variable time.
 
@@ -33,6 +34,11 @@ const MAX_SIGNATURES: usize = 100;
 
 /// Most issuer candidates considered in one verification.
 const MAX_STEPS: usize = 200_000;
+
+/// Most name and subtree pairs compared in one verification.
+///
+/// A CA with thousands of subtrees over a leaf with thousands of names is otherwise quadratic.
+const MAX_COMPARISONS: usize = 250_000;
 
 /// Extensions this verifier processes, and so may be critical.
 const KNOWN_EXTENSIONS: [&[u8]; 6] = [
@@ -57,6 +63,8 @@ struct PathSearch<'a, 'c> {
     signatures: usize,
     /// Candidates considered.
     steps: usize,
+    /// Name and subtree pairs compared.
+    comparisons: usize,
 }
 
 impl RootStore {
@@ -92,6 +100,7 @@ impl RootStore {
             now,
             signatures: 0,
             steps: 0,
+            comparisons: 0,
         };
         let mut path = vec![leaf];
         search.extend(&mut path)?;
@@ -156,7 +165,7 @@ impl<'c> PathSearch<'_, 'c> {
         let depth = path.len();
         self.verify_signature(child, key, depth - 1)?;
         if let Some(constraints) = constraints {
-            Self::check_constraints(path, &constraints, depth)?;
+            self.check_constraints(path, &constraints, depth)?;
         }
         Ok(())
     }
@@ -211,7 +220,7 @@ impl<'c> PathSearch<'_, 'c> {
         let key = issuer.public_key().map_err(at)?;
         self.verify_signature(child, &key, depth - 1)?;
         if let Some(name_constraints) = extensions.name_constraints().map_err(at)? {
-            Self::check_constraints(path, &name_constraints, depth)?;
+            self.check_constraints(path, &name_constraints, depth)?;
         }
         Ok(())
     }
@@ -315,6 +324,7 @@ impl<'c> PathSearch<'_, 'c> {
     ///
     /// RFC 5280, section 6.1.3: a self-issued intermediate is exempt; the server's certificate never is.
     fn check_constraints(
+        &mut self,
         path: &[Certificate<'_>],
         constraints: &NameConstraints<'_>,
         depth: usize,
@@ -322,6 +332,18 @@ impl<'c> PathSearch<'_, 'c> {
         for (position, certificate) in path.iter().enumerate() {
             if position > 0 && Self::is_self_issued(certificate) {
                 continue;
+            }
+            let at = |source| CertificateError::X509 { depth, source };
+            let names = certificate
+                .extensions()
+                .subject_alt_names()
+                .map_err(at)?
+                .map_or(0, Iterator::count);
+            self.comparisons = self
+                .comparisons
+                .saturating_add((names + 1).saturating_mul(constraints.subtree_count()));
+            if self.comparisons > MAX_COMPARISONS {
+                return Err(CertificateError::BudgetExceeded);
             }
             let permitted = constraints
                 .permits(certificate)
