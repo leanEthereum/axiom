@@ -2,10 +2,11 @@
 
 use std::{error::Error, fmt, io};
 
-use axiom_execution::EngineError;
+use axiom_execution::{EngineError, JwtError};
 use axiom_fork_choice::ForkChoiceError;
 use axiom_ssz::DecodeError;
 use axiom_store::Error as StoreError;
+use axiom_telemetry::RegistryError;
 use axiom_types::Root;
 
 /// Why the chain refused an input or could not persist it.
@@ -79,8 +80,12 @@ pub enum NodeError {
     Genesis(DecodeError),
     /// Neither a database to resume nor a genesis state was given.
     NoAnchor,
-    /// The engine endpoint or its secret is unusable.
+    /// The engine endpoint is unusable.
     Engine(EngineError),
+    /// The JWT secret file does not hold a 32-byte hex secret.
+    Jwt(JwtError),
+    /// The node's metrics could not be registered.
+    Metrics(RegistryError),
     /// The chain thread stopped before the node did.
     ChainStopped,
 }
@@ -93,6 +98,8 @@ impl fmt::Display for NodeError {
             Self::Genesis(error) => write!(f, "genesis state does not decode: {error}"),
             Self::NoAnchor => f.write_str("no database to resume and no genesis state given"),
             Self::Engine(error) => write!(f, "execution engine: {error}"),
+            Self::Jwt(error) => write!(f, "JWT secret: {error}"),
+            Self::Metrics(error) => write!(f, "metrics: {error}"),
             Self::ChainStopped => f.write_str("chain service stopped unexpectedly"),
         }
     }
@@ -105,6 +112,8 @@ impl Error for NodeError {
             Self::Io { error, .. } => Some(error),
             Self::Genesis(error) => Some(error),
             Self::Engine(error) => Some(error),
+            Self::Jwt(error) => Some(error),
+            Self::Metrics(error) => Some(error),
             Self::NoAnchor | Self::ChainStopped => None,
         }
     }

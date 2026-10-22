@@ -19,6 +19,7 @@ axiom-das.workspace = true
 axiom-fork-choice.workspace = true
 axiom-gossip.workspace = true
 axiom-kzg.workspace = true
+axiom-node.workspace = true
 axiom-light-client.workspace = true
 axiom-snappy.workspace = true
 axiom-ssz.workspace = true

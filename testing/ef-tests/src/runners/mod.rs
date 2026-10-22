@@ -1,6 +1,7 @@
 //! One runner per kind of consensus spec vector.
 
 mod blocks;
+mod chain;
 mod epoch_processing;
 mod fork;
 mod fork_choice;
@@ -16,6 +17,7 @@ mod transition;
 
 use axiom_types::{ChainConfig, Epoch, Preset};
 pub use blocks::Blocks;
+pub use chain::ChainReplay;
 pub use epoch_processing::EpochProcessing;
 pub use fork::Fork;
 pub use fork_choice::StoreReplay;

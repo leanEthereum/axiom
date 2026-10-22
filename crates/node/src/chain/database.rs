@@ -106,6 +106,15 @@ impl<P: Preset> ChainDatabase<P> {
         Ok(Some((checkpoint, state)))
     }
 
+    /// Whether the database holds an anchor to resume from.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails.
+    pub fn has_anchor(&self) -> Result<bool, ChainError> {
+        Ok(self.store.contains_key(self.meta, FINALIZED_KEY)?)
+    }
+
     /// The finalized chain's block root at a slot, if a block was proposed there.
     ///
     /// # Errors
@@ -242,6 +251,9 @@ mod tests {
 
     #[test]
     fn a_fresh_database_has_no_finality() {
-        assert_eq!(Database::in_memory().unwrap().finalized().unwrap(), None);
+        let database = Database::in_memory().unwrap();
+
+        assert!(!database.has_anchor().unwrap());
+        assert_eq!(database.finalized().unwrap(), None);
     }
 }

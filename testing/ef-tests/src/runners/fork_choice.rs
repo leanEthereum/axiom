@@ -122,21 +122,9 @@ impl<P: Preset> StoreReplay<P> {
         Ok(())
     }
 
-    /// Applies one block step, deciding data availability from the step's columns.
-    fn block_step(
-        store: &mut Store<P>,
-        case: &Case,
-        step: &Yaml,
-        verification: Verification,
-        payload_statuses: &HashMap<Hash32, PayloadStatus>,
-    ) -> Result<Result<(), String>, Failure> {
-        let name = step
-            .get("block")
-            .and_then(Yaml::as_str)
-            .ok_or_else(|| Failure::new("block step without a name"))?;
-        let block = case.ssz::<SignedBeaconBlock<P>>(name)?;
+    /// Data availability of a block step, from the columns the step lists.
+    pub(super) fn availability(case: &Case, step: &Yaml) -> Result<DataAvailability, Failure> {
         let config = config_of::<P>();
-
         // No columns listed means nothing to sample; an empty list means sampling failed.
         let availability = match step.get("columns").and_then(Yaml::as_sequence) {
             None => DataAvailability::Available,
@@ -159,6 +147,24 @@ impl<P: Preset> StoreReplay<P> {
                 }
             }
         };
+        Ok(availability)
+    }
+
+    /// Applies one block step, deciding data availability from the step's columns.
+    fn block_step(
+        store: &mut Store<P>,
+        case: &Case,
+        step: &Yaml,
+        verification: Verification,
+        payload_statuses: &HashMap<Hash32, PayloadStatus>,
+    ) -> Result<Result<(), String>, Failure> {
+        let name = step
+            .get("block")
+            .and_then(Yaml::as_str)
+            .ok_or_else(|| Failure::new("block step without a name"))?;
+        let block = case.ssz::<SignedBeaconBlock<P>>(name)?;
+
+        let availability = Self::availability(case, step)?;
 
         let payload = payload_statuses
             .get(&block.message.body.execution_payload.block_hash)
@@ -243,7 +249,7 @@ impl<P: Preset> StoreReplay<P> {
     }
 
     /// The mocked engine verdict of a payload step.
-    fn payload_status(status: &Yaml) -> Result<PayloadStatus, Failure> {
+    pub(super) fn payload_status(status: &Yaml) -> Result<PayloadStatus, Failure> {
         let latest_valid_hash = status
             .get("latest_valid_hash")
             .and_then(Yaml::as_hex_array::<32>)
@@ -260,7 +266,7 @@ impl<P: Preset> StoreReplay<P> {
     }
 
     /// Fails unless two values are equal.
-    fn expect_eq<T: PartialEq + Debug>(
+    pub(super) fn expect_eq<T: PartialEq + Debug>(
         what: &str,
         expected: &T,
         actual: &T,
@@ -275,14 +281,14 @@ impl<P: Preset> StoreReplay<P> {
     }
 
     /// A number scalar.
-    fn scalar(value: &Yaml) -> Result<u64, Failure> {
+    pub(super) fn scalar(value: &Yaml) -> Result<u64, Failure> {
         value
             .as_u64()
             .ok_or_else(|| Failure::new("expected a number"))
     }
 
     /// A number field of a mapping.
-    fn number(value: &Yaml, key: &str) -> Result<u64, Failure> {
+    pub(super) fn number(value: &Yaml, key: &str) -> Result<u64, Failure> {
         value
             .get(key)
             .and_then(Yaml::as_u64)
@@ -290,7 +296,7 @@ impl<P: Preset> StoreReplay<P> {
     }
 
     /// A root field of a mapping.
-    fn root(value: &Yaml, key: &str) -> Result<Root, Failure> {
+    pub(super) fn root(value: &Yaml, key: &str) -> Result<Root, Failure> {
         value
             .get(key)
             .and_then(Yaml::as_hex_array::<32>)
@@ -299,7 +305,7 @@ impl<P: Preset> StoreReplay<P> {
     }
 
     /// A checkpoint mapping.
-    fn checkpoint(value: &Yaml) -> Result<Checkpoint, Failure> {
+    pub(super) fn checkpoint(value: &Yaml) -> Result<Checkpoint, Failure> {
         Ok(Checkpoint {
             epoch: Epoch(Self::number(value, "epoch")?),
             root: Self::root(value, "root")?,

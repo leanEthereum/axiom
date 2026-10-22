@@ -121,24 +121,19 @@ impl<P: Preset> Chain<P> {
 
     /// The chain a database was left with, resuming from its finalized anchor.
     ///
-    /// # Returns
-    ///
-    /// Nothing when the database is empty.
+    /// Blocks after the anchor are not replayed; the node fetches them again from peers.
     ///
     /// # Errors
     ///
-    /// Fails when the database is unreadable or inconsistent.
-    pub fn resume(
-        config: ChainConfig,
-        database: ChainDatabase<P>,
-    ) -> Result<Option<Self>, ChainError> {
-        let Some((checkpoint, state)) = database.finalized()? else {
-            return Ok(None);
-        };
+    /// Fails when the database holds no anchor, or is unreadable or inconsistent.
+    pub fn resume(config: ChainConfig, database: ChainDatabase<P>) -> Result<Self, ChainError> {
+        let (checkpoint, state) = database
+            .finalized()?
+            .ok_or(ChainError::Missing("finalized checkpoint"))?;
         let block = database
             .block(checkpoint.root)?
             .ok_or(ChainError::Missing("finalized block"))?;
-        Self::with_anchor(config, state, &block.message, database).map(Some)
+        Self::with_anchor(config, state, &block.message, database)
     }
 
     /// Builds the store over an anchor and selects the first head.
