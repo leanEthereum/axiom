@@ -197,22 +197,14 @@ impl<P: Preset> Node<P> {
         let (hub, event_sender, streams) = EventHub::new();
         let hub = task::spawn(hub.run());
 
-        // The chain, from the database's anchor or from genesis, with its slasher if enabled.
-        let mut chain = config
-            .attach_slasher(config.open_chain::<P>(chain_config)?)?
-            .with_metrics(metrics.clone())
-            .with_events(event_sender.clone());
-
-        // The network identity fixes which columns the node custodies.
-        let identity = match &config.network {
-            Some(settings) => {
-                let identity = config.open_identity(settings)?;
-                let columns = identity.1.sampling_columns::<P>(chain.config())?;
-                chain = chain.with_custody(columns);
-                Some(identity)
-            }
-            None => None,
-        };
+        // The chain, with its slasher, telemetry, event feed, and the network identity's custody.
+        let (chain, identity) = Box::pin(config.start_chain::<P>(
+            chain_config,
+            clock.as_ref(),
+            metrics.clone(),
+            event_sender.clone(),
+        ))
+        .await?;
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.

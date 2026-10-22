@@ -5,6 +5,7 @@ mod database;
 mod gossip;
 mod handle;
 mod head;
+mod history;
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -15,6 +16,7 @@ pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
 use axiom_beacon_json::ForkedJson;
+use axiom_bls::PublicKey;
 use axiom_fork_choice::{
     DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, NodePayload,
     PayloadArrival, PayloadStatus, Store,
@@ -31,7 +33,7 @@ use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::P
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Gwei, Hash32, Preset,
-    Root, Slot,
+    Root, Slot, ValidatorIndex,
     accessors::{CoreState, ForkState},
     altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
@@ -42,12 +44,20 @@ use axiom_types::{
     phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
-pub use database::ChainDatabase;
+pub use database::{
+    ChainDatabase, Finality, HistoryStart, InvalidInterval, ReconstructionCursor, SchemaVersion,
+    SnapshotInterval, StorageMode,
+};
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
 pub use head::{ChainEvent, ExecutionHead, Head};
+use history::History;
+pub use history::{
+    HistorySegment, ProposerKeys, Reconstruction, SegmentContext, SegmentError, StateReplay,
+    VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
+};
 use tokio::sync::broadcast;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{ApiEvent, ChainError, EventSender, EventTopic, slasher::SlasherFeed};
 
@@ -98,6 +108,8 @@ pub struct Chain<P: Preset> {
     pool: OperationPool<P>,
     /// The slasher's feed, when the node runs one.
     slasher: Option<SlasherFeed<P>>,
+    /// Past states, backfill, and the trusted checkpoint.
+    history: History<P>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -140,11 +152,8 @@ impl<P: Preset> Chain<P> {
             epoch: state.current_epoch(),
             root,
         };
-        let slot = signed.slot();
         // The anchor is trusted, so its signature is kept as given and never checked.
         let mut chain = Self::with_anchor(config, state, &signed.message(), database)?;
-        chain.database.put_block(root, signed)?;
-        chain.offer_bootstrap(root, signed);
         let anchor_state = chain
             .store
             .block_state(&root)
@@ -152,7 +161,9 @@ impl<P: Preset> Chain<P> {
             .beacon();
         chain
             .database
-            .finalize(checkpoint, checkpoint, anchor_state, &[(slot, root)], &[])?;
+            .put_anchor(checkpoint, signed, anchor_state)?;
+        chain.offer_bootstrap(root, signed);
+        chain.persist_light_client(Slot(0))?;
         Ok(chain)
     }
 
@@ -170,7 +181,12 @@ impl<P: Preset> Chain<P> {
         let block = database
             .block(checkpoint.root)?
             .ok_or(ChainError::Missing("finalized block"))?;
-        Self::with_anchor(config, state, &block.message(), database)
+        let mut chain = Self::with_anchor(config, state, &block.message(), database)?;
+        // Light client data settled before the restart is served again at once.
+        chain
+            .database
+            .restore_light_client(&mut chain.light_client)?;
+        Ok(chain)
     }
 
     /// Builds the store over an anchor and selects the first head.
@@ -180,6 +196,7 @@ impl<P: Preset> Chain<P> {
         anchor: &combined::BeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
+        let history = History::new(anchor.hash_tree_root(), anchor.state_root());
         let mut store = Store::new(config, State::new(state), anchor)?;
         let head = Self::read_head(&mut store)?;
         info!(slot = %head.slot, root = %head.root, fork = %anchor.fork_name(), "chain anchored");
@@ -198,6 +215,7 @@ impl<P: Preset> Chain<P> {
             api_events: EventSender::detached(),
             pool: OperationPool::default(),
             slasher: None,
+            history,
         })
     }
 
@@ -556,6 +574,7 @@ impl<P: Preset> Chain<P> {
         }
         // Store before announcing, so any reader told of the block can fetch it.
         self.database.put_block(root, block)?;
+        self.history.note_block(block.message().state_root(), root);
         info!(slot = %block.slot(), fork = %block.fork_name(), %root, "imported block");
         self.announce_block(root, block.slot());
         // Every block's update is kept; the head change below decides whether it is served.
@@ -829,6 +848,192 @@ impl<P: Preset> Chain<P> {
                     | ForkChoiceError::BeforeFinalized { .. }
             )
         )
+    }
+
+    /// The state of the canonical chain at a slot, from genesis or the stored history up to the head.
+    ///
+    /// Since finality the fork choice holds the states.
+    /// Before it, an archive replays them from the nearest snapshot.
+    /// A pruned database holds no state before its finalized anchor, so those slots have none.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, or a stored block does not apply.
+    pub fn state_at_slot(&mut self, slot: Slot) -> Result<Option<State<P>>, ChainError> {
+        self.history
+            .state_at_slot(&self.store, &self.database, self.head.root, slot)
+    }
+
+    /// The state with a root, among those since finality and the finalized ones an archive indexes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, or a stored block does not apply.
+    pub fn state_by_root(&mut self, root: Root) -> Result<Option<State<P>>, ChainError> {
+        self.history
+            .state_by_root(&self.store, &self.database, self.head.root, root)
+    }
+
+    /// The oldest slot backfill must still reach, or nothing once the stored history suffices.
+    ///
+    /// An archive wants every block back to genesis.
+    /// Otherwise the window peers must serve is enough.
+    /// See `MIN_EPOCHS_FOR_BLOCK_REQUESTS` in the phase0 p2p spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn backfill_target(&self) -> Result<Option<Slot>, ChainError> {
+        let Some(start) = self.database.history_start()? else {
+            return Ok(None);
+        };
+        if start.reaches_genesis() {
+            return Ok(None);
+        }
+        let target = if self.database.mode().backfills_to_genesis() {
+            Slot(0)
+        } else {
+            let window = self.config().min_epochs_for_block_requests();
+            Epoch(self.store.current_epoch().0.saturating_sub(window)).start_slot::<P>()
+        };
+        Ok((start.slot > target).then_some(target))
+    }
+
+    /// Decompressed keys of validators, for checking past proposers' signatures.
+    ///
+    /// The registry only grows, so the head state knows every past proposer.
+    /// Unknown indices and invalid keys are left out, and the signature check then refuses.
+    #[must_use]
+    pub fn proposer_keys(&self, indices: impl IntoIterator<Item = ValidatorIndex>) -> ProposerKeys {
+        let Some(state) = self.store.block_state(&self.head.root) else {
+            return ProposerKeys::new();
+        };
+        let validators = state.beacon().validators();
+        let cache = state.pubkeys();
+        indices
+            .into_iter()
+            .filter_map(|index| {
+                let bytes = &validators.get(index.as_usize())?.pubkey;
+                // The cache mirrors a prefix of the registry; keys past it decompress here.
+                let key = if index.as_usize() < cache.len() {
+                    cache.public_key(index, bytes)
+                } else {
+                    PublicKey::from_bytes(&bytes.0).ok()
+                };
+                Some((index, key?))
+            })
+            .collect()
+    }
+
+    /// Stores a verified backfill segment, which extends the stored history towards genesis.
+    ///
+    /// A pending weak subjectivity checkpoint inside the segment is checked first.
+    ///
+    /// # Returns
+    ///
+    /// Where the stored history now begins.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the segment buries another block than the trusted one, or the write fails.
+    pub fn import_history(
+        &mut self,
+        segment: &VerifiedSegment<P>,
+    ) -> Result<HistoryStart, ChainError> {
+        if let Some(checkpoint) = self.history.weak_subjectivity() {
+            let target = checkpoint.slot::<P>();
+            if segment.start.slot <= target && target < segment.extends.slot {
+                // The latest block at or before the epoch's first slot is canonical there.
+                let canonical = segment
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find(|(_, block)| block.slot() <= target)
+                    .map(|(root, _)| *root);
+                if let Some(root) = canonical {
+                    self.history.settle(root)?;
+                }
+            }
+        }
+        self.database.put_history(segment)?;
+        Ok(segment.start)
+    }
+
+    /// Runs one bounded step of rebuilding the snapshots below a checkpoint anchor.
+    ///
+    /// # Arguments
+    ///
+    /// - `budget`: the most slots to replay in this step.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable, a block does not apply, or the genesis state is wrong.
+    pub fn reconstruct_history(&mut self, budget: u64) -> Result<Reconstruction, ChainError> {
+        self.history.reconstruct(&self.database, budget)
+    }
+
+    /// Keeps a genesis state, so an archive can rebuild the states below a checkpoint anchor.
+    ///
+    /// The state must belong to this chain; its root is checked again once backfill reaches genesis.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state is of another chain, or the write fails.
+    pub fn with_genesis(self, genesis: &combined::BeaconState<P>) -> Result<Self, ChainError> {
+        let expected = self.genesis_validators_root();
+        let actual = genesis.genesis_validators_root();
+        if expected != actual {
+            return Err(ChainError::GenesisMismatch { expected, actual });
+        }
+        if self.database.mode().interval().is_some() {
+            self.database.put_snapshot(genesis)?;
+        }
+        Ok(self)
+    }
+
+    /// Holds the chain to a checkpoint the operator trusts.
+    ///
+    /// A checkpoint the stored chain already covers is checked at once.
+    /// A later one is checked when finality passes it, an earlier one when backfill does.
+    /// See the weak subjectivity sync procedure in the phase0 weak subjectivity guide.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the stored chain holds another block at the checkpoint's epoch.
+    pub fn with_weak_subjectivity(
+        mut self,
+        checkpoint: WeakSubjectivity,
+    ) -> Result<Self, ChainError> {
+        self.history.trust(checkpoint);
+        let finalized = self.store.finalized_checkpoint();
+        if checkpoint.0.epoch > finalized.epoch {
+            return Ok(self);
+        }
+        // The finalized checkpoint names the canonical block at its own epoch.
+        if checkpoint.0.epoch == finalized.epoch {
+            self.history.settle(finalized.root)?;
+            return Ok(self);
+        }
+        let state = self
+            .store
+            .block_state(&finalized.root)
+            .ok_or(ChainError::MissingState(finalized.root))?;
+        if checkpoint.check_state(state.beacon())? {
+            self.history.settle(checkpoint.0.root)?;
+            return Ok(self);
+        }
+        let covered = self
+            .database
+            .history_start()?
+            .is_some_and(|start| start.slot <= checkpoint.slot::<P>());
+        if covered
+            && let Some(root) = self
+                .database
+                .canonical_at_or_before(checkpoint.slot::<P>())?
+        {
+            self.history.settle(root)?;
+        }
+        Ok(self)
     }
 
     /// Start of a slot, in milliseconds since the Unix epoch.
@@ -1237,13 +1442,22 @@ impl<P: Preset> Chain<P> {
                     && !blocks.is_ancestor(*root, finalized.root)
             })
             .collect();
+        self.check_weak_subjectivity(finalized, &chain)?;
         let state = self
             .store
             .block_state(&finalized.root)
             .ok_or(ChainError::MissingState(finalized.root))?
             .beacon();
-        self.database
-            .finalize(previous, finalized, state, &chain, &orphans)?;
+        let archive = History::finality_records(&self.store, &self.database, previous, &chain)?;
+        self.database.finalize(&Finality {
+            previous,
+            checkpoint: finalized,
+            state,
+            chain: &chain,
+            orphans: &orphans,
+            snapshots: &archive.snapshots,
+            state_roots: &archive.state_roots,
+        })?;
         // What the finalized state carried out can never go in a block again.
         self.pool.on_finalized(state);
 
@@ -1268,9 +1482,55 @@ impl<P: Preset> Chain<P> {
             self.light_client.settle(*slot);
         }
         self.prune_light_client();
+        let previous_slot = previous.epoch.start_slot::<P>();
+        self.persist_light_client(previous_slot)?;
+
+        // Sidecars past their retention window are no longer served, so they leave the disk.
+        let pruned = self.database.prune_sidecars(self.store.current_epoch())?;
+        if pruned > 0 {
+            debug!(blocks = pruned, "pruned expired sidecars");
+        }
 
         // Only now that the disk agrees, drop the excluded blocks from memory.
         self.store.prune();
+        self.history.prune(&self.store);
+        Ok(())
+    }
+
+    /// Writes the settled light client data, from the period of a slot on.
+    fn persist_light_client(&self, from: Slot) -> Result<(), ChainError> {
+        self.database.put_light_client(
+            &self.light_client,
+            from.sync_committee_period::<P>(),
+            self.light_client_earliest(),
+        )
+    }
+
+    /// Refuses a finality that would bury another block than the trusted one at its epoch.
+    ///
+    /// The chain runs from the new finalized block back, newest first.
+    /// See the weak subjectivity sync procedure in the phase0 weak subjectivity guide.
+    fn check_weak_subjectivity(
+        &mut self,
+        finalized: Checkpoint,
+        chain: &[(Slot, Root)],
+    ) -> Result<(), ChainError> {
+        let Some(checkpoint) = self.history.weak_subjectivity() else {
+            return Ok(());
+        };
+        if finalized.epoch < checkpoint.0.epoch {
+            return Ok(());
+        }
+        let target = checkpoint.slot::<P>();
+        let canonical = match chain.iter().find(|(slot, _)| *slot <= target) {
+            Some((_, root)) => Some(*root),
+            None => self.database.canonical_at_or_before(target)?,
+        };
+        if let Some(root) = canonical {
+            self.history.settle(root).inspect_err(|error| {
+                error!(%error, "finality conflicts with the weak subjectivity checkpoint");
+            })?;
+        }
         Ok(())
     }
 
@@ -1292,6 +1552,12 @@ impl<P: Preset> Chain<P> {
     /// Bootstraps share their committee keys with the states, so each costs little memory.
     /// See the serving ranges of the Altair light client full node spec.
     fn prune_light_client(&mut self) {
+        let earliest = self.light_client_earliest();
+        self.light_client.prune(earliest);
+    }
+
+    /// The oldest slot whose light client data is served.
+    fn light_client_earliest(&self) -> Slot {
         let config = self.store.config();
         let window = config.min_epochs_for_block_requests();
         let earliest = self
@@ -1301,8 +1567,7 @@ impl<P: Preset> Chain<P> {
             .saturating_sub(window)
             .max(config.altair_fork_epoch.0);
         // Without Altair scheduled, the far future epoch saturates rather than overflows.
-        let earliest = Slot(earliest.saturating_mul(P::SLOTS_PER_EPOCH));
-        self.light_client.prune(earliest);
+        Slot(earliest.saturating_mul(P::SLOTS_PER_EPOCH))
     }
 
     /// Blocks on the old head's chain after the common ancestor with the new head.

@@ -12,6 +12,7 @@
 
 mod api;
 mod chain;
+mod checkpoint;
 mod clock;
 mod config;
 mod engine;
@@ -27,10 +28,16 @@ mod tasks;
 
 pub use api::BeaconApi;
 pub use chain::{
-    Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Head, Submission,
+    Chain, ChainDatabase, ChainEvent, ChainHandle, ChainStopped, ExecutionHead, Finality, Head,
+    HistorySegment, HistoryStart, InvalidInterval, ProposerKeys, Reconstruction,
+    ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SnapshotInterval,
+    StateReplay, StorageMode, Submission, VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
+pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig, ProposerSettings};
+pub use config::{
+    AnchorSource, EngineConfig, HistorySettings, NetworkSettings, NodeConfig, ProposerSettings,
+};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
 pub use events::{
