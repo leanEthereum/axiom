@@ -38,6 +38,15 @@ Adding a crate requires a reason recorded in the commit message and in the root 
 
 Errors derive `thiserror::Error`: one `#[error("...")]` message per variant, `#[from]` or `#[source]` for wrapped causes.
 
+An error carries what a reader of the log needs to act on it:
+
+- A count or length mismatch carries both sides: expected and actual.
+- A bound violation carries the value and the bound.
+- A failed check on an item names the item: its index, slot, root, or peer.
+- The message prints every field, so the log line stands on its own.
+
+A variant stays bare only when there is nothing to add, such as an empty input.
+
 ## Crate graph
 
 Dependencies point one way only.
