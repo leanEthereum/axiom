@@ -30,6 +30,15 @@ impl Epoch {
         Slot(self.0 * P::SLOTS_PER_EPOCH)
     }
 
+    /// Epoch an activation or exit decided in this epoch takes effect.
+    ///
+    /// The delay keeps the change outside every committee already derivable from randao.
+    /// See `compute_activation_exit_epoch` in the phase0 beacon chain spec.
+    #[must_use]
+    pub const fn activation_exit_epoch<P: Preset>(self) -> Self {
+        Self(self.0 + 1 + P::MAX_SEED_LOOKAHEAD)
+    }
+
     /// The epoch that many epochs later, or nothing on overflow.
     #[must_use]
     pub const fn checked_add(self, epochs: u64) -> Option<Self> {

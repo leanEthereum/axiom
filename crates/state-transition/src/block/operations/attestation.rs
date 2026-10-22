@@ -1,14 +1,14 @@
 //! Attestations: crediting the votes a block includes.
 
 use axiom_types::{
-    Attestation, AttestationData, Gwei, IndexedAttestation, Preset,
+    Attestation, AttestationData, BeaconState, Gwei, IndexedAttestation, Preset,
     constants::{
         PARTICIPATION_FLAG_WEIGHTS, PROPOSER_WEIGHT, TIMELY_HEAD_FLAG_INDEX,
         TIMELY_SOURCE_FLAG_INDEX, TIMELY_TARGET_FLAG_INDEX, WEIGHT_DENOMINATOR,
     },
 };
 
-use crate::{BlockError, BlockProcessor, Operation, State, StateError};
+use crate::{BlockError, BlockProcessor, Operation, StateError};
 
 impl<P: Preset> Operation<P> for Attestation<P> {
     /// Records an aggregate's votes in the participation flags, and pays the proposer.
@@ -63,8 +63,7 @@ impl<P: Preset> Operation<P> for Attestation<P> {
         }
 
         // Phase 3: flags earned, and the signature.
-        let inclusion_delay = processor.state.beacon.slot - data.slot;
-        let flags = processor.participation_flag_indices(data, inclusion_delay)?;
+        let flags = Inclusion::new(&processor.state.beacon, data).flags()?;
         let attesters = processor.state.attesting_indices(self)?;
         processor.verify_indexed_attestation(&IndexedAttestation {
             attesting_indices: attesters
@@ -78,8 +77,9 @@ impl<P: Preset> Operation<P> for Attestation<P> {
         })?;
 
         // Phase 4: flags and the proposer reward.
-        let base_reward_per_increment =
-            State::<P>::base_reward_per_increment(processor.total_active_balance);
+        let base_reward_per_increment = processor
+            .total_active_balance
+            .base_reward_per_increment::<P>();
         let state = &mut processor.state.beacon;
         let is_current = target_epoch == current_epoch;
         let mut proposer_reward_numerator = 0_u64;
@@ -110,8 +110,28 @@ impl<P: Preset> Operation<P> for Attestation<P> {
     }
 }
 
-impl<P: Preset> BlockProcessor<'_, P> {
-    /// The participation flags a vote earns at an inclusion delay.
+/// A vote included in a block, with the state that judges it.
+#[derive(Debug)]
+struct Inclusion<'a, P: Preset> {
+    /// The state at the including block.
+    state: &'a BeaconState<P>,
+    /// The vote.
+    data: &'a AttestationData,
+    /// Slots between the vote and the including block.
+    delay: u64,
+}
+
+impl<'a, P: Preset> Inclusion<'a, P> {
+    /// A vote included at a state's slot.
+    fn new(state: &'a BeaconState<P>, data: &'a AttestationData) -> Self {
+        Self {
+            state,
+            data,
+            delay: state.slot - data.slot,
+        }
+    }
+
+    /// The participation flags the vote earns at its inclusion delay.
     ///
     /// | flag   | requires                         | inclusion delay       |
     /// |--------|----------------------------------|-----------------------|
@@ -124,12 +144,10 @@ impl<P: Preset> BlockProcessor<'_, P> {
     /// # Errors
     ///
     /// Fails when the source does not match, since such a vote cannot be included at all.
-    pub fn participation_flag_indices(
-        &self,
-        data: &AttestationData,
-        inclusion_delay: u64,
-    ) -> Result<Vec<usize>, BlockError> {
-        let state = &self.state.beacon;
+    fn flags(&self) -> Result<Vec<usize>, BlockError> {
+        let state = self.state;
+        let data = self.data;
+        let inclusion_delay = self.delay;
         let justified = if data.target.epoch == state.current_epoch() {
             &state.current_justified_checkpoint
         } else {

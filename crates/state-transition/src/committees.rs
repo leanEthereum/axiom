@@ -1,11 +1,13 @@
 //! The beacon committees of one epoch.
 
+use std::collections::BTreeSet;
+
 use axiom_types::{
-    BeaconState, CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
+    Attestation, BeaconState, CommitteeIndex, Epoch, Preset, Slot, ValidatorIndex,
     constants::DOMAIN_BEACON_ATTESTER,
 };
 
-use crate::SwapOrNot;
+use crate::{BlockError, SwapOrNot};
 
 /// Every beacon committee of one epoch, computed with one shuffle.
 ///
@@ -86,5 +88,43 @@ impl EpochCommittees {
         let start = (total * position / count) as usize;
         let end = (total * (position + 1) / count) as usize;
         Some(&self.shuffled[start..end])
+    }
+
+    /// Validators an attestation counts, sorted and unique.
+    ///
+    /// The aggregation bits run across the selected committees, back to back.
+    ///
+    /// ```text
+    /// committee bits:    0 1 0 1          committees 1 and 3 are aggregated
+    /// aggregation bits:  [c1 members][c3 members]
+    /// ```
+    ///
+    /// See `get_attesting_indices` in the Electra beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a committee does not exist or the bits run short.
+    pub fn attesting_indices<P: Preset>(
+        &self,
+        attestation: &Attestation<P>,
+    ) -> Result<BTreeSet<ValidatorIndex>, BlockError> {
+        let mut attesters = BTreeSet::new();
+        let mut offset = 0;
+        for index in attestation.committee_indices() {
+            let committee = self
+                .committee(attestation.data.slot, index)
+                .ok_or(BlockError::UnknownCommittee(index))?;
+            for (position, validator) in committee.iter().enumerate() {
+                let bit = attestation
+                    .aggregation_bits
+                    .get(offset + position)
+                    .ok_or(BlockError::AggregationBitsLengthMismatch)?;
+                if bit {
+                    attesters.insert(*validator);
+                }
+            }
+            offset += committee.len();
+        }
+        Ok(attesters)
     }
 }

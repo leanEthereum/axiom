@@ -3,8 +3,8 @@
 use axiom_kzg::{Blob as KzgBlob, Bytes48, CELLS_PER_EXT_BLOB, Cell as KzgCell, CellIndex, Kzg};
 use axiom_ssz::{Container, Ssz, Vector};
 use axiom_types::{
-    BeaconBlockBody, BeaconBlockHeader, Blob, Bytes32, Cell, ColumnIndex, DataColumnSidecar,
-    KzgProof, Preset, SignedBeaconBlock, SignedBeaconBlockHeader,
+    BeaconBlockBody, Blob, Bytes32, Cell, ColumnIndex, DataColumnSidecar, KzgProof, Preset,
+    SignedBeaconBlock, SignedBeaconBlockHeader,
 };
 
 use crate::ColumnError;
@@ -77,13 +77,7 @@ impl<'a, P: Preset> BlockColumns<'a, P> {
 
         // The parts every sidecar shares.
         let header = SignedBeaconBlockHeader {
-            message: BeaconBlockHeader {
-                slot: self.block.message.slot,
-                proposer_index: self.block.message.proposer_index,
-                parent_root: self.block.message.parent_root,
-                state_root: self.block.message.state_root,
-                body_root: body.hash_tree_root(),
-            },
+            message: self.block.message.header(),
             signature: self.block.signature,
         };
         let inclusion_proof = Self::inclusion_proof(body)?;

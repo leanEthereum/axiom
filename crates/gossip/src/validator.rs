@@ -1,6 +1,6 @@
 //! The gossip rules, one method per topic, in the spec's order.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use axiom_bls::{PublicKey, Signature};
 use axiom_das::ColumnSidecar;
@@ -446,19 +446,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     ///
     /// Ignores or rejects as the spec's rules say.
     pub fn attester_slashing(&mut self, slashing: &AttesterSlashing<P>) -> Verdict {
-        let first: HashSet<ValidatorIndex> = slashing
-            .attestation_1
-            .attesting_indices
-            .iter()
-            .copied()
-            .collect();
-        let both: Vec<ValidatorIndex> = slashing
-            .attestation_2
-            .attesting_indices
-            .iter()
-            .copied()
-            .filter(|index| first.contains(index))
-            .collect();
+        let both = slashing.common_signers();
         if both
             .iter()
             .all(|index| self.seen.attester_slashing_indices.contains(index))

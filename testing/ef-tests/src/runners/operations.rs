@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use axiom_ssz::Ssz;
 use axiom_state_transition::{
-    BlockError, BlockProcessor, KnownVerdict, Operation, State, Verification,
+    BlockError, BlockProcessor, KnownVerdict, Operation, PayloadExecution, State, Verification,
 };
 use axiom_types::{
     Attestation, AttesterSlashing, BeaconBlock, BeaconBlockBody, BeaconState, ConsolidationRequest,
@@ -89,11 +89,11 @@ impl<P: Preset> Runner for Operations<P> {
                     &mut processor,
                 )?,
                 "block_header" => Self::input::<BeaconBlock<P>>(case, "block")?
-                    .and_then(|block| processor.process_block_header(&block)),
+                    .and_then(|block| processor.apply(&block.header())),
                 "sync_aggregate" => Self::input::<SyncAggregate<P>>(case, "sync_aggregate")?
-                    .and_then(|aggregate| processor.process_sync_aggregate(&aggregate)),
+                    .and_then(|aggregate| processor.apply(&aggregate)),
                 "withdrawals" => Self::input::<ExecutionPayload<P>>(case, "execution_payload")?
-                    .and_then(|payload| processor.process_withdrawals(&payload)),
+                    .and_then(|payload| processor.apply(payload.withdrawals.as_slice())),
                 "execution_payload" => {
                     let valid = case
                         .yaml("execution.yaml")?
@@ -101,7 +101,7 @@ impl<P: Preset> Runner for Operations<P> {
                         .and_then(Yaml::as_bool)
                         .ok_or_else(|| Failure::new("execution.yaml has no verdict"))?;
                     Self::input::<BeaconBlockBody<P>>(case, "body")?.and_then(|body| {
-                        processor.process_execution_payload(&body, &KnownVerdict(valid))
+                        processor.apply(&PayloadExecution::new(&body, &KnownVerdict(valid)))
                     })
                 }
                 other => return Err(Failure(format!("unsupported operation {other}"))),

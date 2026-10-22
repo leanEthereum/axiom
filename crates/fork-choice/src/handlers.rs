@@ -1,7 +1,5 @@
 //! The store's event handlers: blocks, attestations, and attester slashings.
 
-use std::collections::HashSet;
-
 use axiom_ssz::Ssz;
 use axiom_state_transition::{
     BlockProcessor, EpochProcessor, EpochStep, State, StateError, Verification,
@@ -281,14 +279,7 @@ impl<P: Preset> Store<P> {
             .and_then(|()| processor.finish())
             .map_err(ForkChoiceError::InvalidAttestation)?;
 
-        let second: HashSet<_> = slashing.attestation_2.attesting_indices.iter().collect();
-        let both = slashing
-            .attestation_1
-            .attesting_indices
-            .iter()
-            .filter(|index| second.contains(index))
-            .copied();
-        self.votes.mark_equivocating(both);
+        self.votes.mark_equivocating(slashing.common_signers());
         Ok(())
     }
 

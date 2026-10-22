@@ -64,25 +64,26 @@ impl<P: Preset> Runner for Rewards<P> {
         let config = config_of::<P>();
         let mut state = State::new(case.ssz::<BeaconState<P>>("pre")?);
         let processor = EpochProcessor::new(&mut state, &config);
+        let participation = processor.participation();
         Self::compare(
             case,
             "source_deltas",
-            &processor.flag_index_deltas(TIMELY_SOURCE_FLAG_INDEX),
+            &Deltas::flag_index(&participation, TIMELY_SOURCE_FLAG_INDEX),
         )?;
         Self::compare(
             case,
             "target_deltas",
-            &processor.flag_index_deltas(TIMELY_TARGET_FLAG_INDEX),
+            &Deltas::flag_index(&participation, TIMELY_TARGET_FLAG_INDEX),
         )?;
         Self::compare(
             case,
             "head_deltas",
-            &processor.flag_index_deltas(TIMELY_HEAD_FLAG_INDEX),
+            &Deltas::flag_index(&participation, TIMELY_HEAD_FLAG_INDEX),
         )?;
         Self::compare(
             case,
             "inactivity_penalty_deltas",
-            &processor.inactivity_penalty_deltas(),
+            &Deltas::inactivity_penalties(&participation, &config),
         )
     }
 }

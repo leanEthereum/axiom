@@ -1,16 +1,17 @@
 //! A beacon state paired with the caches that make processing fast.
 
-mod accessors;
-mod mutators;
+use std::{collections::BTreeSet, sync::Arc};
 
-use std::sync::Arc;
-
+use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
-use axiom_types::{BeaconState, ChainConfig, Epoch, Preset, Root, SignedBeaconBlock, Slot};
+use axiom_types::{
+    Attestation, BeaconState, BlsPubkey, ChainConfig, CommitteeIndex, Epoch, Gwei, Preset, Root,
+    SignedBeaconBlock, Slot, ValidatorIndex, electra,
+};
 
 use crate::{
-    BlockProcessor, EpochCommittees, EpochProcessor, ExecutionEngine, PubkeyCache, StateError,
-    TransitionError, Verification,
+    BlockError, BlockProcessor, EpochCommittees, EpochProcessor, ExecutionEngine, PubkeyCache,
+    StateError, TransitionError, Verification, sampling::WeightedSampler,
 };
 
 /// A beacon state with its derived caches.
@@ -20,7 +21,7 @@ use crate::{
 /// The beacon state is the consensus object, defined field by field by the spec.
 /// The caches are derived from it, and never change its meaning or its root.
 ///
-/// Every spec accessor and mutator that benefits from a cache lives here.
+/// The accessors that benefit from a cache live here.
 ///
 /// # Invariants
 ///
@@ -62,6 +63,33 @@ impl<P: Preset> State<P> {
             committees: Vec::new(),
             verification: Verification::Verify,
         }
+    }
+
+    /// Upgrades an Electra state to Fulu, at the first slot of the fork epoch.
+    ///
+    /// Every field carries over, and the fork version advances.
+    /// The new proposer lookahead is computed from the upgraded state itself.
+    ///
+    /// See `upgrade_to_fulu` and `initialize_proposer_lookahead` in the Fulu fork spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an epoch of the lookahead has no active validator.
+    pub fn upgrade_from_electra(
+        pre: electra::BeaconState<P>,
+        config: &ChainConfig,
+    ) -> Result<Self, StateError> {
+        let mut state = Self::new(pre.upgrade_to_fulu(config.fulu_fork_version));
+        let epoch = state.beacon.current_epoch();
+        // The lookahead spans the current epoch and the next MIN_SEED_LOOKAHEAD epochs.
+        let mut lookahead = Vec::with_capacity(state.beacon.proposer_lookahead.len());
+        for offset in 0..=P::MIN_SEED_LOOKAHEAD {
+            lookahead.extend(WeightedSampler::proposers(&state.beacon, epoch + offset)?);
+        }
+        state.beacon.proposer_lookahead = lookahead
+            .try_into()
+            .map_err(|_| StateError::InvalidSyncCommittee)?;
+        Ok(state)
     }
 
     /// Sets whether later transitions check signatures.
@@ -174,6 +202,118 @@ impl<P: Preset> State<P> {
                 computed,
             });
         }
+        Ok(())
+    }
+
+    /// Committees of the previous, current, or next epoch.
+    ///
+    /// # Errors
+    ///
+    /// Fails for any other epoch, whose committees are not fixed yet or no longer kept.
+    pub fn committees(&mut self, epoch: Epoch) -> Result<Arc<EpochCommittees>, StateError> {
+        self.check_committee_epoch(epoch)?;
+        if let Some(found) = self
+            .committees
+            .iter()
+            .find(|cached| cached.epoch() == epoch)
+        {
+            return Ok(Arc::clone(found));
+        }
+        let computed = Arc::new(EpochCommittees::compute(&self.beacon, epoch));
+        self.committees.push(Arc::clone(&computed));
+        Ok(computed)
+    }
+
+    /// Validators an attestation counts, sorted and unique.
+    ///
+    /// See `get_attesting_indices` in the Electra beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target epoch's committees are not kept, or the bits do not fit them.
+    pub fn attesting_indices(
+        &mut self,
+        attestation: &Attestation<P>,
+    ) -> Result<BTreeSet<ValidatorIndex>, BlockError> {
+        self.committees(attestation.data.target.epoch)?
+            .attesting_indices(attestation)
+    }
+
+    /// The beacon committee at a slot and index.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slot's epoch is not cached or the committee does not exist.
+    pub fn beacon_committee(
+        &mut self,
+        slot: Slot,
+        index: CommitteeIndex,
+    ) -> Result<Vec<ValidatorIndex>, BlockError> {
+        let committees = self.committees(slot.epoch::<P>())?;
+        committees
+            .committee(slot, index)
+            .map(<[ValidatorIndex]>::to_vec)
+            .ok_or(BlockError::UnknownCommittee(index))
+    }
+
+    /// Decompressed key of a validator.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator does not exist or its key does not decompress.
+    pub fn public_key(&mut self, index: ValidatorIndex) -> Result<PublicKey, BlockError> {
+        let validator = self
+            .beacon
+            .validators
+            .get(index.as_usize())
+            .ok_or(StateError::UnknownValidator(index))?;
+        self.pubkeys.sync(&self.beacon.validators);
+        self.pubkeys
+            .public_key(index, &validator.pubkey)
+            .ok_or(BlockError::MalformedSignature)
+    }
+
+    /// Index of the validator with a key.
+    pub fn validator_index(&mut self, pubkey: &BlsPubkey) -> Option<ValidatorIndex> {
+        self.pubkeys.sync(&self.beacon.validators);
+        self.pubkeys.index_of(pubkey)
+    }
+
+    /// Adds to a validator's balance.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator does not exist or the balance overflows.
+    pub fn increase_balance(
+        &mut self,
+        index: ValidatorIndex,
+        delta: Gwei,
+    ) -> Result<(), StateError> {
+        let balance = self
+            .beacon
+            .balances
+            .get_mut(index.as_usize())
+            .ok_or(StateError::UnknownValidator(index))?;
+        *balance = balance.checked_add(delta).ok_or(StateError::Overflow)?;
+        Ok(())
+    }
+
+    /// Takes from a validator's balance, stopping at zero.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator does not exist.
+    pub fn decrease_balance(
+        &mut self,
+        index: ValidatorIndex,
+        delta: Gwei,
+    ) -> Result<(), StateError> {
+        let balance = self
+            .beacon
+            .balances
+            .get_mut(index.as_usize())
+            .ok_or(StateError::UnknownValidator(index))?;
+        *balance = balance.saturating_sub(delta);
         Ok(())
     }
 

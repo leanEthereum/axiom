@@ -80,13 +80,7 @@ impl BeaconRoutes {
                 let (root, block) = Self::find_block(chain, id)?;
                 let message = &block.message;
                 let canonical = chain.canonical_root(message.slot)? == Some(root);
-                let header = BeaconBlockHeader {
-                    slot: message.slot,
-                    proposer_index: message.proposer_index,
-                    parent_root: message.parent_root,
-                    state_root: message.state_root,
-                    body_root: message.body.hash_tree_root(),
-                };
+                let header = message.header();
                 let data = Reply::object([
                     ("root", Reply::text(&root)),
                     ("canonical", canonical.into()),
