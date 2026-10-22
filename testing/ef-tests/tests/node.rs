@@ -380,38 +380,34 @@ fn a_node_finds_its_peer_through_discovery() {
 }
 
 #[test]
-fn a_node_starts_from_a_checkpoint() {
+fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
     let Some(fixture) = Fixture::load("checkpoint") else {
         return;
     };
 
-    // Fixture state: block 2 and its post-state, computed by running both blocks on genesis.
+    // Fixture state: block 1 and its post-state, a checkpoint in the middle of epoch 0.
     //
-    //     genesis ──block 1──> state 1 ──block 2──> state 2      checkpoint = (block 2, state 2)
+    //     genesis ──block 1──> state 1        checkpoint = (block 1, state 1), slot 1
+    //                              └──block 2──> published after the node starts
     let genesis =
         BeaconState::<Minimal>::decode(&fixture.case.ssz_bytes("anchor_state").unwrap()).unwrap();
+    let anchor = fixture
+        .case
+        .ssz::<SignedBeaconBlock<Minimal>>(BLOCKS[0])
+        .unwrap();
     let mut state = State::new(genesis);
-    let mut last = None;
-    for name in BLOCKS {
-        let block = fixture
-            .case
-            .ssz::<SignedBeaconBlock<Minimal>>(name)
-            .unwrap();
-        state
-            .state_transition(
-                &config_of::<Minimal>(),
-                &block,
-                Verification::Verify,
-                &KnownVerdict(true),
-            )
-            .unwrap();
-        last = Some(block);
-    }
-    let block = last.unwrap();
+    state
+        .state_transition(
+            &config_of::<Minimal>(),
+            &anchor,
+            Verification::Verify,
+            &KnownVerdict(true),
+        )
+        .unwrap();
     let state_path = fixture.directory.join("checkpoint_state.ssz");
     let block_path = fixture.directory.join("checkpoint_block.ssz");
     fs::write(&state_path, state.beacon().encode()).unwrap();
-    fs::write(&block_path, block.encode()).unwrap();
+    fs::write(&block_path, anchor.encode()).unwrap();
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -426,8 +422,20 @@ fn a_node_starts_from_a_checkpoint() {
         };
         let node = TestNode::start_with(&fixture, config, address).await;
 
-        // The checkpoint block is the head, with no block before it to replay.
+        // A child of the mid-epoch anchor imports and becomes the head.
+        let response = node.publish(&fixture.contents(BLOCKS[1])).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
         assert_eq!(node.head_root().await.as_deref(), Some(HEAD));
+
+        // The anchor is served exactly as given, signature included.
+        let root = anchor.message.hash_tree_root();
+        let request = Request::new(Method::Get, &format!("/eth/v2/beacon/blocks/{root}"))
+            .with_header("accept", "application/octet-stream");
+        let served = node.client.send(&request).await.unwrap();
+        assert_eq!(
+            SignedBeaconBlock::<Minimal>::decode(&served.body).unwrap(),
+            anchor
+        );
         node.stop().await;
     });
 }

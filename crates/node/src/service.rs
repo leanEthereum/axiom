@@ -356,12 +356,7 @@ impl<P: Preset> Node<P> {
                     Self::read_ssz(block, "reading the checkpoint block")?;
                 // The store refuses a block whose state root is not this state's.
                 info!(slot = %block.message.slot, "starting from a checkpoint");
-                Ok(Chain::from_anchor(
-                    chain_config,
-                    state,
-                    block.message,
-                    database,
-                )?)
+                Ok(Chain::from_anchor(chain_config, state, block, database)?)
             }
         }
     }

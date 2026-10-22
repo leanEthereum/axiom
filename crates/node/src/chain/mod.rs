@@ -95,6 +95,11 @@ impl<P: Preset> Chain<P> {
             state_root: genesis.hash_tree_root(),
             body: BeaconBlockBody::default(),
         };
+        // Genesis has no proposer, so its block carries no signature.
+        let block = SignedBeaconBlock {
+            message: block,
+            signature: BlsSignature::default(),
+        };
         Self::from_anchor(config, genesis, block, database)
     }
 
@@ -108,20 +113,16 @@ impl<P: Preset> Chain<P> {
     pub fn from_anchor(
         config: ChainConfig,
         state: BeaconState<P>,
-        block: BeaconBlock<P>,
+        signed: SignedBeaconBlock<P>,
         database: ChainDatabase<P>,
     ) -> Result<Self, ChainError> {
-        let root = block.hash_tree_root();
+        let root = signed.message.hash_tree_root();
         let checkpoint = Checkpoint {
             epoch: state.current_epoch(),
             root,
         };
-        let slot = block.slot;
-        // The anchor's signature is never checked, since the anchor is trusted.
-        let signed = SignedBeaconBlock {
-            message: block,
-            signature: BlsSignature::default(),
-        };
+        let slot = signed.message.slot;
+        // The anchor is trusted, so its signature is kept as given and never checked.
         let chain = Self::with_anchor(config, state, &signed.message, database)?;
         chain.database.put_block(root, &signed)?;
         let anchor_state = chain

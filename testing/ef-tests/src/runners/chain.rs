@@ -13,8 +13,8 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_node::{Chain, ChainDatabase};
 use axiom_state_transition::EpochCommittees;
 use axiom_types::{
-    Attestation, AttesterSlashing, BeaconBlock, BeaconState, CommitteeIndex, Hash32, Preset,
-    SignedBeaconBlock, SingleAttestation,
+    Attestation, AttesterSlashing, BeaconBlock, BeaconState, BlsSignature, CommitteeIndex, Hash32,
+    Preset, SignedBeaconBlock, SingleAttestation,
 };
 use axiom_yaml::Yaml;
 
@@ -204,8 +204,16 @@ impl<P: Preset> Runner for ChainReplay<P> {
         let anchor_block = case.ssz::<BeaconBlock<P>>("anchor_block")?;
         let database = ChainDatabase::open(&directory.0)
             .map_err(|error| Failure(format!("database: {error}")))?;
-        let chain = Chain::from_anchor(config_of::<P>(), anchor_state, anchor_block, database)
-            .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
+        let chain = Chain::from_anchor(
+            config_of::<P>(),
+            anchor_state,
+            SignedBeaconBlock {
+                message: anchor_block,
+                signature: BlsSignature::default(),
+            },
+            database,
+        )
+        .map_err(|error| Failure(format!("anchor rejected: {error}")))?;
 
         let chain = Self::replay(case, chain)?;
         let finalized = chain.head().finalized;

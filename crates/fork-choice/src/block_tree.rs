@@ -123,14 +123,17 @@ impl BlockTree {
 
     /// The ancestor of a block at a slot: the block itself or its latest ancestor at or before it.
     ///
-    /// Returns nothing when the walk leaves the tree.
+    /// The anchor stands for every slot before it, since all history behind it is finalized.
+    /// A store anchored mid-epoch then still finds the anchor as its epoch's checkpoint block.
+    /// Returns nothing for a block outside the tree.
     /// See `get_ancestor` in the phase0 fork choice spec.
     #[must_use]
     pub fn ancestor(&self, root: Root, slot: Slot) -> Option<Root> {
         let mut current = root;
         loop {
             let node = self.nodes.get(&current)?;
-            if node.slot <= slot {
+            // The walk stops at the slot, or at the anchor, whose parent the tree never holds.
+            if node.slot <= slot || !self.nodes.contains_key(&node.parent_root) {
                 return Some(current);
             }
             current = node.parent_root;
@@ -208,6 +211,20 @@ mod tests {
     fn ancestor_at_a_skipped_slot_is_the_latest_block_before_it() {
         // Slot 2 is empty on the c branch, so its ancestor there is b at slot 1.
         assert_eq!(fixture().ancestor(root(3), Slot(2)), Some(root(2)));
+    }
+
+    #[test]
+    fn the_anchor_answers_for_slots_before_it() {
+        // Fixture state: a tree anchored mid-epoch at slot 2, with a child at slot 3.
+        //
+        //     (pruned history) -> a(2) -> b(3)
+        let mut tree = BlockTree::new(root(1), node(2, 0));
+        tree.insert(root(2), node(3, 1));
+
+        // Slot 0 lies before the anchor, so the anchor is the ancestor there.
+        assert_eq!(tree.ancestor(root(2), Slot(0)), Some(root(1)));
+        // A block outside the tree has no ancestor at all.
+        assert_eq!(tree.ancestor(root(9), Slot(0)), None);
     }
 
     #[test]

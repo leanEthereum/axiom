@@ -112,13 +112,17 @@ impl<'a, P: Preset> ChainView<'a, P> {
     }
 
     /// The checkpoint block of an epoch on a block's chain, through seen blocks too.
+    ///
+    /// The store's anchor stands for every slot before it, as its tree has no parent for it.
     #[must_use]
     pub fn checkpoint_block(&self, root: Root, epoch: Epoch) -> Option<Root> {
         let target = epoch.start_slot::<P>();
         let mut current = root;
         loop {
             let node = self.block(&current)?;
-            if node.slot <= target {
+            let at_anchor =
+                self.store.blocks().contains(&current) && self.block(&node.parent_root).is_none();
+            if node.slot <= target || at_anchor {
                 return Some(current);
             }
             current = node.parent_root;
