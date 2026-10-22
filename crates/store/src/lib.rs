@@ -40,9 +40,8 @@
 //! - Order matters: pruning walks slots, and a head lookup wants the last slot.
 //!   Bitcask's hash index cannot scan, so the index here is an ordered tree.
 //!
-//! Geth keeps chain data in Pebble, an LSM tree, beside flat "freezer" files for old data.
-//! Lighthouse splits a hot LevelDB database from a cold freezer database.
-//! Both splits exist because LSM write amplification hurts large immutable values.
+//! A common design splits a hot LSM database from cold, flat "freezer" files.
+//! That split exists because LSM write amplification hurts large immutable values.
 //! A log with in-memory locations has no such amplification, so one engine serves both roles.
 //!
 //! The index stores 16-byte locations, never values.

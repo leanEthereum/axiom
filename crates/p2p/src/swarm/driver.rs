@@ -35,7 +35,7 @@ use crate::{
     yamux::{Mode, StreamId},
 };
 
-/// Result code for a rate-limited request: client-specific, as lighthouse uses it.
+/// Result code for a rate-limited request, from the range the spec leaves to clients.
 const RATE_LIMITED: ResponseCode = ResponseCode::ClientSpecific(139);
 
 /// Inputs other than gossip that may wait for one full connection queue.
