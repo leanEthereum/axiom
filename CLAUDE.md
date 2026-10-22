@@ -95,6 +95,9 @@ Everything else is a method. These signals mean a type is missing:
 - A function returns an `Option` meaning "need more input": that is an incremental decoder with state.
 - A function allocates a scratch buffer on every call: that is an encoder that owns and reuses it.
 - A helper reads or writes one type's fields: it is a method of that type.
+- One type's impl blocks spread over several files: it is a god object doing several jobs.
+  Moving the impls into one file only makes a bigger god object.
+  Find the seams instead, give each job a type that owns its state, and let the original type compose them.
 
 Design the API before the body:
 
