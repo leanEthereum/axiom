@@ -21,8 +21,3 @@ thiserror.workspace = true
 [dev-dependencies]
 axiom-yaml.workspace = true
 proptest.workspace = true
-criterion.workspace = true
-
-[[bench]]
-name = "operations"
-harness = false
