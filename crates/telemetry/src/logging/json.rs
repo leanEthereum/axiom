@@ -273,6 +273,7 @@ mod tests {
         let config = LogConfig {
             filter: "info".to_owned(),
             format: LogFormat::Json,
+            file: None,
         };
         let built = config.subscriber(capture.clone()).expect("valid filter");
 

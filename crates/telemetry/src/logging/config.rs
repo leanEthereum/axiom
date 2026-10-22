@@ -4,14 +4,13 @@ use std::io::{self, IsTerminal};
 
 use tracing::{Subscriber, subscriber};
 use tracing_subscriber::{
-    Layer,
     filter::{ParseError, Targets},
-    fmt::{Layer as FmtLayer, MakeWriter},
+    fmt::MakeWriter,
     layer::SubscriberExt,
     registry,
 };
 
-use crate::logging::{LogError, LogFormat, json::JsonFormat};
+use crate::logging::{LogError, LogFile, LogFormat};
 
 /// A log subscriber with its concrete type erased, so every format shares one type.
 type BoxedSubscriber = Box<dyn Subscriber + Send + Sync>;
@@ -28,6 +27,9 @@ pub struct LogConfig {
 
     /// The layout of each line.
     pub format: LogFormat,
+
+    /// A copy of the log kept on disk, with its own level and layout.
+    pub file: Option<LogFile>,
 }
 
 impl Default for LogConfig {
@@ -36,18 +38,19 @@ impl Default for LogConfig {
         Self {
             filter: "info".to_owned(),
             format: LogFormat::default(),
+            file: None,
         }
     }
 }
 
 impl LogConfig {
-    /// Installs the process-wide logger, writing to standard error.
+    /// Installs the process-wide logger, writing to standard error and to the file if any.
     ///
-    /// Colours are used only when standard error is a terminal.
+    /// Colours are used on standard error only when it is a terminal.
     ///
     /// # Errors
     ///
-    /// Fails when the filter does not parse or a global subscriber already exists.
+    /// Fails when the filter does not parse, the file cannot be opened, or a logger exists.
     pub fn init(&self) -> Result<(), LogError> {
         // Escape codes in a file or a pipe would be noise, so colour only a terminal.
         let ansi = io::stderr().is_terminal();
@@ -58,11 +61,12 @@ impl LogConfig {
 
     /// A subscriber writing to any sink, without colours, and not installed.
     ///
+    /// The file, if any, is opened and written as well.
     /// Tests and embedders scope it to a thread instead of the whole process.
     ///
     /// # Errors
     ///
-    /// Fails when the filter does not parse.
+    /// Fails when the filter does not parse or the file cannot be opened.
     pub fn subscriber<W>(&self, writer: W) -> Result<BoxedSubscriber, LogError>
     where
         W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
@@ -85,31 +89,42 @@ impl LogConfig {
                     reason: error.to_string(),
                 })?;
 
-        // Phase 2: one formatting layer, shaped by the chosen layout.
-        let layer = FmtLayer::default().with_writer(writer).with_ansi(ansi);
+        // Phase 2: the sink's output, in its own layout.
+        let mut layers = vec![self.format.layer(writer, ansi, targets)];
 
-        // Phase 3: stack the filtered layer on a span registry.
-        // Each layout yields a different type, so each is boxed to one.
-        let built: BoxedSubscriber = match self.format {
-            LogFormat::Pretty => Box::new(registry().with(layer.pretty().with_filter(targets))),
-            LogFormat::Compact => Box::new(registry().with(layer.compact().with_filter(targets))),
-            // A collector parses the lines, so JSON never carries escape codes.
-            LogFormat::Json => Box::new(
-                registry().with(
-                    layer
-                        .with_ansi(false)
-                        .event_format(JsonFormat)
-                        .with_filter(targets),
-                ),
-            ),
-        };
-        Ok(built)
+        // Phase 3: the file's output, with its own level and layout.
+        // Each output filters on its own, so the file can keep detail the terminal hides.
+        if let Some(file) = &self.file {
+            layers.push(file.layer()?);
+        }
+
+        // Phase 4: stack the outputs on one span registry.
+        Ok(Box::new(registry().with(layers)))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        fs::{self, File},
+        path::Path,
+        process,
+        sync::Arc,
+    };
+
+    use tracing::{debug, info};
+
     use super::*;
+
+    /// Each line of a log file, with its leading timestamp dropped.
+    fn lines(path: &Path) -> Vec<String> {
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| line.split_once(' ').unwrap().1.trim_start().to_owned())
+            .collect()
+    }
 
     #[test]
     fn bad_filters_are_reported() {
@@ -117,6 +132,7 @@ mod tests {
         let config = LogConfig {
             filter: "axiom=loud".to_owned(),
             format: LogFormat::Compact,
+            file: None,
         };
         // The error carries the directives as written and the parser's reason.
         assert_eq!(
@@ -128,5 +144,39 @@ mod tests {
                     .to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn the_file_keeps_its_own_level() {
+        // Fixture state: the terminal at info, the file at its default of debug.
+        let directory = env::temp_dir().join(format!("axiom-log-layers-{}", process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let terminal = directory.join("terminal.txt");
+        let config = LogConfig {
+            filter: "info".to_owned(),
+            format: LogFormat::Compact,
+            file: Some(LogFile::new(directory.clone(), "beacon".to_owned())),
+        };
+        let sink = Arc::new(File::create(&terminal).unwrap());
+        let built = config.subscriber(sink).unwrap();
+
+        // One event below the terminal's level, one at it.
+        subscriber::with_default(built, || {
+            debug!("peer scored");
+            info!("block imported");
+        });
+
+        // The terminal shows only the info line; the file shows both.
+        let target = "axiom_telemetry::logging::config::tests";
+        assert_eq!(lines(&terminal), [format!("INFO {target}: block imported")]);
+        assert_eq!(
+            lines(&directory.join("beacon.log")),
+            [
+                format!("DEBUG {target}: peer scored"),
+                format!("INFO {target}: block imported"),
+            ]
+        );
+        fs::remove_dir_all(&directory).unwrap();
     }
 }

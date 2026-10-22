@@ -6,7 +6,7 @@
 //! Pure crates never depend on it: they neither log nor read a clock.
 //!
 //! ```text
-//!     logging    filter and format events, install the global subscriber
+//!     logging    filter and format events, keep rotating files, install the subscriber
 //!     metrics    atomic counters, gauges, histograms, and their registry
 //!     exporter   serve the registry to a Prometheus scraper over HTTP
 //!     node       the beacon node's own metric set
@@ -21,7 +21,7 @@ mod metrics;
 mod node;
 
 pub use exporter::MetricsServer;
-pub use logging::{LogConfig, LogError, LogFormat};
+pub use logging::{LogConfig, LogError, LogFile, LogFormat};
 pub use metrics::{
     Buckets, BucketsError, CONTENT_TYPE, Counter, CounterVec, Gauge, GaugeVec, Histogram,
     HistogramSnapshot, HistogramVec, Registry, RegistryError, Timer,
