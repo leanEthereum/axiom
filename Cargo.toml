@@ -114,6 +114,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 # Test-only.
 proptest = "1.7"
 
+# Bench-only: statistics, warmup, and comparison against the last run.
+# Plots and the parallel runner are off; reports stay in the terminal.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-pub use params::{PeerScoreParams, PeerScoreThresholds, TopicScoreParams, decay_for};
+pub use params::{DecaySchedule, PeerScoreParams, PeerScoreThresholds, TopicScoreParams};
 
 use super::{MessageId, Topic};
 use crate::identity::PeerId;
@@ -33,6 +33,21 @@ struct TopicStats {
     mesh_failure_penalty: f64,
     /// P4: invalid messages from this peer.
     invalid_message_deliveries: f64,
+}
+
+impl TopicStats {
+    /// Leaves the mesh, moving an active delivery deficit into the sticky failure penalty.
+    ///
+    /// The deficit then stops counting as P3, so it is charged once, as P3b.
+    fn leave_mesh(&mut self, tp: &TopicScoreParams) {
+        // Threshold: only an active member that under-delivered carries a deficit.
+        let deficit = tp.mesh_message_deliveries_threshold - self.mesh_message_deliveries;
+        if self.in_mesh && self.mesh_message_deliveries_active && deficit > 0.0 {
+            self.mesh_failure_penalty = deficit.mul_add(deficit, self.mesh_failure_penalty);
+        }
+        self.in_mesh = false;
+        self.mesh_message_deliveries_active = false;
+    }
 }
 
 /// Counters of one peer.
@@ -208,7 +223,7 @@ impl PeerScore {
         // Leaving the mesh counts as a prune, with its delivery penalty.
         for (topic, topic_stats) in &mut stats.topics {
             if let Some(tp) = self.params.topics.get(topic) {
-                apply_mesh_failure(topic_stats, tp);
+                topic_stats.leave_mesh(tp);
             }
             topic_stats.first_message_deliveries = 0.0;
         }
@@ -259,7 +274,7 @@ impl PeerScore {
             return;
         };
         if let Some(topic_stats) = self.topic_stats(peer, topic) {
-            apply_mesh_failure(topic_stats, &tp);
+            topic_stats.leave_mesh(&tp);
         }
     }
 
@@ -488,19 +503,6 @@ impl PeerScore {
             self.deliveries.remove(&id);
         }
     }
-}
-
-/// Moves an active mesh delivery deficit into the sticky failure penalty, leaving the mesh.
-///
-/// The deficit then stops counting as P3, so it is charged once, as P3b.
-fn apply_mesh_failure(ts: &mut TopicStats, tp: &TopicScoreParams) {
-    // Threshold: only an active member that under-delivered carries a deficit.
-    let deficit = tp.mesh_message_deliveries_threshold - ts.mesh_message_deliveries;
-    if ts.in_mesh && ts.mesh_message_deliveries_active && deficit > 0.0 {
-        ts.mesh_failure_penalty = deficit.mul_add(deficit, ts.mesh_failure_penalty);
-    }
-    ts.in_mesh = false;
-    ts.mesh_message_deliveries_active = false;
 }
 
 #[cfg(test)]

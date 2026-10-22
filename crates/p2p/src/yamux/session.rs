@@ -6,7 +6,8 @@ use std::{
 };
 
 use super::{
-    Config, Flags, FrameType, GoAwayCode, HEADER_LEN, Header, INITIAL_WINDOW, StreamId, YamuxError,
+    Config, Flags, FrameType, GoAwayCode, Header, INITIAL_WINDOW, StreamId, YamuxError,
+    reader::FrameReader,
 };
 
 /// Which end of the underlying connection this session is.
@@ -119,8 +120,8 @@ pub struct Session {
     next_id: u32,
     /// Outbound streams the peer has not yet acknowledged.
     ack_backlog: usize,
-    /// Bytes received but not yet parsed into frames.
-    inbound: Vec<u8>,
+    /// Splits frames off the bytes received.
+    inbound: FrameReader,
     /// Encoded frames waiting to be written.
     outbound: Vec<u8>,
     /// Events waiting for the owner.
@@ -143,7 +144,7 @@ impl Session {
                 Mode::Server => 2,
             },
             ack_backlog: 0,
-            inbound: Vec::new(),
+            inbound: FrameReader::new(),
             outbound: Vec::new(),
             events: VecDeque::new(),
             closing: false,
@@ -301,55 +302,39 @@ impl Session {
     /// A protocol violation is fatal.
     /// A go-away with the protocol error code is queued before the error returns.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<(), YamuxError> {
-        self.inbound.extend_from_slice(bytes);
-        let mut offset = 0;
+        self.inbound.feed(bytes);
         let result = loop {
-            match self.parse_frame(offset) {
-                Ok(Some(consumed)) => offset += consumed,
-                Ok(None) => break Ok(()),
+            match self.handle_frame() {
+                Ok(true) => {}
+                Ok(false) => break Ok(()),
                 Err(error) => break Err(error),
             }
         };
-        // Drop every byte of the frames handled, in one move.
-        self.inbound.drain(..offset);
         if result.is_err() {
             self.go_away(GoAwayCode::ProtocolError);
         }
         result
     }
 
-    /// Handles the frame starting at an offset of the inbound buffer.
-    ///
-    /// # Returns
-    ///
-    /// The bytes the frame took, or nothing while it is incomplete.
-    fn parse_frame(&mut self, offset: usize) -> Result<Option<usize>, YamuxError> {
+    /// Handles the next frame, returning whether there was a complete one.
+    fn handle_frame(&mut self) -> Result<bool, YamuxError> {
         // Phase 1: wait for the full 12-byte header.
-        let Some(header_bytes) = self.inbound.get(offset..offset + HEADER_LEN) else {
-            return Ok(None);
+        let Some(header) = self.inbound.header()? else {
+            return Ok(false);
         };
-        let mut array = [0u8; HEADER_LEN];
-        array.copy_from_slice(header_bytes);
-        let header = Header::decode(&array)?;
 
         // Phase 2: dispatch on type; only data frames carry a body.
         match header.frame_type {
             FrameType::Data => {
                 // Check the window before buffering, so a peer cannot make us hold a huge body.
                 self.check_window(&header)?;
-                let start = offset + HEADER_LEN;
-                let end = start + header.length as usize;
-                if self.inbound.len() < end {
-                    return Ok(None);
-                }
-                let body = self.inbound[start..end].to_vec();
+                let Some(body) = self.inbound.body(&header) else {
+                    return Ok(false);
+                };
+                let body = body.to_vec();
                 self.on_stream_frame(header, body)?;
-                Ok(Some(HEADER_LEN + header.length as usize))
             }
-            FrameType::WindowUpdate => {
-                self.on_stream_frame(header, Vec::new())?;
-                Ok(Some(HEADER_LEN))
-            }
+            FrameType::WindowUpdate => self.on_stream_frame(header, Vec::new())?,
             FrameType::Ping => {
                 // A request is echoed with ACK; a response is reported.
                 if header.flags.contains(Flags::SYN) {
@@ -363,15 +348,16 @@ impl Session {
                 } else if header.flags.contains(Flags::ACK) {
                     self.events.push_back(SessionEvent::Pong(header.length));
                 }
-                Ok(Some(HEADER_LEN))
             }
             FrameType::GoAway => {
                 self.closing = true;
                 self.events
                     .push_back(SessionEvent::GoAway(GoAwayCode::from_code(header.length)));
-                Ok(Some(HEADER_LEN))
             }
         }
+        // Only a frame handled without error leaves the buffer.
+        self.inbound.consume(&header);
+        Ok(true)
     }
 
     /// Rejects a data frame larger than the window left on its stream.

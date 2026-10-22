@@ -31,6 +31,7 @@
 //! assert_eq!(doc.get("valid").and_then(Yaml::as_bool), Some(true));
 //! ```
 
+mod char_class;
 mod emitter;
 mod error;
 mod mapping;

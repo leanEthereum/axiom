@@ -3,9 +3,12 @@
 //! The parser walks the bytes once, left to right, with an explicit stack of open containers.
 //! Recursion depth on the thread's stack stays constant whatever the input nests.
 
-use std::{mem, str};
+use std::str;
 
-use crate::{ErrorKind, Json, Number, Object, ParseError};
+use crate::{
+    ErrorKind, Json, Number, Object, ParseError,
+    frame::{Frame, OpenObject},
+};
 
 /// Bounds on the input a parse accepts.
 ///
@@ -35,77 +38,6 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self::DEFAULT
-    }
-}
-
-/// An array or object whose closing bracket is still ahead.
-enum Frame {
-    /// An open array and the items read so far.
-    Array(Vec<Json>),
-
-    /// An open object.
-    Object {
-        /// Members read so far.
-        object: Object,
-        /// Name of the member whose value is being read.
-        name: String,
-        /// Byte offset of each member name, in member order.
-        name_offsets: Vec<usize>,
-    },
-}
-
-impl Frame {
-    /// Turns a closed container into its value.
-    ///
-    /// An object's names are checked for uniqueness here, once all are known.
-    fn close(self) -> Result<Json, ParseError> {
-        match self {
-            Self::Array(items) => Ok(Json::Array(items)),
-            Self::Object {
-                object,
-                name_offsets,
-                ..
-            } => {
-                check_unique_names(&object, &name_offsets)?;
-                Ok(Json::Object(object))
-            }
-        }
-    }
-}
-
-/// Rejects an object that repeats a member name.
-///
-/// Sorting member positions by name brings equal names together in O(n log n).
-/// A hostile object with a hundred thousand members then costs milliseconds, not hours.
-///
-/// The reported offset is the earliest second occurrence in the document.
-///
-/// ```text
-///     {"b":1, "a":2, "b":3}        names start at offsets 1, 8, 15
-///     sorted by name: a(8) b(1) b(15)
-///     b repeats -> error at offset 15
-/// ```
-fn check_unique_names(object: &Object, name_offsets: &[usize]) -> Result<(), ParseError> {
-    let members = object.members();
-
-    // Positions 0..n, ordered by member name; a stable sort keeps document order among equals.
-    let mut order: Vec<usize> = (0..members.len()).collect();
-    order.sort_by(|&left, &right| members[left].0.cmp(&members[right].0));
-
-    // Neighbours with equal names are duplicates.
-    // The later of the pair, in document order, is the repeated one.
-    let first_repeat = order
-        .windows(2)
-        .filter(|pair| members[pair[0]].0 == members[pair[1]].0)
-        .map(|pair| pair[1])
-        .min_by_key(|&position| name_offsets[position]);
-
-    match first_repeat {
-        None => Ok(()),
-        Some(position) => Err(ParseError {
-            offset: name_offsets[position],
-            kind: ErrorKind::DuplicateKey(members[position].0.clone()),
-        }),
     }
 }
 
@@ -171,17 +103,7 @@ impl<'a> Parser<'a> {
                     return Ok(value);
                 };
 
-                // The byte that may close this container.
-                let closer = match frame {
-                    Frame::Array(items) => {
-                        items.push(value);
-                        b']'
-                    }
-                    Frame::Object { object, name, .. } => {
-                        object.push_unchecked(mem::take(name), value);
-                        b'}'
-                    }
-                };
+                frame.push(value);
 
                 // After an item: a comma for another, or the closing bracket.
                 self.skip_whitespace();
@@ -189,18 +111,14 @@ impl<'a> Parser<'a> {
                     Some(b',') => {
                         self.at += 1;
                         // An object's next member starts with its name.
-                        if let Frame::Object {
-                            name, name_offsets, ..
-                        } = frame
-                        {
+                        if let Frame::Object(object) = frame {
                             self.skip_whitespace();
                             let (next, offset) = self.member_name()?;
-                            *name = next;
-                            name_offsets.push(offset);
+                            object.next_name(next, offset);
                         }
                         continue 'value;
                     }
-                    Some(byte) if byte == closer => {
+                    Some(byte) if byte == frame.closer() => {
                         self.at += 1;
                         // The container is complete; it becomes the value to attach next.
                         match stack.pop() {
@@ -243,11 +161,7 @@ impl<'a> Parser<'a> {
                 // "{}" closes at once; anything else must be a first member name.
                 if self.peek() != Some(b'}') {
                     let (name, offset) = self.member_name()?;
-                    stack.push(Frame::Object {
-                        object: Object::new(),
-                        name,
-                        name_offsets: vec![offset],
-                    });
+                    stack.push(Frame::Object(OpenObject::new(name, offset)));
                     return Ok(None);
                 }
                 self.at += 1;

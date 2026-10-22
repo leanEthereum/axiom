@@ -144,25 +144,27 @@ impl PeerScoreThresholds {
     }
 }
 
-/// The decay factor that shrinks a counter to the zero floor over a given time.
-///
-/// ```text
-/// decay^(time / interval) = decay_to_zero
-/// → decay = decay_to_zero^(interval / time)
-/// ```
-#[must_use]
-pub fn decay_for(time: Duration, interval: Duration, decay_to_zero: f64) -> f64 {
-    let ticks = time.as_secs_f64() / interval.as_secs_f64();
-    decay_to_zero.powf(1.0 / ticks)
+/// How score counters decay: by a factor once per interval, until a floor counts as zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecaySchedule {
+    /// Time between two decay steps.
+    pub interval: Duration,
+    /// The value below which a counter resets to zero.
+    pub to_zero: f64,
 }
 
-/// The steady-state value of a counter that gains a rate per interval and decays.
-///
-/// ```text
-/// c = c * decay + rate  →  c = rate / (1 - decay)
-/// ```
-fn convergence(decay: f64, rate: f64) -> f64 {
-    rate / (1.0 - decay)
+impl DecaySchedule {
+    /// The per-interval factor that shrinks a counter to the floor over a given time.
+    ///
+    /// ```text
+    /// decay^(time / interval) = to_zero
+    /// → decay = to_zero^(interval / time)
+    /// ```
+    #[must_use]
+    pub fn factor_over(self, time: Duration) -> f64 {
+        let ticks = time.as_secs_f64() / self.interval.as_secs_f64();
+        self.to_zero.powf(1.0 / ticks)
+    }
 }
 
 impl PeerScoreParams {
@@ -177,6 +179,10 @@ impl PeerScoreParams {
     pub fn ethereum(slot: Duration, slots_per_epoch: u32, total_topic_weight: f64) -> Self {
         let epoch = slot * slots_per_epoch;
         let decay_to_zero = 0.01;
+        let decay = DecaySchedule {
+            interval: slot,
+            to_zero: decay_to_zero,
+        };
         // The best score a peer can reach: perfect P1 and P2 in every topic.
         let max_positive_score =
             (MAX_IN_MESH_SCORE + MAX_FIRST_MESSAGE_DELIVERIES_SCORE) * total_topic_weight;
@@ -195,7 +201,7 @@ impl PeerScoreParams {
             ip_colocation_factor_threshold: 8.0,
             behaviour_penalty_weight,
             behaviour_penalty_threshold,
-            behaviour_penalty_decay: decay_for(epoch * 10, slot, decay_to_zero),
+            behaviour_penalty_decay: decay.factor_over(epoch * 10),
             decay_interval: slot,
             decay_to_zero,
             retain_score: epoch * 100,
@@ -227,15 +233,22 @@ impl TopicScoreParams {
         mesh_n: usize,
     ) -> Self {
         let epoch = slot * slots_per_epoch;
-        let decay_to_zero = 0.01;
+        let decay = DecaySchedule {
+            interval: slot,
+            to_zero: 0.01,
+        };
         // P1: one quantum per slot, capped after one hour in the mesh.
         let time_in_mesh_cap = 3600.0 / slot.as_secs_f64();
         // P2: a mesh peer delivers first about 1 / D of the messages.
         //
         //     steady state = rate / D / (1 - decay); cap at twice that
-        let first_decay = decay_for(epoch, slot, decay_to_zero);
+        let first_decay = decay.factor_over(epoch);
         let mesh_n = f64::from(u32::try_from(mesh_n).unwrap_or(u32::MAX));
-        let first_cap = 2.0 * convergence(first_decay, messages_per_slot / mesh_n).max(1.0);
+        // A counter gaining a rate per interval converges where gain equals decay.
+        //
+        //     c = c * decay + rate  →  c = rate / (1 - decay)
+        let steady_state = (messages_per_slot / mesh_n) / (1.0 - first_decay);
+        let first_cap = 2.0 * steady_state.max(1.0);
         Self {
             topic_weight,
             time_in_mesh_weight: MAX_IN_MESH_SCORE / time_in_mesh_cap,
@@ -245,20 +258,20 @@ impl TopicScoreParams {
             first_message_deliveries_decay: first_decay,
             first_message_deliveries_cap: first_cap,
             mesh_message_deliveries_weight: 0.0,
-            mesh_message_deliveries_decay: decay_for(epoch, slot, decay_to_zero),
+            mesh_message_deliveries_decay: decay.factor_over(epoch),
             mesh_message_deliveries_cap: 0.0,
             mesh_message_deliveries_threshold: 0.0,
             mesh_message_deliveries_window: Duration::from_secs(2),
             mesh_message_deliveries_activation: epoch * 4,
             mesh_failure_penalty_weight: 0.0,
-            mesh_failure_penalty_decay: decay_for(epoch, slot, decay_to_zero),
+            mesh_failure_penalty_decay: decay.factor_over(epoch),
             // P4: ten invalid messages reach the graylist threshold.
             //
             //     topic_weight * w4 * 10^2 = -16000  →  w4 = -160 / topic_weight
             invalid_message_deliveries_weight: PeerScoreThresholds::ethereum().graylist_threshold
                 / 100.0
                 / topic_weight.max(f64::EPSILON),
-            invalid_message_deliveries_decay: decay_for(epoch * 50, slot, decay_to_zero),
+            invalid_message_deliveries_decay: decay.factor_over(epoch * 50),
         }
     }
 }
@@ -270,7 +283,11 @@ mod tests {
     #[test]
     fn decay_reaches_the_floor_on_time() {
         // Decaying over 10 intervals: decay^10 = 0.01 → decay = 0.01^(1/10).
-        let decay = decay_for(Duration::from_secs(120), Duration::from_secs(12), 0.01);
+        let schedule = DecaySchedule {
+            interval: Duration::from_secs(12),
+            to_zero: 0.01,
+        };
+        let decay = schedule.factor_over(Duration::from_secs(120));
         assert!((decay.powi(10) - 0.01).abs() < 1e-12);
     }
 

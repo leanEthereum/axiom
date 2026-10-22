@@ -2,7 +2,7 @@
 
 use axiom_execution::{
     ForkchoiceState, JsonCodec, JwtSecret, PayloadAttributes, PayloadStatus, PayloadStatusKind,
-    wire::requests,
+    wire::RequestsList,
 };
 use axiom_json::Json;
 use axiom_ssz::{ByteList, ByteVector, List, U256};
@@ -175,15 +175,16 @@ proptest! {
     #[test]
     fn requests_list_round_trip(requests in execution_requests()) {
         // The list holds one element per non-empty type, in ascending type order.
-        let list = requests::encode_list(&requests);
+        let list = RequestsList::encode(&requests);
+        let elements = list.as_slice();
         let non_empty = [
             !requests.deposits.is_empty(),
             !requests.withdrawals.is_empty(),
             !requests.consolidations.is_empty(),
         ];
-        prop_assert_eq!(list.len(), non_empty.iter().filter(|&&present| present).count());
-        prop_assert!(list.windows(2).all(|pair| pair[0][0] < pair[1][0]));
-        prop_assert_eq!(requests::decode_list::<Minimal>(&list), Ok(requests.clone()));
+        prop_assert_eq!(elements.len(), non_empty.iter().filter(|&&present| present).count());
+        prop_assert!(elements.windows(2).all(|pair| pair[0][0] < pair[1][0]));
+        prop_assert_eq!(list.decode::<Minimal>(), Ok(requests.clone()));
 
         // The JSON array form decodes back too.
         prop_assert_eq!(ExecutionRequests::<Minimal>::from_json(&requests.to_json()), Ok(requests));
@@ -194,7 +195,7 @@ proptest! {
         list in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..400), 0..4),
     ) {
         // Arbitrary elements either decode or fail; nothing in between.
-        let _ = requests::decode_list::<Minimal>(&list);
+        let _ = RequestsList::from(list).decode::<Minimal>();
     }
 
     #[test]

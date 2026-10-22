@@ -1,0 +1,233 @@
+//! The inputs of one cell batch verification, with commitments deduplicated.
+
+use std::collections::HashMap;
+
+use axiom_bls12_381::Scalar;
+
+use crate::{
+    Bytes48, CELLS_PER_EXT_BLOB, Cell, CellIndex, FIELD_ELEMENTS_PER_BLOB, FIELD_ELEMENTS_PER_CELL,
+    KzgError, transcript::Transcript,
+};
+
+/// Domain tag of the cell batch coefficient, RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN in the Fulu spec.
+const RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN: &[u8; 16] = b"RCKZGCBATCH__V1_";
+
+/// Cells with their indices and proofs, each naming its commitment by position in a distinct list.
+///
+/// Commitments repeat across the cells of one blob, so the spec hashes and weights each only once.
+#[derive(Clone, Debug)]
+pub(super) struct CellBatch<'a> {
+    /// The distinct commitments, in order of first appearance.
+    commitments: Vec<&'a Bytes48>,
+    /// For each cell, the position of its commitment in the distinct list.
+    commitment_indices: Vec<usize>,
+    /// For each cell, its position in the extended blob.
+    cell_indices: &'a [CellIndex],
+    /// The cells.
+    cells: &'a [Cell],
+    /// For each cell, its proof.
+    proofs: &'a [Bytes48],
+}
+
+impl<'a> CellBatch<'a> {
+    /// Pairs up the four lists entry by entry and deduplicates the commitments by their bytes.
+    ///
+    /// ```text
+    ///     commitments          [A, B, A, C]
+    ///     distinct             [A, B, C]
+    ///     commitment indices   [0, 1, 0, 2]
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lists differ in length.
+    pub(super) fn new(
+        commitments: &'a [Bytes48],
+        cell_indices: &'a [CellIndex],
+        cells: &'a [Cell],
+        proofs: &'a [Bytes48],
+    ) -> Result<Self, KzgError> {
+        KzgError::check_paired(
+            commitments.len(),
+            &[cell_indices.len(), cells.len(), proofs.len()],
+        )?;
+        let mut distinct: Vec<&Bytes48> = Vec::new();
+        let mut positions: HashMap<&Bytes48, usize> = HashMap::new();
+        let commitment_indices = commitments
+            .iter()
+            .map(|commitment| {
+                *positions.entry(commitment).or_insert_with(|| {
+                    distinct.push(commitment);
+                    distinct.len() - 1
+                })
+            })
+            .collect();
+        Ok(Self {
+            commitments: distinct,
+            commitment_indices,
+            cell_indices,
+            cells,
+            proofs,
+        })
+    }
+
+    /// Number of cells.
+    pub(super) const fn len(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// The distinct commitments, in order of first appearance.
+    pub(super) fn commitments(&self) -> &[&'a Bytes48] {
+        &self.commitments
+    }
+
+    /// The cell positions, one per cell.
+    pub(super) const fn cell_indices(&self) -> &'a [CellIndex] {
+        self.cell_indices
+    }
+
+    /// The proofs, one per cell.
+    pub(super) const fn proofs(&self) -> &'a [Bytes48] {
+        self.proofs
+    }
+
+    /// The coefficient r of the batch, compute_verify_cell_kzg_proof_batch_challenge in the Fulu spec.
+    ///
+    /// ```text
+    ///     SHA-256( tag || 4096 || 64 || #commitments || #cells          (u64 each)
+    ///              || commitments
+    ///              || (commitment index || cell index || cell || proof) for each cell )  mod r
+    /// ```
+    pub(super) fn challenge(&self) -> Scalar {
+        let mut transcript = Transcript::new(RANDOM_CHALLENGE_KZG_CELL_BATCH_DOMAIN);
+        transcript.append_u64(FIELD_ELEMENTS_PER_BLOB as u64);
+        transcript.append_u64(FIELD_ELEMENTS_PER_CELL as u64);
+        transcript.append_u64(self.commitments.len() as u64);
+        transcript.append_u64(self.cell_indices.len() as u64);
+        for commitment in &self.commitments {
+            transcript.append(commitment.0);
+        }
+        let rows = self
+            .commitment_indices
+            .iter()
+            .zip(self.cell_indices)
+            .zip(self.cells)
+            .zip(self.proofs);
+        for (((commitment_index, cell_index), cell), proof) in rows {
+            transcript.append_u64(*commitment_index as u64);
+            transcript.append_u64(cell_index.get());
+            // Cells hold canonical elements, so re-encoding gives back the bytes received.
+            transcript.append(cell.to_bytes());
+            transcript.append(proof.0);
+        }
+        transcript.challenge()
+    }
+
+    /// The weight of each distinct commitment: the sum of r^k over the cells that name it.
+    pub(super) fn commitment_weights(&self, r_powers: &[Scalar]) -> Vec<Scalar> {
+        let mut weights = vec![Scalar::ZERO; self.commitments.len()];
+        for (index, power) in self.commitment_indices.iter().zip(r_powers) {
+            weights[*index] += power;
+        }
+        weights
+    }
+
+    /// The sum of r^k e_k over the cells of each column, or none for a column without cells.
+    ///
+    /// Cells of one column share a coset, so their weighted sum has a single interpolant.
+    pub(super) fn weighted_columns(
+        &self,
+        r_powers: &[Scalar],
+    ) -> Vec<Option<[Scalar; FIELD_ELEMENTS_PER_CELL]>> {
+        let mut columns = vec![None; CELLS_PER_EXT_BLOB];
+        for ((index, cell), power) in self.cell_indices.iter().zip(self.cells).zip(r_powers) {
+            let column: &mut [Scalar; FIELD_ELEMENTS_PER_CELL] =
+                columns[index.position()].get_or_insert([Scalar::ZERO; FIELD_ELEMENTS_PER_CELL]);
+            for (sum, value) in column.iter_mut().zip(cell.evaluations()) {
+                *sum += value * power;
+            }
+        }
+        columns
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_yaml::Yaml;
+
+    use super::*;
+    use crate::test_vectors::{cases, points};
+
+    #[test]
+    fn challenge_matches_vectors() {
+        // Each case lists deduplicated commitments, then one row per cell.
+        for case in cases("compute_verify_cell_kzg_proof_batch_challenge") {
+            let input = case.get("input").unwrap();
+            let sequence = |key: &str| input.get(key).and_then(Yaml::as_sequence).unwrap();
+            let commitments = points(sequence("commitments"));
+            let commitment_indices: Vec<usize> = sequence("commitment_indices")
+                .iter()
+                .map(|item| usize::try_from(item.as_u64().unwrap()).unwrap())
+                .collect();
+            let cell_indices: Vec<CellIndex> = sequence("cell_indices")
+                .iter()
+                .map(|item| CellIndex::new(item.as_u64().unwrap()).unwrap())
+                .collect();
+
+            // Each coset is a list of 64 field elements, joined then decoded as a cell.
+            let cells: Vec<Cell> = sequence("cosets_evals")
+                .iter()
+                .map(|evaluations| {
+                    let bytes: Vec<u8> = evaluations
+                        .as_sequence()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|item| item.as_hex_bytes().unwrap())
+                        .collect();
+                    Cell::from_bytes(&bytes).unwrap()
+                })
+                .collect();
+            let proofs = points(sequence("proofs"));
+
+            // The vectors give the distinct list and the indices directly, so the batch is built as is.
+            let batch = CellBatch {
+                commitments: commitments.iter().collect(),
+                commitment_indices,
+                cell_indices: &cell_indices,
+                cells: &cells,
+                proofs: &proofs,
+            };
+            let expected = case.get("output").unwrap().as_hex_array().unwrap();
+            assert_eq!(batch.challenge().to_bytes_be(), expected);
+        }
+    }
+
+    #[test]
+    fn repeated_commitments_share_one_weight() {
+        // Fixture state: commitments [A, B, A] over three zero cells, with weights r^k = 1, 2, 4.
+        let a = Bytes48([1; 48]);
+        let b = Bytes48([2; 48]);
+        let commitments = [a, b, a];
+        let indices = [0, 1, 2].map(|index| CellIndex::new(index).unwrap());
+        let cells = vec![Cell::from_evaluations(&[Scalar::ZERO; FIELD_ELEMENTS_PER_CELL]); 3];
+        let proofs = [a; 3];
+        let batch = CellBatch::new(&commitments, &indices, &cells, &proofs).unwrap();
+
+        // A collects 1 + 4 = 5 and B collects 2.
+        assert_eq!(batch.commitments(), [&a, &b]);
+        let powers = [1, 2, 4].map(Scalar::from_u64);
+        assert_eq!(
+            batch.commitment_weights(&powers),
+            [5, 2].map(Scalar::from_u64)
+        );
+
+        // Four proofs for three cells do not pair up.
+        assert_eq!(
+            CellBatch::new(&commitments, &indices, &cells, &[a; 4]).unwrap_err(),
+            KzgError::LengthMismatch {
+                expected: 3,
+                actual: 4
+            }
+        );
+    }
+}

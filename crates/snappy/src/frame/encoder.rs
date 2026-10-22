@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 
-use super::{MAX_CHUNK_DATA_LEN, STREAM_IDENTIFIER, encode_chunk};
+use super::{ChunkEncoder, MAX_CHUNK_DATA_LEN, STREAM_IDENTIFIER};
 
 /// Compresses bytes written to it into a framed stream on an inner writer.
 ///
@@ -17,6 +17,8 @@ pub struct FrameEncoder<W: Write> {
     pending: Vec<u8>,
     /// Scratch space for one encoded chunk.
     chunk: Vec<u8>,
+    /// Chunk writer, whose compressor table serves every chunk.
+    chunks: ChunkEncoder,
     /// Whether the stream identifier went out already.
     started: bool,
 }
@@ -28,6 +30,7 @@ impl<W: Write> FrameEncoder<W> {
             inner,
             pending: Vec::new(),
             chunk: Vec::new(),
+            chunks: ChunkEncoder::new(),
             started: false,
         }
     }
@@ -62,7 +65,7 @@ impl<W: Write> FrameEncoder<W> {
         }
         self.start()?;
         self.chunk.clear();
-        encode_chunk(&self.pending, &mut self.chunk);
+        self.chunks.encode(&self.pending, &mut self.chunk);
         self.inner.write_all(&self.chunk)?;
         self.pending.clear();
         Ok(())

@@ -459,14 +459,13 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
     let local_peer = config.identity.peer_id();
     let (input_tx, input_rx) = mpsc::channel(config.swarm_queue.max(1));
     let queue = events::EventQueue::new(config.event_limits);
-    driver::spawn_swarm(
+    driver::Swarm::new(
         config,
-        listener,
         listen_addr.clone(),
         input_tx.clone(),
-        input_rx,
         Arc::clone(&queue),
-    );
+    )
+    .spawn(listener, input_rx);
     let handle = NetworkHandle {
         commands: input_tx,
         local_peer,

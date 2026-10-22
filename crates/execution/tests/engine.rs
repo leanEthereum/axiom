@@ -12,7 +12,7 @@ use axiom_execution::{
     mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
-use axiom_json::{Json, data};
+use axiom_json::{Data, Json};
 use axiom_ssz::{ByteList, List, U256};
 use axiom_types::{
     Bytes32, ConsolidationRequest, DepositRequest, ExecutionAddress, ExecutionPayload,
@@ -245,7 +245,7 @@ fn forkchoice_updated_with_and_without_attributes() {
 /// A getPayloadV5 reply with one blob of 0x11 bytes and 128 cell proofs.
 fn get_payload_reply(proofs: usize) -> Json {
     let payload = new_payload_request().execution_payload.to_json();
-    let blob = data::encode(&vec![0x11; 131_072]);
+    let blob = vec![0x11; 131_072].to_data();
     let proof = format!("\"0x{}\"", "22".repeat(48));
     let proofs = vec![proof; proofs].join(",");
     let deposit_list = format!("0x00{}", "00".repeat(192));
@@ -328,7 +328,7 @@ fn get_blobs_all_or_nothing() {
         assert_eq!(client.get_blobs::<Minimal>(&hashes).await.unwrap(), None);
 
         // One blob of zeros with 128 proofs answers the one hash.
-        let blob = data::encode(&vec![0; 131_072]);
+        let blob = vec![0; 131_072].to_data();
         let proofs = vec![format!("\"0x{}\"", "00".repeat(48)); 128].join(",");
         engine.reply(
             "engine_getBlobsV2",

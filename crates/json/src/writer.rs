@@ -3,86 +3,97 @@
 //! Output has no whitespace between tokens.
 //! Member order and number text are kept, so parsing then writing gives back compact input.
 
-use std::fmt::{self, Write};
+use std::fmt::{self, Formatter, Write};
 
 use crate::Json;
 
-impl fmt::Display for Json {
-    /// Writes the compact text of the value.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Null => f.write_str("null"),
-            Self::Bool(true) => f.write_str("true"),
-            Self::Bool(false) => f.write_str("false"),
-            // Numbers are stored as validated text, written back unchanged.
-            Self::Number(number) => f.write_str(number.as_str()),
-            Self::String(text) => write_string(f, text),
-            Self::Array(items) => {
-                // [item,item,...]
-                f.write_char('[')?;
-                for (index, item) in items.iter().enumerate() {
-                    if index > 0 {
-                        f.write_char(',')?;
-                    }
-                    fmt::Display::fmt(item, f)?;
-                }
-                f.write_char(']')
-            }
-            Self::Object(object) => {
-                // {"name":value,...} in member order.
-                f.write_char('{')?;
-                for (index, (name, value)) in object.iter().enumerate() {
-                    if index > 0 {
-                        f.write_char(',')?;
-                    }
-                    write_string(f, name)?;
-                    f.write_char(':')?;
-                    fmt::Display::fmt(value, f)?;
-                }
-                f.write_char('}')
-            }
-        }
-    }
+/// Writes values as compact text to a formatter.
+pub(crate) struct Writer<'a, 'f> {
+    /// The destination.
+    f: &'a mut Formatter<'f>,
 }
 
-/// Writes a string literal, escaping only what RFC 8259 section 7 requires.
-///
-/// ```text
-///     "      -> \"        \      -> \\
-///     U+000A -> \n        U+0001 -> \u0001
-///     é      -> é         (non-ASCII stays raw UTF-8)
-/// ```
-fn write_string(f: &mut fmt::Formatter<'_>, text: &str) -> fmt::Result {
-    f.write_char('"')?;
-
-    // Write unescaped runs whole; split only at bytes that need an escape.
-    // Every byte that needs one is ASCII, so each split lands on a character boundary.
-    let mut run_start = 0;
-    for (index, byte) in text.bytes().enumerate() {
-        let escape = match byte {
-            b'"' => "\\\"",
-            b'\\' => "\\\\",
-            b'\n' => "\\n",
-            b'\r' => "\\r",
-            b'\t' => "\\t",
-            0x08 => "\\b",
-            0x0c => "\\f",
-            // Other control characters have no short form.
-            0x00..=0x1f => "",
-            _ => continue,
-        };
-        f.write_str(&text[run_start..index])?;
-        if escape.is_empty() {
-            write!(f, "\\u{byte:04x}")?;
-        } else {
-            f.write_str(escape)?;
-        }
-        run_start = index + 1;
+impl<'a, 'f> Writer<'a, 'f> {
+    /// A writer to the given formatter.
+    pub(crate) const fn new(f: &'a mut Formatter<'f>) -> Self {
+        Self { f }
     }
 
-    // The tail after the last escaped byte.
-    f.write_str(&text[run_start..])?;
-    f.write_char('"')
+    /// Writes the compact text of a value.
+    pub(crate) fn value(&mut self, value: &Json) -> fmt::Result {
+        match value {
+            Json::Null => self.f.write_str("null"),
+            Json::Bool(true) => self.f.write_str("true"),
+            Json::Bool(false) => self.f.write_str("false"),
+            // Numbers are stored as validated text, written back unchanged.
+            Json::Number(number) => self.f.write_str(number.as_str()),
+            Json::String(text) => self.string(text),
+            Json::Array(items) => {
+                // [item,item,...]
+                self.f.write_char('[')?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        self.f.write_char(',')?;
+                    }
+                    self.value(item)?;
+                }
+                self.f.write_char(']')
+            }
+            Json::Object(object) => {
+                // {"name":value,...} in member order.
+                self.f.write_char('{')?;
+                for (index, (name, value)) in object.iter().enumerate() {
+                    if index > 0 {
+                        self.f.write_char(',')?;
+                    }
+                    self.string(name)?;
+                    self.f.write_char(':')?;
+                    self.value(value)?;
+                }
+                self.f.write_char('}')
+            }
+        }
+    }
+
+    /// Writes a string literal, escaping only what RFC 8259 section 7 requires.
+    ///
+    /// ```text
+    ///     "      -> \"        \      -> \\
+    ///     U+000A -> \n        U+0001 -> \u0001
+    ///     é      -> é         (non-ASCII stays raw UTF-8)
+    /// ```
+    fn string(&mut self, text: &str) -> fmt::Result {
+        self.f.write_char('"')?;
+
+        // Write unescaped runs whole; split only at bytes that need an escape.
+        // Every byte that needs one is ASCII, so each split lands on a character boundary.
+        let mut run_start = 0;
+        for (index, byte) in text.bytes().enumerate() {
+            let escape = match byte {
+                b'"' => "\\\"",
+                b'\\' => "\\\\",
+                b'\n' => "\\n",
+                b'\r' => "\\r",
+                b'\t' => "\\t",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                // Other control characters have no short form.
+                0x00..=0x1f => "",
+                _ => continue,
+            };
+            self.f.write_str(&text[run_start..index])?;
+            if escape.is_empty() {
+                write!(self.f, "\\u{byte:04x}")?;
+            } else {
+                self.f.write_str(escape)?;
+            }
+            run_start = index + 1;
+        }
+
+        // The tail after the last escaped byte.
+        self.f.write_str(&text[run_start..])?;
+        self.f.write_char('"')
+    }
 }
 
 #[cfg(test)]

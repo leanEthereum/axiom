@@ -23,6 +23,7 @@ Allowed, and already declared in the root `Cargo.toml`:
 - `tracing` and `tracing-subscriber`, for telemetry, with default features off and no serde.
 - `thiserror`, for error types.
 - `proptest`, as a dev-dependency only.
+- `criterion`, as a dev-dependency of benchmarks only.
 
 Everything else is written here:
 
@@ -95,6 +96,11 @@ Everything else is a method. These signals mean a type is missing:
 - A function returns an `Option` meaning "need more input": that is an incremental decoder with state.
 - A function allocates a scratch buffer on every call: that is an encoder that owns and reuses it.
 - A helper reads or writes one type's fields: it is a method of that type.
+- A function named after a type, such as decoding, encoding, parsing, or writing it: it is that type's associated function.
+  Many types sharing one codec shape justify one small codec trait.
+- One type's impl blocks spread over several files: it is a god object doing several jobs.
+  Moving the impls into one file only makes a bigger god object.
+  Find the seams instead, give each job a type that owns its state, and let the original type compose them.
 
 Design the API before the body:
 
@@ -129,6 +135,12 @@ More rules:
 - Tests have no header doc. Their bodies are narrated line by line with concrete numbers.
 
 ## Testing
+
+- Unit and property tests live in the file they test, in a `#[cfg(test)] mod tests` at the bottom.
+- `tests/` holds only black-box suites over the public API: end-to-end runs, simulations, crash and model tests, and conformance against external vector files.
+  A unit test moves to `tests/` only if keeping it inline would make its file unreadable.
+- Benchmarks are criterion benches under `benches/`, never ignored tests.
+  Each bench target sets `harness = false` and drives criterion from a plain `main`, without its macros.
 
 - Consensus spec vectors are the interop contract. They run from `testing/ef-tests`.
 - Property tests with `proptest` for every law: round-trips, reference equality, determinism.

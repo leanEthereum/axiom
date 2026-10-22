@@ -1,6 +1,6 @@
 //! Laws of the parser, the serializer, and the hex encodings, checked on random input.
 
-use axiom_json::{Json, Limits, Number, Object, data, quantity};
+use axiom_json::{Data, Json, Limits, Number, Object, Quantity};
 use axiom_ssz::U256;
 use proptest::prelude::*;
 
@@ -126,38 +126,38 @@ proptest! {
     #[test]
     fn quantity_u64_round_trip(value in any::<u64>()) {
         // The minimal form decodes back and carries no leading zero.
-        let text = quantity::encode(value);
+        let text = value.to_quantity();
         prop_assert!(value == 0 || !text.starts_with("0x0"));
-        prop_assert_eq!(quantity::decode(&text), Ok(value));
+        prop_assert_eq!(u64::from_quantity(&text), Ok(value));
     }
 
     #[test]
     fn quantity_u256_round_trip(bytes in any::<[u8; 32]>()) {
         // Same law over 256 bits.
         let value = U256(bytes);
-        prop_assert_eq!(quantity::decode_u256(&quantity::encode_u256(&value)), Ok(value));
+        prop_assert_eq!(U256::from_quantity(&value.to_quantity()), Ok(value));
     }
 
     #[test]
     fn quantity_widths_agree(value in any::<u64>()) {
         // A 64-bit value has the same text whether read as 64 or 256 bits.
-        prop_assert_eq!(quantity::encode_u256(&U256::from_u64(value)), quantity::encode(value));
+        prop_assert_eq!(U256::from_u64(value).to_quantity(), value.to_quantity());
     }
 
     #[test]
     fn data_round_trip(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
         // Every byte string encodes to 2 + 2n characters and decodes back.
-        let text = data::encode(&bytes);
+        let text = bytes.to_data();
         prop_assert_eq!(text.len(), 2 + 2 * bytes.len());
-        prop_assert_eq!(data::decode(&text), Ok(bytes));
+        prop_assert_eq!(Vec::<u8>::from_data(&text), Ok(bytes));
     }
 
     #[test]
     fn hex_decoders_never_panic(text in "(0x)?[0-9a-fA-Fg-z]{0,70}") {
         // Only the outcome's existence matters here.
-        let _ = quantity::decode(&text);
-        let _ = quantity::decode_u256(&text);
-        let _ = data::decode(&text);
-        let _ = data::decode_array::<32>(&text);
+        let _ = u64::from_quantity(&text);
+        let _ = U256::from_quantity(&text);
+        let _ = Vec::<u8>::from_data(&text);
+        let _ = <[u8; 32]>::from_data(&text);
     }
 }

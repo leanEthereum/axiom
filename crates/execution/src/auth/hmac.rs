@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 /// Bytes in one SHA-256 input block, which sizes the HMAC key pads.
 const BLOCK: usize = 64;
 
-/// Computes HMAC-SHA256 of a message under a key.
+/// HMAC-SHA256 under one key, ready to authenticate messages.
 ///
 /// # Algorithm
 ///
@@ -19,43 +19,67 @@ const BLOCK: usize = 64;
 ///
 /// The two pads differ in many bits, so the inner and outer keys are unrelated.
 /// That blocks the length-extension attack a bare keyed hash would allow.
-pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
-    // A key longer than one block is replaced by its hash, per RFC 2104 section 2.
-    let mut padded = [0_u8; BLOCK];
-    if key.len() > BLOCK {
-        padded[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        padded[..key.len()].copy_from_slice(key);
-    }
-
-    // Inner hash over the key masked with 0x36, then the message.
-    let mut inner = Sha256::new();
-    inner.update(padded.map(|byte| byte ^ 0x36));
-    inner.update(message);
-    let inner = inner.finalize();
-
-    // Outer hash over the key masked with 0x5c, then the inner digest.
-    let mut outer = Sha256::new();
-    outer.update(padded.map(|byte| byte ^ 0x5c));
-    outer.update(inner);
-    outer.finalize().into()
+///
+/// # Performance
+///
+/// Both padded key blocks are absorbed once, at construction.
+/// Each message then costs its own hashing plus one block for the outer hash.
+#[derive(Clone)]
+pub(crate) struct HmacSha256 {
+    /// The hash state after absorbing the key masked with 0x36.
+    inner: Sha256,
+    /// The hash state after absorbing the key masked with 0x5c.
+    outer: Sha256,
 }
 
-/// Compares two byte strings in time that depends only on their lengths.
-///
-/// A comparison that stops at the first difference leaks, through timing, how many leading bytes matched.
-/// An attacker could then forge a MAC one byte at a time.
-pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    // Lengths are public: a MAC always has 32 bytes.
-    if left.len() != right.len() {
-        return false;
+impl HmacSha256 {
+    /// Keys the MAC.
+    pub(crate) fn new(key: &[u8]) -> Self {
+        // A key longer than one block is replaced by its hash, per RFC 2104 section 2.
+        let mut padded = [0_u8; BLOCK];
+        if key.len() > BLOCK {
+            padded[..32].copy_from_slice(&Sha256::digest(key));
+        } else {
+            padded[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(padded.map(|byte| byte ^ 0x36));
+        let mut outer = Sha256::new();
+        outer.update(padded.map(|byte| byte ^ 0x5c));
+        Self { inner, outer }
     }
-    // Fold every byte difference into one accumulator, with no early exit.
-    let difference = left
-        .iter()
-        .zip(right)
-        .fold(0_u8, |acc, (a, b)| acc | (a ^ b));
-    difference == 0
+
+    /// Computes the tag of a message.
+    pub(crate) fn mac(&self, message: &[u8]) -> [u8; 32] {
+        // Inner hash over the masked key, then the message.
+        let mut inner = self.inner.clone();
+        inner.update(message);
+        let inner = inner.finalize();
+
+        // Outer hash over the other masked key, then the inner digest.
+        let mut outer = self.outer.clone();
+        outer.update(inner);
+        outer.finalize().into()
+    }
+
+    /// Whether a tag authenticates a message, compared in time that depends only on lengths.
+    ///
+    /// A comparison that stops at the first difference leaks, through timing, how many leading bytes matched.
+    /// An attacker could then forge a MAC one byte at a time.
+    pub(crate) fn verify(&self, message: &[u8], tag: &[u8]) -> bool {
+        let expected = self.mac(message);
+        // Lengths are public: a MAC always has 32 bytes.
+        if tag.len() != expected.len() {
+            return false;
+        }
+        // Fold every byte difference into one accumulator, with no early exit.
+        let difference = tag
+            .iter()
+            .zip(expected)
+            .fold(0_u8, |acc, (a, b)| acc | (a ^ b));
+        difference == 0
+    }
 }
 
 #[cfg(test)]
@@ -114,22 +138,30 @@ mod tests {
             ),
         ];
         for (key, message, expected) in cases {
-            assert_eq!(hmac_sha256(&key, &message).to_vec(), hex(expected));
+            assert_eq!(HmacSha256::new(&key).mac(&message).to_vec(), hex(expected));
         }
     }
 
     #[test]
     fn rfc4231_truncated_vector() {
         // Case 5 checks only the first 128 bits of the output.
-        let mac = hmac_sha256(&[0x0c; 20], b"Test With Truncation");
+        let mac = HmacSha256::new(&[0x0c; 20]).mac(b"Test With Truncation");
         assert_eq!(mac[..16].to_vec(), hex("a3b6167473100ee06e0c796c2955552b"));
     }
 
     #[test]
-    fn comparison() {
-        // Equal, one byte off at the end, and different lengths.
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
+    fn verification() {
+        // The tag of "abc" under the key "k" verifies.
+        let key = HmacSha256::new(b"k");
+        let mut tag = key.mac(b"abc");
+        assert!(key.verify(b"abc", &tag));
+
+        // The same tag fails for another message, and with its last byte flipped.
+        assert!(!key.verify(b"abd", &tag));
+        tag[31] ^= 1;
+        assert!(!key.verify(b"abc", &tag));
+
+        // A tag one byte short fails on its length alone.
+        assert!(!key.verify(b"abc", &key.mac(b"abc")[..31]));
     }
 }
