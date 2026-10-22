@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 axiom-bls12-381.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 axiom-yaml.workspace = true

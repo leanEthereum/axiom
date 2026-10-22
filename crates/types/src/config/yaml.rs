@@ -1,34 +1,24 @@
 //! Reading a configuration from the YAML files the consensus specs and networks publish.
 
-use std::{error::Error, fmt};
-
 use axiom_yaml::Yaml;
+use thiserror::Error;
 
 use super::{BlobParameters, BlobSchedule, ChainConfig};
 use crate::{Epoch, ExecutionAddress, Gwei, Version};
 
 /// A configuration file that does not describe a valid configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ConfigError {
     /// The file is not a mapping of names to values.
+    #[error("configuration is not a mapping")]
     NotAMapping,
     /// A value does not have its field's type.
+    #[error("configuration value {0} is invalid")]
     InvalidValue(String),
     /// The preset base is neither mainnet nor minimal.
+    #[error("preset base {0} is unknown")]
     UnknownPresetBase(String),
 }
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotAMapping => f.write_str("configuration is not a mapping"),
-            Self::InvalidValue(key) => write!(f, "configuration value {key} is invalid"),
-            Self::UnknownPresetBase(base) => write!(f, "preset base {base} is unknown"),
-        }
-    }
-}
-
-impl Error for ConfigError {}
 
 impl ChainConfig {
     /// A configuration read from YAML, starting from the defaults of its preset base.
