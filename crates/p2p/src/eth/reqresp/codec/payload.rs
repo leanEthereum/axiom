@@ -6,7 +6,7 @@ use axiom_snappy::frame;
 
 use crate::{
     eth::{max_compressed_len, reqresp::ReqRespError},
-    varint::{self, Varint, VarintError},
+    varint::{Varint, VarintError},
 };
 
 /// Bytes of the stream identifier chunk that opens every framed stream.
@@ -25,7 +25,7 @@ pub(in crate::eth::reqresp) struct Payload<'a>(pub(in crate::eth::reqresp) &'a [
 impl Payload<'_> {
     /// Appends the length prefix and the framed snappy stream.
     pub(in crate::eth::reqresp) fn encode_to(self, out: &mut Vec<u8>) {
-        varint::encode(self.0.len() as u64, out);
+        Varint::Protobuf.write(self.0.len() as u64, out);
         out.extend_from_slice(&frame::compress(self.0));
     }
 }

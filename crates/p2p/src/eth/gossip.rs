@@ -23,64 +23,90 @@ pub const fn max_compressed_len(n: u64) -> u64 {
     32 + n + n / 6
 }
 
-/// Largest gossip RPC frame: the compressed payload bound plus 1 KiB of framing, at least 1 MiB.
-#[must_use]
-pub fn max_message_size(max_payload_size: u64) -> usize {
-    let bound = (max_compressed_len(max_payload_size) + 1024).max(1024 * 1024);
-    usize::try_from(bound).unwrap_or(usize::MAX)
-}
-
-/// The identifier of a gossip message, as Altair and later forks define it.
+/// The ssz_snappy gossip encoding under one payload limit.
 ///
-/// ```text
-/// valid snappy:    SHA256(VALID_DOMAIN   || len(topic) as u64 LE || topic || decompressed)[:20]
-/// invalid snappy:  SHA256(INVALID_DOMAIN || len(topic) as u64 LE || topic || raw data)[:20]
-/// ```
-///
-/// Two cases exist because distinct compressions may decode to one payload.
-/// Hashing the decompressed bytes gives them one identifier.
-/// See `specs/altair/p2p-interface.md`, topics and messages.
-#[must_use]
-pub fn gossip_message_id(topic: &Topic, data: &[u8]) -> MessageId {
-    let topic = topic.as_str().as_bytes();
-    let mut hasher = Sha256::new();
-    // A payload that decompresses within the bound is hashed decompressed.
-    let decompressed = raw::decompressed_len(data)
-        .ok()
-        .filter(|&len| len as u64 <= MAX_PAYLOAD_SIZE)
-        .and_then(|_| raw::decompress(data, MAX_PAYLOAD_SIZE as usize).ok());
-    match &decompressed {
-        Some(_) => hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY),
-        None => hasher.update(MESSAGE_DOMAIN_INVALID_SNAPPY),
-    }
-    hasher.update((topic.len() as u64).to_le_bytes());
-    hasher.update(topic);
-    hasher.update(decompressed.as_deref().unwrap_or(data));
-    let digest = hasher.finalize();
-    let mut id = [0u8; MESSAGE_ID_LEN];
-    id.copy_from_slice(&digest[..MESSAGE_ID_LEN]);
-    MessageId(id)
+/// A payload travels as one raw snappy block, with no framing.
+/// See `specs/phase0/p2p-interface.md`, encodings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GossipEncoding {
+    /// The largest decompressed payload accepted, MAX_PAYLOAD_SIZE.
+    max_payload_size: u64,
 }
 
-/// Compresses an SSZ payload for gossip, with the raw snappy block format.
-#[must_use]
-pub fn encode_gossip(ssz: &[u8]) -> Vec<u8> {
-    raw::compress(ssz)
+impl GossipEncoding {
+    /// The encoding under a payload limit.
+    #[must_use]
+    pub const fn new(max_payload_size: u64) -> Self {
+        Self { max_payload_size }
+    }
+
+    /// Largest gossip RPC frame: the compressed payload bound plus 1 KiB of framing, at least 1 MiB.
+    #[must_use]
+    pub fn max_message_size(self) -> usize {
+        let bound = (max_compressed_len(self.max_payload_size) + 1024).max(1024 * 1024);
+        usize::try_from(bound).unwrap_or(usize::MAX)
+    }
+
+    /// Compresses an SSZ payload into one raw snappy block.
+    #[must_use]
+    pub fn encode(self, ssz: &[u8]) -> Vec<u8> {
+        raw::compress(ssz)
+    }
+
+    /// Decompresses a gossip payload, enforcing both size limits of the spec.
+    pub fn decode(self, data: &[u8]) -> Result<Vec<u8>, GossipDecodeError> {
+        // The compressed size is bounded before any work is done.
+        let max_compressed = max_compressed_len(self.max_payload_size);
+        if data.len() as u64 > max_compressed {
+            return Err(GossipDecodeError::CompressedTooLarge {
+                len: data.len(),
+                max: max_compressed,
+            });
+        }
+        // The decompressed size is checked from the preamble, before allocation.
+        let max = usize::try_from(self.max_payload_size).unwrap_or(usize::MAX);
+        raw::decompress(data, max).map_err(GossipDecodeError::Snappy)
+    }
+
+    /// The identifier of a gossip message, as Altair and later forks define it.
+    ///
+    /// ```text
+    /// valid snappy:    SHA256(VALID_DOMAIN   || len(topic) as u64 LE || topic || decompressed)[:20]
+    /// invalid snappy:  SHA256(INVALID_DOMAIN || len(topic) as u64 LE || topic || raw data)[:20]
+    /// ```
+    ///
+    /// Two cases exist because distinct compressions may decode to one payload.
+    /// Hashing the decompressed bytes gives them one identifier.
+    /// The spec decides validity under MAX_PAYLOAD_SIZE, whatever the configured limit.
+    /// See `specs/altair/p2p-interface.md`, topics and messages.
+    #[must_use]
+    pub fn message_id(topic: &Topic, data: &[u8]) -> MessageId {
+        let topic = topic.as_str().as_bytes();
+        let mut hasher = Sha256::new();
+        // A payload that decompresses within the bound is hashed decompressed.
+        let decompressed = raw::decompressed_len(data)
+            .ok()
+            .filter(|&len| len as u64 <= MAX_PAYLOAD_SIZE)
+            .and_then(|_| raw::decompress(data, MAX_PAYLOAD_SIZE as usize).ok());
+        match &decompressed {
+            Some(_) => hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY),
+            None => hasher.update(MESSAGE_DOMAIN_INVALID_SNAPPY),
+        }
+        hasher.update((topic.len() as u64).to_le_bytes());
+        hasher.update(topic);
+        hasher.update(decompressed.as_deref().unwrap_or(data));
+        let digest = hasher.finalize();
+        let mut id = [0u8; MESSAGE_ID_LEN];
+        id.copy_from_slice(&digest[..MESSAGE_ID_LEN]);
+        MessageId(id)
+    }
 }
 
-/// Decompresses a gossip payload, enforcing both size limits of the spec.
-pub fn decode_gossip(data: &[u8], max_payload_size: u64) -> Result<Vec<u8>, GossipDecodeError> {
-    // The compressed size is bounded before any work is done.
-    let max_compressed = max_compressed_len(max_payload_size);
-    if data.len() as u64 > max_compressed {
-        return Err(GossipDecodeError::CompressedTooLarge {
-            len: data.len(),
-            max: max_compressed,
-        });
+impl Default for GossipEncoding {
+    /// The encoding under the Fulu MAX_PAYLOAD_SIZE.
+    fn default() -> Self {
+        Self::new(MAX_PAYLOAD_SIZE)
     }
-    // The decompressed size is checked from the preamble, before allocation.
-    let max = usize::try_from(max_payload_size).unwrap_or(usize::MAX);
-    raw::decompress(data, max).map_err(GossipDecodeError::Snappy)
 }
 
 /// A gossip payload that breaks the encoding rules.
@@ -110,7 +136,7 @@ mod tests {
     fn message_id_of_valid_snappy() {
         let topic = Topic::new("/eth2/00000000/beacon_block/ssz_snappy");
         let payload = b"block".repeat(4);
-        let data = encode_gossip(&payload);
+        let data = GossipEncoding::default().encode(&payload);
 
         // Recompute the spec formula by hand.
         //
@@ -120,7 +146,7 @@ mod tests {
         preimage.extend_from_slice(topic.as_str().as_bytes());
         preimage.extend_from_slice(&payload);
         let expected = &Sha256::digest(&preimage)[..20];
-        assert_eq!(gossip_message_id(&topic, &data).0, expected);
+        assert_eq!(GossipEncoding::message_id(&topic, &data).0, expected);
     }
 
     #[test]
@@ -133,7 +159,7 @@ mod tests {
         preimage.push(b't');
         preimage.extend_from_slice(&data);
         assert_eq!(
-            gossip_message_id(&topic, &data).0,
+            GossipEncoding::message_id(&topic, &data).0,
             &Sha256::digest(&preimage)[..20]
         );
     }
@@ -143,13 +169,16 @@ mod tests {
         // 10 MiB payload → 32 + 10485760 + 1747626 = 12233418 compressed.
         assert_eq!(max_compressed_len(MAX_PAYLOAD_SIZE), 12_233_418);
         // Plus 1024 bytes of framing.
-        assert_eq!(max_message_size(MAX_PAYLOAD_SIZE), 12_234_442);
+        assert_eq!(
+            GossipEncoding::new(MAX_PAYLOAD_SIZE).max_message_size(),
+            12_234_442
+        );
         // A tiny payload bound still allows 1 MiB frames.
-        assert_eq!(max_message_size(10), 1024 * 1024);
+        assert_eq!(GossipEncoding::new(10).max_message_size(), 1024 * 1024);
         // A 100-byte payload against a 10-byte bound is rejected from the preamble.
-        let data = encode_gossip(&[0; 100]);
+        let data = GossipEncoding::default().encode(&[0; 100]);
         assert!(matches!(
-            decode_gossip(&data, 10),
+            GossipEncoding::new(10).decode(&data),
             Err(GossipDecodeError::CompressedTooLarge { .. } | GossipDecodeError::Snappy(_))
         ));
     }
@@ -157,13 +186,13 @@ mod tests {
     proptest! {
         #[test]
         fn round_trip(payload in proptest::collection::vec(any::<u8>(), 0..2048)) {
-            prop_assert_eq!(decode_gossip(&encode_gossip(&payload), MAX_PAYLOAD_SIZE), Ok(payload));
+            prop_assert_eq!(GossipEncoding::default().decode(&GossipEncoding::default().encode(&payload)), Ok(payload));
         }
 
         #[test]
         fn garbage_never_panics(data in proptest::collection::vec(any::<u8>(), 0..256)) {
-            let _ = decode_gossip(&data, 1024);
-            let _ = gossip_message_id(&Topic::new("t"), &data);
+            let _ = GossipEncoding::new(1024).decode(&data);
+            let _ = GossipEncoding::message_id(&Topic::new("t"), &data);
         }
     }
 }

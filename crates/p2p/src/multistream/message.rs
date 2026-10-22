@@ -9,7 +9,7 @@ use std::{mem, str};
 use super::{MAX_MESSAGE_LEN, NegotiationError, PROTOCOL_HEADER};
 use crate::{
     protobuf::{LengthPrefixedDecoder, ProtobufError},
-    varint,
+    varint::Varint,
 };
 
 /// Reads the messages one side receives, checking the protocol header first.
@@ -139,7 +139,7 @@ impl MessageWriter {
     /// Queues one message whose body may be arbitrary bytes.
     fn push_body(&mut self, body: &[u8]) {
         // The length counts the trailing newline.
-        varint::encode(body.len() as u64 + 1, &mut self.out);
+        Varint::Multiformat.write(body.len() as u64 + 1, &mut self.out);
         self.out.extend_from_slice(body);
         self.out.push(b'\n');
     }

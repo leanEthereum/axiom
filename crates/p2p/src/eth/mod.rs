@@ -7,8 +7,7 @@ pub mod reqresp;
 mod topic;
 
 pub use gossip::{
-    GossipDecodeError, MAX_PAYLOAD_SIZE, MESSAGE_DOMAIN_INVALID_SNAPPY,
-    MESSAGE_DOMAIN_VALID_SNAPPY, decode_gossip, encode_gossip, gossip_message_id,
-    max_compressed_len, max_message_size,
+    GossipDecodeError, GossipEncoding, MAX_PAYLOAD_SIZE, MESSAGE_DOMAIN_INVALID_SNAPPY,
+    MESSAGE_DOMAIN_VALID_SNAPPY, max_compressed_len,
 };
 pub use topic::{GossipKind, GossipTopic, TopicError};

@@ -100,7 +100,6 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::varint;
 
     #[test]
     fn frames_arrive_whole_or_wait() {
@@ -159,7 +158,7 @@ mod tests {
             // Frame every body, then feed the stream in pieces of cut bytes.
             let mut wire = Vec::new();
             for body in &bodies {
-                varint::encode(body.len() as u64, &mut wire);
+                Varint::Multiformat.write(body.len() as u64, &mut wire);
                 wire.extend_from_slice(body);
             }
             let mut decoder = LengthPrefixedDecoder::new(256);

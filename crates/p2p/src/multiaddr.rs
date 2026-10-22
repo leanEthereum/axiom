@@ -25,7 +25,7 @@ use thiserror::Error;
 
 use crate::{
     identity::{PeerId, PeerIdError},
-    varint::{self, Varint},
+    varint::Varint,
 };
 
 /// Multicodec of IPv4.
@@ -63,27 +63,27 @@ impl Protocol {
     fn encode_to(&self, out: &mut Vec<u8>) {
         match self {
             Self::Ip4(addr) => {
-                varint::encode(CODE_IP4, out);
+                Varint::Multiformat.write(CODE_IP4, out);
                 out.extend_from_slice(&addr.octets());
             }
             Self::Ip6(addr) => {
-                varint::encode(CODE_IP6, out);
+                Varint::Multiformat.write(CODE_IP6, out);
                 out.extend_from_slice(&addr.octets());
             }
             Self::Tcp(port) => {
-                varint::encode(CODE_TCP, out);
+                Varint::Multiformat.write(CODE_TCP, out);
                 out.extend_from_slice(&port.to_be_bytes());
             }
             Self::Udp(port) => {
-                varint::encode(CODE_UDP, out);
+                Varint::Multiformat.write(CODE_UDP, out);
                 out.extend_from_slice(&port.to_be_bytes());
             }
             // QUIC carries no value: the code alone says it all.
-            Self::QuicV1 => varint::encode(CODE_QUIC_V1, out),
+            Self::QuicV1 => Varint::Multiformat.write(CODE_QUIC_V1, out),
             // Variable-size values carry their own varint length.
             Self::P2p(peer) => {
-                varint::encode(CODE_P2P, out);
-                varint::encode(peer.as_bytes().len() as u64, out);
+                Varint::Multiformat.write(CODE_P2P, out);
+                Varint::Multiformat.write(peer.as_bytes().len() as u64, out);
                 out.extend_from_slice(peer.as_bytes());
             }
         }

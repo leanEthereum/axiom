@@ -1,7 +1,7 @@
 //! Appending the fields of one message.
 
 use super::{ProtoMessage, WireType};
-use crate::varint;
+use crate::varint::Varint;
 
 /// Appends the fields of one message to a buffer, in the order written.
 #[derive(Debug)]
@@ -19,13 +19,13 @@ impl<'a> FieldWriter<'a> {
     /// Appends a varint field.
     pub fn varint(&mut self, number: u32, value: u64) {
         self.key(number, WireType::Varint);
-        varint::encode(value, self.out);
+        Varint::Protobuf.write(value, self.out);
     }
 
     /// Appends a length-delimited field holding raw bytes or a string.
     pub fn bytes(&mut self, number: u32, bytes: &[u8]) {
         self.key(number, WireType::LengthDelimited);
-        varint::encode(bytes.len() as u64, self.out);
+        Varint::Protobuf.write(bytes.len() as u64, self.out);
         self.out.extend_from_slice(bytes);
     }
 
@@ -37,7 +37,7 @@ impl<'a> FieldWriter<'a> {
 
     /// Appends a field key.
     fn key(&mut self, number: u32, wire_type: WireType) {
-        varint::encode((u64::from(number) << 3) | wire_type.tag(), self.out);
+        Varint::Protobuf.write((u64::from(number) << 3) | wire_type.tag(), self.out);
     }
 }
 

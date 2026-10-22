@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, iter::from_fn, time::Duration};
 
 use super::*;
 use crate::{
-    eth::encode_gossip,
+    eth::GossipEncoding,
     gossipsub::{
         IDontWant, IHave, IWant, TopicScoreParams,
         rpc::{Graft, Prune},
@@ -67,7 +67,10 @@ fn controls(rpcs: &[Rpc]) -> Vec<&ControlMessage> {
 /// An RPC carrying one message on the test topic.
 fn message_rpc(data: &[u8]) -> Rpc {
     Rpc {
-        publish: vec![RawMessage::anonymous(topic(), encode_gossip(data))],
+        publish: vec![RawMessage::anonymous(
+            topic(),
+            GossipEncoding::default().encode(data),
+        )],
         ..Rpc::default()
     }
 }
@@ -253,7 +256,11 @@ fn ihave_is_answered_with_iwant_and_tracked_as_a_promise() {
 fn iwant_is_served_from_the_cache_with_a_retransmission_limit() {
     let mut router = router_with_peers(1);
     let id = router
-        .publish(topic(), encode_gossip(b"own"), Duration::ZERO)
+        .publish(
+            topic(),
+            GossipEncoding::default().encode(b"own"),
+            Duration::ZERO,
+        )
         .unwrap();
     drain(&mut router);
     let iwant = Rpc {
@@ -340,7 +347,11 @@ fn heartbeat_emits_gossip_to_non_mesh_peers() {
     // 20 peers: 8 in the mesh, 12 outside.
     let mut router = router_with_peers(20);
     router
-        .publish(topic(), encode_gossip(b"gossip me"), Duration::ZERO)
+        .publish(
+            topic(),
+            GossipEncoding::default().encode(b"gossip me"),
+            Duration::ZERO,
+        )
         .unwrap();
     drain(&mut router);
     router.heartbeat(Duration::from_millis(700));

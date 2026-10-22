@@ -33,12 +33,12 @@
 //! assert_eq!(addr.to_string(), "/ip4/127.0.0.1/tcp/9000");
 //! ```
 
-pub mod base58;
 pub mod eth;
 pub mod gossipsub;
 pub mod identify;
 pub mod identity;
 pub mod multiaddr;
+pub mod multibase;
 pub mod multistream;
 pub mod ping;
 pub mod protobuf;

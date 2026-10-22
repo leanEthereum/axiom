@@ -35,7 +35,7 @@ pub use frame::LengthPrefixedDecoder;
 pub use reader::{Field, FieldReader, FieldValue};
 pub use writer::FieldWriter;
 
-use crate::varint;
+use crate::varint::Varint;
 
 /// A protobuf message with a hand-written wire encoding.
 pub trait ProtoMessage: Sized {
@@ -57,10 +57,11 @@ pub trait ProtoMessage: Sized {
     /// Appends this message behind a varint length prefix, the framing libp2p streams use.
     fn encode_length_prefixed(&self, out: &mut Vec<u8>) {
         // The prefix needs the body's size, so the body goes first and the prefix follows.
+        // A length encodes the same in both dialects, so this framing suits either reader.
         let start = out.len();
         self.encode_to(out);
         let body_len = out.len() - start;
-        varint::encode(body_len as u64, out);
+        Varint::Multiformat.write(body_len as u64, out);
         // Rotate the prefix in front of the body, with no scratch buffer.
         //
         //     [ body ][ prefix ]  →  [ prefix ][ body ]

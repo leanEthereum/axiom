@@ -17,13 +17,13 @@ use tokio::{
 
 use super::{
     Command, InboundRequestId, NetworkConfig, NetworkEvent, RequestError, RequestId,
-    connection::{self, ConnectionEvent, ConnectionId, ConnectionInput, Shared},
+    connection::{Connection, ConnectionEvent, ConnectionId, ConnectionInput, Shared},
     events::{Admission, EventQueue},
-    upgrade::upgrade,
+    upgrade::Upgrade,
 };
 use crate::{
     eth::{
-        decode_gossip, encode_gossip,
+        GossipEncoding,
         reqresp::{Protocol, RateLimiter, ResponseChunk, ResponseCode},
     },
     gossipsub::{GossipsubEvent, ProtocolVersion, Router, ValidationOutcome},
@@ -145,7 +145,7 @@ impl ConnectionEntry {
 }
 
 /// The swarm task's state.
-struct Swarm {
+pub(super) struct Swarm {
     /// The configuration.
     config: NetworkConfig,
     /// Settings shared with connections.
@@ -174,101 +174,108 @@ struct Swarm {
     events: Arc<EventQueue>,
 }
 
-/// Spawns the swarm, accept loop, and heartbeat tasks.
-pub(super) fn spawn_swarm(
-    config: NetworkConfig,
-    listener: TcpListener,
-    listen_addr: Multiaddr,
-    input: mpsc::Sender<SwarmInput>,
-    mut receiver: mpsc::Receiver<SwarmInput>,
-    events: Arc<EventQueue>,
-) {
-    let identify = IdentifyInfo {
-        protocol_version: "eth2/1.0.0".to_owned(),
-        agent_version: config.agent_version.clone(),
-        public_key: config.identity.public_key().clone(),
-        listen_addrs: vec![listen_addr],
-        observed_addr: None,
-        protocols: ProtocolVersion::ALL
-            .iter()
-            .map(|version| version.protocol_id())
-            .chain(Protocol::ALL.iter().map(|protocol| protocol.protocol_id()))
-            .chain([identify::PROTOCOL, ping::PROTOCOL])
-            .map(str::to_owned)
-            .collect(),
-    };
-    let shared = Arc::new(Shared {
-        identify,
-        max_payload_size: config.max_payload_size,
-        max_gossip_frame: config.gossipsub.max_transmit_size,
-        yamux: config.yamux,
-        connection_queue: config.connection_queue,
-    });
-    let heartbeat = config.gossipsub.heartbeat_interval;
-    let mut swarm = Swarm {
-        router: Router::new(config.gossipsub, config.scoring.clone(), config.seed),
-        limiter: config.rate_limiter.clone(),
-        config,
-        shared,
-        start: Instant::now(),
-        connections: BTreeMap::new(),
-        peers: BTreeMap::new(),
-        requests: BTreeMap::new(),
-        inbound: BTreeMap::new(),
-        next_connection: 1,
-        next_inbound: 1,
-        input: input.clone(),
-        events,
-    };
-
-    // The accept loop feeds sockets into the swarm.
-    let accept_input = input.clone();
-    let accept_task = spawn(async move {
-        while let Ok((stream, address)) = listener.accept().await {
-            if accept_input
-                .send(SwarmInput::Accepted(stream, address))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    });
-    // The heartbeat ticks the router.
-    let heartbeat_task = spawn(async move {
-        let mut ticker = interval(heartbeat);
-        // The first tick completes at once; skip it so the first heartbeat waits a full period.
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            if input.send(SwarmInput::Heartbeat).await.is_err() {
-                return;
-            }
-        }
-    });
-    spawn(async move {
-        while let Some(input) = receiver.recv().await {
-            if !swarm.handle(input) {
-                break;
-            }
-            swarm.flush_router();
-            swarm.retry_backlogs();
-        }
-        // Shutdown: close every connection, cutting those too busy to hear it.
-        for entry in swarm.connections.values_mut() {
-            if entry.deliver(ConnectionInput::Close) != Delivery::Sent
-                && let Some(task) = &entry.task
-            {
-                task.abort();
-            }
-        }
-        swarm.events.finish();
-        accept_task.abort();
-        heartbeat_task.abort();
-    });
-}
-
 impl Swarm {
+    /// A swarm with no connections, for a node listening at an address.
+    pub(super) fn new(
+        config: NetworkConfig,
+        listen_addr: Multiaddr,
+        input: mpsc::Sender<SwarmInput>,
+        events: Arc<EventQueue>,
+    ) -> Self {
+        let identify = IdentifyInfo {
+            protocol_version: "eth2/1.0.0".to_owned(),
+            agent_version: config.agent_version.clone(),
+            public_key: config.identity.public_key().clone(),
+            listen_addrs: vec![listen_addr],
+            observed_addr: None,
+            protocols: ProtocolVersion::ALL
+                .iter()
+                .map(|version| version.protocol_id())
+                .chain(Protocol::ALL.iter().map(|protocol| protocol.protocol_id()))
+                .chain([identify::PROTOCOL, ping::PROTOCOL])
+                .map(str::to_owned)
+                .collect(),
+        };
+        let shared = Arc::new(Shared {
+            identify,
+            max_payload_size: config.max_payload_size,
+            max_gossip_frame: config.gossipsub.max_transmit_size,
+            yamux: config.yamux,
+            connection_queue: config.connection_queue,
+        });
+        Self {
+            router: Router::new(config.gossipsub, config.scoring.clone(), config.seed),
+            limiter: config.rate_limiter.clone(),
+            config,
+            shared,
+            start: Instant::now(),
+            connections: BTreeMap::new(),
+            peers: BTreeMap::new(),
+            requests: BTreeMap::new(),
+            inbound: BTreeMap::new(),
+            next_connection: 1,
+            next_inbound: 1,
+            input,
+            events,
+        }
+    }
+
+    /// Spawns the swarm task, with its accept loop and heartbeat tasks.
+    pub(super) fn spawn(mut self, listener: TcpListener, mut receiver: mpsc::Receiver<SwarmInput>) {
+        let heartbeat = self.config.gossipsub.heartbeat_interval;
+        // The accept loop feeds sockets into the swarm.
+        let accept_input = self.input.clone();
+        let accept_task = spawn(async move {
+            while let Ok((stream, address)) = listener.accept().await {
+                if accept_input
+                    .send(SwarmInput::Accepted(stream, address))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        // The heartbeat ticks the router.
+        let heartbeat_input = self.input.clone();
+        let heartbeat_task = spawn(async move {
+            let mut ticker = interval(heartbeat);
+            // The first tick completes at once; skip it so the first heartbeat waits a full period.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if heartbeat_input.send(SwarmInput::Heartbeat).await.is_err() {
+                    return;
+                }
+            }
+        });
+        spawn(async move {
+            while let Some(input) = receiver.recv().await {
+                if !self.handle(input) {
+                    break;
+                }
+                self.flush_router();
+                self.retry_backlogs();
+            }
+            // Shutdown: close every connection, cutting those too busy to hear it.
+            for entry in self.connections.values_mut() {
+                if entry.deliver(ConnectionInput::Close) != Delivery::Sent
+                    && let Some(task) = &entry.task
+                {
+                    task.abort();
+                }
+            }
+            self.events.finish();
+            accept_task.abort();
+            heartbeat_task.abort();
+        });
+    }
+
+    /// The gossip encoding under the configured payload limit.
+    const fn encoding(&self) -> GossipEncoding {
+        GossipEncoding::new(self.config.max_payload_size)
+    }
+
     /// The router clock: time since the swarm started.
     fn now(&self) -> Duration {
         self.start.elapsed()
@@ -329,7 +336,9 @@ impl Swarm {
             }
             Command::Publish { topic, ssz, reply } => {
                 // Gossip carries raw snappy blocks.
-                let outcome = self.router.publish(topic, encode_gossip(&ssz), now);
+                let outcome = self
+                    .router
+                    .publish(topic, self.encoding().encode(&ssz), now);
                 let _ = reply.send(outcome);
             }
             Command::Validate { id, outcome } => {
@@ -434,13 +443,20 @@ impl Swarm {
             .unwrap_or_default();
         let task = spawn(async move {
             let _ = stream.set_nodelay(true);
-            match upgrade(stream, role, security.as_ref(), expected).await {
+            match Upgrade::new(stream, role)
+                .run(security.as_ref(), expected)
+                .await
+            {
                 Ok(upgraded) => {
                     let mode = match role {
                         Role::Initiator => Mode::Client,
                         Role::Responder => Mode::Server,
                     };
-                    connection::run(id, upgraded, mode, remote, shared, input).await;
+                    if let Some((connection, inputs)) =
+                        Connection::establish(id, upgraded, mode, remote, shared, input).await
+                    {
+                        connection.run(inputs).await;
+                    }
                 }
                 Err(error) => {
                     let _ = input
@@ -683,7 +699,7 @@ impl Swarm {
             } = event
             {
                 // Gossip payloads are snappy blocks; an undecodable one is invalid outright.
-                match decode_gossip(&message.data, self.config.max_payload_size) {
+                match self.encoding().decode(&message.data) {
                     Ok(data) => {
                         let event = NetworkEvent::GossipMessage {
                             id,

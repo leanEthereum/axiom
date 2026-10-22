@@ -168,7 +168,7 @@ enum StreamState {
 }
 
 /// The connection task's state.
-struct Connection {
+pub(super) struct Connection {
     /// This connection's identifier.
     id: ConnectionId,
     /// The yamux session.
@@ -195,151 +195,125 @@ struct Connection {
     remote_addr: Multiaddr,
     /// Whether the connection should end.
     closing: bool,
-}
-
-/// Runs a connection after its upgrade, until it closes.
-pub(super) async fn run(
-    id: ConnectionId,
-    upgraded: Upgraded,
-    mode: Mode,
-    remote_addr: Multiaddr,
-    shared: Arc<Shared>,
-    swarm: mpsc::Sender<SwarmInput>,
-) {
-    let Upgraded {
-        tcp,
-        session: secure,
-        yamux_remainder,
-    } = upgraded;
-    let (input_tx, mut input_rx) = mpsc::channel(shared.connection_queue.max(1));
-    let peer = secure.remote_peer.clone();
-    let established = SwarmInput::Connection(
-        id,
-        ConnectionEvent::Established {
-            peer,
-            commands: input_tx.clone(),
-        },
-    );
-    if swarm.send(established).await.is_err() {
-        return;
-    }
-
-    // The reader task turns socket bytes into plaintext for this task.
-    // The guard stops it whenever this task ends, even when the swarm aborts it.
-    let (reader, writer) = tcp.into_split();
-    let _reader = ReaderGuard(spawn(read_loop(reader, secure.opener, input_tx)));
-
-    let mut connection = Connection {
-        id,
-        session: Session::new(mode, shared.yamux),
-        sealer: secure.sealer,
-        writer,
-        streams: BTreeMap::new(),
-        gossip_stream: None,
-        gossip_queue: Vec::new(),
-        swarm,
-        outbox: Vec::new(),
-        credit: Vec::new(),
-        shared,
-        remote_addr,
-        closing: false,
-    };
-    // Open the gossip and identify streams at once.
-    connection.open(
-        Purpose::Gossip,
-        &[
-            ProtocolVersion::V1_2,
-            ProtocolVersion::V1_1,
-            ProtocolVersion::V1_0,
-        ]
-        .map(ProtocolVersion::protocol_id),
-    );
-    connection.open(Purpose::Identify, &[identify::PROTOCOL]);
-    // Plaintext that trailed the multiplexer negotiation comes before anything the reader sees.
-    if !yamux_remainder.is_empty() {
-        connection.handle_input(ConnectionInput::Bytes(yamux_remainder));
-    }
-
-    // One input at a time, then the turn's fixed sequence.
-    loop {
-        // Phase 1: hand events to the swarm, waiting while it is busy.
-        if connection.deliver().await.is_err() {
-            break;
-        }
-        // Phase 2: only now let the peer send more.
-        connection.grant_credit();
-        // Phase 3: move pending responses into whatever send buffer freed up.
-        connection.pump_responses();
-        // Phase 4: write what the session produced.
-        if connection.flush().await.is_err() || connection.closing {
-            break;
-        }
-        let Some(input) = input_rx.recv().await else {
-            break;
-        };
-        connection.handle_input(input);
-    }
-    // Best effort: tell the peer, then stop.
-    connection.session.go_away(GoAwayCode::Normal);
-    let _ = connection.flush().await;
-    let _ = connection.writer.shutdown().await;
-    // Fail requests still in flight.
-    for state in mem::take(&mut connection.streams).into_values() {
-        if let StreamState::RequestOut(request, ..)
-        | StreamState::Dialing(_, Purpose::Request(request, ..)) = state
-        {
-            connection.report(ConnectionEvent::RequestFailed(
-                request,
-                RequestError::StreamClosed,
-            ));
-        }
-    }
-    connection.report(ConnectionEvent::Closed);
-    let _ = connection.deliver().await;
-}
-
-/// Aborts the reader task when dropped.
-struct ReaderGuard(JoinHandle<()>);
-
-impl Drop for ReaderGuard {
-    fn drop(&mut self) {
-        // The reader holds the socket's read half; it must not outlive the connection.
-        self.0.abort();
-    }
-}
-
-/// Reads the socket, unseals, and forwards plaintext until the socket ends.
-///
-/// A failed authentication ends the loop, and with it the connection.
-/// A full connection queue makes it wait, so the socket is not read meanwhile.
-async fn read_loop(
-    mut reader: OwnedReadHalf,
-    mut opener: Box<dyn Open>,
-    output: mpsc::Sender<ConnectionInput>,
-) {
-    let mut buffer = vec![0u8; READ_CHUNK];
-    loop {
-        let n = match reader.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        let mut plaintext = Vec::new();
-        if opener.open(&buffer[..n], &mut plaintext).is_err() {
-            break;
-        }
-        if !plaintext.is_empty()
-            && output
-                .send(ConnectionInput::Bytes(plaintext))
-                .await
-                .is_err()
-        {
-            return;
-        }
-    }
-    let _ = output.send(ConnectionInput::Eof).await;
+    /// The task reading the socket, stopped when the connection ends.
+    _reader: ReaderGuard,
 }
 
 impl Connection {
+    /// Announces an upgraded connection to the swarm and starts reading its socket.
+    ///
+    /// # Returns
+    ///
+    /// The connection and its input queue, or nothing when the swarm has stopped.
+    pub(super) async fn establish(
+        id: ConnectionId,
+        upgraded: Upgraded,
+        mode: Mode,
+        remote_addr: Multiaddr,
+        shared: Arc<Shared>,
+        swarm: mpsc::Sender<SwarmInput>,
+    ) -> Option<(Self, mpsc::Receiver<ConnectionInput>)> {
+        let Upgraded {
+            tcp,
+            session: secure,
+            yamux_remainder,
+        } = upgraded;
+        let (input_tx, input_rx) = mpsc::channel(shared.connection_queue.max(1));
+        let peer = secure.remote_peer.clone();
+        let established = SwarmInput::Connection(
+            id,
+            ConnectionEvent::Established {
+                peer,
+                commands: input_tx.clone(),
+            },
+        );
+        if swarm.send(established).await.is_err() {
+            return None;
+        }
+
+        // The reader task turns socket bytes into plaintext for this task.
+        // The guard stops it whenever this task ends, even when the swarm aborts it.
+        let (reader, writer) = tcp.into_split();
+        let reader = SocketReader {
+            socket: reader,
+            opener: secure.opener,
+            output: input_tx,
+        };
+
+        let mut connection = Self {
+            id,
+            session: Session::new(mode, shared.yamux),
+            sealer: secure.sealer,
+            writer,
+            streams: BTreeMap::new(),
+            gossip_stream: None,
+            gossip_queue: Vec::new(),
+            swarm,
+            outbox: Vec::new(),
+            credit: Vec::new(),
+            shared,
+            remote_addr,
+            closing: false,
+            _reader: reader.spawn(),
+        };
+        // Open the gossip and identify streams at once.
+        connection.open(
+            Purpose::Gossip,
+            &[
+                ProtocolVersion::V1_2,
+                ProtocolVersion::V1_1,
+                ProtocolVersion::V1_0,
+            ]
+            .map(ProtocolVersion::protocol_id),
+        );
+        connection.open(Purpose::Identify, &[identify::PROTOCOL]);
+        // Plaintext that trailed the multiplexer negotiation comes before anything the reader sees.
+        if !yamux_remainder.is_empty() {
+            connection.handle_input(ConnectionInput::Bytes(yamux_remainder));
+        }
+        Some((connection, input_rx))
+    }
+
+    /// Runs the connection until it closes.
+    pub(super) async fn run(mut self, mut inputs: mpsc::Receiver<ConnectionInput>) {
+        // One input at a time, then the turn's fixed sequence.
+        loop {
+            // Phase 1: hand events to the swarm, waiting while it is busy.
+            if self.deliver().await.is_err() {
+                break;
+            }
+            // Phase 2: only now let the peer send more.
+            self.grant_credit();
+            // Phase 3: move pending responses into whatever send buffer freed up.
+            self.pump_responses();
+            // Phase 4: write what the session produced.
+            if self.flush().await.is_err() || self.closing {
+                break;
+            }
+            let Some(input) = inputs.recv().await else {
+                break;
+            };
+            self.handle_input(input);
+        }
+        // Best effort: tell the peer, then stop.
+        self.session.go_away(GoAwayCode::Normal);
+        let _ = self.flush().await;
+        let _ = self.writer.shutdown().await;
+        // Fail requests still in flight.
+        for state in mem::take(&mut self.streams).into_values() {
+            if let StreamState::RequestOut(request, ..)
+            | StreamState::Dialing(_, Purpose::Request(request, ..)) = state
+            {
+                self.report(ConnectionEvent::RequestFailed(
+                    request,
+                    RequestError::StreamClosed,
+                ));
+            }
+        }
+        self.report(ConnectionEvent::Closed);
+        let _ = self.deliver().await;
+    }
+
     /// Queues an event for the swarm, delivered at the end of the turn.
     fn report(&mut self, event: ConnectionEvent) {
         self.outbox.push(event);
@@ -826,5 +800,60 @@ impl Connection {
         let mut bytes = Vec::new();
         rpc.encode_length_prefixed(&mut bytes);
         let _ = self.session.send(stream, &bytes);
+    }
+}
+
+/// Reads the socket, unseals, and forwards plaintext to the connection task.
+///
+/// A failed authentication ends the loop, and with it the connection.
+/// A full connection queue makes it wait, so the socket is not read meanwhile.
+struct SocketReader {
+    /// The socket's read half.
+    socket: OwnedReadHalf,
+    /// Unseals inbound bytes.
+    opener: Box<dyn Open>,
+    /// The connection task's input.
+    output: mpsc::Sender<ConnectionInput>,
+}
+
+impl SocketReader {
+    /// Starts reading on a task of its own, stopped when the guard drops.
+    fn spawn(self) -> ReaderGuard {
+        ReaderGuard(spawn(self.run()))
+    }
+
+    /// Forwards plaintext until the socket ends.
+    async fn run(mut self) {
+        let mut buffer = vec![0u8; READ_CHUNK];
+        loop {
+            let n = match self.socket.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut plaintext = Vec::new();
+            if self.opener.open(&buffer[..n], &mut plaintext).is_err() {
+                break;
+            }
+            if !plaintext.is_empty()
+                && self
+                    .output
+                    .send(ConnectionInput::Bytes(plaintext))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+        }
+        let _ = self.output.send(ConnectionInput::Eof).await;
+    }
+}
+
+/// Aborts the reader task when dropped.
+struct ReaderGuard(JoinHandle<()>);
+
+impl Drop for ReaderGuard {
+    fn drop(&mut self) {
+        // The reader holds the socket's read half; it must not outlive the connection.
+        self.0.abort();
     }
 }

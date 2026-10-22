@@ -23,6 +23,7 @@
 //! See `libp2p/specs/yamux/README.md`, a copy of the hashicorp specification.
 
 mod frame;
+mod reader;
 mod session;
 
 pub use frame::{Flags, FrameType, HEADER_LEN, Header, StreamId};

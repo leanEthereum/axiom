@@ -73,6 +73,26 @@ impl Varint {
         matches!(self, Self::Multiformat)
     }
 
+    /// Appends the encoding of a value: the shortest one, which every dialect reads.
+    pub fn write(self, mut value: u64, out: &mut Vec<u8>) {
+        // Emit seven bits at a time, setting the high bit while more remain.
+        while value >= 0x80 {
+            // Low seven bits of the value, plus the continuation flag.
+            out.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        // The last group fits in seven bits, so its high bit stays clear.
+        out.push(value as u8);
+    }
+
+    /// Number of bytes the encoding of a value takes.
+    #[must_use]
+    pub const fn encoded_len(self, value: u64) -> usize {
+        // Bits needed, rounded up to whole seven-bit groups, and at least one group for zero.
+        let bits = 64 - (value | 1).leading_zeros() as usize;
+        bits.div_ceil(7)
+    }
+
     /// Reads one varint off the front of the input, advancing past it.
     ///
     /// # Errors
@@ -119,28 +139,6 @@ impl Varint {
     }
 }
 
-/// Appends the varint encoding of a value.
-///
-/// Both dialects share one encoding: the shortest one.
-pub fn encode(mut value: u64, out: &mut Vec<u8>) {
-    // Emit seven bits at a time, setting the high bit while more remain.
-    while value >= 0x80 {
-        // Low seven bits of the value, plus the continuation flag.
-        out.push((value as u8 & 0x7f) | 0x80);
-        value >>= 7;
-    }
-    // The last group fits in seven bits, so its high bit stays clear.
-    out.push(value as u8);
-}
-
-/// Number of bytes the varint encoding of a value takes.
-#[must_use]
-pub const fn encoded_len(value: u64) -> usize {
-    // Bits needed, rounded up to whole seven-bit groups, and at least one group for zero.
-    let bits = 64 - (value | 1).leading_zeros() as usize;
-    bits.div_ceil(7)
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -162,9 +160,9 @@ mod tests {
         for (value, bytes) in cases {
             // Encoding gives exactly the listed bytes.
             let mut out = Vec::new();
-            encode(value, &mut out);
+            Varint::Multiformat.write(value, &mut out);
             assert_eq!(out, bytes);
-            assert_eq!(encoded_len(value), bytes.len());
+            assert_eq!(Varint::Multiformat.encoded_len(value), bytes.len());
             // Decoding consumes exactly those bytes.
             let mut input = bytes;
             assert_eq!(Varint::Protobuf.read(&mut input), Ok(value));
@@ -176,7 +174,7 @@ mod tests {
     fn max_value_takes_ten_bytes() {
         // 2^64 - 1 needs 64 bits → ceil(64 / 7) = 10 groups.
         let mut out = Vec::new();
-        encode(u64::MAX, &mut out);
+        Varint::Protobuf.write(u64::MAX, &mut out);
         assert_eq!(
             out,
             [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]
@@ -229,7 +227,7 @@ mod tests {
         fn round_trip(value: u64, tail in proptest::collection::vec(any::<u8>(), 0..4)) {
             // Encode, then append unrelated bytes the decoder must leave alone.
             let mut bytes = Vec::new();
-            encode(value, &mut bytes);
+            Varint::Protobuf.write(value, &mut bytes);
             bytes.extend_from_slice(&tail);
             let mut input = &bytes[..];
             prop_assert_eq!(Varint::Protobuf.read(&mut input), Ok(value));
