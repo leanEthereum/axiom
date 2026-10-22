@@ -111,6 +111,10 @@ struct Network {
     sequence: u64,
     /// Whether the network drops everything, as a cut cable does.
     cut: bool,
+    /// A sender whose datagrams are all dropped.
+    silenced: Option<SocketAddr>,
+    /// Bytes each address handed to the network.
+    sent: BTreeMap<SocketAddr, usize>,
 }
 
 impl Network {
@@ -122,11 +126,14 @@ impl Network {
             in_flight: BTreeMap::new(),
             sequence: 0,
             cut: false,
+            silenced: None,
+            sent: BTreeMap::new(),
         }
     }
 
     fn send(&mut self, from: SocketAddr, transmit: &Transmit) {
-        if self.cut || self.dice.chance(self.weather.loss) {
+        *self.sent.entry(from).or_default() += transmit.bytes.len();
+        if self.cut || self.silenced == Some(from) || self.dice.chance(self.weather.loss) {
             return;
         }
         let copies = if self.dice.chance(self.weather.duplication) {
@@ -677,4 +684,35 @@ fn unknown_versions_get_version_negotiation() {
             .handle(Duration::ZERO, UNIX_START, from, &datagram[..100])
             .is_none()
     );
+}
+
+#[test]
+fn a_server_sends_at_most_three_times_what_it_received_before_validation() {
+    let (mut network, mut client, mut server) = pair(CLEAR, 12);
+    // Deliver the client's first Initial, then silence the client, as a spoofed source would be.
+    run(
+        &mut network,
+        &mut client,
+        &mut server,
+        Duration::from_secs(1),
+        |_, server| !server.connections.is_empty(),
+    );
+    network.silenced = Some(client.address);
+    let received = network.sent[&client.address];
+    run(
+        &mut network,
+        &mut client,
+        &mut server,
+        Duration::from_secs(20),
+        |_, _| false,
+    );
+
+    // Probe timeouts fire, but the server never sends past three times the client's 1200 bytes.
+    let sent = network.sent.get(&server.address).copied().unwrap_or(0);
+    assert_eq!(received, 1200);
+    assert!(
+        sent <= 3 * received,
+        "server sent {sent} for {received} received"
+    );
+    assert!(sent > 1200, "the server answered at all: {sent}");
 }

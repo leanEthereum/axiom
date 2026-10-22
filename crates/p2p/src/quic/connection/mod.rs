@@ -1606,3 +1606,119 @@ impl Connection {
             && self.one_rtt.as_mut().is_some_and(OneRttKeys::force_update)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        identity::Keypair,
+        quic::{crypto::RetryTag, packet::Header},
+        tls::TlsIdentity,
+    };
+
+    /// A client connection to 10.0.0.2:4000 and its first datagram.
+    fn client() -> (Connection, Transmit) {
+        let keypair = Keypair::from_secret_bytes(&[1; 32]).unwrap();
+        let identity = Arc::new(TlsIdentity::generate(&keypair, [2; 32]).unwrap());
+        let setup = ConnectionSetup {
+            config: Arc::new(QuicConfig::new(identity)),
+            local_cid: ConnectionId::new(&[0xc1; LOCAL_CID_LEN]).unwrap(),
+            remote: SocketAddr::from(([10, 0, 0, 2], 4000)),
+            now: Duration::ZERO,
+            unix_seconds: 1_767_225_600,
+        };
+        let mut connection = Connection::client(setup, None, &mut Entropy::new([3; 32]));
+        let first = connection.poll_transmit(Duration::ZERO).unwrap();
+        (connection, first)
+    }
+
+    /// The destination id of a datagram's first long-header packet.
+    fn destination(datagram: &[u8]) -> (ConnectionId, Vec<u8>) {
+        let (packet, _) = ProtectedPacket::parse(datagram, LOCAL_CID_LEN).unwrap();
+        match packet.header {
+            Header::Long { dcid, token, .. } => (dcid, token.to_vec()),
+            other => panic!("not a long header: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_first_flight_is_a_padded_initial() {
+        let (_, first) = client();
+        // The client's Initial datagram is padded to 1200 bytes and addresses an 8-byte random id.
+        assert_eq!(first.bytes.len(), MIN_INITIAL_DATAGRAM);
+        assert_eq!(destination(&first.bytes).0.len(), LOCAL_CID_LEN);
+    }
+
+    #[test]
+    fn a_valid_retry_restarts_the_initial_flight_with_its_token() {
+        let (mut connection, first) = client();
+        let (original, _) = destination(&first.bytes);
+        let server_id = ConnectionId::new(&[0x5e; 8]).unwrap();
+
+        // A Retry from the server: its id, a token, and the tag over the client's original id.
+        let mut retry = vec![0xf0, 0, 0, 0, 1];
+        connection.local_cid().encode_with_length(&mut retry);
+        server_id.encode_with_length(&mut retry);
+        retry.extend_from_slice(b"token");
+        let tag = RetryTag::compute(&original, &retry);
+        let mut forged = retry.clone();
+        forged.extend_from_slice(&[0; 16]);
+        retry.extend_from_slice(&tag.0);
+
+        // A Retry with a wrong tag changes nothing.
+        connection.handle_datagram(Duration::ZERO, first.destination, &forged);
+        assert!(connection.retry.is_none());
+
+        // The genuine one makes the next Initial address the server's id and carry the token.
+        connection.handle_datagram(Duration::ZERO, first.destination, &retry);
+        let again = connection.poll_transmit(Duration::from_millis(1)).unwrap();
+        assert_eq!(destination(&again.bytes), (server_id, b"token".to_vec()));
+
+        // A second Retry is ignored, per RFC 9000, section 17.2.5.2.
+        connection.handle_datagram(Duration::ZERO, first.destination, &retry);
+        assert_eq!(
+            connection.retry.as_ref().map(|retry| retry.source_id),
+            Some(server_id)
+        );
+    }
+
+    #[test]
+    fn version_negotiation_without_version_one_ends_the_attempt() {
+        let (mut connection, first) = client();
+        let (original, _) = destination(&first.bytes);
+        // A Version Negotiation listing only draft 29.
+        let mut negotiation = vec![0x80, 0, 0, 0, 0];
+        connection.local_cid().encode_with_length(&mut negotiation);
+        original.encode_with_length(&mut negotiation);
+        negotiation.extend_from_slice(&0xff00_001d_u32.to_be_bytes());
+
+        // One that lists version 1 is stale or forged, and ignored.
+        let mut listing_v1 = negotiation.clone();
+        listing_v1.extend_from_slice(&VERSION.to_be_bytes());
+        connection.handle_datagram(Duration::ZERO, first.destination, &listing_v1);
+        assert!(!connection.is_closed());
+
+        connection.handle_datagram(Duration::ZERO, first.destination, &negotiation);
+        assert!(connection.is_closed());
+        assert_eq!(
+            connection.poll_event(),
+            Some(Event::Closed(ConnectionError::VersionMismatch {
+                offered: vec![0xff00_001d]
+            }))
+        );
+    }
+
+    #[test]
+    fn packets_from_another_address_are_dropped() {
+        let (mut connection, first) = client();
+        let (original, _) = destination(&first.bytes);
+        let mut negotiation = vec![0x80, 0, 0, 0, 0];
+        connection.local_cid().encode_with_length(&mut negotiation);
+        original.encode_with_length(&mut negotiation);
+        negotiation.extend_from_slice(&0xff00_001d_u32.to_be_bytes());
+        // The same packet from a stranger's address does nothing.
+        let stranger = SocketAddr::from(([10, 0, 0, 99], 4000));
+        connection.handle_datagram(Duration::ZERO, stranger, &negotiation);
+        assert!(!connection.is_closed());
+    }
+}

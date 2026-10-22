@@ -26,7 +26,7 @@ const NONCE: [u8; 12] = [
 
 /// The integrity tag of a Retry packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RetryTag([u8; RETRY_TAG_LEN]);
+pub(crate) struct RetryTag(pub(crate) [u8; RETRY_TAG_LEN]);
 
 impl RetryTag {
     /// The tag over a Retry packet's bytes before the tag, for the client's original dcid.
