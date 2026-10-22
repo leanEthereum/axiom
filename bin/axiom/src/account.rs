@@ -510,10 +510,16 @@ impl KeyGeneration {
         let password =
             Password::new(read_file(&self.password_file)?.trim_end_matches(['\n', '\r']));
         let seed = mnemonic.to_seed("");
-        let kdf = if self.pbkdf2 {
-            Kdf::pbkdf2(Kdf::PBKDF2_ROUNDS)?
-        } else {
-            Kdf::default()
+        let derivation = Derivation {
+            withdrawal_address: self.withdrawal_address,
+            compounding: self.compounding,
+            amount: self.amount,
+            kdf: if self.pbkdf2 {
+                Kdf::pbkdf2(Kdf::PBKDF2_ROUNDS)?
+            } else {
+                Kdf::default()
+            },
+            chain: &self.chain,
         };
         fs::create_dir_all(&self.output).map_err(|source| AccountError::File {
             path: self.output.clone(),
@@ -521,39 +527,17 @@ impl KeyGeneration {
         })?;
         let mut deposits = Vec::new();
         for index in self.start..self.start + self.count {
+            let derived = derivation.derive(seed.as_bytes(), index, &password)?;
             let path = DerivationPath::validator_signing(index);
-            let key = path.derive(seed.as_bytes())?;
-            let withdrawal = match (self.withdrawal_address, self.compounding) {
-                (Some(address), false) => WithdrawalTarget::Execution(address),
-                (Some(address), true) => WithdrawalTarget::Compounding(address),
-                // Without an address, withdrawals go to the EIP-2334 withdrawal key.
-                (None, _) => WithdrawalTarget::Bls(
-                    DerivationPath::validator_withdrawal(index)
-                        .derive(seed.as_bytes())?
-                        .public_key(),
-                ),
-            };
-            let keystore = Keystore::encrypt(&key, &password, &EncryptionParams::random(kdf)?)
-                .with_path(path.clone());
             let name = format!(
                 "keystore-m_{}.json",
                 path.to_string().replace('/', "_").trim_start_matches("m_")
             );
             write_file(
                 &self.output.join(name),
-                keystore.to_json().to_string().as_bytes(),
+                derived.keystore.to_json().to_string().as_bytes(),
             )?;
-            let network = self.chain.config_name.clone();
-            deposits.push(
-                DepositEntry::sign(
-                    &key,
-                    withdrawal,
-                    self.amount,
-                    self.chain.genesis_fork_version,
-                    network,
-                )
-                .to_json(),
-            );
+            deposits.push(derived.deposit.to_json());
         }
         let file = self.output.join("deposit_data.json");
         write_file(&file, Json::Array(deposits).to_string().as_bytes())?;
@@ -564,6 +548,67 @@ impl KeyGeneration {
             file.display()
         );
         Ok(())
+    }
+}
+
+/// How validators derive from a seed: their withdrawals, their deposit, and their keystore cipher.
+#[derive(Debug)]
+pub(crate) struct Derivation<'a> {
+    /// Where withdrawals go, when not to a BLS withdrawal key.
+    pub(crate) withdrawal_address: Option<ExecutionAddress>,
+    /// Whether the credentials compound.
+    pub(crate) compounding: bool,
+    /// Deposit amount.
+    pub(crate) amount: Gwei,
+    /// The keystore key derivation function.
+    pub(crate) kdf: Kdf,
+    /// The chain, for the deposit fork version.
+    pub(crate) chain: &'a ChainConfig,
+}
+
+/// One validator derived from a seed.
+#[derive(Debug)]
+pub(crate) struct DerivedValidator {
+    /// Its signing key, encrypted, recording its EIP-2334 path.
+    pub(crate) keystore: Keystore,
+    /// Its signed deposit.
+    pub(crate) deposit: DepositEntry,
+}
+
+impl Derivation<'_> {
+    /// Derives the validator at an EIP-2334 index, encrypting its key under a password.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a key cannot be derived or the keystore cannot be encrypted.
+    pub(crate) fn derive(
+        &self,
+        seed: &[u8],
+        index: u32,
+        password: &Password,
+    ) -> Result<DerivedValidator, AccountError> {
+        let path = DerivationPath::validator_signing(index);
+        let key = path.derive(seed)?;
+        let withdrawal = match (self.withdrawal_address, self.compounding) {
+            (Some(address), false) => WithdrawalTarget::Execution(address),
+            (Some(address), true) => WithdrawalTarget::Compounding(address),
+            // Without an address, withdrawals go to the EIP-2334 withdrawal key.
+            (None, _) => WithdrawalTarget::Bls(
+                DerivationPath::validator_withdrawal(index)
+                    .derive(seed)?
+                    .public_key(),
+            ),
+        };
+        let keystore =
+            Keystore::encrypt(&key, password, &EncryptionParams::random(self.kdf)?).with_path(path);
+        let deposit = DepositEntry::sign(
+            &key,
+            withdrawal,
+            self.amount,
+            self.chain.genesis_fork_version,
+            self.chain.config_name.clone(),
+        );
+        Ok(DerivedValidator { keystore, deposit })
     }
 }
 
