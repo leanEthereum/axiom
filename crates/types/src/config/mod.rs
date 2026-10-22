@@ -342,6 +342,18 @@ impl ChainConfig {
         self
     }
 
+    /// The same configuration with one fork activating at an epoch.
+    ///
+    /// Phase0 starts at genesis by definition, so it stays there.
+    /// Spec transition vectors schedule their fork this way.
+    #[must_use]
+    pub const fn with_fork_epoch(mut self, fork: ForkName, epoch: Epoch) -> Self {
+        if let Some(slot) = self.fork_epoch_mut(fork) {
+            *slot = epoch;
+        }
+        self
+    }
+
     /// The minimal configuration, which every fork starts disabled in.
     #[must_use]
     pub fn minimal() -> Self {

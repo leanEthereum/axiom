@@ -1,9 +1,13 @@
 //! The vectors of Electra, which adds larger validators and execution requests.
 
+use axiom_state_transition::{
+    KnownVerdict,
+    electra::block::{BridgeDeposit, Exit, PayloadExecution, PayloadWithdrawals, RequestedDeposit},
+};
 use axiom_types::{ForkName, Preset, electra};
 
 use super::{Deneb, SpecFork};
-use crate::{Case, Failure, FieldNames};
+use crate::{Applied, Case, Failure, FieldNames, OperationInput};
 
 /// The Electra fork.
 ///
@@ -84,6 +88,51 @@ impl SpecFork for Electra {
             "SingleAttestation" => case.round_trip::<electra::SingleAttestation>(),
             "WithdrawalRequest" => case.round_trip::<electra::WithdrawalRequest>(),
             _ => Deneb::ssz_static::<P>(container, case),
+        }
+    }
+
+    fn operation<P: Preset>(
+        handler: &str,
+        input: &mut OperationInput<'_, '_, '_, electra::BeaconState<P>>,
+    ) -> Applied {
+        match handler {
+            "attestation" => input.apply::<electra::Attestation<P>>("attestation"),
+            "attester_slashing" => input.apply::<electra::AttesterSlashing<P>>("attester_slashing"),
+            "proposer_slashing" => input.apply::<electra::ProposerSlashing>("proposer_slashing"),
+            "deposit" => input.apply_with::<electra::Deposit>("deposit", |deposit, processor| {
+                processor.apply(&BridgeDeposit(deposit))
+            }),
+            "voluntary_exit" => input
+                .apply_with::<electra::SignedVoluntaryExit>("voluntary_exit", |exit, processor| {
+                    processor.apply(&Exit(exit))
+                }),
+            "bls_to_execution_change" => {
+                input.apply::<electra::SignedBlsToExecutionChange>("address_change")
+            }
+            "deposit_request" => input
+                .apply_with::<electra::DepositRequest>("deposit_request", |request, processor| {
+                    processor.apply(&RequestedDeposit(request))
+                }),
+            "withdrawal_request" => input.apply::<electra::WithdrawalRequest>("withdrawal_request"),
+            "consolidation_request" => {
+                input.apply::<electra::ConsolidationRequest>("consolidation_request")
+            }
+            "block_header" => input
+                .apply_with::<electra::BeaconBlock<P>>("block", |block, processor| {
+                    processor.apply(&block.header())
+                }),
+            "sync_aggregate" => input.apply::<electra::SyncAggregate<P>>("sync_aggregate"),
+            "withdrawals" => input.apply_with::<electra::ExecutionPayload<P>>(
+                "execution_payload",
+                |payload, processor| processor.apply(&PayloadWithdrawals(&payload.withdrawals)),
+            ),
+            "execution_payload" => {
+                let engine = KnownVerdict(input.execution_verdict()?);
+                input.apply_with::<electra::BeaconBlockBody<P>>("body", |body, processor| {
+                    processor.apply(&PayloadExecution::new(body, &engine))
+                })
+            }
+            other => Err(Failure(format!("unsupported operation {other} in electra"))),
         }
     }
 }

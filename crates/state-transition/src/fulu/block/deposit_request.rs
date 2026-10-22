@@ -1,11 +1,8 @@
-//! Deposit requests: deposits relayed by the execution layer.
+//! Deposit requests, once the contract deposits are retired.
 
-use axiom_types::{
-    accessors::PendingQueueState,
-    electra::{DepositRequest, PendingDeposit},
-};
+use axiom_types::{accessors::PendingQueueState, electra::DepositRequest};
 
-use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
+use crate::{BlockError, BlockProcessor, Fork, Operation, electra::block::RequestedDeposit};
 
 /// A deposit request, queued by Fulu's rule.
 ///
@@ -17,24 +14,9 @@ pub struct QueuedDeposit<'a>(pub &'a DepositRequest);
 impl<S: Fork + PendingQueueState> Operation<S> for QueuedDeposit<'_> {
     /// Queues the deposit, stamped with the current slot.
     ///
-    /// The slot holds the deposit back until its block is finalized.
     /// See `process_deposit_request` in the Fulu beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
-        let request = self.0;
-        let state = &mut *processor.state.beacon;
-        let deposit = PendingDeposit {
-            pubkey: request.pubkey,
-            withdrawal_credentials: request.withdrawal_credentials,
-            amount: request.amount,
-            signature: request.signature,
-            slot: state.slot(),
-        };
-        state
-            .push_pending_deposit(deposit)
-            .map_err(|source| StateError::Capacity {
-                list: "pending deposits",
-                source,
-            })?;
+        RequestedDeposit(self.0).queue(&mut *processor.state.beacon)?;
         Ok(())
     }
 }

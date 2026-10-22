@@ -225,6 +225,22 @@ pub enum BlockError {
     /// The block carries deposits, which Fulu removed.
     #[error("block carries {0} deposits")]
     DepositsNotAllowed(usize),
+    /// The block does not carry every pending deposit from the contract it can.
+    #[error("block carries {actual} deposits, {expected} expected")]
+    DepositCountMismatch {
+        /// Deposits the block must carry.
+        expected: u64,
+        /// Deposits the block carries.
+        actual: usize,
+    },
+    /// A deposit's branch does not lead to the deposit root the state adopted.
+    #[error("deposit {index} is not under deposit root {deposit_root}")]
+    InvalidDepositProof {
+        /// Position of the deposit in the contract's tree.
+        index: u64,
+        /// The contract root the state's eth1 data holds.
+        deposit_root: Root,
+    },
     /// A proposer slashing does not show two distinct headers from one slot and proposer.
     #[error("proposer slashing of validator {proposer} is invalid: {reason}")]
     InvalidProposerSlashing {

@@ -5,7 +5,8 @@
 
 use axiom_ef_tests::{
     Blocks, ChainReplay, EpochProcessing, Fork, LightClient, MerkleProofs, Networking, Operations,
-    Rewards, Shuffling, SszStatic, StoreReplay, Suite, Transition, forks::Fulu,
+    Rewards, Shuffling, SszStatic, StoreReplay, Suite, Transition,
+    forks::{Electra, Fulu},
 };
 use axiom_types::{Mainnet, Minimal};
 
@@ -99,12 +100,20 @@ fn fork_mainnet() {
 
 #[test]
 fn transition_minimal() {
-    Suite::run(&Transition::<Minimal>::default(), "minimal", "fulu");
+    Suite::run(
+        &Transition::<Minimal, Electra, Fulu>::default(),
+        "minimal",
+        "fulu",
+    );
 }
 
 #[test]
 fn transition_mainnet() {
-    Suite::run(&Transition::<Mainnet>::default(), "mainnet", "fulu");
+    Suite::run(
+        &Transition::<Mainnet, Electra, Fulu>::default(),
+        "mainnet",
+        "fulu",
+    );
 }
 
 #[test]
