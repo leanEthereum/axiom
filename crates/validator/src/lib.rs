@@ -17,6 +17,7 @@
 
 pub mod beacon;
 pub mod duties;
+pub mod json;
 pub mod keymanager;
 pub mod keys;
 pub mod protection;
