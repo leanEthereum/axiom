@@ -24,7 +24,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4},
     time::Duration,
 };
 
@@ -244,6 +244,8 @@ impl AddressVotes {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use proptest::prelude::*;
 
     use super::*;

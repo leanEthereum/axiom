@@ -7,6 +7,8 @@ use axiom_discv5::{
 };
 use axiom_types::{ChainConfig, Epoch, ForkDigest, Root};
 
+use super::nat::AdvertisedEndpoint;
+
 /// The consensus entries of the node's record at one epoch.
 ///
 /// The fork entries move at every fork and every blob step.
@@ -121,6 +123,30 @@ impl LocalRecord {
         Ok(true)
     }
 
+    /// Re-signs the record under the next sequence number, when it does not state the endpoint.
+    ///
+    /// Only the address and port entries move; the consensus entries stay.
+    ///
+    /// # Returns
+    ///
+    /// Whether the record changed.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the record exceeds the size cap, leaving the old record in place.
+    pub(crate) fn set_endpoint(
+        &mut self,
+        endpoint: AdvertisedEndpoint,
+        key: &SecretKey,
+    ) -> Result<bool, EnrError> {
+        // Invariant: a record already stating the endpoint keeps its sequence number.
+        if endpoint.is_stated_by(self.enr.endpoints()) {
+            return Ok(false);
+        }
+        self.enr = endpoint.write(self.enr.to_builder()).build(key)?;
+        Ok(true)
+    }
+
     /// The signed record.
     pub(crate) const fn enr(&self) -> &Enr {
         &self.enr
@@ -129,6 +155,9 @@ impl LocalRecord {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
+    use axiom_discv5::enr::Endpoints;
     use axiom_types::{BlobParameters, BlobSchedule, ForkName, Version};
 
     use super::*;
@@ -227,5 +256,50 @@ mod tests {
         assert_eq!(set, [2, 3]);
         // The endpoint of the base record survives every update.
         assert_eq!(record.enr().get_raw(b"tcp"), first.get_raw(b"tcp"));
+    }
+
+    #[test]
+    fn the_endpoint_moves_without_touching_the_consensus_entries() {
+        // Fixture state: a record on TCP 9000 and UDP 9001, with no address, at sequence 1.
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Fulu);
+        let root = Root([7; 32]);
+        let key = SecretKey::from_bytes(&[5; 32]).expect("valid key");
+        let entries = RecordEntries::at(&config, root, Epoch(0), 0b101);
+        let mut record = LocalRecord::new(Enr::builder().tcp4(9000).udp4(9001), entries, &key)
+            .expect("record fits");
+        let eth2 = record.enr().eth2().clone();
+
+        // Peers confirmed 81.2.3.4:40000 for discovery; the gateway forwards QUIC 9002 too.
+        let endpoint = AdvertisedEndpoint {
+            ip: Ipv4Addr::new(81, 2, 3, 4),
+            udp: Some(40000),
+            tcp: None,
+            quic: Some(9002),
+        };
+        assert_eq!(record.set_endpoint(endpoint, &key), Ok(true));
+        assert_eq!(record.enr().seq(), 2);
+        assert_eq!(
+            *record.enr().endpoints(),
+            Endpoints {
+                ip4: Some(Ipv4Addr::new(81, 2, 3, 4)),
+                tcp4: Some(9000),
+                udp4: Some(40000),
+                quic4: Some(9002),
+                ..Endpoints::default()
+            }
+        );
+        assert_eq!(record.enr().eth2(), &eth2);
+
+        // The same endpoint again changes nothing, so peers refetch nothing.
+        assert_eq!(record.set_endpoint(endpoint, &key), Ok(false));
+        assert_eq!(record.enr().seq(), 2);
+
+        // A later fork update keeps the new endpoint.
+        let later = RecordEntries::at(&config, root, Epoch(0), 0b111);
+        assert_eq!(record.update(later, &key), Ok(true));
+        assert_eq!(
+            record.enr().endpoints().udp_socket(),
+            Some("81.2.3.4:40000".parse().expect("socket"))
+        );
     }
 }

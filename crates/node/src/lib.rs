@@ -31,7 +31,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{AnchorSource, EngineConfig, NetworkSettings, NodeConfig, ProposerSettings};
 pub use engine::ExecutionLayer;
 pub use error::{ChainError, NodeError};
-pub use network::{DiscoverySettings, NodeKey};
+pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
 pub use proposer::{BlockOrder, ProposerError, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;

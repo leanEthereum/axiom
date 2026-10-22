@@ -5,6 +5,7 @@ mod forks;
 mod gossip;
 mod handshake;
 mod identity;
+mod nat;
 mod record;
 mod requests;
 mod responder;
@@ -38,10 +39,11 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-pub use self::{discovery::DiscoverySettings, identity::NodeKey};
+pub use self::{discovery::DiscoverySettings, identity::NodeKey, nat::PortMappingSettings};
 pub(crate) use self::{
     discovery::{Discovery, RecordSetup},
     forks::ForkDigests,
+    nat::NatMetrics,
     server::LocalMetadata,
     subnets::AttestationSubnets,
 };
@@ -374,6 +376,7 @@ impl<P: Preset> NetworkService<P> {
         // The record states the same subnets, and the fork of the wall-clock epoch.
         if let Some(discovery) = &mut self.discovery {
             discovery.refresh(epoch, change.attnets).await;
+            discovery.publish_external().await;
         }
 
         self.publish_light_client().await;
