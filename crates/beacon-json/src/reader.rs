@@ -98,12 +98,18 @@ impl Items<'_> {
 }
 
 /// Typed access to the members of a JSON object.
+///
+/// The API's own envelopes, such as a data member beside a version, are read with it too.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Fields<'a>(&'a Object);
+pub struct Fields<'a>(&'a Object);
 
 impl<'a> Fields<'a> {
     /// Views a value that must be an object.
-    pub(crate) fn of(value: &'a Json) -> Result<Self, ApiJsonError> {
+    ///
+    /// # Errors
+    ///
+    /// Fails when the value is not an object.
+    pub fn of(value: &'a Json) -> Result<Self, ApiJsonError> {
         value
             .as_object()
             .map(Self)
@@ -113,12 +119,44 @@ impl<'a> Fields<'a> {
     /// Reads a member that must be present and not null.
     ///
     /// Members the container does not name are never read, so they are ignored.
-    pub(crate) fn required<T: ApiJson>(self, name: &'static str) -> Result<T, ApiJsonError> {
+    ///
+    /// # Errors
+    ///
+    /// Fails when the member is absent, null, or malformed, naming it.
+    pub fn required<T: ApiJson>(self, name: &'static str) -> Result<T, ApiJsonError> {
         match self.0.get(name) {
             None | Some(Json::Null) => {
                 Err(ApiJsonError::new(ApiJsonErrorKind::Missing).in_member(name))
             }
             Some(value) => T::from_json(value).map_err(|error| error.in_member(name)),
+        }
+    }
+
+    /// Reads a member that may be absent or null.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the member is present and malformed, naming it.
+    pub fn optional<T: ApiJson>(self, name: &'static str) -> Result<Option<T>, ApiJsonError> {
+        match self.0.get(name) {
+            None | Some(Json::Null) => Ok(None),
+            Some(value) => T::from_json(value)
+                .map(Some)
+                .map_err(|error| error.in_member(name)),
+        }
+    }
+
+    /// The JSON value of a member that must be present and not null.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the member is absent or null, naming it.
+    pub fn raw(self, name: &'static str) -> Result<&'a Json, ApiJsonError> {
+        match self.0.get(name) {
+            None | Some(Json::Null) => {
+                Err(ApiJsonError::new(ApiJsonErrorKind::Missing).in_member(name))
+            }
+            Some(value) => Ok(value),
         }
     }
 }

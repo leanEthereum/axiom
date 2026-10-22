@@ -176,6 +176,10 @@ pub enum ApiJsonErrorKind {
     #[error("{0}")]
     Bits(DecodeError),
 
+    /// A string names none of the values a field may take.
+    #[error("unknown value {0:?}")]
+    UnknownName(String),
+
     /// The fork has no container of the requested kind.
     #[error("the {fork} fork has no {container}")]
     AbsentInFork {

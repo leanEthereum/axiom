@@ -140,6 +140,19 @@ impl<T: ApiJson, N: Length> ApiJson for Vector<T, N> {
     }
 }
 
+impl<T: ApiJson> ApiJson for Vec<T> {
+    /// An array of any length, as the API's request and response bodies carry items.
+    ///
+    /// The bound, when one applies, is the caller's to check.
+    fn to_json(&self) -> Json {
+        Json::Array(self.iter().map(ApiJson::to_json).collect())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        Reader::new(value).items()?.decode()
+    }
+}
+
 impl<T: ApiJson> ApiJson for ProgressiveList<T> {
     fn to_json(&self) -> Json {
         Json::Array(self.iter().map(ApiJson::to_json).collect())
