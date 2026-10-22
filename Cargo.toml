@@ -87,6 +87,7 @@ axiom-json = { path = "crates/json" }
 axiom-http = { path = "crates/http" }
 axiom-execution = { path = "crates/execution" }
 axiom-crypto = { path = "crates/crypto" }
+axiom-telemetry = { path = "crates/telemetry" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"
@@ -95,8 +96,14 @@ sha2 = "0.10"
 # The pure layers never see it.
 tokio = { version = "1", default-features = false, features = ["net", "io-util", "time", "rt", "rt-multi-thread", "sync", "signal"] }
 
-# Structured logging facade; the node and binary emit events, pure crates never do.
+# Structured logging for the adapters and the node; pure crates never log.
+# Default features are off: they pull proc-macro attributes and the log bridge.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+# The subscriber that formats and filters log events.
+# Only the formatter, its colours, and the target filter are enabled.
+# The JSON formatter is written in the telemetry crate, since the upstream one pulls serde.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "fmt", "ansi"] }
 
 # Test-only.
 proptest = "1.7"
