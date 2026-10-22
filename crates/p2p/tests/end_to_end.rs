@@ -1,12 +1,17 @@
-//! Two tokio nodes over real TCP sockets: gossip, req/resp, identify, and disconnection.
+//! Two tokio nodes over real sockets: gossip, req/resp, identify, and disconnection.
 //!
-//! The scenario runs twice: over real Noise, the production channel, and over plaintext.
+//! The scenario runs three times:
+//!
+//! - over QUIC, the primary transport, with TLS 1.3
+//! - over TCP with Noise, the fallback transport
+//! - over TCP with plaintext, the test channel
+//!
 //! A second scenario pairs a node with one that speaks only the first status version.
 
 use std::{sync::Arc, time::Duration};
 
 use axiom_p2p::{
-    Keypair, PeerId,
+    Keypair, Multiaddr, PeerId,
     eth::{
         GossipKind, GossipTopic,
         reqresp::{Protocol, ResponseChunk, ResponseCode, Status, StatusVersion},
@@ -53,9 +58,11 @@ impl Inbox {
     }
 }
 
-/// Which secure channel the nodes speak.
+/// Which transport and secure channel the nodes speak.
 #[derive(Clone, Copy, Debug)]
 enum Channel {
+    /// QUIC with libp2p TLS.
+    Quic,
     /// Noise XX with secp256k1 identities, the default.
     Noise,
     /// The unauthenticated test channel.
@@ -67,6 +74,11 @@ async fn node(seed: u8, channel: Channel, protocols: &[Protocol]) -> (NetworkHan
     let identity = Keypair::from_secret_bytes(&[seed; 32]).expect("seed is a valid scalar");
     let mut config = match channel {
         Channel::Noise => NetworkConfig::new(identity).expect("entropy available"),
+        Channel::Quic => {
+            let mut config = NetworkConfig::new(identity).expect("entropy available");
+            config.quic_listen_addr = Some(Multiaddr::from_quic(([127, 0, 0, 1], 0).into()));
+            config
+        }
         Channel::Plaintext => {
             let security = Arc::new(PlaintextConfig::new(identity.public_key().clone()));
             NetworkConfig::with_security(identity, security)
@@ -82,6 +94,11 @@ async fn node(seed: u8, channel: Channel, protocols: &[Protocol]) -> (NetworkHan
             backlog: Vec::new(),
         },
     )
+}
+
+#[test]
+fn gossip_and_status_over_quic() {
+    run(Channel::Quic);
 }
 
 #[test]
@@ -145,7 +162,11 @@ async fn connect(channel: Channel, bob_serves: &[Protocol]) -> Pair {
     let bob_id = bob.local_peer().clone();
 
     // Phase 1: alice dials bob's address, naming his identity in a /p2p layer.
-    let address = bob.listen_addr().clone().with(Layer::P2p(bob_id.clone()));
+    let listen = match channel {
+        Channel::Quic => bob.quic_listen_addr().expect("QUIC listens").clone(),
+        Channel::Noise | Channel::Plaintext => bob.listen_addr().clone(),
+    };
+    let address = listen.with(Layer::P2p(bob_id.clone()));
     alice.dial(address).await.expect("dial queued");
     let connected = alice_events
         .wait_for(|event| match event {
