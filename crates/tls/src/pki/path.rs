@@ -5,6 +5,7 @@
 //! A depth-first search over issuers, per RFC 5280, section 6, and RFC 4158 on path building.
 //! At each step the candidates are the roots, then the intermediates, whose subject is the issuer.
 //! A candidate joins the path once its own checks pass and its key verifies the signature below.
+//!
 //! A failed branch backtracks, so an expired cross-sign does not hide a valid path.
 //!
 //! # Invariants
@@ -74,8 +75,8 @@ impl RootStore {
     ///
     /// # Errors
     ///
-    /// Fails when the server's certificate is unusable or does not name the server,
-    /// or when no valid path reaches a root.
+    /// Fails when the server's certificate is unusable or does not name the server.
+    /// Fails when no valid path reaches a root.
     pub fn verify_server(
         &self,
         chain: &[&[u8]],

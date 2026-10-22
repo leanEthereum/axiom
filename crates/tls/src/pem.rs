@@ -10,9 +10,15 @@
 //! -----END CERTIFICATE-----
 //! ```
 //!
-//! The labels name the content: CERTIFICATE, PRIVATE KEY for PKCS#8, EC PRIVATE KEY for SEC 1,
-//! and RSA PRIVATE KEY for PKCS#1.
-//! Whitespace inside a block is ignored; headers, which only encrypted legacy keys carry, are refused.
+//! The labels name the content:
+//!
+//! - CERTIFICATE;
+//! - PRIVATE KEY for PKCS#8;
+//! - EC PRIVATE KEY for SEC 1;
+//! - RSA PRIVATE KEY for PKCS#1.
+//!
+//! Whitespace inside a block is ignored.
+//! Headers, which only encrypted legacy keys carry, are refused.
 
 use thiserror::Error;
 

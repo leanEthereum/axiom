@@ -66,8 +66,8 @@ impl HandshakeBuffer {
 
     /// Moves to the next level once keys change.
     ///
-    /// RFC 9001, section 4.1.3: data left at the old level is an error, since the peer
-    /// sent it after a message that should have ended that level.
+    /// Data left at the old level is an error, per RFC 8446, section 5.1, and RFC 9001, section 4.1.3.
+    /// The peer sent it after a message that should have ended that level.
     pub(crate) const fn advance(&mut self, level: Level) -> Result<(), ProtocolError> {
         if !self.pending.is_empty() {
             return Err(ProtocolError::DataAfterKeyChange {
