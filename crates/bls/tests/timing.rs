@@ -85,7 +85,7 @@ fn print_timings() {
             let message = [u8::try_from(index).unwrap(); 32];
             SignatureSet {
                 signature: key.sign(&message),
-                public_key: committee_keys[index],
+                public_key: committee_keys[index].clone(),
                 message,
             }
         })

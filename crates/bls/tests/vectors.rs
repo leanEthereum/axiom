@@ -13,7 +13,9 @@ use std::{
     env,
     fmt::Write,
     fs,
+    iter::Peekable,
     path::{Path, PathBuf},
+    str::Chars,
 };
 
 use axiom_bls::{PublicKey, SecretKey, Signature, SignatureSet};
@@ -100,7 +102,7 @@ impl Yaml {
     }
 
     /// Parses one flow node: a sequence, a mapping, or a scalar.
-    fn parse_flow(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Self {
+    fn parse_flow(chars: &mut Peekable<Chars<'_>>) -> Self {
         skip_spaces(chars);
         match chars.peek() {
             Some('[') => {
@@ -233,7 +235,7 @@ fn brackets_balanced(text: &str) -> bool {
 }
 
 /// Advances past spaces.
-fn skip_spaces(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+fn skip_spaces(chars: &mut Peekable<Chars<'_>>) {
     while chars.peek() == Some(&' ') {
         chars.next();
     }

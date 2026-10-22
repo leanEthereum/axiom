@@ -16,7 +16,7 @@ const COEFFICIENT_BYTES: usize = 16;
 /// One signature check: a signature over a 32-byte message by an already aggregated key.
 ///
 /// Consensus objects always sign a 32-byte signing root, hence the fixed message size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignatureSet {
     /// The signature to check.
     pub signature: Signature,
@@ -143,6 +143,8 @@ impl SignatureSet {
 
 #[cfg(test)]
 mod tests {
+    use std::mem;
+
     use proptest::prelude::*;
 
     use super::*;
@@ -195,9 +197,8 @@ mod tests {
         //     set 0: sig_5 over m_4 under pk_4
         //     set 1: sig_4 over m_5 under pk_5
         // The plain sum of signatures is unchanged, so only the coefficients catch this.
-        let signature = sets[0].signature;
-        sets[0].signature = sets[1].signature;
-        sets[1].signature = signature;
+        let [first, second] = &mut sets;
+        mem::swap(&mut first.signature, &mut second.signature);
         assert!(!SignatureSet::verify_batch(&sets));
     }
 

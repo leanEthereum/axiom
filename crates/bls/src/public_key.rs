@@ -9,7 +9,7 @@ use crate::BlsError;
 /// A public key that passed KeyValidate: a point of G1 other than the point at infinity.
 ///
 /// Every constructor enforces both properties, so holders never re-check them.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PublicKey {
     /// The key as a curve point, in G1 and never infinite.
     point: G1Affine,

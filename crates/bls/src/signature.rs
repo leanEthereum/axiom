@@ -10,7 +10,7 @@ use crate::{BlsError, DST, PublicKey};
 ///
 /// Decoding checks subgroup membership, so every value already passed signature_subgroup_check.
 /// The point at infinity is a valid encoding: it is the aggregate of no signatures in Ethereum's sense.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Signature {
     /// The signature as a curve point, always in G2.
     point: G2Affine,
