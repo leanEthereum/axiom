@@ -33,8 +33,8 @@ use peer_ids::PeerIds;
 use space::PacketSpace;
 
 use super::{
-    ConnectionError, ConnectionId, DecodeError, Entropy, Event, QuicConfig, QuicError, Side,
-    StreamId, TransportError, TransportErrorCode, VERSION,
+    ConnectionError, ConnectionId, DecodeError, Event, QuicConfig, QuicError, Side, StreamId,
+    TransportError, TransportErrorCode, VERSION,
     crypto::{InitialSecrets, KeyPair, Keys, OneRttKeys, Protected, RetryTag, TAG_LEN},
     frame::{AckFrame, Frame, FrameIter, PacketKind},
     packet::{Header, LONG_FORM, LongType, PacketNumber, PlainPacket, ProtectedPacket},
@@ -44,6 +44,7 @@ use super::{
     transport_parameters::TransportParameters,
 };
 use crate::{
+    Entropy,
     identity::PeerId,
     tls::{Level, TlsOutput, TlsSession},
 };

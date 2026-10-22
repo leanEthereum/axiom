@@ -15,11 +15,11 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use super::{
-    Connection, ConnectionId, Entropy, QuicConfig, Transmit, VERSION,
+    Connection, ConnectionId, QuicConfig, Transmit, VERSION,
     connection::{ConnectionSetup, LOCAL_CID_LEN},
     packet::{FIXED_BIT, Header, LONG_FORM, LongType, ProtectedPacket},
 };
-use crate::identity::PeerId;
+use crate::{Entropy, identity::PeerId};
 
 /// The smallest datagram that may open a connection or earn a Version Negotiation reply.
 ///

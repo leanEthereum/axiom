@@ -13,8 +13,7 @@
 
 use std::{
     collections::HashMap,
-    fs::File,
-    io::{self, Read},
+    io,
     net::SocketAddr,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,20 +49,6 @@ fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
-}
-
-/// Path of the kernel's non-blocking entropy device.
-const ENTROPY_DEVICE: &str = "/dev/urandom";
-
-/// Reads 32 bytes of operating system entropy.
-///
-/// # Errors
-///
-/// Fails when the entropy device cannot be read.
-pub(super) fn os_entropy() -> io::Result<[u8; 32]> {
-    let mut seed = [0; 32];
-    File::open(ENTROPY_DEVICE)?.read_exact(&mut seed)?;
-    Ok(seed)
 }
 
 /// What the endpoint task waits on.

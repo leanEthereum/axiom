@@ -64,6 +64,7 @@ use tokio::{
 };
 
 use crate::{
+    Entropy,
     eth::{
         MAX_PAYLOAD_SIZE,
         reqresp::{Protocol, RateLimiter, ReqRespError, ResponseChunk},
@@ -521,10 +522,11 @@ pub async fn start(config: NetworkConfig) -> Result<(NetworkHandle, NetworkEvent
             .ok_or_else(|| NetworkError::UnsupportedAddress(address.clone()))?;
         let socket = UdpSocket::bind(socket).await?;
         let bound = Multiaddr::from_quic(socket.local_addr()?);
-        let identity = TlsIdentity::generate(&config.identity, quic::os_entropy()?)?;
+        let mut entropy = Entropy::from_os()?;
+        let identity = TlsIdentity::generate(&config.identity, entropy.array())?;
         let endpoint = Endpoint::new(
             Arc::new(QuicConfig::new(Arc::new(identity))),
-            quic::os_entropy()?,
+            entropy.array(),
         );
         let (shared, tasks) =
             quic::QuicShared::start(socket, endpoint, input_tx.clone(), config.connection_queue);

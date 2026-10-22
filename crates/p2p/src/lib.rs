@@ -26,6 +26,7 @@
 //!
 //! The specifications are `libp2p/specs` and the consensus specs' `p2p-interface.md` files.
 
+mod entropy;
 pub mod eth;
 pub mod gossipsub;
 pub mod identify;
@@ -46,5 +47,6 @@ pub mod yamux;
 #[cfg(test)]
 mod testing;
 
+pub use entropy::Entropy;
 pub use identity::{KeyType, Keypair, PeerId, PeerIdError, PublicKey};
 pub use multiaddr::{Multiaddr, MultiaddrError, Protocol};

@@ -37,7 +37,6 @@
 //! See `libp2p/specs/noise/README.md` and the Noise Protocol Framework, revision 34.
 
 mod handshake;
-mod key_source;
 mod payload;
 mod symmetric;
 mod transport;
@@ -52,11 +51,13 @@ use std::{
 
 use axiom_crypto::x25519::SecretKey;
 pub use handshake::NoiseHandshake;
-use key_source::KeySource;
 pub use payload::{NoiseExtensions, NoiseHandshakePayload};
 
 use super::{Handshake, Role, SecurityUpgrade};
-use crate::identity::{Keypair, PeerId};
+use crate::{
+    Entropy,
+    identity::{Keypair, PeerId},
+};
 
 /// The multistream-select name.
 pub const PROTOCOL: &str = "/noise";
@@ -86,7 +87,7 @@ pub struct NoiseConfig {
     /// The handshake payload: identity key and signature over the static key.
     payload: NoiseHandshakePayload,
     /// Where ephemeral secrets come from.
-    keys: Mutex<KeySource>,
+    keys: Mutex<Entropy>,
 }
 
 impl fmt::Debug for NoiseConfig {
@@ -105,7 +106,7 @@ impl NoiseConfig {
     ///
     /// Fails when the entropy device cannot be read.
     pub fn new(identity: &Keypair) -> io::Result<Self> {
-        Ok(Self::with_key_source(identity, KeySource::from_os()?))
+        Ok(Self::with_key_source(identity, Entropy::from_os()?))
     }
 
     /// A configuration whose every key derives from a seed.
@@ -114,7 +115,7 @@ impl NoiseConfig {
     /// Use it in tests and simulations only.
     #[must_use]
     pub fn from_seed(identity: &Keypair, seed: [u8; 32]) -> Self {
-        Self::with_key_source(identity, KeySource::from_seed(seed))
+        Self::with_key_source(identity, Entropy::new(seed))
     }
 
     /// The payload this node sends: identity key, signature, no extensions.
@@ -124,8 +125,8 @@ impl NoiseConfig {
     }
 
     /// Draws the static key and signs it once: every handshake reuses the binding.
-    fn with_key_source(identity: &Keypair, mut keys: KeySource) -> Self {
-        let static_secret = keys.next_secret();
+    fn with_key_source(identity: &Keypair, mut keys: Entropy) -> Self {
+        let static_secret = SecretKey::from_bytes(keys.array());
         let mut message = STATIC_KEY_DOMAIN.to_vec();
         message.extend_from_slice(static_secret.public_key().as_bytes());
         let payload = NoiseHandshakePayload {
@@ -148,11 +149,12 @@ impl SecurityUpgrade for NoiseConfig {
 
     fn handshake(&self, role: Role, expected: Option<PeerId>) -> Box<dyn Handshake> {
         // A panic elsewhere cannot corrupt the generator: a draw is one plain overwrite.
-        let ephemeral = self
-            .keys
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .next_secret();
+        let ephemeral = SecretKey::from_bytes(
+            self.keys
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .array(),
+        );
         Box::new(NoiseHandshake::new(
             role,
             self.static_secret.clone(),
