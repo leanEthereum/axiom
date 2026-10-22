@@ -3,14 +3,20 @@
 //! Everything else is Altair's.
 //! See the Bellatrix beacon chain and fork choice specs.
 
+mod blinded_block;
 mod block;
 mod builder;
 mod execution;
 mod pow_block;
 mod state;
 
+pub use blinded_block::{
+    BlindedBeaconBlock, BlindedBeaconBlockBody, SignedBlindedBeaconBlock, UnblindError,
+};
 pub use block::{BeaconBlock, BeaconBlockBody, SignedBeaconBlock};
-pub use builder::{SignedValidatorRegistrationV1, ValidatorRegistrationV1};
+pub use builder::{
+    BuilderBid, SignedBuilderBid, SignedValidatorRegistrationV1, ValidatorRegistrationV1,
+};
 pub use execution::{
     ExecutionPayload, ExecutionPayloadHeader, ExtraData, LogsBloom, NewPayloadRequest, Transaction,
     Transactions,

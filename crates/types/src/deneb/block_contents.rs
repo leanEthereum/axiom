@@ -45,13 +45,13 @@ impl<P: Preset> Container for SignedBlockContents<P> {
     }
 }
 
-/// An unsigned block with every blob it commits to and their proofs.
+/// A block to sign, with every blob it commits to and one proof per blob.
 ///
-/// This is the Deneb body of the produce-block route in the beacon API, not a consensus container.
+/// It is the Deneb response of the produce-block route, not a consensus container.
 /// See `BlockContents` in the beacon-APIs repository.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockContents<P: Preset> {
-    /// The block, before its proposer signs it.
+    /// The unsigned block.
     pub block: BeaconBlock<P>,
 
     /// Proofs that open each commitment to its blob, in commitment order.
@@ -84,9 +84,9 @@ impl<P: Preset> Container for BlockContents<P> {
 }
 
 impl<P: Preset> BlockContents<P> {
-    /// The signed contents, once the proposer has signed the block.
+    /// The contents to publish, once the proposer has signed the block.
     #[must_use]
-    pub fn sign(self, signature: BlsSignature) -> SignedBlockContents<P> {
+    pub fn into_signed(self, signature: BlsSignature) -> SignedBlockContents<P> {
         SignedBlockContents {
             signed_block: SignedBeaconBlock {
                 message: self.block,
@@ -119,21 +119,30 @@ mod tests {
     }
 
     #[test]
-    fn signing_contents_keeps_the_blobs_and_proofs() {
-        // Fixture state: a produced block at slot 5 with one blob and its proof.
+    fn signing_wraps_the_block_and_keeps_its_blobs() {
+        // Fixture state: a block at slot 4 with two blobs and their two proofs.
         let mut contents = BlockContents::<Minimal>::default();
-        contents.block.slot = Slot(5);
-        contents.blobs.push(Blob::<Minimal>::default()).unwrap();
-        contents.kzg_proofs.push(KzgProof([7; 48])).unwrap();
+        contents.block.slot = Slot(4);
+        for _ in 0..2 {
+            contents.blobs.push(Blob::<Minimal>::default()).unwrap();
+        }
+        for byte in 0..2 {
+            contents.kzg_proofs.push(KzgProof([byte; 48])).unwrap();
+        }
 
-        let signed = contents.clone().sign(BlsSignature([9; 96]));
+        // The signature joins the block, and the blobs and proofs pass through untouched.
+        let signed = contents.clone().into_signed(BlsSignature([7; 96]));
 
-        // The block gains the signature; blobs and proofs travel unchanged.
-        let mut expected = SignedBlockContents::<Minimal>::default();
-        expected.signed_block.message = contents.block;
-        expected.signed_block.signature = BlsSignature([9; 96]);
-        expected.kzg_proofs = contents.kzg_proofs;
-        expected.blobs = contents.blobs;
-        assert_eq!(signed, expected);
+        assert_eq!(
+            signed,
+            SignedBlockContents {
+                signed_block: SignedBeaconBlock {
+                    message: contents.block,
+                    signature: BlsSignature([7; 96]),
+                },
+                kzg_proofs: contents.kzg_proofs,
+                blobs: contents.blobs,
+            }
+        );
     }
 }

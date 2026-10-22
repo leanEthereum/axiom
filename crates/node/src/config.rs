@@ -17,7 +17,7 @@ use axiom_p2p::{
 use axiom_ssz::DecodeError;
 use axiom_telemetry::{MetricsServer, Registry};
 use axiom_types::{
-    ChainConfig, Preset,
+    ChainConfig, ExecutionAddress, Preset,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
 };
@@ -29,7 +29,7 @@ use tracing::{info, warn};
 
 use crate::{
     BeaconApi, Chain, ChainDatabase, ChainHandle, DiscoverySettings, ExecutionLayer, NodeError,
-    NodeKey, Publisher,
+    NodeKey, ProposerService, Publisher,
     network::{NetworkIdentity, NodeIdentity},
 };
 
@@ -183,6 +183,17 @@ pub struct NodeConfig {
     pub engine: Option<EngineConfig>,
     /// The peer-to-peer network; none runs the node alone.
     pub network: Option<NetworkSettings>,
+    /// How the node builds blocks for its validators.
+    pub proposer: ProposerSettings,
+}
+
+/// How the node builds blocks for the validators it serves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProposerSettings {
+    /// The fee recipient of payloads whose validator named none.
+    pub default_fee_recipient: ExecutionAddress,
+    /// Builder API endpoints that sell payloads, such as a local relay multiplexer.
+    pub builders: Vec<String>,
 }
 
 impl NodeConfig {
@@ -245,13 +256,14 @@ impl NodeConfig {
         &self,
         handle: &ChainHandle<P>,
         publisher: Arc<Publisher<P>>,
+        proposer: Arc<ProposerService<P>>,
         identity: Option<Arc<NodeIdentity>>,
         registry: Registry,
         stopped: &watch::Receiver<bool>,
     ) -> Result<Vec<JoinHandle<()>>, NodeError> {
         let mut servers = Vec::new();
         if let Some(address) = self.http_address {
-            let router = BeaconApi::router(handle.clone(), publisher, identity);
+            let router = BeaconApi::router(handle.clone(), publisher, proposer, identity);
             let server = Server::bind(address, router, ServerConfig::default())
                 .await
                 .map_err(|error| NodeError::Bind {

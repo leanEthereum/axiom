@@ -5,11 +5,13 @@
 //! See the Fulu beacon chain, data availability, and networking specs.
 
 mod block_contents;
+mod builder;
 mod data_column;
 mod partial_column;
 mod state;
 
 pub use block_contents::{BlockContents, SignedBlockContents};
+pub use builder::{BlobsBundle, ExecutionPayloadAndBlobsBundle};
 pub use data_column::{
     Cell, DataColumn, DataColumnSidecar, DataColumnsByRootIdentifier, KzgCommitmentsInclusionProof,
     KzgProofs, MatrixEntry,

@@ -2,6 +2,7 @@
 
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
+use axiom_builder_client::{RelayClient, RelaySet};
 use axiom_p2p::swarm::NetworkHandle;
 use axiom_telemetry::{NodeMetrics, Registry};
 use axiom_types::{ChainConfig, Preset, SlotClock};
@@ -12,13 +13,14 @@ use tokio::{
 use tracing::{error, info, warn};
 
 use crate::{
-    ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey, Publisher,
+    ChainHandle, Clock, ExecutionLayer, NetworkSettings, NodeConfig, NodeError, NodeKey,
+    ProposerService, ProposerSettings, Publisher,
     network::{
         AttestationSubnets, Discovery, ForkDigests, NetworkIdentity, NetworkService, NetworkSetup,
         NodeIdentity, RecordSetup,
     },
     race::Either,
-    tasks::{EngineFollower, Ticker},
+    tasks::{EngineFollower, PayloadPreparer, Ticker},
 };
 
 /// The running chain, as the services started after it see it.
@@ -31,6 +33,40 @@ struct StartedChain<'a, P: Preset> {
 }
 
 impl<P: Preset> StartedChain<'_, P> {
+    /// Starts the proposal desk, and the task that prepares payloads before each slot.
+    fn start_proposer(
+        self,
+        execution: &Arc<ExecutionLayer>,
+        clock: &Arc<dyn Clock>,
+        settings: &ProposerSettings,
+    ) -> Result<(Arc<ProposerService<P>>, JoinHandle<()>), NodeError> {
+        let relays = if settings.builders.is_empty() {
+            None
+        } else {
+            let clients = settings
+                .builders
+                .iter()
+                .map(|url| {
+                    RelayClient::new(url).map_err(|error| NodeError::Builder {
+                        url: url.clone(),
+                        error: Box::new(error),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(RelaySet::new(clients))
+        };
+        let proposer = Arc::new(ProposerService::new(
+            self.handle.clone(),
+            Arc::clone(execution),
+            settings.default_fee_recipient,
+            relays,
+        ));
+        let preparer = task::spawn(
+            PayloadPreparer::new(Arc::clone(&proposer), Arc::clone(clock), self.slots).run(),
+        );
+        Ok((proposer, preparer))
+    }
+
     /// Starts libp2p and the network service over it.
     ///
     /// # Returns
@@ -215,11 +251,19 @@ impl<P: Preset> Node<P> {
             network.as_ref().map(|(p2p, _)| p2p.clone()),
         ));
 
+        // The proposal desk builds payloads ahead of prepared validators' slots.
+        let started = StartedChain {
+            handle: &handle,
+            slots,
+        };
+        let (proposer, preparer) = started.start_proposer(&execution, &clock, &config.proposer)?;
+
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);
-        let servers = config
-            .start_servers(&handle, publisher, identity, registry, &stopped)
-            .await?;
+        let servers = Box::pin(
+            config.start_servers(&handle, publisher, proposer, identity, registry, &stopped),
+        )
+        .await?;
 
         // Background loops run until aborted.
         let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
@@ -248,8 +292,10 @@ impl<P: Preset> Node<P> {
         }
         ticker.abort();
         follower.abort();
+        preparer.abort();
         let _cancelled = ticker.await;
         let _cancelled = follower.await;
+        let _cancelled = preparer.await;
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);

@@ -1,6 +1,6 @@
 //! Response shapes and error replies shared by every route.
 
-use std::future::Future;
+use std::{fmt, future::Future};
 
 use axiom_http::{Method, Request, Response, Router, StatusCode};
 use axiom_json::{Json, Object};
@@ -60,6 +60,16 @@ impl ApiError {
         )
     }
 
+    /// The node failed in a way the client cannot fix.
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
+    }
+
+    /// The node cannot serve the request now, such as without an engine to build with.
+    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
+
     /// An error with a status and a message.
     fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
@@ -77,6 +87,12 @@ impl ApiError {
         .into_iter()
         .collect();
         Response::new(self.status).with_body(JSON, Json::from(body).to_string().into_bytes())
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
     }
 }
 

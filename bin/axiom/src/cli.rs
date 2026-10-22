@@ -322,6 +322,7 @@ impl Cli {
                 metrics_address: self.metrics_address,
                 engine,
                 network,
+                ..NodeConfig::default()
             },
             log: LogConfig {
                 filter: self.log.unwrap_or_else(|| "info".to_owned()),
@@ -503,6 +504,7 @@ mod tests {
                         boot_enrs: vec![EIP_778_RECORD.parse().unwrap()],
                     }),
                 }),
+                ..NodeConfig::default()
             }
         );
         assert_eq!(run.log.filter, "debug");

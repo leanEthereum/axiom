@@ -93,6 +93,10 @@ axiom-telemetry = { path = "crates/telemetry" }
 axiom-p2p = { path = "crates/p2p" }
 axiom-rlp = { path = "crates/rlp" }
 axiom-discv5 = { path = "crates/discv5" }
+axiom-operation-pool = { path = "crates/operation-pool" }
+axiom-block-production = { path = "crates/block-production" }
+axiom-beacon-json = { path = "crates/beacon-json" }
+axiom-builder-client = { path = "crates/builder-client" }
 axiom-validator = { path = "crates/validator" }
 axiom-ef-tests = { path = "testing/ef-tests" }
 

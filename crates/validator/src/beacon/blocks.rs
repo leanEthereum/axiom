@@ -109,9 +109,9 @@ impl<P: Preset> ProducedBlock<P> {
             Self::Block(block) => {
                 SignedProposal::Block(combined::SignedBeaconBlock::from_parts(block, signature))
             }
-            Self::Deneb(contents) => SignedProposal::Deneb(contents.sign(signature)),
-            Self::Electra(contents) => SignedProposal::Electra(contents.sign(signature)),
-            Self::Fulu(contents) => SignedProposal::Fulu(contents.sign(signature)),
+            Self::Deneb(contents) => SignedProposal::Deneb(contents.into_signed(signature)),
+            Self::Electra(contents) => SignedProposal::Electra(contents.into_signed(signature)),
+            Self::Fulu(contents) => SignedProposal::Fulu(contents.into_signed(signature)),
         }
     }
 }

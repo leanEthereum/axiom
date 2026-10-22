@@ -6,8 +6,10 @@
 
 mod aggregate;
 mod attestation;
+mod blinded_block;
 mod block;
 mod block_contents;
+mod builder;
 mod consolidation;
 mod deposit;
 mod execution;
@@ -21,8 +23,10 @@ pub use attestation::{
     AggregationBits, Attestation, AttestingIndices, CommitteeBits, IndexedAttestation,
     SingleAttestation,
 };
+pub use blinded_block::{BlindedBeaconBlock, BlindedBeaconBlockBody, SignedBlindedBeaconBlock};
 pub use block::{BeaconBlock, BeaconBlockBody, SignedBeaconBlock};
 pub use block_contents::{BlockContents, SignedBlockContents};
+pub use builder::{BuilderBid, SignedBuilderBid};
 pub use consolidation::{ConsolidationRequest, PendingConsolidation};
 pub use deposit::{DepositRequest, PendingDeposit};
 pub use execution::{

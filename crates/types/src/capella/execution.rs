@@ -228,6 +228,32 @@ impl<P: Preset> Container for ExecutionPayloadHeader<P> {
     }
 }
 
+impl<P: Preset> From<&ExecutionPayload<P>> for ExecutionPayloadHeader<P> {
+    /// The header of a payload, which hashes to the same root.
+    ///
+    /// Each list becomes its root, the very leaf the payload's own root merkleizes.
+    /// See `process_execution_payload` in the Capella beacon chain spec.
+    fn from(payload: &ExecutionPayload<P>) -> Self {
+        Self {
+            parent_hash: payload.parent_hash,
+            fee_recipient: payload.fee_recipient,
+            state_root: payload.state_root,
+            receipts_root: payload.receipts_root,
+            logs_bloom: payload.logs_bloom.clone(),
+            prev_randao: payload.prev_randao,
+            block_number: payload.block_number,
+            gas_limit: payload.gas_limit,
+            gas_used: payload.gas_used,
+            timestamp: payload.timestamp,
+            extra_data: payload.extra_data.clone(),
+            base_fee_per_gas: payload.base_fee_per_gas,
+            block_hash: payload.block_hash,
+            transactions_root: payload.transactions.hash_tree_root(),
+            withdrawals_root: payload.withdrawals.hash_tree_root(),
+        }
+    }
+}
+
 /// Everything the execution engine needs to validate a payload.
 ///
 /// See the Capella beacon chain spec.

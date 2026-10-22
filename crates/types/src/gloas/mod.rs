@@ -9,6 +9,7 @@ mod aggregate;
 mod attestation;
 mod bid;
 mod block;
+mod block_contents;
 mod builder;
 mod data_column;
 mod envelope;
@@ -25,6 +26,7 @@ pub use attestation::{
 };
 pub use bid::{ExecutionPayloadBid, SignedExecutionPayloadBid};
 pub use block::{BeaconBlock, BeaconBlockBody, SignedBeaconBlock};
+pub use block_contents::BlockContents;
 pub use builder::{
     Builder, BuilderDepositRequest, BuilderExitRequest, BuilderPendingPayment,
     BuilderPendingPayments, BuilderPendingWithdrawal, BuilderPendingWithdrawals, Builders,

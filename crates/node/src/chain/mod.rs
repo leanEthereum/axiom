@@ -14,20 +14,25 @@ use std::{
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
-use axiom_fork_choice::{DataAvailability, ExecutionStatus, ForkChoiceError, PayloadStatus, Store};
+use axiom_fork_choice::{
+    DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, PayloadStatus, Store,
+};
 use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
 use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
-use axiom_state_transition::{EpochCommittees, State, Verification};
+use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
+use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
     BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Hash32, Preset, Root,
     Slot,
     accessors::{CoreState, ForkState},
+    altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
+    capella::SignedBlsToExecutionChange,
     combined,
     deneb::BlobSidecar,
     gloas::{self, PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
-    phase0::Checkpoint,
+    phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
 pub use database::ChainDatabase;
@@ -80,6 +85,8 @@ pub struct Chain<P: Preset> {
     committees: Option<(Epoch, Root, Arc<EpochCommittees>)>,
     /// Light client data derived from the canonical chain.
     light_client: LightClientServer<P>,
+    /// Operations waiting for the blocks this node's validators propose.
+    pool: OperationPool<P>,
 }
 
 impl<P: Preset> Chain<P> {
@@ -177,6 +184,7 @@ impl<P: Preset> Chain<P> {
             gossip: GossipMemory::default(),
             committees: None,
             light_client: LightClientServer::new(),
+            pool: OperationPool::default(),
         })
     }
 
@@ -220,6 +228,48 @@ impl<P: Preset> Chain<P> {
     #[must_use]
     pub const fn config(&self) -> &ChainConfig {
         self.store.config()
+    }
+
+    /// The operations waiting for a block.
+    #[must_use]
+    pub const fn pool(&self) -> &OperationPool<P> {
+        &self.pool
+    }
+
+    /// The operations waiting for a block, to add what the beacon API receives.
+    pub const fn pool_mut(&mut self) -> &mut OperationPool<P> {
+        &mut self.pool
+    }
+
+    /// The state the head block left, which judges operations on entry.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the store lost the head's state, which it never prunes.
+    pub fn head_state(&self) -> Result<&State<P>, ChainError> {
+        let root = self.head.root;
+        self.store
+            .block_state(&root)
+            .ok_or(ChainError::MissingState(root))
+    }
+
+    /// The head as the fork choice names it, with the payload variant a Gloas head has.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork choice cannot pick a head.
+    pub fn head_node(&mut self) -> Result<ForkChoiceNode, ChainError> {
+        Ok(self.store.head()?)
+    }
+
+    /// Whether a proposal at a slot builds on the head's payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head is not in the store.
+    pub fn builds_on_full(&mut self, slot: Slot) -> Result<bool, ChainError> {
+        let head = self.store.head()?;
+        Ok(self.store.should_build_on_full(head, slot)?)
     }
 
     /// The light client data the chain serves.
@@ -323,7 +373,12 @@ impl<P: Preset> Chain<P> {
     /// Fails when the head cannot be recomputed.
     pub fn on_tick(&mut self, time_ms: u64) -> Result<(), ChainError> {
         let epoch = self.store.current_epoch();
+        let slot = self.store.current_slot();
         self.store.on_tick(time_ms);
+        if self.store.current_slot() != slot {
+            // Votes and signatures too old for any coming block leave the pool.
+            self.pool.on_slot(self.store.current_slot());
+        }
         if self.store.current_epoch() != epoch {
             // Messages from two epochs ago can no longer be gossiped, so forget them.
             self.gossip.seen.prune::<P>(self.store.current_epoch());
@@ -652,9 +707,21 @@ impl<P: Preset> Chain<P> {
     ///
     /// Fails when the fork choice refuses the vote.
     pub fn on_vote(&mut self, vote: &CommitteeVote) -> Result<(), ChainError> {
+        self.pool_vote(vote);
         self.store
             .on_attestation(vote, false, Verification::Verify)?;
         Ok(())
+    }
+
+    /// Keeps a vote for this node's blocks, whatever the fork choice makes of it.
+    ///
+    /// A vote for a block the store has not seen yet may still go in a later block.
+    fn pool_vote(&mut self, vote: &CommitteeVote) {
+        let kept = CommitteeAggregate::from_vote(vote)
+            .and_then(|vote| self.pool.attestations_mut().insert(vote));
+        if let Err(error) = kept {
+            debug!(slot = %vote.data.slot, %error, "vote not pooled");
+        }
     }
 
     /// Counts one validator's vote, received alone on an attestation subnet.
@@ -699,6 +766,7 @@ impl<P: Preset> Chain<P> {
             bits,
             payload: claim,
         };
+        self.pool_vote(&aggregate);
         // The signature is checked again against the committee the store resolves.
         // A committee from a branch with another shuffling then fails the check.
         // It never credits the wrong validator.
@@ -732,9 +800,97 @@ impl<P: Preset> Chain<P> {
     ///
     /// Fails when the slashing does not prove an equivocation.
     pub fn on_attester_slashing(&mut self, votes: &ConflictingVotes) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        if let Err(error) = self
+            .pool
+            .slashings_mut()
+            .insert_attester(state, votes.clone())
+        {
+            debug!(%error, "attester slashing not pooled");
+        }
         self.store
             .on_attester_slashing(votes, Verification::Verify)?;
         Ok(())
+    }
+
+    /// Keeps a proposer slashing that passed gossip or API checks.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the slashing cannot change anything at the head.
+    pub fn on_proposer_slashing(&mut self, slashing: ProposerSlashing) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        self.pool.slashings_mut().insert_proposer(state, slashing)?;
+        Ok(())
+    }
+
+    /// Keeps a voluntary exit that passed gossip or API checks.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the exit cannot take effect at the head.
+    pub fn on_voluntary_exit(&mut self, exit: SignedVoluntaryExit) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        self.pool.requests_mut().insert_exit(state, exit)?;
+        Ok(())
+    }
+
+    /// Keeps a withdrawal credential change that passed gossip or API checks.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator no longer has BLS credentials.
+    pub fn on_credential_change(
+        &mut self,
+        change: SignedBlsToExecutionChange,
+    ) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        self.pool
+            .requests_mut()
+            .insert_credential_change(state, change)?;
+        Ok(())
+    }
+
+    /// Keeps a sync committee member's signature, at each of its seats.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the head's state has no sync committee or the member no seat.
+    pub fn on_sync_message(&mut self, message: &SyncCommitteeMessage) -> Result<(), ChainError> {
+        let root = self.head.root;
+        let state = self
+            .store
+            .block_state(&root)
+            .ok_or(ChainError::MissingState(root))?;
+        let committees = state
+            .beacon()
+            .sync_committees()
+            .ok_or_else(|| ChainError::NoSyncCommittee(state.fork_name()))?;
+        let seats = SyncPool::<P>::seats(committees, message.validator_index)?;
+        self.pool.sync_mut().insert_message(message, &seats)?;
+        Ok(())
+    }
+
+    /// Keeps an aggregator's sync committee contribution.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the contribution names no subcommittee or its signature is no point.
+    pub fn on_contribution(
+        &mut self,
+        contribution: &SyncCommitteeContribution<P>,
+    ) -> Result<(), ChainError> {
+        self.pool.sync_mut().insert_contribution(contribution)?;
+        Ok(())
+    }
+
+    /// The head's consensus state, borrowing the store alone so the pool stays writable.
+    fn head_beacon(store: &Store<P>, head: Head) -> Result<&combined::BeaconState<P>, ChainError> {
+        let root = head.root;
+        store
+            .block_state(&root)
+            .map(State::beacon)
+            .ok_or(ChainError::MissingState(root))
     }
 
     /// Counts a payload timeliness committee member's vote on its slot's payload.
@@ -746,8 +902,30 @@ impl<P: Preset> Chain<P> {
         &mut self,
         message: &PayloadAttestationMessage,
     ) -> Result<(), ChainError> {
+        if let Err(error) = self.pool_payload_attestation(message) {
+            debug!(slot = %message.data.slot, %error, "payload attestation not pooled");
+        }
         self.store
             .on_payload_attestation_message(message, false, Verification::Verify)?;
+        Ok(())
+    }
+
+    /// Keeps a payload timeliness vote at its member's seats in the slot's committee.
+    fn pool_payload_attestation(
+        &mut self,
+        message: &PayloadAttestationMessage,
+    ) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        let slot = message.data.slot;
+        let gloas =
+            gloas::BeaconState::<P>::from_any(state).ok_or(ChainError::NoPayloadCommittee(slot))?;
+        let fork_epoch = self.store.config().gloas_fork_epoch;
+        let committee = PtcWindow::of_slot(gloas, slot, fork_epoch)
+            .map_err(|_| ChainError::NoPayloadCommittee(slot))?
+            .to_vec();
+        self.pool
+            .payload_attestations_mut()
+            .insert(message, &committee)?;
         Ok(())
     }
 
@@ -886,6 +1064,8 @@ impl<P: Preset> Chain<P> {
             .beacon();
         self.database
             .finalize(previous, finalized, state, &chain, &orphans)?;
+        // What the finalized state carried out can never go in a block again.
+        self.pool.on_finalized(state);
 
         // Light clients bootstrap from finalized epoch boundary blocks.
         // Their states leave the store below, so the bootstraps are made now.

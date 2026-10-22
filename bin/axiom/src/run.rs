@@ -58,10 +58,10 @@ impl Run {
             // The preset is a compile-time choice, so each one is its own monomorphized node.
             match self.preset {
                 PresetName::Mainnet => {
-                    Node::<Mainnet>::run(self.chain, self.node, clock, shutdown).await
+                    Box::pin(Node::<Mainnet>::run(self.chain, self.node, clock, shutdown)).await
                 }
                 PresetName::Minimal => {
-                    Node::<Minimal>::run(self.chain, self.node, clock, shutdown).await
+                    Box::pin(Node::<Minimal>::run(self.chain, self.node, clock, shutdown)).await
                 }
             }
         })

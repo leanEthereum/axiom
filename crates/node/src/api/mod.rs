@@ -7,10 +7,14 @@
 
 mod beacon;
 mod debug;
+mod duties;
 mod ids;
 mod light_client;
 mod node;
+mod pool;
+mod query;
 mod reply;
+mod validator;
 
 use std::sync::Arc;
 
@@ -23,9 +27,11 @@ use self::{
     debug::DebugRoutes,
     light_client::LightClientRoutes,
     node::NodeRoutes,
+    pool::PoolRoutes,
     reply::{ApiError, Freshness, Routes},
+    validator::ValidatorRoutes,
 };
-use crate::{Chain, ChainHandle, Publisher, network::NodeIdentity};
+use crate::{Chain, ChainHandle, ProposerService, Publisher, network::NodeIdentity};
 
 /// What every route can reach: the chain and the engine.
 #[derive(Debug)]
@@ -34,6 +40,8 @@ pub(crate) struct ApiContext<P: Preset> {
     chain: ChainHandle<P>,
     /// Publishes proposed blocks.
     publisher: Arc<Publisher<P>>,
+    /// Produces blocks for the node's validators.
+    proposer: Arc<ProposerService<P>>,
     /// How the node presents itself on the network, when it has one.
     identity: Option<Arc<NodeIdentity>>,
 }
@@ -43,6 +51,7 @@ impl<P: Preset> Clone for ApiContext<P> {
         Self {
             chain: self.chain.clone(),
             publisher: Arc::clone(&self.publisher),
+            proposer: Arc::clone(&self.proposer),
             identity: self.identity.clone(),
         }
     }
@@ -91,17 +100,21 @@ impl BeaconApi {
     pub(crate) fn router<P: Preset>(
         chain: ChainHandle<P>,
         publisher: Arc<Publisher<P>>,
+        proposer: Arc<ProposerService<P>>,
         identity: Option<Arc<NodeIdentity>>,
     ) -> Router {
         let context = ApiContext {
             chain,
             publisher,
+            proposer,
             identity,
         };
         let routes = Routes::new(Router::new(), context);
         let routes = NodeRoutes::register(routes);
         let routes = BeaconRoutes::register(routes);
         let routes = LightClientRoutes::register(routes);
+        let routes = ValidatorRoutes::register(routes);
+        let routes = PoolRoutes::register(routes);
         DebugRoutes::register(routes).finish()
     }
 }

@@ -46,13 +46,13 @@ impl<P: Preset> Container for SignedBlockContents<P> {
     }
 }
 
-/// An unsigned block with every blob it commits to and their proofs.
+/// A block to sign, with every blob it commits to and one proof per blob.
 ///
-/// This is the Electra body of the produce-block route in the beacon API, not a consensus container.
+/// It is the Electra response of the produce-block route, not a consensus container.
 /// See `BlockContents` in the beacon-APIs repository.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BlockContents<P: Preset> {
-    /// The block, before its proposer signs it.
+    /// The unsigned block.
     pub block: BeaconBlock<P>,
 
     /// Proofs that open each commitment to its blob, in commitment order.
@@ -85,9 +85,9 @@ impl<P: Preset> Container for BlockContents<P> {
 }
 
 impl<P: Preset> BlockContents<P> {
-    /// The signed contents, once the proposer has signed the block.
+    /// The contents to publish, once the proposer has signed the block.
     #[must_use]
-    pub fn sign(self, signature: BlsSignature) -> SignedBlockContents<P> {
+    pub fn into_signed(self, signature: BlsSignature) -> SignedBlockContents<P> {
         SignedBlockContents {
             signed_block: SignedBeaconBlock {
                 message: self.block,
@@ -117,5 +117,33 @@ mod tests {
         let decoded = SignedBlockContents::<Minimal>::decode(&contents.encode()).unwrap();
 
         assert_eq!(decoded, contents);
+    }
+
+    #[test]
+    fn signing_wraps_the_block_and_keeps_its_blobs() {
+        // Fixture state: a block at slot 4 with two blobs and their two proofs.
+        let mut contents = BlockContents::<Minimal>::default();
+        contents.block.slot = Slot(4);
+        for _ in 0..2 {
+            contents.blobs.push(Blob::<Minimal>::default()).unwrap();
+        }
+        for byte in 0..2 {
+            contents.kzg_proofs.push(KzgProof([byte; 48])).unwrap();
+        }
+
+        // The signature joins the block, and the blobs and proofs pass through untouched.
+        let signed = contents.clone().into_signed(BlsSignature([7; 96]));
+
+        assert_eq!(
+            signed,
+            SignedBlockContents {
+                signed_block: SignedBeaconBlock {
+                    message: contents.block,
+                    signature: BlsSignature([7; 96]),
+                },
+                kzg_proofs: contents.kzg_proofs,
+                blobs: contents.blobs,
+            }
+        );
     }
 }
