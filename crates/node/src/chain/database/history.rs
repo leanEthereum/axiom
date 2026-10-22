@@ -51,6 +51,41 @@ impl HistoryStart {
     }
 }
 
+/// How far rebuilding the snapshots below a checkpoint anchor has come.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconstructionCursor {
+    /// The slot whose state the rebuild has reached.
+    pub reached: Slot,
+    /// The anchor's slot, where stored snapshots already begin.
+    pub target: Slot,
+}
+
+impl ReconstructionCursor {
+    /// Bytes of the encoded record: two big-endian slots.
+    const LEN: usize = 16;
+
+    /// The record as stored.
+    pub(super) fn encode(&self) -> [u8; Self::LEN] {
+        let mut bytes = [0; Self::LEN];
+        bytes[..8].copy_from_slice(&self.reached.0.to_be_bytes());
+        bytes[8..].copy_from_slice(&self.target.0.to_be_bytes());
+        bytes
+    }
+
+    /// Reads a stored record.
+    pub(super) fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let array: [u8; Self::LEN] = bytes.try_into().map_err(|_| DecodeError::InvalidLength {
+            expected: Self::LEN,
+            actual: bytes.len(),
+        })?;
+        let (reached, target) = array.split_at(8);
+        Ok(Self {
+            reached: Slot(u64::from_be_bytes(reached.try_into().unwrap_or_default())),
+            target: Slot(u64::from_be_bytes(target.try_into().unwrap_or_default())),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +106,25 @@ mod tests {
             Err(DecodeError::InvalidLength {
                 expected: 40,
                 actual: 39
+            })
+        );
+    }
+
+    #[test]
+    fn the_reconstruction_cursor_round_trips() {
+        let cursor = ReconstructionCursor {
+            reached: Slot(64),
+            target: Slot(4096),
+        };
+        assert_eq!(
+            ReconstructionCursor::decode(&cursor.encode()).unwrap(),
+            cursor
+        );
+        assert_eq!(
+            ReconstructionCursor::decode(&[0; 15]),
+            Err(DecodeError::InvalidLength {
+                expected: 16,
+                actual: 15
             })
         );
     }

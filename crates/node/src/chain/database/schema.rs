@@ -119,7 +119,10 @@ mod tests {
     #[test]
     fn a_version_record_is_eight_big_endian_bytes() {
         assert_eq!(SchemaVersion(2).encode(), [0, 0, 0, 0, 0, 0, 0, 2]);
-        assert_eq!(SchemaVersion::decode(&[0, 0, 0, 0, 0, 0, 1, 0]), Some(SchemaVersion(256)));
+        assert_eq!(
+            SchemaVersion::decode(&[0, 0, 0, 0, 0, 0, 1, 0]),
+            Some(SchemaVersion(256))
+        );
         assert_eq!(SchemaVersion::decode(&[2]), None);
     }
 }

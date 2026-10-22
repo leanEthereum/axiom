@@ -37,7 +37,7 @@ impl SnapshotInterval {
     /// Whether a snapshot falls on a slot.
     #[must_use]
     pub const fn is_due(self, slot: Slot) -> bool {
-        slot.0 % self.0.get() == 0
+        slot.0.is_multiple_of(self.0.get())
     }
 }
 
@@ -110,12 +110,18 @@ mod tests {
     #[test]
     fn an_interval_is_a_positive_slot_count() {
         assert_eq!(SnapshotInterval::new(0), None);
-        assert_eq!("0".parse::<SnapshotInterval>(), Err(InvalidInterval("0".to_owned())));
+        assert_eq!(
+            "0".parse::<SnapshotInterval>(),
+            Err(InvalidInterval("0".to_owned()))
+        );
         assert_eq!(
             "eight".parse::<SnapshotInterval>(),
             Err(InvalidInterval("eight".to_owned()))
         );
-        assert_eq!("64".parse::<SnapshotInterval>(), Ok(SnapshotInterval::new(64).unwrap()));
+        assert_eq!(
+            "64".parse::<SnapshotInterval>(),
+            Ok(SnapshotInterval::new(64).unwrap())
+        );
         assert_eq!(SnapshotInterval::default().slots(), 2048);
     }
 
@@ -123,7 +129,9 @@ mod tests {
     fn snapshots_fall_on_multiples_of_the_interval() {
         // Interval 8: slots 0, 8, 16 get a snapshot; 7 and 9 do not.
         let interval = SnapshotInterval::new(8).unwrap();
-        let due: Vec<u64> = (0..18).filter(|slot| interval.is_due(Slot(*slot))).collect();
+        let due: Vec<u64> = (0..18)
+            .filter(|slot| interval.is_due(Slot(*slot)))
+            .collect();
         assert_eq!(due, [0, 8, 16]);
     }
 

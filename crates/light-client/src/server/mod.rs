@@ -244,7 +244,10 @@ impl<P: Preset> LightClientServer<P> {
     /// # Errors
     ///
     /// Fails when the update's headers have different formats.
-    pub fn restore_settled(&mut self, update: LightClientUpdate<P>) -> Result<(), LightClientError> {
+    pub fn restore_settled(
+        &mut self,
+        update: LightClientUpdate<P>,
+    ) -> Result<(), LightClientError> {
         self.keep_settled(Candidate::new(update)?);
         self.select();
         Ok(())
