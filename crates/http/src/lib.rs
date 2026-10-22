@@ -46,6 +46,7 @@
 //! assert_eq!(used, bytes.len());
 //! ```
 
+mod charset;
 mod client;
 mod connection;
 mod date;
@@ -58,6 +59,7 @@ mod method;
 mod race;
 mod router;
 mod server;
+mod session;
 mod status;
 mod wire;
 

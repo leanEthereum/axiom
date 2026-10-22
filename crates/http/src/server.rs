@@ -1,26 +1,18 @@
 //! The server: an accept loop, one task per connection, and graceful shutdown.
 
-use std::{
-    future::Future,
-    io,
-    net::SocketAddr,
-    pin::pin,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{future::Future, io, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
 
 use tokio::{
-    net::{TcpListener, TcpStream, ToSocketAddrs},
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    net::{TcpListener, ToSocketAddrs},
+    sync::{Semaphore, watch},
     task::JoinSet,
-    time::{self, Instant},
+    time,
 };
 
 use crate::{
-    BodyLength, HttpError, Limits, Method, Request, Response, Router, StatusCode,
-    connection::Connection,
-    date::http_date,
+    Limits, Router,
     race::{Either, race},
+    session::Session,
 };
 
 /// How a server treats its connections.
@@ -147,13 +139,10 @@ impl Server {
                 Either::Right(()) => break,
             };
 
-            tasks.spawn(serve_connection(
-                stream,
-                Arc::clone(&router),
-                config,
-                stopped.clone(),
-                permit,
-            ));
+            // The session holds the permit, so its slot frees when the connection ends.
+            tasks.spawn(
+                Session::new(stream, Arc::clone(&router), config, stopped.clone(), permit).run(),
+            );
         }
 
         // Shutdown: refuse new clients, then tell every connection to finish up.
@@ -167,136 +156,4 @@ impl Server {
             while tasks.join_next().await.is_some() {}
         }
     }
-}
-
-/// Serves requests on one connection until it closes.
-async fn serve_connection(
-    stream: TcpStream,
-    router: Arc<Router>,
-    config: ServerConfig,
-    mut stopped: watch::Receiver<bool>,
-    _permit: OwnedSemaphorePermit,
-) {
-    // Small responses go out at once rather than waiting to coalesce.
-    let _ = stream.set_nodelay(true);
-    let mut connection = Connection::new(stream, config.limits);
-
-    loop {
-        // Wait for the next head; an idle connection also yields to shutdown.
-        let waited = race(
-            time::timeout(config.idle_timeout, connection.read_request_head()),
-            // The guard the wait returns is dropped at once; only the event matters.
-            async {
-                let _ = stopped.wait_for(|stop| *stop).await;
-            },
-        )
-        .await;
-        let head = match waited {
-            // A complete head.
-            Either::Left(Ok(Ok(Some(head)))) => head,
-            // A malformed head gets the matching status, then the connection closes.
-            Either::Left(Ok(Err(HttpError::Protocol(error)))) => {
-                reject(&mut connection, error.status(), config.io_timeout).await;
-                return;
-            }
-            // Clean close, socket error, idle timeout, or shutdown: close quietly.
-            _ => return,
-        };
-
-        // Framing errors are answered before any body byte is read.
-        let length = match head.body_length() {
-            Ok(length) => length,
-            Err(error) => {
-                reject(&mut connection, error.status(), config.io_timeout).await;
-                return;
-            }
-        };
-
-        // A client that sent "expect: 100-continue" waits for this go-ahead before its body.
-        if length != BodyLength::Empty && head.headers.has_token("expect", "100-continue") {
-            let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
-            if connection.write(interim).await.is_err() {
-                return;
-            }
-        }
-
-        // Read the body under the I/O timeout.
-        let body = match time::timeout(config.io_timeout, connection.read_body(length)).await {
-            Ok(Ok(body)) => body,
-            Ok(Err(HttpError::Protocol(error))) => {
-                reject(&mut connection, error.status(), config.io_timeout).await;
-                return;
-            }
-            Ok(Err(_)) => return,
-            Err(_) => {
-                reject(
-                    &mut connection,
-                    StatusCode::REQUEST_TIMEOUT,
-                    config.io_timeout,
-                )
-                .await;
-                return;
-            }
-        };
-
-        // Hand the complete request to its handler.
-        let head_only = head.method == Method::Head;
-        let client_keeps_alive = head.keep_alive();
-        let mut request = Request::new(head.method, &head.target);
-        request.headers = head.headers;
-        request.body = body;
-        let mut response = router.handle(request).await;
-
-        // Persist only when the client, the handler, and the shutdown flag all allow it.
-        let keep_alive = client_keeps_alive
-            && !response.headers.has_token("connection", "close")
-            && !*stopped.borrow();
-        if !keep_alive {
-            response.headers.insert("connection", "close");
-        }
-        if !send(&mut connection, response, head_only, config.io_timeout).await || !keep_alive {
-            return;
-        }
-    }
-}
-
-/// Answers a request the server will not process, then lets the connection close.
-async fn reject(connection: &mut Connection<TcpStream>, status: StatusCode, timeout: Duration) {
-    let response = Response::new(status).with_header("connection", "close");
-    send(connection, response, false, timeout).await;
-}
-
-/// Writes a response with a date field under a timeout.
-///
-/// # Returns
-///
-/// Whether the whole response was written.
-async fn send(
-    connection: &mut Connection<TcpStream>,
-    mut response: Response,
-    head_only: bool,
-    timeout: Duration,
-) -> bool {
-    // RFC 9110 section 6.6.1: a server with a clock dates its responses.
-    response
-        .headers
-        .insert("date", http_date(SystemTime::now()));
-
-    // A handler that set an unwritable field yields a bare 500 instead.
-    let bytes = match response.encode(head_only) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            let fallback =
-                Response::new(StatusCode::INTERNAL_SERVER_ERROR).with_header("connection", "close");
-            match fallback.encode(false) {
-                Ok(bytes) => bytes,
-                Err(_) => return false,
-            }
-        }
-    };
-    let deadline = Instant::now() + timeout;
-    matches!(
-        time::timeout_at(deadline, connection.write(&bytes)).await,
-        Ok(Ok(()))
-    )
 }

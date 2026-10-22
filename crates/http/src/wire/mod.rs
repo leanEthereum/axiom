@@ -7,4 +7,5 @@ mod encode;
 mod head;
 
 pub use body::{BodyLength, ChunkedDecoder};
+pub(crate) use encode::Encoder;
 pub use head::{RequestHead, ResponseHead};

@@ -47,8 +47,12 @@ where
         // The RFC 3339 timestamp contains no character that needs escaping.
         writer.write_str("{\"timestamp\":\"")?;
         SystemTime.format_time(&mut writer)?;
-        write!(writer, "\",\"level\":\"{}\",\"target\":", metadata.level())?;
-        write_string(&mut writer, metadata.target())?;
+        write!(
+            writer,
+            "\",\"level\":\"{}\",\"target\":{}",
+            metadata.level(),
+            JsonString(metadata.target())
+        )?;
 
         // Phase 2: the event's own fields, typed where JSON has a matching type.
         writer.write_str(",\"fields\":{")?;
@@ -68,15 +72,13 @@ where
                 if index > 0 {
                     writer.write_char(',')?;
                 }
-                writer.write_str("{\"name\":")?;
-                write_string(&mut writer, span.name())?;
+                write!(writer, "{{\"name\":{}", JsonString(span.name()))?;
                 // The formatting layer stored each span's fields as text when the span opened.
                 let extensions = span.extensions();
                 if let Some(fields) = extensions.get::<FormattedFields<N>>()
                     && !fields.fields.is_empty()
                 {
-                    writer.write_str(",\"fields\":")?;
-                    write_string(&mut writer, &fields.fields)?;
+                    write!(writer, ",\"fields\":{}", JsonString(&fields.fields))?;
                 }
                 // Release the span's extension lock before the next span takes its own.
                 drop(extensions);
@@ -115,12 +117,10 @@ impl<W: Write> FieldVisitor<'_, W> {
     fn string(&mut self, field: &Field, value: &dyn Display) {
         // After a failure, skip the rest; the error surfaces once visiting ends.
         if self.result.is_ok() {
-            self.result = self.key(field).and_then(|()| {
-                // Escape the text as it streams, so no temporary string is built.
-                self.out.write_char('"')?;
-                write!(Escaped(&mut *self.out), "{value}")?;
-                self.out.write_char('"')
-            });
+            // Escape the text as it streams, so no temporary string is built.
+            self.result = self
+                .key(field)
+                .and_then(|()| write!(self.out, "{}", JsonString(value)));
         }
     }
 
@@ -131,8 +131,7 @@ impl<W: Write> FieldVisitor<'_, W> {
             self.out.write_char(',')?;
         }
         self.first = false;
-        write_string(self.out, field.name())?;
-        self.out.write_char(':')
+        write!(self.out, "{}:", JsonString(field.name()))
     }
 }
 
@@ -212,12 +211,18 @@ impl<W: Write> Write for Escaped<'_, W> {
     }
 }
 
-/// Writes text as a quoted, escaped JSON string.
-fn write_string<W: Write>(out: &mut W, text: &str) -> fmt::Result {
-    out.write_char('"')?;
-    // Every character between the quotes goes through the escaper.
-    Escaped(&mut *out).write_str(text)?;
-    out.write_char('"')
+/// A display adapter that writes a value as a quoted, escaped JSON string.
+///
+/// The value's text streams through the escaper, so no temporary string is built.
+struct JsonString<T>(T);
+
+impl<T: Display> Display for JsonString<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_char('"')?;
+        // Every character between the quotes goes through the escaper.
+        write!(Escaped(&mut *f), "{}", self.0)?;
+        f.write_char('"')
+    }
 }
 
 #[cfg(test)]
@@ -303,9 +308,8 @@ mod tests {
 
     #[test]
     fn control_characters_use_the_long_escape() {
-        let mut out = String::new();
         // Bell is 0x07 and has no short escape; tab does.
-        write_string(&mut out, "a\u{7}\tb").expect("string sink");
+        let out = JsonString("a\u{7}\tb").to_string();
         assert_eq!(out, "\"a\\u0007\\tb\"");
     }
 }

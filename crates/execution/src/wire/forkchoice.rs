@@ -18,7 +18,7 @@ use std::fmt;
 use axiom_json::{Json, data};
 use axiom_types::{Bytes32, ExecutionAddress, Hash32, Preset, Root, Withdrawals};
 
-use super::{Fields, JsonCodec, PayloadStatus, nullable, object, primitives::read_fixed};
+use super::{Fields, JsonCodec, PayloadStatus, Reader, object};
 use crate::WireError;
 
 /// The execution blocks the consensus layer considers head, safe, and finalized.
@@ -115,7 +115,7 @@ impl JsonCodec for PayloadId {
     }
 
     fn from_json(value: &Json) -> Result<Self, WireError> {
-        read_fixed(value).map(Self)
+        Reader::new(value).data().map(Self)
     }
 }
 
@@ -141,7 +141,7 @@ impl JsonCodec for ForkchoiceUpdated {
     fn to_json(&self) -> Json {
         object([
             ("payloadStatus", self.payload_status.to_json()),
-            ("payloadId", nullable(self.payload_id.as_ref())),
+            ("payloadId", self.payload_id.to_json()),
         ])
     }
 

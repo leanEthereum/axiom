@@ -1,6 +1,6 @@
 //! Complete requests and responses, as handlers and callers see them.
 
-use crate::{Headers, Method, StatusCode};
+use crate::{Headers, HttpError, Method, ProtocolError, StatusCode, wire::Encoder};
 
 /// The protocol version on a start line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +29,16 @@ impl Version {
             b"HTTP/1.0" => Some(Self::Http10),
             b"HTTP/1.1" => Some(Self::Http11),
             _ => None,
+        }
+    }
+
+    /// Whether a connection persists after a message with these fields, per RFC 9112 section 9.3.
+    pub(crate) fn persists(self, headers: &Headers) -> bool {
+        match self {
+            // HTTP/1.1 persists unless a party says close.
+            Self::Http11 => !headers.has_token("connection", "close"),
+            // HTTP/1.0 closes unless a party asks to keep alive.
+            Self::Http10 => headers.has_token("connection", "keep-alive"),
         }
     }
 }
@@ -106,6 +116,37 @@ impl Request {
             None => self.path.clone(),
         }
     }
+
+    /// Serializes the request for a host, such as `localhost:8551`.
+    ///
+    /// A host field is added when the caller set none, since HTTP/1.1 requires one.
+    /// The body always goes out whole, framed by a content length the encoder computes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the target or a field would corrupt the message.
+    pub fn encode(&self, host: &str) -> Result<Vec<u8>, HttpError> {
+        // The target must be origin form with no byte that could end the line early.
+        let target = self.target();
+        if !target.starts_with('/') || !target.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(HttpError::Protocol(ProtocolError::InvalidTarget));
+        }
+
+        let mut encoder = Encoder::new(self.body.len());
+        encoder.start_line(format_args!("{} {target} HTTP/1.1", self.method));
+        if self.headers.get("host").is_none() {
+            encoder.field("host", host)?;
+        }
+        encoder.fields(&self.headers)?;
+
+        // A request without a body still states its length when the method expects one.
+        // Without it, a server could not tell an empty POST from one still arriving.
+        let expects_body = matches!(self.method, Method::Post | Method::Put | Method::Patch);
+        if expects_body || !self.body.is_empty() {
+            encoder.content_length(self.body.len());
+        }
+        Ok(encoder.finish(&self.body))
+    }
 }
 
 /// A response with its whole body.
@@ -145,5 +186,92 @@ impl Response {
         self.headers.insert("content-type", content_type);
         self.body = body;
         self
+    }
+
+    /// Serializes the response.
+    ///
+    /// A reply to HEAD keeps its length field but drops the body, per RFC 9110 section 9.3.2.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a field would corrupt the message.
+    pub fn encode(&self, head_only: bool) -> Result<Vec<u8>, HttpError> {
+        let mut encoder = Encoder::new(self.body.len());
+        encoder.start_line(format_args!(
+            "HTTP/1.1 {} {}",
+            self.status.as_u16(),
+            self.status.reason()
+        ));
+        encoder.fields(&self.headers)?;
+
+        // 1xx and 204 must not carry a length field, per RFC 9110 section 8.6.
+        // 304 carries no body either; its length would describe the unsent resource.
+        let code = self.status.as_u16();
+        let bodiless =
+            self.status.is_informational() || self.status == StatusCode::NO_CONTENT || code == 304;
+        if !bodiless {
+            encoder.content_length(self.body.len());
+        }
+        let body = if bodiless || head_only {
+            &[][..]
+        } else {
+            &self.body
+        };
+        Ok(encoder.finish(body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_bytes() {
+        // A POST with a two-byte JSON body to a host without a caller-set host field.
+        let request =
+            Request::new(Method::Post, "/rpc?x=1").with_body("application/json", b"{}".to_vec());
+        let bytes = request.encode("localhost:8551").unwrap();
+        assert_eq!(
+            bytes,
+            b"POST /rpc?x=1 HTTP/1.1\r\nhost: localhost:8551\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}"
+        );
+    }
+
+    #[test]
+    fn response_bytes() {
+        // A caller-set length field is replaced by the computed one.
+        let response = Response::new(StatusCode::OK)
+            .with_header("content-length", "999")
+            .with_body("text/plain", b"ok".to_vec());
+        assert_eq!(
+            response.encode(false).unwrap(),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\nok"
+        );
+
+        // A reply to HEAD keeps the length but sends no body.
+        assert_eq!(
+            response.encode(true).unwrap(),
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\n\r\n"
+        );
+
+        // 204 has neither length nor body.
+        assert_eq!(
+            Response::new(StatusCode::NO_CONTENT).encode(false).unwrap(),
+            b"HTTP/1.1 204 No Content\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn injection_is_refused() {
+        // A value carrying CRLF would smuggle a second field.
+        let response = Response::new(StatusCode::OK).with_header("x", "a\r\nset-cookie: b");
+        assert!(matches!(
+            response.encode(false),
+            Err(HttpError::InvalidHeader)
+        ));
+
+        // A target with a space would split the request line.
+        let request = Request::new(Method::Get, "/a b");
+        assert!(matches!(request.encode("h"), Err(HttpError::Protocol(_))));
     }
 }

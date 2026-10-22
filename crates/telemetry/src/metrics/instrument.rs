@@ -6,7 +6,7 @@ use crate::metrics::{
     Counter, Gauge, Histogram,
     exposition::{Exposition, Kind},
     family::Family,
-    name::{LabelName, MetricName},
+    name::MetricName,
     process::ProcessStat,
 };
 
@@ -72,19 +72,19 @@ impl Instrument {
             // Each family child is one series, its labels paired with the declared names.
             Self::CounterFamily(family) => {
                 for (values, counter) in family.children() {
-                    out.sample(name, "", &pairs(family.names(), &values), &counter.get())?;
+                    out.sample(name, "", &family.labels(&values), &counter.get())?;
                 }
                 Ok(())
             }
             Self::GaugeFamily(family) => {
                 for (values, gauge) in family.children() {
-                    out.sample(name, "", &pairs(family.names(), &values), &gauge.get())?;
+                    out.sample(name, "", &family.labels(&values), &gauge.get())?;
                 }
                 Ok(())
             }
             Self::HistogramFamily(family) => {
                 for (values, histogram) in family.children() {
-                    out.histogram(name, &pairs(family.names(), &values), &histogram.snapshot())?;
+                    out.histogram(name, &family.labels(&values), &histogram.snapshot())?;
                 }
                 Ok(())
             }
@@ -112,14 +112,4 @@ impl Instrument {
             ],
         }
     }
-}
-
-/// Pairs label names with one child's values, in declaration order.
-fn pairs<'a>(names: &'a [LabelName], values: &'a [String]) -> Vec<(&'a str, &'a str)> {
-    // The family stores exactly one value per name, so the zip loses nothing.
-    names
-        .iter()
-        .map(LabelName::as_str)
-        .zip(values.iter().map(String::as_str))
-        .collect()
 }
