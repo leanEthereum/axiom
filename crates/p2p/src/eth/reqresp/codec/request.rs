@@ -122,17 +122,29 @@ impl RequestDecoder {
             self.progress = Progress::Trailing;
             return;
         }
-        self.buffer.extend_from_slice(bytes);
-        let buffer = mem::take(&mut self.buffer);
-        let mut input = &buffer[..];
-        self.progress = match self.payload.advance(&mut input) {
-            Ok(Some(_)) if !input.is_empty() => Progress::Trailing,
+        // With no unit in progress, decode straight from the new bytes, saving a copy.
+        let mut buffer = mem::take(&mut self.buffer);
+        let stream = if buffer.is_empty() {
+            bytes
+        } else {
+            buffer.extend_from_slice(bytes);
+            &buffer[..]
+        };
+        let mut input = stream;
+        let outcome = self.payload.advance(&mut input);
+        let rest_len = input.len();
+        self.progress = match outcome {
+            Ok(Some(_)) if rest_len > 0 => Progress::Trailing,
             Ok(Some(payload)) => Progress::Complete(payload),
             Ok(None) => {
                 // Keep the unit in progress for the next bytes.
-                let consumed = buffer.len() - input.len();
+                let consumed = stream.len() - rest_len;
+                if buffer.is_empty() {
+                    buffer.extend_from_slice(&bytes[consumed..]);
+                } else {
+                    buffer.drain(..consumed);
+                }
                 self.buffer = buffer;
-                self.buffer.drain(..consumed);
                 Progress::Reading
             }
             Err(error) => Progress::Failed(error),
