@@ -1,8 +1,6 @@
 //! The eth1 data vote of an honest proposer, while deposits still come from the contract.
 
-use axiom_types::{
-    ChainConfig, Preset, Slot, accessors::CoreState, phase0::Eth1Data,
-};
+use axiom_types::{ChainConfig, Preset, Slot, accessors::CoreState, phase0::Eth1Data};
 
 /// An execution block as deposit voting sees it: its time and the contract's tree.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -78,7 +76,9 @@ impl<'a> Eth1Vote<'a> {
         }
         match best {
             Some((_, vote)) => vote.clone(),
-            None => considered.last().map_or_else(|| current.clone(), |latest| (*latest).clone()),
+            None => considered
+                .last()
+                .map_or_else(|| current.clone(), |latest| (*latest).clone()),
         }
     }
 
@@ -138,8 +138,14 @@ mod tests {
         // Candidates lie between 1192 - 448 = 744 and 1192 - 224 = 968.
         let config = ChainConfig::minimal();
         let chain = [
-            Eth1Candidate { timestamp: 800, data: data(5, 1) },
-            Eth1Candidate { timestamp: 900, data: data(6, 2) },
+            Eth1Candidate {
+                timestamp: 800,
+                data: data(5, 1),
+            },
+            Eth1Candidate {
+                timestamp: 900,
+                data: data(6, 2),
+            },
         ];
         // Votes: 2, 1, 2, 1 tie at two each; vote 2 was cast first.
         let votes = [data(6, 2), data(5, 1), data(6, 2), data(5, 1)];
@@ -151,12 +157,24 @@ mod tests {
     fn without_valid_votes_the_latest_candidate_wins_unless_the_bridge_closed() {
         let config = ChainConfig::minimal();
         let chain = [
-            Eth1Candidate { timestamp: 800, data: data(5, 1) },
-            Eth1Candidate { timestamp: 900, data: data(6, 2) },
+            Eth1Candidate {
+                timestamp: 800,
+                data: data(5, 1),
+            },
+            Eth1Candidate {
+                timestamp: 900,
+                data: data(6, 2),
+            },
             // Mutation: this block moves the count back from 4 to 3, so it is no candidate.
-            Eth1Candidate { timestamp: 950, data: data(3, 3) },
+            Eth1Candidate {
+                timestamp: 950,
+                data: data(3, 3),
+            },
             // Too recent: 1000 lies past 968.
-            Eth1Candidate { timestamp: 1000, data: data(7, 4) },
+            Eth1Candidate {
+                timestamp: 1000,
+                data: data(7, 4),
+            },
         ];
         let rule = Eth1Vote::new(&config);
         assert_eq!(rule.choose(&state(&[]), &chain, false), data(6, 2));
