@@ -17,6 +17,8 @@ The only external crates are `sha2`, `tokio`, `tracing`, and `proptest` for test
 - **Consensus.** The Fulu state transition, LMD-GHOST and Casper FFG fork choice, the fast confirmation rule, optimistic sync, and light client updates.
 - **Data availability.** PeerDAS custody, column sidecar checks, and KZG cell proofs with FK20.
 - **Networking.** libp2p over TCP with Noise and yamux, gossipsub v1.2 with peer scoring, every Fulu gossip rule, req/resp, status handshakes, and range sync of blocks with their custody columns.
+- **Discovery.** discv5 with a signed record carrying the fork, attestation subnets, and custody group count.
+- **Publishing.** Proposed blocks are checked, split into their 128 column sidecars, gossiped, and imported.
 - **Execution.** The engine API with JWT authentication; without an engine the node follows the chain optimistically.
 - **Interfaces.** A beacon API subset, Prometheus metrics, and structured logs in compact, pretty, or JSON form.
 
@@ -31,7 +33,7 @@ cargo build --release
 ./target/release/axiom --help
 ```
 
-A node needs a genesis state, or a database it already wrote:
+A node needs a genesis state, a trusted checkpoint, or a database it already wrote:
 
 ```sh
 ./target/release/axiom \
@@ -39,8 +41,11 @@ A node needs a genesis state, or a database it already wrote:
     --genesis-state genesis.ssz \
     --datadir data \
     --metrics-address 127.0.0.1:5054 \
-    --boot-node /ip4/10.0.0.1/tcp/9000
+    --enr-address 203.0.113.7 \
+    --boot-enr enr:-IS4Q...
 ```
+
+To start from a checkpoint instead, pass `--checkpoint-state` and `--checkpoint-block`, the block's SSZ post-state and the SSZ signed block.
 
 ## Repository layout
 
@@ -78,7 +83,7 @@ cargo test --workspace --release
 
 The suite covers SSZ, operations, epoch processing, sanity, finality, rewards, forks, shuffling, fork choice, fast confirmation, optimistic sync, networking and gossip, merkle proofs, and light clients.
 The same fork choice vectors also run through the node's chain with a real database.
-End-to-end tests boot whole nodes from a spec genesis, publish blocks over HTTP, and sync a second node over Noise.
+End-to-end tests boot whole nodes from a spec genesis or a checkpoint, publish blocks over HTTP, sync a second node over Noise, and find peers through discv5.
 
 CI runs:
 
