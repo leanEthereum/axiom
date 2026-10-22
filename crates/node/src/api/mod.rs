@@ -8,11 +8,16 @@
 mod beacon;
 mod debug;
 mod duties;
+#[cfg(test)]
+mod fixture;
 mod ids;
 mod light_client;
+mod liveness;
 mod node;
 mod pool;
+mod preparation;
 mod query;
+mod registry;
 mod reply;
 mod validator;
 
@@ -20,14 +25,19 @@ use std::sync::Arc;
 
 use axiom_fork_choice::ExecutionStatus;
 use axiom_http::Router;
-use axiom_types::{Preset, Root, Slot};
+use axiom_state_transition::State;
+use axiom_types::{Preset, Root, Slot, combined::BeaconState};
 
 use self::{
     beacon::BeaconRoutes,
     debug::DebugRoutes,
+    duties::DutyRoutes,
     light_client::LightClientRoutes,
+    liveness::LivenessRoutes,
     node::NodeRoutes,
     pool::PoolRoutes,
+    preparation::PreparationRoutes,
+    registry::RegistryRoutes,
     reply::{ApiError, Freshness, Routes},
     validator::ValidatorRoutes,
 };
@@ -68,6 +78,14 @@ impl<P: Preset> ApiContext<P> {
         query: impl FnOnce(&mut Chain<P>) -> Result<R, ApiError> + Send + 'static,
     ) -> Result<R, ApiError> {
         self.chain.run(query).await?
+    }
+
+    /// The post-state of a block the fork choice still holds, or a 404 for one pruned at finality.
+    fn held_state(chain: &Chain<P>, root: Root) -> Result<&BeaconState<P>, ApiError> {
+        chain
+            .state(&root)
+            .map(State::beacon)
+            .ok_or_else(|| ApiError::not_found("state is older than finality and not held"))
     }
 
     /// How fresh data derived from a block is.
@@ -112,8 +130,12 @@ impl BeaconApi {
         let routes = Routes::new(Router::new(), context);
         let routes = NodeRoutes::register(routes);
         let routes = BeaconRoutes::register(routes);
+        let routes = RegistryRoutes::register(routes);
         let routes = LightClientRoutes::register(routes);
         let routes = ValidatorRoutes::register(routes);
+        let routes = DutyRoutes::register(routes);
+        let routes = PreparationRoutes::register(routes);
+        let routes = LivenessRoutes::register(routes);
         let routes = PoolRoutes::register(routes);
         DebugRoutes::register(routes).finish()
     }

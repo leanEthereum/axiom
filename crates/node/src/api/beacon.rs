@@ -1,21 +1,19 @@
 //! The beacon namespace: genesis, blocks, headers, and state summaries.
 
+use axiom_beacon_json::{ApiJson, api::Genesis};
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::Json;
 use axiom_ssz::Ssz;
-use axiom_state_transition::State;
-use axiom_types::{
-    ForkName, Preset, Root, accessors::CoreState, combined::BeaconState,
-    gloas::SignedExecutionPayloadEnvelope,
-};
+use axiom_types::{ForkName, Preset, accessors::CoreState, gloas::SignedExecutionPayloadEnvelope};
 use tracing::warn;
 
 use super::{
     ApiContext,
     ids::{BlockId, StateId},
+    query::{Body, Query},
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::{Chain, ChainStopped, Proposal, PublishError, Published};
+use crate::{ChainStopped, Proposal, PublishError, Published};
 
 /// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`.
 #[derive(Clone, Copy, Debug)]
@@ -34,8 +32,12 @@ impl BeaconRoutes {
             .get("/eth/v2/beacon/blocks/{block_id}", Self::block::<P>)
             .post("/eth/v2/beacon/blocks", Self::publish::<P>)
             .post(
-                "/eth/v1/beacon/execution_payload_envelope",
+                "/eth/v1/beacon/execution_payload_envelopes",
                 Self::publish_envelope::<P>,
+            )
+            .get(
+                "/eth/v1/beacon/execution_payload_envelopes/{block_id}",
+                Self::envelope::<P>,
             )
             .get(
                 "/eth/v1/beacon/states/{state_id}/root",
@@ -58,20 +60,12 @@ impl BeaconRoutes {
                     .state(&head)
                     .ok_or_else(|| ApiError::not_found("no head state"))?;
                 let beacon = state.beacon();
-                Ok(Reply::data(
-                    Json::from([
-                        ("genesis_time", Reply::number(beacon.genesis_time())),
-                        (
-                            "genesis_validators_root",
-                            Reply::text(&beacon.genesis_validators_root()),
-                        ),
-                        (
-                            "genesis_fork_version",
-                            Reply::text(&chain.config().genesis_fork_version),
-                        ),
-                    ]),
-                    None,
-                ))
+                let genesis = Genesis {
+                    genesis_time: beacon.genesis_time(),
+                    genesis_validators_root: beacon.genesis_validators_root(),
+                    genesis_fork_version: chain.config().genesis_fork_version,
+                };
+                Ok(Reply::data(genesis.to_json(), None))
             })
             .await
     }
@@ -158,15 +152,59 @@ impl BeaconRoutes {
         }
     }
 
-    /// Publishes a Gloas payload envelope its block's builder revealed, as SSZ.
+    /// Publishes a signed Gloas payload envelope, as SSZ or JSON.
+    ///
+    /// # Overview
+    ///
+    /// Two headers are required: the consensus version, and whether blob data is included.
+    /// This node takes the signed envelope alone, so a body announced with blob data is refused.
+    ///
+    /// The envelope passes the gossip rules before it is broadcast, the default validation level.
+    /// The consensus levels need a full import before the broadcast, which this node does not do.
+    /// So a request for them is refused rather than silently weakened.
     ///
     /// Statuses follow the block route: 200 imported, 202 broadcast only, 400 invalid.
+    /// See `publishExecutionPayloadEnvelope` in the beacon API.
     async fn publish_envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        if !Reply::sends_ssz(&request) {
-            return Err(ApiError::unsupported_media_type());
+        let fork = Self::consensus_version(&request)?;
+        if !fork.separates_payloads() {
+            return Err(ApiError::bad_request(format!(
+                "{fork} blocks carry their payload"
+            )));
         }
-        let envelope = SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
-            .map_err(|error| ApiError::bad_request(format!("malformed envelope: {error}")))?;
+        match request.headers.get("eth-blob-data-included") {
+            Some(value) if value.eq_ignore_ascii_case("false") => {}
+            Some(value) if value.eq_ignore_ascii_case("true") => {
+                return Err(ApiError::bad_request(
+                    "this node takes the signed envelope alone, without blob data",
+                ));
+            }
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "blob data included header is not a boolean: {other}"
+                )));
+            }
+            None => return Err(ApiError::bad_request("missing blob data included header")),
+        }
+        match Query::of(&request).text("broadcast_validation") {
+            None | Some("gossip") => {}
+            Some(level @ ("consensus" | "consensus_and_equivocation")) => {
+                return Err(ApiError::bad_request(format!(
+                    "broadcast validation {level} is not supported; gossip is"
+                )));
+            }
+            Some(other) => {
+                return Err(ApiError::bad_request(format!(
+                    "unknown broadcast validation: {other}"
+                )));
+            }
+        }
+        let envelope = if Reply::sends_ssz(&request) {
+            SignedExecutionPayloadEnvelope::<P>::decode(&request.body)
+                .map_err(|error| ApiError::bad_request(format!("malformed envelope: {error}")))?
+        } else {
+            Body(&request).json_item()?
+        };
         match context.publisher.publish_envelope(envelope).await {
             Ok(Published::Imported(_)) => Ok(Response::new(StatusCode::OK)),
             Ok(Published::BroadcastOnly(error)) => {
@@ -176,6 +214,42 @@ impl BeaconRoutes {
             Err(PublishError::ChainStopped) => Err(ChainStopped.into()),
             Err(error) => Err(ApiError::bad_request(error.to_string())),
         }
+    }
+
+    /// The signed payload envelope of a Gloas block, as JSON or SSZ.
+    ///
+    /// See `getSignedExecutionPayloadEnvelope` in the beacon API.
+    async fn envelope<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
+        let id = BlockId::from_request(&request)?;
+        let ssz = Reply::accepts_ssz(&request);
+        context
+            .query(move |chain| {
+                let (root, block) = id.find(chain)?;
+                let envelope = chain
+                    .database()
+                    .envelope(root)?
+                    .ok_or_else(|| ApiError::not_found("execution payload envelope not found"))?;
+                if ssz {
+                    return Ok(Reply::ssz(envelope.encode(), ForkName::Gloas));
+                }
+                let freshness = ApiContext::freshness(chain, root, block.slot());
+                Ok(Reply::versioned(
+                    ForkName::Gloas,
+                    envelope.to_json(),
+                    Some(freshness),
+                ))
+            })
+            .await
+    }
+
+    /// The fork a request's required consensus version header names.
+    fn consensus_version(request: &Request) -> Result<ForkName, ApiError> {
+        let named = request
+            .headers
+            .get("eth-consensus-version")
+            .ok_or_else(|| ApiError::bad_request("missing consensus version header"))?;
+        ForkName::from_name(named)
+            .ok_or_else(|| ApiError::bad_request(format!("unknown consensus version: {named}")))
     }
 
     /// The proposal in a publish request's body, decoded in the fork it names.
@@ -233,7 +307,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
-                let fork = Self::held_state(chain, root)?.fork();
+                let fork = ApiContext::held_state(chain, root)?.fork();
                 let data = Json::from([
                     ("previous_version", Reply::text(&fork.previous_version)),
                     ("current_version", Reply::text(&fork.current_version)),
@@ -256,7 +330,7 @@ impl BeaconRoutes {
         context
             .query(move |chain| {
                 let (root, block) = id.find_block(chain)?;
-                let state = Self::held_state(chain, root)?;
+                let state = ApiContext::held_state(chain, root)?;
                 let data = Json::from([
                     (
                         "previous_justified",
@@ -274,13 +348,5 @@ impl BeaconRoutes {
                 ))
             })
             .await
-    }
-
-    /// A post-state the fork choice still holds, or a 404 for one pruned at finality.
-    fn held_state<P: Preset>(chain: &Chain<P>, root: Root) -> Result<&BeaconState<P>, ApiError> {
-        chain
-            .state(&root)
-            .map(State::beacon)
-            .ok_or_else(|| ApiError::not_found("state is older than finality and not held"))
     }
 }

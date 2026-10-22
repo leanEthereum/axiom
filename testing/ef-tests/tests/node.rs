@@ -328,10 +328,12 @@ impl TestNode {
         }
     }
 
-    /// Publishes a Gloas payload envelope over the API.
+    /// Publishes a Gloas payload envelope over the API, alone, without blob data.
     async fn publish_envelope(&self, proposal: &Proposal<Minimal>) -> Option<Response> {
         let envelope = proposal.envelope()?;
-        let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelope")
+        let request = Request::new(Method::Post, "/eth/v1/beacon/execution_payload_envelopes")
+            .with_header("eth-consensus-version", "gloas")
+            .with_header("eth-blob-data-included", "false")
             .with_body("application/octet-stream", envelope.encode());
         Some(self.client.send(&request).await.expect("node answers"))
     }
@@ -946,6 +948,33 @@ fn a_node_syncs_from_genesis_through_every_fork() {
                 "{fork}"
             );
         }
+
+        // A serves the tip's envelope back by block root, as SSZ and as versioned JSON.
+        let envelope = proposals
+            .last()
+            .and_then(Proposal::envelope)
+            .expect("the Gloas tip has an envelope");
+        let path = format!("/eth/v1/beacon/execution_payload_envelopes/{tip}");
+        let request =
+            Request::new(Method::Get, &path).with_header("accept", "application/octet-stream");
+        let response = a.client.send(&request).await.expect("node answers");
+        assert_eq!(response.status, StatusCode::OK, "{}", body_text(&response));
+        assert_eq!(response.headers.get("eth-consensus-version"), Some("gloas"));
+        assert_eq!(response.body, envelope.encode());
+        let reply = a.json(&path).await.expect("A holds the envelope");
+        assert_eq!(reply.get("version").and_then(Json::as_str), Some("gloas"));
+        assert_eq!(
+            reply.get("finalized").and_then(Json::as_bool),
+            Some(false),
+            "the tip is not finalized"
+        );
+        let slot = reply
+            .get("data")
+            .and_then(|data| data.get("message"))
+            .and_then(|message| message.get("payload"))
+            .and_then(|payload| payload.get("slot_number"))
+            .and_then(Json::as_str);
+        assert_eq!(slot, Some(EVERY_FORK_SLOTS.to_string().as_str()));
 
         // Before importing the merge block of slot 16, B asked its engine for the terminal block.
         // The terminal block at 1000 led to its parent at 999, and nothing else was looked up.

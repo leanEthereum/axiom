@@ -17,7 +17,7 @@ use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelop
 use axiom_fork_choice::{
     DataAvailability, ExecutionStatus, ForkChoiceError, ForkChoiceNode, PayloadStatus, Store,
 };
-use axiom_gossip::{ChainView, GossipValidator, SubnetVote};
+use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
 use axiom_light_client::{LightClientServer, PostState, combined::LightClientUpdate};
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
@@ -575,6 +575,11 @@ impl<P: Preset> Chain<P> {
         self.availability.custody()
     }
 
+    /// What gossip validation remembers of the messages it let through.
+    pub(crate) const fn seen(&self) -> &Seen {
+        &self.gossip.seen
+    }
+
     /// Runs gossip validation against the chain.
     ///
     /// The validator borrows the store and the gossip memory for the duration of the check.
@@ -778,7 +783,10 @@ impl<P: Preset> Chain<P> {
     /// Committees of an epoch as the head state shuffles them.
     ///
     /// Shuffling walks every validator, so the result is kept until the head changes.
-    fn committees_at(&mut self, epoch: Epoch) -> Result<Arc<EpochCommittees>, ChainError> {
+    pub(crate) fn committees_at(
+        &mut self,
+        epoch: Epoch,
+    ) -> Result<Arc<EpochCommittees>, ChainError> {
         if let Some((cached, root, committees)) = &self.committees
             && *cached == epoch
             && *root == self.head.root

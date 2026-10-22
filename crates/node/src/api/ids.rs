@@ -1,10 +1,10 @@
-//! Block and state identifiers, as beacon API paths name them.
+//! Block, state, and validator identifiers, as beacon API paths and queries name them.
 
 use std::str::FromStr;
 
 use axiom_http::Request;
 use axiom_json::Data;
-use axiom_types::{Preset, Root, Slot, combined::SignedBeaconBlock};
+use axiom_types::{BlsPubkey, Preset, Root, Slot, ValidatorIndex, combined::SignedBeaconBlock};
 
 use super::ApiError;
 use crate::{Chain, ChainError};
@@ -180,6 +180,35 @@ impl StateId {
     }
 }
 
+/// A validator named by its registry index or by its key.
+///
+/// ```text
+///     12345 | 0x93247f2209abcacf57b75a51dafae777f9dd38bc7053d1af526f220a7489a6d3a2753e5f3e8b1cfe39b56f43611df74a
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValidatorId {
+    /// A position in the registry.
+    Index(ValidatorIndex),
+    /// A key, which names at most one validator: deposits of a known key top it up.
+    Pubkey(BlsPubkey),
+}
+
+impl FromStr for ValidatorId {
+    type Err = ApiError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || ApiError::bad_request(format!("invalid validator id: {text}"));
+        if text.starts_with("0x") {
+            return <[u8; 48]>::from_data(text)
+                .map(|bytes| Self::Pubkey(BlsPubkey(bytes)))
+                .map_err(|_| invalid());
+        }
+        text.parse()
+            .map(|index| Self::Index(ValidatorIndex(index)))
+            .map_err(|_| invalid())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +226,11 @@ mod tests {
         // A root names a state directly, a keyword names it through its block.
         assert_eq!(root.parse(), Ok(StateId::Root(Root([0xab; 32]))));
         assert_eq!("head".parse(), Ok(StateId::Block(BlockId::Head)));
+
+        // A validator is a decimal index or a 48-byte key.
+        let key = format!("0x{}", "cd".repeat(48));
+        assert_eq!("7".parse(), Ok(ValidatorId::Index(ValidatorIndex(7))));
+        assert_eq!(key.parse(), Ok(ValidatorId::Pubkey(BlsPubkey([0xcd; 48]))));
     }
 
     #[test]
@@ -206,6 +240,17 @@ mod tests {
             assert_eq!(
                 text.parse::<BlockId>(),
                 Err(ApiError::bad_request(format!("invalid block id: {text}"))),
+                "{text}"
+            );
+        }
+        // A 32-byte root is no key, and a keyword is no index.
+        let root = format!("0x{}", "ab".repeat(32));
+        for text in [root.as_str(), "head"] {
+            assert_eq!(
+                text.parse::<ValidatorId>(),
+                Err(ApiError::bad_request(format!(
+                    "invalid validator id: {text}"
+                ))),
                 "{text}"
             );
         }
