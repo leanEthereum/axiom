@@ -69,6 +69,9 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
     /// Epochs an exit or activation is delayed, bounding how far ahead committees can be biased.
     const MAX_SEED_LOOKAHEAD: u64;
 
+    /// Epochs in an eth1 data voting period, long enough to ride out execution reorgs.
+    const EPOCHS_PER_ETH1_VOTING_PERIOD: u64;
+
     /// Epochs without finality after which the inactivity leak starts.
     const MIN_EPOCHS_TO_INACTIVITY_PENALTY: u64;
 

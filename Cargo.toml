@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["bin/*", "crates/*"]
+members = ["bin/*", "crates/*", "testing/ef-tests"]
 default-members = ["bin/axiom"]
 
 [workspace.package]
@@ -40,7 +40,6 @@ if_then_some_else_none = "warn"
 mem_forget = "warn"
 print_stderr = "warn"
 print_stdout = "warn"
-rc_buffer = "warn"
 redundant_type_annotations = "warn"
 rest_pat_in_fully_bound_structs = "warn"
 same_name_method = "warn"
@@ -62,6 +61,9 @@ doc_markdown = "allow"
 # A match on an option, with a comment per arm, reads better than a combinator chain.
 option_if_let_else = "allow"
 single_match_else = "allow"
+# Axiom targets 64-bit platforms only, asserted at compile time in axiom-types.
+# A u64 index then converts to usize without loss.
+cast_possible_truncation = "allow"
 # Conflicts with rustc's unreachable_pub, which this workspace keeps.
 redundant_pub_crate = "allow"
 
@@ -76,6 +78,8 @@ axiom-kzg = { path = "crates/kzg" }
 axiom-types = { path = "crates/types" }
 axiom-state-transition = { path = "crates/state-transition" }
 axiom-fork-choice = { path = "crates/fork-choice" }
+axiom-das = { path = "crates/das" }
+axiom-light-client = { path = "crates/light-client" }
 
 # SHA-256 with hardware acceleration where the CPU offers it.
 sha2 = "0.10"

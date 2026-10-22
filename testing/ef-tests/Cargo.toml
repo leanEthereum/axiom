@@ -1,0 +1,25 @@
+[package]
+name = "axiom-ef-tests"
+description = "Runs the consensus spec test vectors against Axiom"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-bls.workspace = true
+axiom-das.workspace = true
+axiom-fork-choice.workspace = true
+axiom-light-client.workspace = true
+axiom-snappy.workspace = true
+axiom-ssz.workspace = true
+axiom-state-transition.workspace = true
+axiom-types.workspace = true
+axiom-yaml.workspace = true

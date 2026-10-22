@@ -30,6 +30,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-das"
+version = "0.1.0"
+dependencies = [
+ "axiom-ssz",
+ "axiom-types",
+]
+
+[[package]]
+name = "axiom-ef-tests"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-das",
+ "axiom-fork-choice",
+ "axiom-light-client",
+ "axiom-snappy",
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "axiom-yaml",
+]
+
+[[package]]
+name = "axiom-fork-choice"
+version = "0.1.0"
+dependencies = [
+ "axiom-ssz",
+ "axiom-state-transition",
+ "axiom-types",
+ "proptest",
+]
+
+[[package]]
+name = "axiom-light-client"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-ssz",
+ "axiom-types",
+]
+
+[[package]]
+name = "axiom-snappy"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "axiom-ssz"
 version = "0.1.0"
 dependencies = [
@@ -38,10 +87,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "axiom-state-transition"
+version = "0.1.0"
+dependencies = [
+ "axiom-bls",
+ "axiom-ssz",
+ "axiom-types",
+ "proptest",
+]
+
+[[package]]
 name = "axiom-types"
 version = "0.1.0"
 dependencies = [
  "axiom-ssz",
+ "proptest",
+]
+
+[[package]]
+name = "axiom-yaml"
+version = "0.1.0"
+dependencies = [
  "proptest",
 ]
 

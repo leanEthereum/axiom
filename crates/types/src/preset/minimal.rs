@@ -24,6 +24,7 @@ impl Preset for Minimal {
     const SLOTS_PER_EPOCH: u64 = 8;
     const MIN_SEED_LOOKAHEAD: u64 = 1;
     const MAX_SEED_LOOKAHEAD: u64 = 4;
+    const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 4;
     const MIN_EPOCHS_TO_INACTIVITY_PENALTY: u64 = 4;
     const SLOTS_PER_HISTORICAL_ROOT: u64 = 64;
     const EPOCHS_PER_HISTORICAL_VECTOR: u64 = 64;
@@ -90,7 +91,7 @@ impl Preset for Minimal {
     type ValidatorRegistryLimit = Const<1_099_511_627_776>;
     type EpochsPerHistoricalVector = Const<64>;
     type EpochsPerSlashingsVector = Const<64>;
-    type Eth1DataVotesLimit = Const<512>;
+    type Eth1DataVotesLimit = Const<32>;
     type MaxProposerSlashings = Const<16>;
     type MaxAttesterSlashings = Const<1>;
     type MaxAttestations = Const<8>;

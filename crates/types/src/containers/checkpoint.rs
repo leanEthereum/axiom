@@ -8,7 +8,7 @@ use crate::{Epoch, Root};
 ///
 /// Finality is decided on checkpoints rather than on every block.
 /// See the Gasper paper, section 4.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Checkpoint {
     /// Epoch the checkpoint belongs to.
     pub epoch: Epoch,

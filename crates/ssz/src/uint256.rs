@@ -6,8 +6,8 @@ use crate::{DecodeError, Root, Ssz};
 
 /// A 256-bit unsigned integer, stored as its little-endian encoding.
 ///
-/// Consensus code only carries these values, such as an execution base fee.
-/// It never does arithmetic on them, so the type exposes bytes and small conversions only.
+/// Consensus code mostly carries these values, such as an execution base fee.
+/// The only arithmetic it needs is counting node identifiers upward, so that is all there is.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct U256(pub [u8; 32]);
 
@@ -21,6 +21,45 @@ impl U256 {
         let mut bytes = [0; 32];
         bytes[..8].copy_from_slice(&value.to_le_bytes());
         Self(bytes)
+    }
+
+    /// The largest value, 2^256 - 1.
+    pub const MAX: Self = Self([0xff; 32]);
+
+    /// The next value, wrapping from the largest back to zero.
+    #[must_use]
+    pub fn wrapping_increment(mut self) -> Self {
+        for byte in &mut self.0 {
+            let (sum, carry) = byte.overflowing_add(1);
+            *byte = sum;
+            if !carry {
+                break;
+            }
+        }
+        self
+    }
+
+    /// The value written in decimal, or nothing when it is not a decimal below 2^256.
+    #[must_use]
+    pub fn from_decimal(text: &str) -> Option<Self> {
+        if text.is_empty() {
+            return None;
+        }
+        let mut value = [0_u8; 32];
+        for digit in text.bytes() {
+            let digit = u16::from(digit.checked_sub(b'0').filter(|digit| *digit < 10)?);
+            // value = value * 10 + digit, carried byte by byte from the low end.
+            let mut carry = digit;
+            for byte in &mut value {
+                let product = u16::from(*byte) * 10 + carry;
+                *byte = product as u8;
+                carry = product >> 8;
+            }
+            if carry != 0 {
+                return None;
+            }
+        }
+        Some(Self(value))
     }
 
     /// The little-endian bytes.
@@ -71,6 +110,36 @@ impl Ssz for U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decimal_parses_little_endian() {
+        // 65536 = 0x01_0000, so byte 2 holds the one.
+        let mut expected = [0; 32];
+        expected[2] = 1;
+
+        assert_eq!(U256::from_decimal("65536"), Some(U256(expected)));
+        assert_eq!(U256::from_decimal("12a"), None);
+        assert_eq!(U256::from_decimal(""), None);
+    }
+
+    #[test]
+    fn decimal_rejects_values_past_256_bits() {
+        // 2^256 - 1 fits, 2^256 does not.
+        let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        let over = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+
+        assert_eq!(U256::from_decimal(max), Some(U256::MAX));
+        assert_eq!(U256::from_decimal(over), None);
+    }
+
+    #[test]
+    fn increment_carries_and_wraps() {
+        let mut expected = [0; 32];
+        expected[1] = 1;
+
+        assert_eq!(U256::from_u64(255).wrapping_increment(), U256(expected));
+        assert_eq!(U256::MAX.wrapping_increment(), U256::ZERO);
+    }
 
     #[test]
     fn small_value_sits_in_the_low_bytes() {

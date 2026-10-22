@@ -4,7 +4,7 @@ use std::fmt;
 
 use axiom_ssz::{DecodeError, Root, Ssz};
 
-use crate::Hex;
+use crate::{ForkData, Hex};
 
 /// Thirty-two opaque bytes, such as a randao mix or withdrawal credentials.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -527,5 +527,24 @@ impl Ssz for ExecutionAddress {
 
     fn hash_tree_root(&self) -> Root {
         self.0.hash_tree_root()
+    }
+}
+
+impl Domain {
+    /// The domain of a message type, under a fork version and a chain.
+    ///
+    /// The domain is the four type bytes, then the first 28 bytes of the fork data root.
+    /// See `compute_domain` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn compute(
+        domain_type: DomainType,
+        fork_version: Version,
+        genesis_validators_root: Root,
+    ) -> Self {
+        let fork_data_root = ForkData::root(fork_version, genesis_validators_root);
+        let mut domain = [0; 32];
+        domain[..4].copy_from_slice(&domain_type.0);
+        domain[4..].copy_from_slice(&fork_data_root.0[..28]);
+        Self(domain)
     }
 }

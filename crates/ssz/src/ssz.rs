@@ -1,6 +1,6 @@
 //! The trait every SSZ type implements.
 
-use crate::{DecodeError, Root};
+use crate::{DecodeError, GeneralizedIndex, MerkleProof, Root};
 
 /// Size of a merkle chunk, the unit the hash tree is built from.
 ///
@@ -59,6 +59,15 @@ pub trait Ssz: Sized {
         let mut out = Vec::with_capacity(self.encoded_len());
         self.encode_to(&mut out);
         out
+    }
+
+    /// Proof for the node at a generalized index of this value's hash tree.
+    ///
+    /// Returns the node and the siblings from it up to the root, or nothing when the
+    /// index does not address a node this type can prove.
+    /// Every type proves its own root; containers also prove nodes inside their fields.
+    fn prove(&self, index: GeneralizedIndex) -> Option<(Root, MerkleProof)> {
+        (index == GeneralizedIndex::ROOT).then(|| (self.hash_tree_root(), MerkleProof::default()))
     }
 
     /// Whether the type is variable-size.

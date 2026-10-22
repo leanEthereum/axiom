@@ -24,6 +24,7 @@ impl Preset for Mainnet {
     const SLOTS_PER_EPOCH: u64 = 32;
     const MIN_SEED_LOOKAHEAD: u64 = 1;
     const MAX_SEED_LOOKAHEAD: u64 = 4;
+    const EPOCHS_PER_ETH1_VOTING_PERIOD: u64 = 64;
     const MIN_EPOCHS_TO_INACTIVITY_PENALTY: u64 = 4;
     const SLOTS_PER_HISTORICAL_ROOT: u64 = 8192;
     const EPOCHS_PER_HISTORICAL_VECTOR: u64 = 65_536;

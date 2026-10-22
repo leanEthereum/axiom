@@ -182,3 +182,29 @@ impl Container for SingleAttestation {
         })
     }
 }
+
+impl AttestationData {
+    /// Whether two votes violate a Casper FFG commandment together.
+    ///
+    /// A double vote names two targets for one epoch.
+    /// A surround vote spans a link strictly inside the other.
+    /// See `is_slashable_attestation_data` in the phase0 beacon chain spec.
+    #[must_use]
+    pub fn is_slashable_with(&self, other: &Self) -> bool {
+        let double_vote = self != other && self.target.epoch == other.target.epoch;
+        let surround_vote =
+            self.source.epoch < other.source.epoch && other.target.epoch < self.target.epoch;
+        double_vote || surround_vote
+    }
+}
+
+impl<P: Preset> Attestation<P> {
+    /// Indices of the committees this attestation aggregates, in increasing order.
+    pub fn committee_indices(&self) -> impl Iterator<Item = CommitteeIndex> + '_ {
+        self.committee_bits
+            .iter()
+            .enumerate()
+            .filter(|(_, bit)| *bit)
+            .map(|(index, _)| CommitteeIndex::from(index))
+    }
+}

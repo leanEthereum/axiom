@@ -1,0 +1,22 @@
+[package]
+name = "axiom-fork-choice"
+description = "LMD-GHOST and Casper FFG fork choice over a pure store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axiom-ssz.workspace = true
+axiom-state-transition.workspace = true
+axiom-types.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
