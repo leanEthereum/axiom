@@ -15,15 +15,18 @@ use tracing::{debug, info, warn};
 
 use crate::{beacon::ApiTopic, duties::DutyContext, signing::SigningRequest};
 
-/// Tells beacon nodes and builders, once an epoch, how this client's validators want to be paid.
+/// Tells beacon nodes and builders how this client's validators want to be paid.
 ///
 /// # Overview
 ///
-/// Each epoch, three messages go out:
+/// Three messages go out:
 ///
-/// 1. Every indexed validator's fee recipient, so a locally built payload pays it.
-/// 2. For validators that use builders, a signed registration of fee recipient and gas limit.
-/// 3. From Gloas on, signed preferences for each coming proposal, which bidding builders follow.
+/// 1. Each epoch, every indexed validator's fee recipient, so a locally built payload pays it.
+/// 2. Each epoch, a signed registration of fee recipient and gas limit, for builder users.
+/// 3. From Gloas on, each slot, signed preferences for coming proposals that lack them.
+///
+/// Preferences commit to the proposal's dependent root, which a reorg may change.
+/// Checking each slot signs them again over the new root, right after duties are refreshed.
 ///
 /// A registration is signed again only when its settings change, so builders see a stable timestamp.
 /// An operator may fix the timestamp, and registrations go out in batches of a configured size.
@@ -46,11 +49,10 @@ impl<P: Preset> Preparation<P> {
         }
     }
 
-    /// Sends this epoch's preparations, registrations, and preferences.
-    pub async fn run(&self, epoch: Epoch) {
+    /// Sends this epoch's preparations and registrations.
+    pub async fn run(&self) {
         self.prepare_proposers().await;
         self.register().await;
-        self.publish_preferences(epoch).await;
     }
 
     /// Tells every node each validator's fee recipient.
@@ -150,11 +152,11 @@ impl<P: Preset> Preparation<P> {
         }
     }
 
-    /// Signs and publishes preferences for this client's coming Gloas proposals.
+    /// Signs and publishes preferences for coming Gloas proposals not yet covered over their root.
     ///
     /// See `get_upcoming_proposal_slots` in the Gloas validator spec.
     /// See also `get_signed_proposer_preferences` there.
-    async fn publish_preferences(&self, epoch: Epoch) {
+    pub async fn publish_preferences(&self, epoch: Epoch) {
         let current = self.context.timer.current_slot();
         let mut coming = Vec::new();
         for epoch in [epoch, epoch + 1] {
@@ -173,7 +175,11 @@ impl<P: Preset> Preparation<P> {
         }
         let mut signed = Vec::new();
         for (duty, dependent_root) in coming {
-            if !self.context.book().mark_preferences(duty.slot) {
+            if !self
+                .context
+                .book()
+                .mark_preferences(duty.slot, dependent_root)
+            {
                 continue;
             }
             let settings = self.context.store.settings(&duty.pubkey);
