@@ -64,7 +64,7 @@ pub enum DirectoryError {
         /// Where its keystore should be.
         path: PathBuf,
     },
-    /// A remote signer URL is not a plain http URL.
+    /// A remote signer URL is not an http or https URL.
     #[error("remote signer URL {url:?}: {source}")]
     Url {
         /// The URL as stored.

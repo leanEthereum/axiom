@@ -22,11 +22,10 @@ use crate::{BuilderError, RelayTimeouts, RevealedPayload, versioned::Versioned};
 /// A configured key pins the relay: a bid signed by any other key is refused.
 ///
 /// ```text
-///     http://0x<48-byte builder key>@relay.example:18550
+///     https://0x<48-byte builder key>@relay.example
 /// ```
 ///
-/// Only plain http is spoken, since this codebase has no TLS.
-/// The usual deployment is a local sidecar that fans out to remote relays over TLS.
+/// Public relays speak https; a local sidecar usually speaks plain http.
 ///
 /// Calls may run concurrently; each takes its own pooled connection.
 #[derive(Debug)]
@@ -50,7 +49,7 @@ impl RelayClient {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not plain http, or its user name is not a 48-byte hex key.
+    /// Fails when the URL is not http or https, or its user name is not a 48-byte hex key.
     pub fn new(url: &str) -> Result<Self, BuilderError> {
         Self::with_timeouts(url, RelayTimeouts::DEFAULT)
     }
@@ -59,17 +58,21 @@ impl RelayClient {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not plain http, or its user name is not a 48-byte hex key.
+    /// Fails when the URL is not http or https, or its user name is not a 48-byte hex key.
     pub fn with_timeouts(url: &str, timeouts: RelayTimeouts) -> Result<Self, BuilderError> {
         let invalid = || BuilderError::InvalidUrl {
             url: url.to_owned(),
         };
 
         // The user name sits before an at sign within the authority, per RFC 3986 section 3.2.1.
-        let rest = url
-            .get(..7)
-            .filter(|scheme| scheme.eq_ignore_ascii_case("http://"));
-        let rest = rest.map(|_| &url[7..]).ok_or_else(invalid)?;
+        let scheme = ["http://", "https://"]
+            .into_iter()
+            .find(|scheme| {
+                url.get(..scheme.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+            })
+            .ok_or_else(invalid)?;
+        let rest = &url[scheme.len()..];
         let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
         let (pubkey, rest) = match rest[..authority_end].split_once('@') {
             Some((user, _)) => {
@@ -79,7 +82,7 @@ impl RelayClient {
             }
             None => (None, rest),
         };
-        let endpoint = Endpoint::parse(&format!("http://{rest}")).map_err(|_| invalid())?;
+        let endpoint = Endpoint::parse(&format!("{scheme}{rest}")).map_err(|_| invalid())?;
         let base = endpoint.path().trim_end_matches('/').to_owned();
 
         let config = ClientConfig {
@@ -308,8 +311,19 @@ mod tests {
             "/api/eth/v1/builder/status"
         );
 
+        // A public relay over https keeps its key and reaches port 443.
+        let url = format!("https://0x{}@relay.example", "02".repeat(48));
+        let client = RelayClient::new(&url).unwrap();
+        assert_eq!(client.pubkey(), Some(&BlsPubkey([2; 48])));
+        let endpoint = client.http.endpoint();
+        assert_eq!(
+            (endpoint.is_tls(), endpoint.host(), endpoint.port()),
+            (true, "relay.example", 443)
+        );
+
         // Without a user name there is no key, and the path is the root.
         let client = RelayClient::new("http://127.0.0.1:18550").unwrap();
+        assert!(!client.http.endpoint().is_tls());
         assert_eq!(client.pubkey(), None);
         assert_eq!(
             client.target("/eth/v1/builder/status"),
@@ -332,9 +346,9 @@ mod tests {
 
     #[test]
     fn bad_relay_urls_are_refused() {
-        // TLS, a short key, and a key that is not hex.
+        // Another scheme, a short key, and a key that is not hex.
         for url in [
-            "https://relay.local".to_owned(),
+            "ftp://relay.local".to_owned(),
             format!("http://0x{}@relay.local", "01".repeat(47)),
             format!("http://0x{}@relay.local", "zz".repeat(48)),
         ] {

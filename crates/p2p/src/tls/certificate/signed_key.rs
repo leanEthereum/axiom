@@ -1,15 +1,16 @@
 //! The libp2p public key extension: the host key, and its signature over the certificate key.
 
+use axiom_tls::{
+    EcdsaSigValue,
+    der::{DerReader, DerWriter, Tag},
+    x509::X509Error,
+};
 use sha2::{Digest, Sha256};
 
 use super::{CertificateError, SubjectPublicKeyInfo};
 use crate::{
     identity::{KeyType, Keypair, PublicKey},
     protobuf::ProtoMessage,
-    tls::{
-        EcdsaSigValue,
-        der::{DerReader, DerWriter, Tag},
-    },
 };
 
 /// The context string the host key signs before the certificate key, per the libp2p TLS spec.
@@ -46,11 +47,11 @@ impl SignedKey {
     /// Decodes the extension content.
     pub(crate) fn from_der(bytes: &[u8]) -> Result<Self, CertificateError> {
         let mut outer = DerReader::new(bytes);
-        let mut body = outer.sequence()?;
-        outer.finish()?;
-        let public_key = body.octet_string()?.to_vec();
-        let signature = body.octet_string()?.to_vec();
-        body.finish()?;
+        let mut body = outer.sequence().map_err(X509Error::from)?;
+        outer.finish().map_err(X509Error::from)?;
+        let public_key = body.octet_string().map_err(X509Error::from)?.to_vec();
+        let signature = body.octet_string().map_err(X509Error::from)?.to_vec();
+        body.finish().map_err(X509Error::from)?;
         Ok(Self {
             public_key,
             signature,

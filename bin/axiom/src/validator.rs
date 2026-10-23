@@ -11,7 +11,7 @@ use std::{
 };
 
 use axiom_beacon_json::api::Genesis;
-use axiom_http::{Client, ClientConfig, Cors, Endpoint, HttpError};
+use axiom_http::{Client, ClientConfig, Cors, Endpoint, HttpError, TlsSetupError, TrustRoots};
 use axiom_json::Data;
 use axiom_node::SystemClock;
 use axiom_telemetry::{LogConfig, MetricsServer, Registry, RegistryError};
@@ -56,6 +56,9 @@ OPTIONS:
     --beacon-node <URLS>           beacon API endpoints, comma-separated or repeated,
                                    in order of preference [default: http://127.0.0.1:5052]
     --proposer-nodes <URLS>        beacon API endpoints that build and publish blocks first
+    --beacon-nodes-tls-certs <FILES>
+                                   PEM certificates trusted, beside the system roots,
+                                   for https beacon and proposer nodes, comma-separated
     --broadcast <TOPICS>           topics sent to every beacon node: attestations, blocks,
                                    subscriptions, sync-committee, or none [default: subscriptions]
     --remote-signer <URL>          also sign with every key a remote signer holds
@@ -113,6 +116,8 @@ pub(crate) struct ValidatorRun {
     proposer_nodes: Vec<String>,
     /// Topics published on every beacon node.
     broadcast: BTreeSet<ApiTopic>,
+    /// Extra roots for https beacon and proposer nodes.
+    beacon_tls_certs: Vec<PathBuf>,
     /// A remote signer whose keys are used too.
     remote_signer: Option<String>,
     /// Whether a missing slashing protection database may be created.
@@ -192,6 +197,9 @@ pub(crate) enum ValidatorError {
     /// The remote signer cannot list its keys.
     #[error("remote signer: {0}")]
     Remote(#[from] RemoteError),
+    /// The roots for https beacon nodes cannot load.
+    #[error("beacon node TLS: {0}")]
+    Tls(#[from] TlsSetupError),
     /// The metrics cannot be registered.
     #[error("metrics: {0}")]
     Metrics(#[from] RegistryError),
@@ -245,6 +253,8 @@ struct ValidatorFlags {
     proposer_nodes: Vec<String>,
     /// Broadcast topics.
     broadcast: Option<BTreeSet<ApiTopic>>,
+    /// Extra roots for https beacon nodes.
+    beacon_tls_certs: Vec<PathBuf>,
     /// Remote signer URL.
     remote_signer: Option<String>,
     /// Whether a missing database may be created.
@@ -285,6 +295,7 @@ impl Default for ValidatorFlags {
             beacon_nodes: Vec::new(),
             proposer_nodes: Vec::new(),
             broadcast: None,
+            beacon_tls_certs: Vec::new(),
             remote_signer: None,
             init_slashing_protection: false,
             defaults: ProposerDefaults {
@@ -357,6 +368,10 @@ impl ValidatorFlags {
                     value: text,
                 })?;
                 self.broadcast = Some(topics);
+            }
+            "--beacon-nodes-tls-certs" => {
+                self.beacon_tls_certs
+                    .extend(Self::list(&value("--beacon-nodes-tls-certs")?).map(PathBuf::from));
             }
             "--remote-signer" => self.remote_signer = Some(value("--remote-signer")?),
             "--init-slashing-protection" => self.init_slashing_protection = true,
@@ -498,6 +513,7 @@ impl ValidatorFlags {
             beacon_nodes,
             proposer_nodes: self.proposer_nodes,
             broadcast: self.broadcast.unwrap_or_else(ApiTopic::defaults),
+            beacon_tls_certs: self.beacon_tls_certs,
             remote_signer: self.remote_signer,
             init_slashing_protection: self.init_slashing_protection,
             defaults: ProposerDefaults {
@@ -616,8 +632,10 @@ impl ValidatorRun {
         registry.register_process_metrics()?;
         let metrics = ValidatorMetrics::register(&registry)?;
 
-        let nodes =
-            Arc::new(Self::nodes(&self.beacon_nodes)?.with_broadcast(self.broadcast.clone()));
+        let node_config = self.node_config()?;
+        let nodes = Arc::new(
+            Self::nodes(&self.beacon_nodes, &node_config)?.with_broadcast(self.broadcast.clone()),
+        );
         let genesis = Self::genesis(&nodes).await;
         if genesis.genesis_fork_version != self.chain.genesis_fork_version {
             return Err(ValidatorError::WrongChain {
@@ -696,7 +714,8 @@ impl ValidatorRun {
         let mut duties =
             DutyContext::<P>::new(store, nodes, config, timer, self.settings).with_metrics(metrics);
         if !self.proposer_nodes.is_empty() {
-            let proposers = Self::nodes(&self.proposer_nodes)?.with_broadcast(self.broadcast);
+            let proposers =
+                Self::nodes(&self.proposer_nodes, &node_config)?.with_broadcast(self.broadcast);
             duties = duties.with_proposer_nodes(Arc::new(proposers));
         }
         ValidatorClient::new(duties)
@@ -746,11 +765,24 @@ impl ValidatorRun {
         }
     }
 
+    /// The HTTP settings of beacon and proposer nodes: extra roots join the system's.
+    fn node_config(&self) -> Result<ClientConfig, ValidatorError> {
+        let roots = if self.beacon_tls_certs.is_empty() {
+            None
+        } else {
+            Some(TrustRoots::with_files(&self.beacon_tls_certs)?)
+        };
+        Ok(ClientConfig {
+            roots,
+            ..ClientConfig::default()
+        })
+    }
+
     /// A set of beacon nodes from their URLs.
-    fn nodes(urls: &[String]) -> Result<BeaconNodes, ValidatorError> {
+    fn nodes(urls: &[String], config: &ClientConfig) -> Result<BeaconNodes, ValidatorError> {
         let clients = urls
             .iter()
-            .map(|url| BeaconClient::new(url, ClientConfig::default()))
+            .map(|url| BeaconClient::new(url, config.clone()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(BeaconNodes::new(clients)?)
     }
@@ -794,6 +826,7 @@ mod tests {
         let run = run(&[]);
         assert_eq!(run.beacon_nodes, [DEFAULT_BEACON_NODE]);
         assert_eq!(run.proposer_nodes, Vec::<String>::new());
+        assert_eq!(run.beacon_tls_certs, Vec::<PathBuf>::new());
         assert_eq!(run.broadcast, BTreeSet::from([ApiTopic::Subscriptions]));
         assert_eq!(run.datadir, PathBuf::from("validator"));
         assert_eq!(run.defaults.gas_limit, DEFAULT_GAS_LIMIT);
@@ -816,7 +849,9 @@ mod tests {
             "--beacon-node",
             "http://10.0.0.4:5052",
             "--proposer-nodes",
-            "http://10.0.0.5:5052",
+            "https://10.0.0.5:5052",
+            "--beacon-nodes-tls-certs",
+            "a.pem,b.pem",
             "--broadcast",
             "attestations,blocks",
             "--remote-signer",
@@ -848,12 +883,16 @@ mod tests {
                 "http://10.0.0.4:5052"
             ]
         );
-        assert_eq!(run.proposer_nodes, ["http://10.0.0.5:5052"]);
+        assert_eq!(run.proposer_nodes, ["https://10.0.0.5:5052"]);
         assert_eq!(
             run.broadcast,
             BTreeSet::from([ApiTopic::Attestations, ApiTopic::Blocks])
         );
         assert_eq!(run.remote_signer.as_deref(), Some("http://10.0.0.3:9000"));
+        assert_eq!(
+            run.beacon_tls_certs,
+            [PathBuf::from("a.pem"), PathBuf::from("b.pem")]
+        );
         assert!(run.init_slashing_protection);
         assert_eq!(run.keymanager, Some("127.0.0.1:5062".parse().unwrap()));
         assert_eq!(run.token_path, Some(PathBuf::from("token.txt")));

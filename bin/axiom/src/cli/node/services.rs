@@ -3,7 +3,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use axiom_http::Cors;
-use axiom_node::EngineConfig;
+use axiom_node::{ApiTls, EngineConfig};
 
 use crate::cli::{Cli, CliError, arguments::Arguments};
 
@@ -17,6 +17,9 @@ pub(crate) const SERVICE_USAGE: &str = "\
     --staking                    serve the beacon API for a validator client, even with --no-http
     --http-allow-origin <ORIGIN> browser origin admitted to the beacon API, or * for any
                                  [default: the API's own address]
+    --http-enable-tls            serve the beacon API over TLS; needs the two flags below
+    --http-tls-cert <FILE>       PEM certificate chain of the beacon API
+    --http-tls-key <FILE>        PEM private key of the beacon API, unencrypted
     --metrics-address <ADDR>     Prometheus endpoint address [default: disabled]
     --metrics-allow-origin <ORIGIN>
                                  browser origin admitted to the metrics, or * for any
@@ -38,6 +41,12 @@ pub(crate) struct ServiceFlags {
     staking: bool,
     /// The browser origins the beacon API admits.
     http_allow_origin: Option<Cors>,
+    /// Whether the beacon API serves TLS.
+    http_enable_tls: bool,
+    /// The beacon API's certificate chain.
+    http_tls_cert: Option<PathBuf>,
+    /// The beacon API's private key.
+    http_tls_key: Option<PathBuf>,
     /// The metrics address.
     pub(crate) metrics_address: Option<SocketAddr>,
     /// The browser origins the metrics admit.
@@ -57,6 +66,8 @@ pub(crate) struct ServiceChoice {
     pub(crate) http_address: Option<SocketAddr>,
     /// The browser origins the beacon API admits.
     pub(crate) http_allow_origin: Option<Cors>,
+    /// The beacon API's TLS identity, or none for plain http.
+    pub(crate) http_tls: Option<ApiTls>,
     /// The metrics address, or none.
     pub(crate) metrics_address: Option<SocketAddr>,
     /// The browser origins the metrics admit.
@@ -79,6 +90,9 @@ impl ServiceFlags {
             "--http-allow-origin" => {
                 self.http_allow_origin = Some(Self::origin("--http-allow-origin", words)?);
             }
+            "--http-enable-tls" => self.http_enable_tls = true,
+            "--http-tls-cert" => self.http_tls_cert = Some(words.path("--http-tls-cert")?),
+            "--http-tls-key" => self.http_tls_key = Some(words.path("--http-tls-key")?),
             "--metrics-address" => self.metrics_address = Some(words.parsed("--metrics-address")?),
             "--metrics-allow-origin" => {
                 self.metrics_allow_origin = Some(Self::origin("--metrics-allow-origin", words)?);
@@ -104,8 +118,40 @@ impl ServiceFlags {
         Cors::parse(&value).map_err(|_| CliError::InvalidValue { flag, value })
     }
 
+    /// The beacon API's TLS files: both with the enabling flag, neither without it.
+    fn http_tls(&self) -> Result<Option<ApiTls>, CliError> {
+        match (
+            self.http_enable_tls,
+            &self.http_tls_cert,
+            &self.http_tls_key,
+        ) {
+            (true, Some(certificate), Some(key)) => Ok(Some(ApiTls {
+                certificate: certificate.clone(),
+                key: key.clone(),
+            })),
+            (true, None, _) => Err(CliError::Requires {
+                flag: "--http-enable-tls",
+                needs: "--http-tls-cert",
+            }),
+            (true, _, None) => Err(CliError::Requires {
+                flag: "--http-enable-tls",
+                needs: "--http-tls-key",
+            }),
+            (false, Some(_), _) => Err(CliError::Requires {
+                flag: "--http-tls-cert",
+                needs: "--http-enable-tls",
+            }),
+            (false, _, Some(_)) => Err(CliError::Requires {
+                flag: "--http-tls-key",
+                needs: "--http-enable-tls",
+            }),
+            (false, None, None) => Ok(None),
+        }
+    }
+
     /// The servers and the engine.
     pub(crate) fn resolve(self) -> Result<ServiceChoice, CliError> {
+        let http_tls = self.http_tls()?;
         let engine = match (self.execution_endpoint, self.jwt_secret) {
             (Some(url), Some(jwt_secret)) => Some(EngineConfig {
                 url,
@@ -127,6 +173,12 @@ impl ServiceFlags {
                 needs: "the beacon API",
             });
         }
+        if http_tls.is_some() && http_address.is_none() {
+            return Err(CliError::Requires {
+                flag: "--http-enable-tls",
+                needs: "the beacon API",
+            });
+        }
         if self.metrics_allow_origin.is_some() && self.metrics_address.is_none() {
             return Err(CliError::Requires {
                 flag: "--metrics-allow-origin",
@@ -136,6 +188,7 @@ impl ServiceFlags {
         Ok(ServiceChoice {
             http_address,
             http_allow_origin: self.http_allow_origin,
+            http_tls,
             metrics_address: self.metrics_address,
             metrics_allow_origin: self.metrics_allow_origin,
             engine,
@@ -203,6 +256,66 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn tls_needs_its_files_and_the_api() {
+        let choice = resolve(&[
+            "--http-enable-tls",
+            "--http-tls-cert",
+            "cert.pem",
+            "--http-tls-key",
+            "key.pem",
+        ])
+        .unwrap();
+        assert_eq!(
+            choice.http_tls,
+            Some(ApiTls {
+                certificate: "cert.pem".into(),
+                key: "key.pem".into(),
+            })
+        );
+        assert_eq!(resolve(&[]).unwrap().http_tls, None);
+
+        // Each missing piece is named.
+        let cases: [(&[&str], &str, &str); 4] = [
+            (
+                &["--http-enable-tls", "--http-tls-key", "k"],
+                "--http-enable-tls",
+                "--http-tls-cert",
+            ),
+            (
+                &["--http-enable-tls", "--http-tls-cert", "c"],
+                "--http-enable-tls",
+                "--http-tls-key",
+            ),
+            (
+                &["--http-tls-cert", "c"],
+                "--http-tls-cert",
+                "--http-enable-tls",
+            ),
+            (
+                &[
+                    "--no-http",
+                    "--http-enable-tls",
+                    "--http-tls-cert",
+                    "c",
+                    "--http-tls-key",
+                    "k",
+                ],
+                "--http-enable-tls",
+                "the beacon API",
+            ),
+        ];
+        for (words, flag, needs) in cases {
+            assert!(
+                matches!(
+                    resolve(words),
+                    Err(CliError::Requires { flag: f, needs: n }) if f == flag && n == needs
+                ),
+                "{words:?}"
+            );
+        }
     }
 
     #[test]

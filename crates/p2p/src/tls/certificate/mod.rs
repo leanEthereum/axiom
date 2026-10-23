@@ -30,30 +30,19 @@ pub(crate) use parse::ParsedCertificate;
 pub(crate) use signed_key::SignedKey;
 pub(crate) use spki::SubjectPublicKeyInfo;
 
-/// The OID 1.2.840.10045.2.1, id-ecPublicKey, per RFC 5480, section 2.1.1.
-const EC_PUBLIC_KEY_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
-
-/// The OID 1.2.840.10045.3.1.7, the named curve P-256, per RFC 5480, section 2.1.1.1.
-const PRIME256V1_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
-
-/// The OID 1.2.840.10045.4.3.2, ecdsa-with-SHA256, per RFC 5758, section 3.2.
-const ECDSA_WITH_SHA256_OID: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02];
-
 /// The OID 1.3.6.1.4.1.53594.1.1 of the libp2p public key extension, assigned by IANA.
 const LIBP2P_EXTENSION_OID: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xa2, 0x5a, 0x01, 0x01];
-
-/// The OID 2.5.4.10, organizationName, per RFC 5280, appendix A.1.
-const ORGANIZATION_NAME_OID: &[u8] = &[0x55, 0x04, 0x0a];
 
 #[cfg(test)]
 mod tests {
     use axiom_crypto::p256::SecretKey;
+    use axiom_tls::{
+        der::{DerError, DerWriter, Tag, Timestamp},
+        x509::X509Error,
+    };
 
     use super::*;
-    use crate::{
-        identity::Keypair,
-        tls::der::{DerError, DerWriter, Tag, Timestamp},
-    };
+    use crate::identity::Keypair;
 
     /// A builder over a fixed certificate key.
     fn key() -> SecretKey {
@@ -94,7 +83,7 @@ mod tests {
 
         // The window runs from the epoch to the last second of 9999.
         let certificate = ParsedCertificate::parse(&der).unwrap();
-        assert_eq!(certificate.key().key(), &key.public_key());
+        assert_eq!(certificate.key(), &key.public_key());
         assert_eq!(
             certificate.check_validity(Timestamp::from_unix_secs(253_402_300_800)),
             Err(CertificateError::Expired {
@@ -137,7 +126,10 @@ mod tests {
             CertificateBuilder::extension(list, LIBP2P_EXTENSION_OID, false, signed);
             CertificateBuilder::extension(list, LIBP2P_EXTENSION_OID, false, signed);
         });
-        assert_eq!(check(&der), Err(CertificateError::DuplicateExtension));
+        assert_eq!(
+            check(&der),
+            Err(CertificateError::X509(X509Error::DuplicateExtension))
+        );
 
         // Mutation: a critical flag written as an explicit false.
         let der = with_extensions(|list, signed| {
@@ -147,7 +139,10 @@ mod tests {
                 extension.element(Tag::OCTET_STRING, signed);
             });
         });
-        assert_eq!(check(&der), Err(CertificateError::ExplicitDefault));
+        assert_eq!(
+            check(&der),
+            Err(CertificateError::X509(X509Error::ExplicitDefault))
+        );
     }
 
     #[test]
@@ -172,7 +167,10 @@ mod tests {
             .position(|window| window == [0xa0, 0x03, 0x02, 0x01, 0x02])
             .unwrap();
         der[at + 4] = 0x01;
-        assert_eq!(check(&der), Err(CertificateError::UnsupportedVersion(1)));
+        assert_eq!(
+            check(&der),
+            Err(CertificateError::X509(X509Error::UnsupportedVersion(1)))
+        );
 
         // Mutation: the last byte of s, the last byte of the certificate.
         let mut der = builder.build(&host());
@@ -194,7 +192,9 @@ mod tests {
         der.push(0);
         assert_eq!(
             check(&der),
-            Err(CertificateError::Der(DerError::TrailingBytes { count: 1 }))
+            Err(CertificateError::X509(X509Error::Der(
+                DerError::TrailingBytes { count: 1 }
+            )))
         );
     }
 }

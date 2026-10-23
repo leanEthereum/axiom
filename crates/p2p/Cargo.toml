@@ -17,11 +17,11 @@ workspace = true
 axiom-crypto.workspace = true
 axiom-snappy.workspace = true
 axiom-ssz.workspace = true
+axiom-tls.workspace = true
 axiom-types.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-axiom-json.workspace = true
 proptest.workspace = true

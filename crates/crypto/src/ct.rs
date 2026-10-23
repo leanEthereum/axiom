@@ -65,7 +65,7 @@ impl Mask {
     }
 
     /// Holds when both conditions hold.
-    #[cfg(test)]
+    #[inline]
     #[must_use]
     pub(crate) const fn and(self, other: Self) -> Self {
         Self(self.0 & other.0)

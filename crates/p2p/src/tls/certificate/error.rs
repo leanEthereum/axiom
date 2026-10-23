@@ -1,37 +1,28 @@
 //! Reasons a libp2p certificate is refused.
 
-use axiom_crypto::p256::P256Error;
+use axiom_tls::{Alert, CertificateRejection, x509::X509Error};
 use thiserror::Error;
 
-use crate::{identity::KeyType, protobuf::ProtobufError, tls::der::DerError};
+use crate::{
+    identity::{KeyType, PeerId},
+    protobuf::ProtobufError,
+};
 
 /// A certificate that does not authenticate a libp2p peer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum CertificateError {
-    /// The certificate, or a structure inside it, is not strict DER of the expected shape.
-    #[error("malformed DER: {0}")]
-    Der(#[from] DerError),
-
-    /// The certificate is not version 3, the only one that carries extensions.
-    #[error("certificate version field {0} is not 2, meaning v3")]
-    UnsupportedVersion(u64),
+    /// The certificate, or a structure inside it, is malformed.
+    #[error("malformed certificate: {0}")]
+    X509(#[from] X509Error),
 
     /// A signature algorithm is not ecdsa-with-SHA256.
     #[error("signature algorithm is not ecdsa-with-SHA256")]
     UnsupportedSignatureAlgorithm,
 
-    /// The outer and inner signature algorithms differ, which RFC 5280, section 4.1.1.2, forbids.
-    #[error("outer and inner signature algorithms differ")]
-    AlgorithmMismatch,
-
-    /// A subject public key is not an EC key on P-256.
+    /// The certificate key is not an EC key on P-256.
     #[error("subject public key is not on P-256")]
     UnsupportedKeyAlgorithm,
-
-    /// A P-256 public key or signature value is invalid.
-    #[error("invalid P-256 key or signature: {0}")]
-    P256(#[from] P256Error),
 
     /// A deprecated issuer or subject unique identifier is present.
     #[error("certificate carries a unique identifier")]
@@ -41,17 +32,9 @@ pub enum CertificateError {
     #[error("self-signature does not verify")]
     InvalidSelfSignature,
 
-    /// An extension appears twice, which RFC 5280, section 4.2, forbids.
-    #[error("duplicate extension")]
-    DuplicateExtension,
-
     /// An extension marked critical is not understood.
     #[error("unknown critical extension")]
     UnknownCriticalExtension,
-
-    /// A critical flag is written as an explicit false, which DER forbids for a default.
-    #[error("explicit default critical flag")]
-    ExplicitDefault,
 
     /// The libp2p public key extension is absent.
     #[error("libp2p public key extension is missing")]
@@ -86,21 +69,35 @@ pub enum CertificateError {
     /// The host signature over the certificate key does not verify.
     #[error("host key signature does not verify")]
     InvalidHostSignature,
+
+    /// The peer sent more or fewer than one certificate, which libp2p forbids.
+    #[error("peer sent {0} certificates, expected exactly one")]
+    MultipleCertificates(usize),
+
+    /// The certificate authenticates another peer than the one dialed.
+    #[error("certificate authenticates {actual}, expected {expected}")]
+    PeerIdMismatch {
+        /// The peer the dialer meant to reach.
+        expected: PeerId,
+        /// The peer the certificate names.
+        actual: PeerId,
+    },
+
+    /// A certificate seed is zero or not below the P-256 group order.
+    #[error("certificate seed gives no valid P-256 key")]
+    InvalidSeed,
 }
 
-impl CertificateError {
-    /// The TLS alert description, per RFC 8446, section 6.2.
-    #[must_use]
-    pub const fn alert(&self) -> u8 {
+impl CertificateRejection for CertificateError {
+    fn alert(&self) -> Alert {
         match self {
-            // certificate_expired: expired or not yet valid.
-            Self::NotYetValid { .. } | Self::Expired { .. } => 45,
-            // unsupported_certificate: a type this node cannot check.
+            Self::NotYetValid { .. } | Self::Expired { .. } => Alert::CERTIFICATE_EXPIRED,
+            // A type this node cannot check.
             Self::UnsupportedSignatureAlgorithm
             | Self::UnsupportedKeyAlgorithm
-            | Self::UnsupportedHostKey(_) => 43,
-            // bad_certificate: everything else.
-            _ => 42,
+            | Self::UnsupportedHostKey(_) => Alert::UNSUPPORTED_CERTIFICATE,
+            Self::InvalidSeed => Alert::INTERNAL_ERROR,
+            _ => Alert::BAD_CERTIFICATE,
         }
     }
 }

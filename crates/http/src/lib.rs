@@ -55,6 +55,8 @@ mod server;
 mod session;
 mod status;
 mod stream;
+mod tls;
+mod transport;
 mod wire;
 
 pub use client::{Client, ClientConfig};
@@ -69,4 +71,5 @@ pub use router::Router;
 pub use server::{Server, ServerConfig};
 pub use status::StatusCode;
 pub use stream::BodyStream;
+pub use tls::{ServerIdentity, TlsSetupError, TrustRoots};
 pub use wire::{BodyLength, ChunkedDecoder, RequestHead, ResponseHead};

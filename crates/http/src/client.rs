@@ -8,11 +8,12 @@ use std::{
 use tokio::{net::TcpStream, time};
 
 use crate::{
-    BodyLength, Endpoint, HttpError, Limits, Method, Request, Response, connection::Connection,
+    BodyLength, Endpoint, HttpError, Limits, Method, Request, Response, TrustRoots,
+    connection::Connection, transport::Transport,
 };
 
 /// How a client connects and what it accepts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ClientConfig {
     /// Longest wait for a TCP connection to open.
     pub connect_timeout: Duration,
@@ -25,6 +26,9 @@ pub struct ClientConfig {
 
     /// Most idle connections kept open for reuse.
     pub max_idle: usize,
+
+    /// The roots an https server's chain must reach; none means the platform's roots.
+    pub roots: Option<TrustRoots>,
 }
 
 impl Default for ClientConfig {
@@ -34,6 +38,7 @@ impl Default for ClientConfig {
             request_timeout: Duration::from_secs(30),
             limits: Limits::DEFAULT,
             max_idle: 4,
+            roots: None,
         }
     }
 }
@@ -52,7 +57,7 @@ pub struct Client {
     /// Timeouts and bounds.
     config: ClientConfig,
     /// Open connections waiting for a request, most recently used last.
-    idle: Mutex<Vec<Connection<TcpStream>>>,
+    idle: Mutex<Vec<Connection<Transport>>>,
 }
 
 impl Client {
@@ -118,7 +123,7 @@ impl Client {
     /// Writes one request and reads its response, pooling the connection when it can persist.
     async fn round_trip(
         &self,
-        mut connection: Connection<TcpStream>,
+        mut connection: Connection<Transport>,
         method: Method,
         bytes: &[u8],
     ) -> Result<Response, HttpError> {
@@ -152,22 +157,34 @@ impl Client {
         })
     }
 
-    /// Opens a new connection under the connect timeout.
-    async fn connect(&self) -> Result<Connection<TcpStream>, HttpError> {
+    /// Opens a new connection under the connect timeout, which covers the TLS handshake too.
+    async fn connect(&self) -> Result<Connection<Transport>, HttpError> {
+        let timeout = self.config.connect_timeout;
+        let transport = time::timeout(timeout, self.open())
+            .await
+            .map_err(|_| HttpError::Timeout { after: timeout })??;
+        Ok(Connection::new(transport, self.config.limits))
+    }
+
+    /// Opens the socket, then runs the TLS handshake for an https endpoint.
+    async fn open(&self) -> Result<Transport, HttpError> {
         // Name resolution runs as part of the connect, under the same timeout.
         let address = (self.endpoint.host(), self.endpoint.port());
-        let stream = time::timeout(self.config.connect_timeout, TcpStream::connect(address))
-            .await
-            .map_err(|_| HttpError::Timeout {
-                after: self.config.connect_timeout,
-            })??;
+        let stream = TcpStream::connect(address).await?;
         // Requests are small and latency-bound; Nagle's delay would only add to it.
         stream.set_nodelay(true)?;
-        Ok(Connection::new(stream, self.config.limits))
+        if !self.endpoint.is_tls() {
+            return Ok(Transport::Plain(stream));
+        }
+        let roots = match &self.config.roots {
+            Some(roots) => roots.clone(),
+            None => TrustRoots::system()?,
+        };
+        Transport::connect_tls(stream, self.endpoint.host(), roots).await
     }
 
     /// Takes the most recently used idle connection.
-    fn take_idle(&self) -> Option<Connection<TcpStream>> {
+    fn take_idle(&self) -> Option<Connection<Transport>> {
         // No code panics while holding the lock, so poisoning carries no meaning here.
         self.idle
             .lock()
@@ -176,7 +193,7 @@ impl Client {
     }
 
     /// Returns a connection to the pool, or drops it when the pool is full.
-    fn put_idle(&self, connection: Connection<TcpStream>) {
+    fn put_idle(&self, connection: Connection<Transport>) {
         let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
         if idle.len() < self.config.max_idle {
             idle.push(connection);

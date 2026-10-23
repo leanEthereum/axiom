@@ -228,6 +228,7 @@ dependencies = [
 name = "axiom-http"
 version = "0.1.0"
 dependencies = [
+ "axiom-tls",
  "proptest",
  "thiserror",
  "tokio",
@@ -316,9 +317,9 @@ name = "axiom-p2p"
 version = "0.1.0"
 dependencies = [
  "axiom-crypto",
- "axiom-json",
  "axiom-snappy",
  "axiom-ssz",
+ "axiom-tls",
  "axiom-types",
  "proptest",
  "sha2",
@@ -396,6 +397,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "axiom-tls"
+version = "0.1.0"
+dependencies = [
+ "axiom-crypto",
+ "axiom-json",
+ "proptest",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

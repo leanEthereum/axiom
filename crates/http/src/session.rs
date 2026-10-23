@@ -3,14 +3,13 @@
 use std::{sync::Arc, time::SystemTime};
 
 use tokio::{
-    net::TcpStream,
     sync::{OwnedSemaphorePermit, watch},
     time::{self, Instant},
 };
 
 use crate::{
     BodyLength, BodyStream, HttpError, Method, Request, Response, Router, ServerConfig, StatusCode,
-    connection::Connection, date::HttpDate, race::Either,
+    connection::Connection, date::HttpDate, race::Either, transport::Transport,
 };
 
 /// The server side of one accepted connection.
@@ -19,7 +18,7 @@ use crate::{
 #[derive(Debug)]
 pub(crate) struct Session {
     /// The socket and its read buffer.
-    connection: Connection<TcpStream>,
+    connection: Connection<Transport>,
     /// The routes, shared by every session.
     router: Arc<Router>,
     /// Timeouts and bounds.
@@ -31,16 +30,14 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// Wraps an accepted stream.
-    pub(crate) fn new(
-        stream: TcpStream,
+    /// Wraps an accepted stream, past any TLS handshake.
+    pub(crate) const fn new(
+        stream: Transport,
         router: Arc<Router>,
         config: ServerConfig,
         stopped: watch::Receiver<bool>,
         permit: OwnedSemaphorePermit,
     ) -> Self {
-        // Small responses go out at once rather than waiting to coalesce.
-        let _ = stream.set_nodelay(true);
         Self {
             connection: Connection::new(stream, config.limits),
             router,

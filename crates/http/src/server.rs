@@ -9,7 +9,7 @@ use tokio::{
     time,
 };
 
-use crate::{Limits, Router, race::Either, session::Session};
+use crate::{Limits, Router, ServerIdentity, race::Either, session::Session, transport::Transport};
 
 /// How a server treats its connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +71,8 @@ pub struct Server {
     router: Arc<Router>,
     /// Timeouts and bounds.
     config: ServerConfig,
+    /// The certificate and key when serving https.
+    tls: Option<ServerIdentity>,
 }
 
 impl Server {
@@ -88,7 +90,15 @@ impl Server {
             listener: TcpListener::bind(address).await?,
             router: Arc::new(router),
             config,
+            tls: None,
         })
+    }
+
+    /// Serves https under an identity: every connection opens with a TLS 1.3 handshake.
+    #[must_use]
+    pub fn with_tls(mut self, identity: ServerIdentity) -> Self {
+        self.tls = Some(identity);
+        self
     }
 
     /// The address the socket is bound to.
@@ -110,6 +120,7 @@ impl Server {
             listener,
             router,
             config,
+            tls,
         } = self;
         let mut shutdown = pin!(shutdown);
 
@@ -142,10 +153,27 @@ impl Server {
                 Either::Right(()) => break,
             };
 
+            // Small responses go out at once rather than waiting to coalesce.
+            let _ = stream.set_nodelay(true);
             // The session holds the permit, so its slot frees when the connection ends.
-            tasks.spawn(
-                Session::new(stream, Arc::clone(&router), config, stopped.clone(), permit).run(),
-            );
+            // The TLS handshake runs in the connection's own task, under the I/O timeout.
+            let (router, stopped, tls) = (Arc::clone(&router), stopped.clone(), tls.clone());
+            tasks.spawn(async move {
+                let transport = match tls {
+                    None => Transport::Plain(stream),
+                    Some(identity) => {
+                        let handshake = Transport::accept_tls(stream, &identity);
+                        match time::timeout(config.io_timeout, handshake).await {
+                            Ok(Ok(transport)) => transport,
+                            // A failed or slow handshake closes the connection quietly.
+                            _ => return,
+                        }
+                    }
+                };
+                Session::new(transport, router, config, stopped, permit)
+                    .run()
+                    .await;
+            });
         }
 
         // Shutdown: refuse new clients, then tell every connection to finish up.

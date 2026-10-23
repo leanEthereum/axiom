@@ -11,12 +11,15 @@
 
 mod aead;
 mod cavp;
+mod der;
 mod ecdh;
 mod ecdsa;
 mod keccak;
 mod mac;
 mod p256;
+mod p384;
 mod pbkdf2;
+mod rsa;
 mod vectors;
 mod wycheproof;
 mod x25519;

@@ -29,6 +29,15 @@ impl NodeJson<'_> {
             "http_allow_origin",
             Self::text(node.http_allow_origin.as_ref()),
         );
+        object.insert(
+            "http_tls",
+            node.http_tls.as_ref().map_or(Json::Null, |tls| {
+                Json::from([
+                    ("certificate", Self::path(Some(&tls.certificate))),
+                    ("key", Self::path(Some(&tls.key))),
+                ])
+            }),
+        );
         object.insert("metrics_address", Self::text(node.metrics_address));
         object.insert(
             "metrics_allow_origin",

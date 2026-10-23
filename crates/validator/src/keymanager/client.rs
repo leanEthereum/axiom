@@ -43,7 +43,7 @@ impl KeymanagerClient {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not a plain http URL.
+    /// Fails when the URL is not an http or https URL.
     pub fn new(url: &str, token: &str) -> Result<Self, KeymanagerClientError> {
         Ok(Self {
             http: Client::new(Endpoint::parse(url)?, ClientConfig::default()),

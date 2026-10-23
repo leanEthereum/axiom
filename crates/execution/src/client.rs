@@ -63,7 +63,7 @@ impl EngineClient {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not a plain http URL with a host.
+    /// Fails when the URL is not an http or https URL with a host.
     pub fn new(url: &str, secret: JwtSecret) -> Result<Self, EngineError> {
         let config = ClientConfig {
             limits: Limits {

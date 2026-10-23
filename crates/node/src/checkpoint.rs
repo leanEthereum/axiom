@@ -48,7 +48,7 @@ impl CheckpointServer {
     ///
     /// # Errors
     ///
-    /// Fails when the URL is not a plain HTTP endpoint.
+    /// Fails when the URL is not an http or https endpoint.
     pub fn new(url: &str, timeout: Duration) -> Result<Self, CheckpointError> {
         let endpoint = Endpoint::parse(url).map_err(|source| CheckpointError::Url {
             url: url.to_owned(),
@@ -173,7 +173,7 @@ impl CheckpointServer {
 /// Why a checkpoint could not be downloaded.
 #[derive(Debug, Error)]
 pub enum CheckpointError {
-    /// The URL is not a plain HTTP endpoint.
+    /// The URL is not an http or https endpoint.
     #[error("checkpoint sync URL {url}: {reason}")]
     Url {
         /// The URL given.

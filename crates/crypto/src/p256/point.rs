@@ -336,6 +336,43 @@ impl ProjectivePoint {
         x.and(y).and(one_infinite.not()).or(both_infinite)
     }
 
+    /// The point times a secret scalar, in constant time.
+    ///
+    /// # Algorithm
+    ///
+    /// Fixed 4-bit windows, high to low, over the multiples 0 P to 15 P.
+    ///
+    /// ```text
+    /// table[j] = j P                 for j = 0..15
+    /// acc = 16 acc + table[d_i]      for each 4-bit digit d_i of k, high to low
+    /// ```
+    ///
+    /// Every window costs four doublings, one full table scan, and one addition.
+    /// The scan blends each entry under a mask, so the digit picks no address.
+    /// The complete formulas take the identity and equal inputs, so no digit picks a branch.
+    pub(super) fn mul_ct(&self, k: &Scalar) -> Self {
+        // Phase 1: the 16 multiples, the identity first.
+        let mut table = [Self::IDENTITY; 16];
+        for j in 1..16 {
+            table[j] = table[j - 1].add(self);
+        }
+
+        // Phase 2: 64 windows, high to low.
+        let mut acc = Self::IDENTITY;
+        for window in (0..64).rev() {
+            acc = acc.double().double().double().double();
+            let digit = k.nibble(window);
+
+            // Read d P by touching every entry.
+            let mut entry = Self::IDENTITY;
+            for (j, candidate) in (0..).zip(&table) {
+                entry = Self::select(Mask::equal(digit, j), candidate, &entry);
+            }
+            acc = acc.add(&entry);
+        }
+        acc
+    }
+
     /// The point times a public scalar, by width-5 NAF.
     ///
     /// Used only on public inputs: the digit pattern steers branches and table indices.
@@ -423,6 +460,20 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn constant_time_windows_at_the_edges() {
+        // 0 P is the identity, 1 P is P, and (n - 1) P is -P, for P = G.
+        let g = AffinePoint::GENERATOR;
+        let gp = g.to_projective();
+        assert!(gp.mul_ct(&Scalar::ZERO).is_identity().reveal());
+        assert_eq!(gp.mul_ct(&Scalar::ONE).to_affine(), Some(g));
+        assert_eq!(gp.mul_ct(&Scalar::ONE.neg()).to_affine(), Some(g.neg()));
+
+        // Any multiple of the identity is the identity.
+        let zero = ProjectivePoint::IDENTITY;
+        assert!(zero.mul_ct(&Scalar::ONE.neg()).is_identity().reveal());
+    }
+
+    #[test]
     fn decompression_picks_the_requested_parity() {
         // Both parities of G's x give G and -G: G's y ends in 0xf5, so it is odd.
         let g = AffinePoint::GENERATOR;
@@ -473,6 +524,19 @@ pub(super) mod tests {
         fn wnaf_matches_double_and_add(k in arb_scalar()) {
             let g = AffinePoint::GENERATOR;
             prop_assert_eq!(g.to_projective().mul_vartime(&k).to_affine(), mul_reference(Some(g), &k));
+        }
+
+        #[test]
+        fn constant_time_windows_match_variable_time_and_reference(
+            base in arb_scalar(),
+            k in arb_scalar(),
+        ) {
+            // Law: k P is the same point by fixed windows, by NAF, and by double-and-add.
+            // P = base G is any point, the identity included when base = 0.
+            let p = AffinePoint::GENERATOR.to_projective().mul_vartime(&base);
+            let windows = p.mul_ct(&k);
+            prop_assert!(windows.equals(&p.mul_vartime(&k)).reveal());
+            prop_assert_eq!(windows.to_affine(), mul_reference(p.to_affine(), &k));
         }
 
         #[test]
