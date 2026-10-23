@@ -14,7 +14,7 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use super::{BATCH_SLOTS, Batch, Fetch, MAX_STRIKES, Received};
+use super::{BATCH_SLOTS, BackfillPacer, Batch, Fetch, MAX_STRIKES, Received};
 use crate::{
     ChainError, ChainHandle, HistorySegment, HistoryStart, Reconstruction, SegmentContext,
     SegmentError, network::ForkDigests,
@@ -65,6 +65,8 @@ pub(crate) struct BackfillOutcome {
 ///
 /// Once an archive's history reaches genesis, the snapshots below the anchor are rebuilt.
 /// The rebuild runs in short steps on the chain thread, interleaved with its other work.
+///
+/// Unless the operator lifts it, a pacer holds each fetched batch until a quiet moment of the slot.
 #[derive(Debug)]
 pub(crate) struct BackfillSync<P: Preset> {
     /// The chain thread.
@@ -89,15 +91,20 @@ pub(crate) struct BackfillSync<P: Preset> {
     rebuilding: bool,
     /// Where processing tasks report.
     outcomes: UnboundedSender<BackfillOutcome>,
+    /// What holds each batch until its moment, unless batches run at once.
+    pacer: Option<BackfillPacer>,
 }
 
 impl<P: Preset> BackfillSync<P> {
     /// A backfill with no peer yet, and the receiver its processing reports to.
+    ///
+    /// Without a pacer, each batch is processed as soon as it is fetched.
     pub(crate) fn new(
         chain: ChainHandle<P>,
         network: NetworkHandle,
         config: ChainConfig,
         forks: Arc<ForkDigests>,
+        pacer: Option<BackfillPacer>,
     ) -> (Self, UnboundedReceiver<BackfillOutcome>) {
         let (outcomes, receiver) = unbounded_channel();
         let backfill = Self {
@@ -112,6 +119,7 @@ impl<P: Preset> BackfillSync<P> {
             cursor: None,
             rebuilding: false,
             outcomes,
+            pacer,
         };
         (backfill, receiver)
     }
@@ -171,7 +179,11 @@ impl<P: Preset> BackfillSync<P> {
         let chain = self.chain.clone();
         let config = self.config.clone();
         let outcomes = self.outcomes.clone();
+        let pacer = self.pacer.clone();
         task::spawn(async move {
+            if let Some(pacer) = pacer {
+                pacer.wait().await;
+            }
             let outcome = BackfillWorker { chain, config }.process(batch).await;
             // A stopped network loop has nobody to tell.
             let _stopped = outcomes.send(outcome);

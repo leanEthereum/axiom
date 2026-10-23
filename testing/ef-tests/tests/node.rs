@@ -663,6 +663,7 @@ fn range_sync(quic: bool) {
             custody_group_count: 4,
             discovery: None,
             subscribe_all_subnets: false,
+            backfill_rate_limiting: false,
         };
         let a = TestNode::start(
             &fixture,
@@ -737,6 +738,7 @@ fn a_node_finds_its_peer_through_discovery() {
                     boot_enrs,
                 }),
                 subscribe_all_subnets: false,
+                backfill_rate_limiting: false,
             }
         };
         let a = TestNode::start(&fixture, Some(settings(Vec::new()))).await;
@@ -850,6 +852,7 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
             custody_group_count: 4,
             discovery: None,
             subscribe_all_subnets: false,
+            backfill_rate_limiting: false,
         };
         let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port()).parse().unwrap();
         let b = TestNode::start(&fixture, Some(settings(free_address(), vec![boot]))).await;
@@ -1025,6 +1028,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             custody_group_count: 4,
             discovery: None,
             subscribe_all_subnets: false,
+            backfill_rate_limiting: false,
         };
         let node_config = |network, engine| NodeConfig {
             anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
@@ -1480,6 +1484,7 @@ fn publish_blobs_and_sync(fork: ForkName) {
                 custody_group_count: 4,
                 discovery: None,
                 subscribe_all_subnets: false,
+                backfill_rate_limiting: false,
             };
             let node_config = NodeConfig {
                 anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
@@ -1770,6 +1775,7 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
         let settings = |listen_address, boot_nodes| NetworkSettings {
             quic_port: None,
             subscribe_all_subnets: false,
+            backfill_rate_limiting: false,
             target_peers: 64,
             port_mapping: PortMappingSettings::default(),
             listen_address,

@@ -5,6 +5,7 @@
 
 mod backfill;
 mod lookup;
+mod pacing;
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -33,6 +34,7 @@ use tracing::{debug, info, warn};
 pub(crate) use self::{
     backfill::{BackfillOutcome, BackfillSync},
     lookup::{BlockLookups, LookupEvent, MissingBlock},
+    pacing::BackfillPacer,
 };
 use super::{
     forks::ForkDigests,

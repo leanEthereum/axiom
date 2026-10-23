@@ -202,6 +202,10 @@ impl NodeJson<'_> {
                 "subscribe_all_subnets",
                 Json::from(network.subscribe_all_subnets),
             ),
+            (
+                "backfill_rate_limiting",
+                Json::from(network.backfill_rate_limiting),
+            ),
         ])
     }
 

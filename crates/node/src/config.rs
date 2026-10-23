@@ -97,6 +97,8 @@ pub struct NetworkSettings {
     pub discovery: Option<DiscoverySettings>,
     /// Whether every attestation and sync committee subnet is joined, not only the node's own.
     pub subscribe_all_subnets: bool,
+    /// Whether backfill batches wait for quiet moments of the slot, leaving the CPU to duties.
+    pub backfill_rate_limiting: bool,
 }
 
 impl NetworkSettings {

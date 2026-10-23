@@ -158,6 +158,7 @@ impl<P: Preset> StartedChain<'_, P> {
                 discovery,
                 events: api_events,
                 subscribe_all_subnets: settings.subscribe_all_subnets,
+                backfill_rate_limiting: settings.backfill_rate_limiting,
             },
         )
         .await;

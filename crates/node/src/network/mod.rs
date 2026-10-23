@@ -57,7 +57,10 @@ use self::{
     handshake::Handshakes,
     peers::{PeerAction, PeerBook, PeerManager, PeerSubnets},
     server::RequestServer,
-    sync::{BackfillOutcome, BackfillSync, BatchOutcome, BlockLookups, LookupEvent, RangeSync},
+    sync::{
+        BackfillOutcome, BackfillPacer, BackfillSync, BatchOutcome, BlockLookups, LookupEvent,
+        RangeSync,
+    },
     topics::Subscriptions,
 };
 use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
@@ -240,12 +243,10 @@ impl<P: Preset> NetworkService<P> {
             discovery,
             events,
             subscribe_all_subnets,
+            backfill_rate_limiting,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
-        let (discovery, discovery_events) = discovery
-            .map_or((None, None), |(discovery, events)| {
-                (Some(discovery), Some(events))
-            });
+        let (discovery, discovery_events) = discovery.unzip();
         let (sync, sync_outcomes) = RangeSync::new(
             chain.clone(),
             Arc::clone(&execution),
@@ -253,11 +254,13 @@ impl<P: Preset> NetworkService<P> {
             config.clone(),
             Arc::clone(&forks),
         );
+        let pacer = backfill_rate_limiting.then(|| BackfillPacer::new(Arc::clone(&clock), slots));
         let (backfill, backfill_outcomes) = BackfillSync::new(
             chain.clone(),
             network.clone(),
             config.clone(),
             Arc::clone(&forks),
+            pacer,
         );
         let (lookups, lookup_events) = sync.lookups(metrics.clone());
         let metadata = Arc::new(LocalMetadata {
@@ -976,4 +979,6 @@ pub(crate) struct NetworkSetup {
     pub(crate) events: EventSender,
     /// Whether every attestation and sync committee subnet is joined.
     pub(crate) subscribe_all_subnets: bool,
+    /// Whether backfill batches wait for quiet moments of the slot.
+    pub(crate) backfill_rate_limiting: bool,
 }
