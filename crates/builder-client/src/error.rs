@@ -5,6 +5,7 @@ use std::fmt;
 use axiom_beacon_json::ApiJsonError;
 use axiom_http::{HttpError, Response, StatusCode};
 use axiom_json::{Json, ParseError};
+use axiom_ssz::DecodeError;
 use axiom_types::ForkName;
 use thiserror::Error;
 
@@ -37,6 +38,14 @@ pub enum BuilderError {
     /// The response body is not JSON.
     #[error("relay response is not JSON: {0}")]
     Json(#[source] ParseError),
+
+    /// The response body does not decode as the fork's SSZ container.
+    #[error("relay response is not the fork's SSZ container: {0}")]
+    Ssz(#[source] DecodeError),
+
+    /// An SSZ response does not name its fork in the consensus version header.
+    #[error("relay SSZ response lacks the eth-consensus-version header")]
+    MissingVersionHeader,
 
     /// A required member of the response envelope is absent or not a string.
     #[error("relay response lacks the {member} member")]

@@ -1,6 +1,6 @@
 //! A signed builder bid of any fork whose builder API sells payloads.
 
-use axiom_ssz::{Root, U256};
+use axiom_ssz::{DecodeError, Root, Ssz, U256};
 
 use crate::{
     BlsPubkey, BlsSignature, ChainConfig, ForkName, Hash32, KzgCommitment, Preset, bellatrix,
@@ -25,6 +25,36 @@ pub enum SignedBuilderBid<P: Preset> {
 }
 
 impl<P: Preset> SignedBuilderBid<P> {
+    /// Decodes a signed bid of a known fork from its SSZ encoding, which does not record the fork.
+    ///
+    /// # Returns
+    ///
+    /// The bid, or nothing when the fork has no builder bid.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the bytes do not encode a bid of the fork.
+    pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Option<Self>, DecodeError> {
+        Ok(Some(match fork {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => return Ok(None),
+            ForkName::Bellatrix => Self::Bellatrix(Ssz::decode(bytes)?),
+            ForkName::Capella => Self::Capella(Ssz::decode(bytes)?),
+            ForkName::Deneb => Self::Deneb(Ssz::decode(bytes)?),
+            ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
+            ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
+        }))
+    }
+
+    /// The bid's SSZ encoding, which does not record the fork.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Bellatrix(signed) => signed.encode(),
+            Self::Capella(signed) => signed.encode(),
+            Self::Deneb(signed) => signed.encode(),
+            Self::Electra(signed) | Self::Fulu(signed) => signed.encode(),
+        }
+    }
     /// The fork the bid belongs to.
     #[must_use]
     pub const fn fork_name(&self) -> ForkName {

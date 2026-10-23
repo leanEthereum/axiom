@@ -17,6 +17,7 @@ pub(crate) const PROPOSER_USAGE: &str = "\
     --builder-header-timeout <MS>
                                  bid deadline, at most 3000 [default: 1000]
     --builder-user-agent <TEXT>  user agent sent to builders [default: axiom/VERSION]
+    --builder-disable-ssz        speak JSON alone to builders, never SSZ
     --builder-fallback-skips <N> missed slots in a row past which builders are not asked
     --builder-fallback-skips-per-epoch <N>
                                  missed slots in the last epoch past which builders are not asked
@@ -47,6 +48,8 @@ pub(crate) struct ProposerFlags {
     header_timeout: Option<Duration>,
     /// The user agent sent to builders.
     user_agent: Option<String>,
+    /// Whether builders get JSON alone.
+    disable_ssz: bool,
     /// Breaker thresholds.
     fallback: BuilderFallback,
     /// How early payloads are prepared.
@@ -90,6 +93,10 @@ impl ProposerFlags {
             "--builder-user-agent" => {
                 self.user_agent = Some(words.value("--builder-user-agent")?);
                 self.builder_tuned = Some("--builder-user-agent");
+            }
+            "--builder-disable-ssz" => {
+                self.disable_ssz = true;
+                self.builder_tuned = Some("--builder-disable-ssz");
             }
             "--builder-fallback-skips" => {
                 self.fallback.skips = Some(words.parsed("--builder-fallback-skips")?);
@@ -154,6 +161,7 @@ impl ProposerFlags {
             builder_client: BuilderClientSettings {
                 header_timeout: self.header_timeout,
                 user_agent: (!self.builders.is_empty()).then_some(user_agent),
+                disable_ssz: self.disable_ssz,
             },
             builders: self.builders,
             builder_fallback: self.fallback,
@@ -213,6 +221,7 @@ mod tests {
                 "2500",
                 "--builder-user-agent",
                 "mev-sidecar",
+                "--builder-disable-ssz",
                 "--builder-fallback-skips",
                 "5",
                 "--builder-fallback-skips-per-epoch",
@@ -237,6 +246,7 @@ mod tests {
                 builder_client: BuilderClientSettings {
                     header_timeout: Some(Duration::from_millis(2500)),
                     user_agent: Some("mev-sidecar".to_owned()),
+                    disable_ssz: true,
                 },
                 builder_fallback: BuilderFallback {
                     skips: Some(5),

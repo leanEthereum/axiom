@@ -469,6 +469,56 @@ fn a_slow_relay_misses_the_bid_deadline() {
     });
 }
 
+/// A Deneb bid request for slot 1, as any relay test asks it.
+async fn ask(client: &RelayClient) -> Option<SignedBuilderBid<Minimal>> {
+    client
+        .header::<Minimal>(
+            ForkName::Deneb,
+            Slot(1),
+            Hash32::default(),
+            BlsPubkey::default(),
+        )
+        .await
+        .expect("the relay answers")
+}
+
+#[test]
+fn ssz_is_preferred_once_the_relay_answers_in_it() {
+    run(async {
+        // Fixture state: a relay bidding for payload 0x64...64 and revealing it honestly.
+        let payload = deneb_payload(0x64);
+        let bid = deneb_bid(&payload, 5);
+        let reveal = RevealedPayload::Deneb(deneb_reveal(payload.clone()));
+        let block = blinded(&deneb_block(payload));
+        let relay = MockRelay::start().await.expect("mock binds");
+        relay.set_bid(&bid);
+        relay.set_reveal(&reveal);
+
+        // The bid comes back in SSZ, so the blinded block goes out in SSZ too.
+        let client = RelayClient::new(relay.url()).expect("parses");
+        assert_eq!(ask(&client).await, Some(bid.clone()));
+        assert_eq!(client.submit_blinded_block(&block).await.unwrap(), reveal);
+
+        // A client kept to JSON sends JSON to the same relay.
+        let json = RelayClient::new(relay.url()).expect("parses").json_only();
+        assert_eq!(ask(&json).await, Some(bid.clone()));
+        assert_eq!(json.submit_blinded_block(&block).await.unwrap(), reveal);
+
+        // A relay that answers JSON alone gets JSON from a client that prefers SSZ.
+        relay.set_json_only(true);
+        assert_eq!(ask(&client).await, Some(bid));
+        assert_eq!(client.submit_blinded_block(&block).await.unwrap(), reveal);
+
+        // Each block arrived intact, in SSZ only the first time.
+        assert_eq!(relay.blinded_blocks_in_ssz(), [true, false, false]);
+        assert_eq!(
+            relay.blinded_blocks::<Minimal>().unwrap(),
+            [block.clone(), block.clone(), block]
+        );
+        relay.stop().await;
+    });
+}
+
 #[test]
 fn a_reveal_of_another_payload_is_refused() {
     run(async {

@@ -397,6 +397,8 @@ pub struct BuilderClientSettings {
     pub header_timeout: Option<Duration>,
     /// The user agent each builder request names, when any.
     pub user_agent: Option<String>,
+    /// Whether builders are spoken to in JSON alone, never SSZ.
+    pub disable_ssz: bool,
 }
 
 impl BuilderClientSettings {
@@ -414,6 +416,11 @@ impl BuilderClientSettings {
                         error: Box::new(error),
                     }
                 })?;
+                let client = if self.disable_ssz {
+                    client.json_only()
+                } else {
+                    client
+                };
                 Ok(match &self.user_agent {
                     Some(agent) => client.with_user_agent(agent.clone()),
                     None => client,

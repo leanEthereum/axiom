@@ -269,6 +269,10 @@ impl NodeJson<'_> {
                 "builder_user_agent",
                 Json::from(proposer.builder_client.user_agent.clone()),
             ),
+            (
+                "builder_disable_ssz",
+                Json::from(proposer.builder_client.disable_ssz),
+            ),
             ("builder_fallback_skips", Json::from(fallback.skips)),
             (
                 "builder_fallback_skips_per_epoch",

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use axiom_beacon_json::{ApiJson, ApiJsonError, ForkedJson};
+use axiom_beacon_json::{ApiJson, ForkedJson};
 use axiom_http::{Method, Request, Response, Router, Server, ServerConfig, StatusCode};
 use axiom_json::{Data, Json, Object};
 use axiom_types::{
@@ -60,13 +60,33 @@ pub struct HeaderRequest {
     pub dated: bool,
 }
 
-/// One blinded block the relay received, still as JSON.
+/// One blinded block the relay received, still encoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Submission {
     /// The fork from the Eth-Consensus-Version header.
     fork: ForkName,
-    /// The block's JSON.
-    block: Json,
+    /// The block as it came.
+    block: Encoded,
+}
+
+/// A body in either encoding the builder API allows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Encoded {
+    /// A JSON value.
+    Json(Json),
+    /// SSZ bytes.
+    Ssz(Vec<u8>),
+}
+
+/// A scripted answer: its fork and both of its encodings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Scripted {
+    /// The fork.
+    fork: ForkName,
+    /// The JSON data.
+    json: Json,
+    /// The SSZ bytes.
+    ssz: Vec<u8>,
 }
 
 /// Script and records, behind one lock each.
@@ -74,12 +94,14 @@ struct Submission {
 struct MockState {
     /// Whether the status endpoint answers 200, or 503.
     unhealthy: Mutex<bool>,
-    /// The bid offered, as its fork and JSON; none answers 204.
-    bid: Mutex<Option<(ForkName, Json)>>,
+    /// Whether the relay answers JSON alone, whatever the client prefers.
+    json_only: Mutex<bool>,
+    /// The bid offered; none answers 204.
+    bid: Mutex<Option<Scripted>>,
     /// How long bid requests wait before the answer.
     header_delay: Mutex<Duration>,
-    /// The payload revealed, as its fork and JSON; none answers 400.
-    reveal: Mutex<Option<(ForkName, Json)>>,
+    /// The payload revealed; none answers 400.
+    reveal: Mutex<Option<Scripted>>,
     /// Registrations received, in arrival order.
     registrations: Mutex<Vec<SignedValidatorRegistrationV1>>,
     /// Bid requests received, in arrival order.
@@ -173,9 +195,18 @@ impl MockRelay {
         *MockState::lock(&self.state.unhealthy) = !healthy;
     }
 
+    /// Answers in JSON alone, as a relay without SSZ support does; by default SSZ is offered.
+    pub fn set_json_only(&self, json_only: bool) {
+        *MockState::lock(&self.state.json_only) = json_only;
+    }
+
     /// Offers a bid to every later bid request.
     pub fn set_bid<P: Preset>(&self, bid: &SignedBuilderBid<P>) {
-        *MockState::lock(&self.state.bid) = Some((bid.fork_name(), bid.to_json()));
+        *MockState::lock(&self.state.bid) = Some(Scripted {
+            fork: bid.fork_name(),
+            json: bid.to_json(),
+            ssz: bid.encode(),
+        });
     }
 
     /// Answers every later bid request with 204, no bid.
@@ -190,7 +221,20 @@ impl MockRelay {
 
     /// Reveals a payload to every later blinded block.
     pub fn set_reveal<P: Preset>(&self, payload: &RevealedPayload<P>) {
-        *MockState::lock(&self.state.reveal) = Some((payload.fork_name(), payload.to_json()));
+        *MockState::lock(&self.state.reveal) = Some(Scripted {
+            fork: payload.fork_name(),
+            json: payload.to_json(),
+            ssz: payload.encode(),
+        });
+    }
+
+    /// Whether each blinded block received came in SSZ, in arrival order.
+    #[must_use]
+    pub fn blinded_blocks_in_ssz(&self) -> Vec<bool> {
+        MockState::lock(&self.state.submissions)
+            .iter()
+            .map(|submission| matches!(submission.block, Encoded::Ssz(_)))
+            .collect()
     }
 
     /// The registrations received so far, in arrival order.
@@ -210,13 +254,16 @@ impl MockRelay {
     /// # Errors
     ///
     /// Fails when a block does not decode as its fork's container.
-    pub fn blinded_blocks<P: Preset>(
-        &self,
-    ) -> Result<Vec<SignedBlindedBeaconBlock<P>>, ApiJsonError> {
+    pub fn blinded_blocks<P: Preset>(&self) -> Result<Vec<SignedBlindedBeaconBlock<P>>, String> {
         MockState::lock(&self.state.submissions)
             .iter()
-            .map(|submission| {
-                SignedBlindedBeaconBlock::from_json_in(submission.fork, &submission.block)
+            .map(|submission| match &submission.block {
+                Encoded::Json(block) => {
+                    SignedBlindedBeaconBlock::from_json_in(submission.fork, block)
+                        .map_err(|error| error.to_string())
+                }
+                Encoded::Ssz(bytes) => SignedBlindedBeaconBlock::decode(bytes, submission.fork)
+                    .map_err(|error| error.to_string()),
             })
             .collect()
     }
@@ -253,17 +300,24 @@ impl MockState {
         )
     }
 
-    /// A 200 carrying a versioned envelope.
-    fn versioned(fork: ForkName, data: Json) -> Response {
+    /// A 200 carrying a scripted answer, in SSZ when the request accepts it and the relay speaks it.
+    fn answer(&self, request: &Request, scripted: Scripted) -> Response {
+        let accepts_ssz = request
+            .headers
+            .get("accept")
+            .is_some_and(|accept| accept.contains("application/octet-stream"));
+        let response = Response::new(StatusCode::OK)
+            .with_header("eth-consensus-version", scripted.fork.as_str());
+        if accepts_ssz && !*Self::lock(&self.json_only) {
+            return response.with_body("application/octet-stream", scripted.ssz);
+        }
         let mut body = Object::new();
-        body.insert("version", Json::from(fork.as_str()));
-        body.insert("data", data);
-        Response::new(StatusCode::OK)
-            .with_header("eth-consensus-version", fork.as_str())
-            .with_body(
-                "application/json",
-                Json::Object(body).to_string().into_bytes(),
-            )
+        body.insert("version", Json::from(scripted.fork.as_str()));
+        body.insert("data", scripted.json);
+        response.with_body(
+            "application/json",
+            Json::Object(body).to_string().into_bytes(),
+        )
     }
 
     /// Serves the status endpoint.
@@ -362,7 +416,7 @@ impl MockState {
         }
         let bid = Self::lock(&self.bid).clone();
         match bid {
-            Some((fork, bid)) => Self::versioned(fork, bid),
+            Some(bid) => self.answer(request, bid),
             None => Response::new(StatusCode::NO_CONTENT),
         }
     }
@@ -379,13 +433,21 @@ impl MockState {
                 "missing or unknown consensus version",
             );
         };
-        let Ok(block) = Json::parse(&request.body) else {
-            return Self::error(StatusCode::BAD_REQUEST, "body is not JSON");
+        let block = if request.headers.get("content-type") == Some("application/octet-stream") {
+            if *Self::lock(&self.json_only) {
+                return Self::error(StatusCode::UNSUPPORTED_MEDIA_TYPE, "SSZ is not supported");
+            }
+            Encoded::Ssz(request.body.clone())
+        } else {
+            let Ok(block) = Json::parse(&request.body) else {
+                return Self::error(StatusCode::BAD_REQUEST, "body is not JSON");
+            };
+            Encoded::Json(block)
         };
         Self::lock(&self.submissions).push(Submission { fork, block });
         let payload = Self::lock(&self.reveal).clone();
         match payload {
-            Some((fork, payload)) => Self::versioned(fork, payload),
+            Some(payload) => self.answer(request, payload),
             None => Self::error(StatusCode::BAD_REQUEST, "no payload for this block"),
         }
     }
