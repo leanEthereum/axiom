@@ -11,8 +11,8 @@ use axiom_execution::{
     GetBlobsResponse, GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3,
     GetPayloadResponseV4, GetPayloadResponseV5, GetPayloadResponseV6, JsonCodec, JwtSecret,
     NewPayload, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
-    PayloadAttributesV4, PayloadId, PayloadStatus, PayloadStatusKind, RpcError, SyncStatus,
-    WireError, WireErrorKind,
+    PayloadAttributesV4, PayloadBody, PayloadId, PayloadStatus, PayloadStatusKind, RpcError,
+    SyncStatus, WireError, WireErrorKind,
     mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
@@ -894,6 +894,58 @@ fn get_blobs_v2_all_or_nothing() {
             })
         );
         engine.stop().await;
+    });
+}
+
+#[test]
+fn payload_bodies_come_by_hash_and_by_range() {
+    run(async {
+        let (engine, client) = connect().await;
+        let body = r#"{"transactions":["0x02f8"],"withdrawals":[]}"#;
+        engine.reply(
+            "engine_getPayloadBodiesByHashV1",
+            json(&format!("[{body},null]")),
+        );
+        engine.reply(
+            "engine_getPayloadBodiesByRangeV1",
+            json(&format!("[{body}]")),
+        );
+        let known = PayloadBody {
+            transactions: vec![vec![0x02, 0xf8]],
+            withdrawals: Some(Vec::new()),
+        };
+
+        // Two hashes: the first body is known, the second is not.
+        let hashes = [Hash32([1; 32]), Hash32([2; 32])];
+        assert_eq!(
+            client.payload_bodies_by_hash(&hashes).await.unwrap(),
+            [Some(known.clone()), None]
+        );
+        assert_eq!(
+            engine.calls()[0].params,
+            [json(&format!("[\"{}\",\"{}\"]", hashes[0], hashes[1]))]
+        );
+
+        // A range of four ending past the engine's head comes back shorter.
+        assert_eq!(
+            client.payload_bodies_by_range(10, 4).await.unwrap(),
+            [Some(known)]
+        );
+        assert_eq!(engine.calls()[1].params, [json("\"0xa\""), json("\"0x4\"")]);
+
+        // One hash answered with two entries is not an answer.
+        let error = client
+            .payload_bodies_by_hash(&hashes[..1])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EngineError::Length {
+                method: "engine_getPayloadBodiesByHashV1",
+                expected: 1,
+                actual: 2,
+            }
+        ));
     });
 }
 

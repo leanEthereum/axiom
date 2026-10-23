@@ -36,8 +36,12 @@ const AMSTERDAM_NEW_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Engine methods this client calls whatever the fork, as announced to the engine.
 ///
-/// See `src/engine/identification.md`.
-pub const FORK_INDEPENDENT: &[&str] = &["engine_getClientVersionV1"];
+/// See `src/engine/shanghai.md` and `src/engine/identification.md`.
+pub const FORK_INDEPENDENT: &[&str] = &[
+    "engine_getPayloadBodiesByHashV1",
+    "engine_getPayloadBodiesByRangeV1",
+    "engine_getClientVersionV1",
+];
 
 /// Engine methods this client calls, as announced to the engine.
 ///
@@ -60,6 +64,8 @@ pub const CAPABILITIES: &[&str] = &[
     "engine_getPayloadV6",
     "engine_getBlobsV1",
     "engine_getBlobsV2",
+    "engine_getPayloadBodiesByHashV1",
+    "engine_getPayloadBodiesByRangeV1",
     "engine_getClientVersionV1",
 ];
 
@@ -366,7 +372,7 @@ mod tests {
 
         // Each method version of the table appears once.
         assert_eq!(union, CAPABILITIES);
-        assert_eq!(CAPABILITIES.len(), 18);
+        assert_eq!(CAPABILITIES.len(), 20);
     }
 
     #[test]

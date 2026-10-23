@@ -49,6 +49,17 @@ pub enum EngineError {
         family: &'static str,
     },
 
+    /// The engine answered a list request with another number of entries than allowed.
+    #[error("engine answered {method} with {actual} entries, where {expected} were asked")]
+    Length {
+        /// The method.
+        method: &'static str,
+        /// Entries asked for, the most the reply may hold.
+        expected: usize,
+        /// Entries in the reply.
+        actual: usize,
+    },
+
     /// The engine answered a block lookup with another block.
     #[error("asked for block {requested}, the engine returned block {returned}")]
     BlockMismatch {

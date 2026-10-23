@@ -85,5 +85,5 @@ pub use wire::{
     ForkchoiceUpdated, GetBlobsResponse, GetPayloadResponse, GetPayloadResponseV2,
     GetPayloadResponseV3, GetPayloadResponseV4, GetPayloadResponseV5, GetPayloadResponseV6,
     JsonCodec, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
-    PayloadAttributesV4, PayloadId, PayloadStatus, PayloadStatusKind, SyncStatus,
+    PayloadAttributesV4, PayloadBody, PayloadId, PayloadStatus, PayloadStatusKind, SyncStatus,
 };

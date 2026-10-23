@@ -1,9 +1,12 @@
 //! A signed blinded beacon block of any fork that has one.
 
-use axiom_ssz::{Root, Ssz};
+use axiom_ssz::{ByteList, List, Root, Ssz};
 
 use crate::{
-    BlsSignature, ForkName, KzgCommitment, Preset, Slot, ValidatorIndex, bellatrix, capella,
+    BlsSignature, ForkName, Hash32, KzgCommitment, Preset, Slot, ValidatorIndex, bellatrix,
+    bellatrix::Transactions,
+    capella,
+    capella::{Withdrawal, Withdrawals},
     combined::{BlindedBeaconBlock, BlindedBlockError, ExecutionPayload, SignedBeaconBlock},
     deneb, electra, fulu,
     phase0::BeaconBlockHeader,
@@ -203,6 +206,83 @@ impl<P: Preset> SignedBlindedBeaconBlock<P> {
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
         })
+    }
+
+    /// Hash of the execution block the payload header names.
+    #[must_use]
+    pub const fn execution_block_hash(&self) -> Hash32 {
+        match self {
+            Self::Bellatrix(signed) => signed.message.body.execution_payload_header.block_hash,
+            Self::Capella(signed) => signed.message.body.execution_payload_header.block_hash,
+            Self::Deneb(signed) => signed.message.body.execution_payload_header.block_hash,
+            Self::Electra(signed) | Self::Fulu(signed) => {
+                signed.message.body.execution_payload_header.block_hash
+            }
+        }
+    }
+
+    /// The signed full block, rebuilt from the payload's transactions and withdrawals.
+    ///
+    /// The header holds every other payload field, so the body is all a pruned payload lacks.
+    /// See `ExecutionPayloadBodyV1` in `src/engine/shanghai.md` of the engine API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a list overflows its bound, or a fork with withdrawals gets none.
+    /// Fails when the body is not the one the header commits to.
+    pub fn with_payload_body(
+        self,
+        transactions: Vec<Vec<u8>>,
+        withdrawals: Option<Vec<Withdrawal>>,
+    ) -> Result<SignedBeaconBlock<P>, BlindedBlockError> {
+        let transactions: Transactions<P> = transactions
+            .into_iter()
+            .map(ByteList::try_from)
+            .collect::<Result<Vec<_>, _>>()?
+            .try_into()?;
+        let fork = self.fork_name();
+        let withdrawals = || -> Result<Withdrawals<P>, BlindedBlockError> {
+            let withdrawals = withdrawals.ok_or(BlindedBlockError::MissingWithdrawals { fork })?;
+            Ok(List::try_from(withdrawals)?)
+        };
+        let payload = match &self {
+            Self::Bellatrix(signed) => ExecutionPayload::Bellatrix(
+                signed
+                    .message
+                    .body
+                    .execution_payload_header
+                    .with_transactions(transactions),
+            ),
+            Self::Capella(signed) => ExecutionPayload::Capella(
+                signed
+                    .message
+                    .body
+                    .execution_payload_header
+                    .with_body(transactions, withdrawals()?),
+            ),
+            Self::Deneb(signed) => ExecutionPayload::Deneb(
+                signed
+                    .message
+                    .body
+                    .execution_payload_header
+                    .with_body(transactions, withdrawals()?),
+            ),
+            Self::Electra(signed) => ExecutionPayload::Electra(
+                signed
+                    .message
+                    .body
+                    .execution_payload_header
+                    .with_body(transactions, withdrawals()?),
+            ),
+            Self::Fulu(signed) => ExecutionPayload::Fulu(
+                signed
+                    .message
+                    .body
+                    .execution_payload_header
+                    .with_body(transactions, withdrawals()?),
+            ),
+        };
+        self.unblind(payload)
     }
 
     /// The signed full block, with the payload the header commits to.
