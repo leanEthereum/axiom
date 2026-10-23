@@ -189,7 +189,7 @@ where
             let cursor = state.next_withdrawal_builder_index_mut();
             *cursor = BuilderIndex((cursor.0 + expected.processed_builders_sweep) % builders);
         }
-        PayloadWithdrawals(&expected.withdrawals).advance_cursors(state);
+        PayloadWithdrawals::advance_cursors(&expected.withdrawals, state);
         Ok(())
     }
 }

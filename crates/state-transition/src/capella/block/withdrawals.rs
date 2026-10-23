@@ -1,8 +1,11 @@
 //! The withdrawals step of Capella: sweeping validators for balances to pay out.
 
+use axiom_ssz::{Root, Ssz};
 use axiom_types::{
-    Epoch, Gwei, Preset, ValidatorIndex, WithdrawalIndex, accessors::WithdrawalState,
-    capella::Withdrawal, phase0::Validator,
+    Epoch, Gwei, Preset, ValidatorIndex, WithdrawalIndex,
+    accessors::WithdrawalState,
+    capella::{Withdrawal, Withdrawals},
+    phase0::Validator,
 };
 
 use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
@@ -86,12 +89,77 @@ impl ValidatorSweep {
     }
 }
 
+/// What a block says its payload withdraws: the list, or its root once the payload was pruned.
+///
+/// The header of a pruned payload keeps the list's root, which binds it as tightly as the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WithdrawalsClaim<'a> {
+    /// The withdrawals, from a whole payload.
+    Listed(&'a [Withdrawal]),
+    /// The root of the withdrawals list, from a payload header.
+    Committed(Root),
+}
+
+impl WithdrawalsClaim<'_> {
+    /// Checks the claim against the withdrawals the state expects, in order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the list differs, or the root is not the expected list's.
+    pub fn check<P: Preset>(self, expected: &[Withdrawal]) -> Result<(), BlockError> {
+        match self {
+            Self::Listed(actual) if actual != expected => Err(BlockError::WithdrawalsMismatch {
+                expected: expected.len(),
+                actual: actual.len(),
+                first_difference: actual
+                    .iter()
+                    .zip(expected)
+                    .take_while(|(actual, expected)| actual == expected)
+                    .count(),
+            }),
+            Self::Listed(_) => Ok(()),
+            Self::Committed(claimed) => {
+                // Bound: the sweep never yields more than a payload holds, so the list fits.
+                let expected_root = Withdrawals::<P>::try_from(expected.to_vec())
+                    .map_err(|_| BlockError::WithdrawalsMismatch {
+                        expected: expected.len(),
+                        actual: 0,
+                        first_difference: 0,
+                    })?
+                    .hash_tree_root();
+                if claimed == expected_root {
+                    Ok(())
+                } else {
+                    Err(BlockError::WithdrawalsRootMismatch {
+                        claimed,
+                        expected: expected_root,
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// A payload's withdrawals, checked and paid by Capella's rules.
 ///
 /// Deneb kept this rule.
 /// Electra added the queue of partial withdrawals before the sweep, in its own type.
 #[derive(Clone, Copy, Debug)]
-pub struct PayloadWithdrawals<'a>(pub &'a [Withdrawal]);
+pub struct PayloadWithdrawals<'a>(pub WithdrawalsClaim<'a>);
+
+impl<'a> PayloadWithdrawals<'a> {
+    /// The withdrawals a whole payload carries.
+    #[must_use]
+    pub const fn listed(withdrawals: &'a [Withdrawal]) -> Self {
+        Self(WithdrawalsClaim::Listed(withdrawals))
+    }
+
+    /// The withdrawals a pruned payload's header commits to.
+    #[must_use]
+    pub const fn committed(root: Root) -> Self {
+        Self(WithdrawalsClaim::Committed(root))
+    }
+}
 
 impl<S: Fork + WithdrawalState> Operation<S> for PayloadWithdrawals<'_> {
     /// Checks a payload's withdrawals against the sweep, then pays them.
@@ -100,19 +168,8 @@ impl<S: Fork + WithdrawalState> Operation<S> for PayloadWithdrawals<'_> {
     ///
     /// See `process_withdrawals` in the Capella beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
-        let actual = self.0;
         let expected = ValidatorSweep::compute(processor.state.beacon())?.withdrawals;
-        if actual != expected.as_slice() {
-            return Err(BlockError::WithdrawalsMismatch {
-                expected: expected.len(),
-                actual: actual.len(),
-                first_difference: actual
-                    .iter()
-                    .zip(&expected)
-                    .take_while(|(actual, expected)| actual == expected)
-                    .count(),
-            });
-        }
+        self.0.check::<S::Preset>(&expected)?;
 
         for withdrawal in &expected {
             processor

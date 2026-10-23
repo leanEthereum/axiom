@@ -9,22 +9,16 @@ mod upgrade;
 use axiom_types::{
     ChainConfig, Preset, ValidatorIndex,
     accessors::ExecutionHeaderState,
-    bellatrix::{BeaconBlock, BeaconState},
+    bellatrix::{BeaconBlock, BeaconState, BlindedBeaconBlock},
     phase0::BeaconBlockHeader,
 };
 
 use crate::{
-    BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes, Fork,
-    PayloadEngine, Registry, StateError,
-    altair::{
-        AltairEpoch,
-        block::{FlaggedAttestation, ParticipantDeposit},
-    },
-    bellatrix::block::PayloadExecution,
-    phase0::{
-        ExitQueue, Slashing, SlotRoots,
-        block::{DepositQuota, RandaoReveal},
-    },
+    BlindedFork, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes,
+    Fork, PayloadEngine, Registry, StateError,
+    altair::AltairEpoch,
+    bellatrix::block::{BodyOperations, PayloadExecution},
+    phase0::{ExitQueue, Slashing, SlotRoots},
     rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
@@ -119,20 +113,30 @@ impl<P: Preset> Fork for BeaconState<P> {
         if payload.is_execution_enabled(latest) {
             processor.apply(&payload)?;
         }
-        processor.apply(&RandaoReveal(body.randao_reveal))?;
-        processor.apply(&body.eth1_data)?;
+        BodyOperations::from(body).apply(processor)
+    }
+}
 
-        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
-        processor.apply_all(&body.proposer_slashings)?;
-        processor.apply_all(&body.attester_slashings)?;
-        for attestation in &body.attestations {
-            processor.apply(&FlaggedAttestation(attestation))?;
-        }
-        for deposit in &body.deposits {
-            processor.apply(&ParticipantDeposit(deposit))?;
-        }
-        processor.apply_all(&body.voluntary_exits)?;
+impl<P: Preset> BlindedFork for BeaconState<P> {
+    type BlindedBlock = BlindedBeaconBlock<P>;
 
-        processor.apply(&body.sync_aggregate)
+    fn blinded_block_header(block: &BlindedBeaconBlock<P>) -> BeaconBlockHeader {
+        block.header()
+    }
+
+    /// Runs Bellatrix's block processing on a blinded block, its payload read from the header.
+    fn process_blinded_block(
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BlindedBeaconBlock<P>,
+        header: &BeaconBlockHeader,
+    ) -> Result<(), BlockError> {
+        let body = &block.body;
+        processor.apply(header)?;
+        let payload = PayloadExecution::blinded(body);
+        let latest = processor.state.beacon().latest_execution_payload_header();
+        if payload.is_execution_enabled(latest) {
+            processor.apply(&payload)?;
+        }
+        BodyOperations::from(body).apply(processor)
     }
 }

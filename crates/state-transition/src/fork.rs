@@ -122,6 +122,39 @@ pub trait Fork: ForkState + Ssz + Clone + Debug + 'static {
     ) -> Result<(), BlockError>;
 }
 
+/// The rules of a fork whose blocks carry an execution payload, applied to blocks whose payload was pruned.
+///
+/// # Overview
+///
+/// A blinded block keeps the payload's header, which commits to every payload field.
+/// Block processing reads the payload only through that header, but for execution:
+///
+/// - the parent hash, the randomness, and the timestamp checks read the header,
+/// - the withdrawals check compares the expected list's root with the header's,
+/// - the state caches the header, which is the payload's header field for field.
+///
+/// So a blinded block moves the state exactly as its whole block did.
+/// Only execution needs the payload, and a pruned payload's block was judged at import.
+/// Bellatrix through Fulu have blinded blocks; Gloas moves the payload out of the block.
+pub trait BlindedFork: Fork {
+    /// The blinded block of this fork.
+    type BlindedBlock: Ssz;
+
+    /// The header of a blinded block, the same as its whole block's.
+    fn blinded_block_header(block: &Self::BlindedBlock) -> BeaconBlockHeader;
+
+    /// Applies a blinded block, given with its header.
+    ///
+    /// # Errors
+    ///
+    /// Fails at the first broken rule.
+    fn process_blinded_block(
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &Self::BlindedBlock,
+        header: &BeaconBlockHeader,
+    ) -> Result<(), BlockError>;
+}
+
 /// A fork's state built from its predecessor's, at the first slot of the fork epoch.
 ///
 /// The pre-state is taken by value: its fields move into the post-state without copies.

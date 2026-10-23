@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use axiom_state_transition::{KnownVerdict, State, Verification};
 use axiom_types::{Preset, Slot, accessors::CoreState};
 
-use crate::{ChainDatabase, ChainError};
+use crate::{ChainDatabase, ChainError, StoredBlock};
 
 /// Rebuilds finalized states, keeping the most recent results.
 ///
@@ -96,15 +96,22 @@ impl<P: Preset> StateReplay<P> {
         let config = database.config();
         let from = state.beacon().slot() + 1;
         for (block_slot, root) in database.canonical_range(from, slot + 1)? {
-            let block = database
-                .block(root)?
-                .ok_or(ChainError::Missing("finalized block"))?;
-            state
-                .state_transition(config, &block, Verification::Skip, &KnownVerdict(true))
-                .map_err(|source| ChainError::Replay {
-                    slot: block_slot,
-                    source,
-                })?;
+            // A block whose payload was pruned replays from its header, to the same state.
+            let applied = match database
+                .stored_block(root)?
+                .ok_or(ChainError::Missing("finalized block"))?
+            {
+                StoredBlock::Full(block) => {
+                    state.state_transition(config, &block, Verification::Skip, &KnownVerdict(true))
+                }
+                StoredBlock::Blinded(block) => {
+                    state.state_transition(config, &block, Verification::Skip, &KnownVerdict(true))
+                }
+            };
+            applied.map_err(|source| ChainError::Replay {
+                slot: block_slot,
+                source,
+            })?;
         }
         if state.beacon().slot() < slot {
             state

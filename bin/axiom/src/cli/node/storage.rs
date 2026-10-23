@@ -19,7 +19,7 @@ pub(crate) const STORAGE_USAGE: &str = "\
     --blob-prune-margin-epochs <EPOCHS>
                                  epochs of sidecars kept past the window [default: 0]
     --prune-payloads <BOOL>      keep finalized blocks blinded, rebuilding their payloads from
-                                 the engine; needs an engine, off in archive mode [default: true]
+                                 the engine when served; needs an engine [default: true]
 ";
 
 /// How the chain database is deleted before the node starts.

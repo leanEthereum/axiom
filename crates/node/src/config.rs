@@ -503,8 +503,7 @@ pub struct DatabaseSettings {
     pub compact_on_start: bool,
     /// Whether finalized blocks lose their payloads, kept blinded and rebuilt from the engine.
     ///
-    /// It applies only with an engine to rebuild from, and outside archive mode.
-    /// An archive replays finalized blocks to rebuild past states, and replay needs every payload.
+    /// It applies only with an engine to rebuild from.
     pub prune_payloads: bool,
 }
 
@@ -520,11 +519,11 @@ impl Default for DatabaseSettings {
 }
 
 impl NodeConfig {
-    /// Whether finalized payloads leave the disk: asked for, with an engine, and outside archive mode.
+    /// Whether finalized payloads leave the disk: asked for, and with an engine to rebuild them from.
+    ///
+    /// An archive prunes them too: it replays finalized blocks from their payload headers.
     const fn prunes_payloads(&self) -> bool {
-        self.database.prune_payloads
-            && self.engine.is_some()
-            && matches!(self.history.mode, StorageMode::Pruned)
+        self.database.prune_payloads && self.engine.is_some()
     }
     /// Opens the database and builds the chain from its anchor, a checkpoint, or genesis.
     ///
