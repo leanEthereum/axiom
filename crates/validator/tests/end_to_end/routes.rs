@@ -347,8 +347,11 @@ impl Routes {
             |chain, request| async move {
                 let preferences = Vec::<SignedProposerPreferences>::from_json(&body(&request))
                     .expect("signed preferences");
-                lock(&chain).receive_preferences(&preferences);
-                ok()
+                if lock(&chain).receive_preferences(&preferences) {
+                    ok()
+                } else {
+                    error(StatusCode::SERVICE_UNAVAILABLE, "preferences refused once")
+                }
             },
         )
         .add(

@@ -11,6 +11,7 @@ use axiom_types::{
     bellatrix::{SignedValidatorRegistrationV1, ValidatorRegistrationV1},
     gloas::{ProposerPreferences, SignedProposerPreferences},
 };
+use tokio::sync::Mutex as RoundLock;
 use tracing::{debug, info, warn};
 
 use crate::{beacon::ApiTopic, duties::DutyContext, signing::SigningRequest};
@@ -27,6 +28,7 @@ use crate::{beacon::ApiTopic, duties::DutyContext, signing::SigningRequest};
 ///
 /// Preferences commit to the proposal's dependent root, which a reorg may change.
 /// Checking each slot signs them again over the new root, right after duties are refreshed.
+/// They count as sent only once a node accepts them, so a failed round is retried a slot later.
 ///
 /// A registration is signed again only when its settings change, so builders see a stable timestamp.
 /// An operator may fix the timestamp, and registrations go out in batches of a configured size.
@@ -37,6 +39,8 @@ pub struct Preparation<P: Preset> {
     context: DutyContext<P>,
     /// The latest signed registration of each validator.
     registrations: Mutex<BTreeMap<BlsPubkey, SignedValidatorRegistrationV1>>,
+    /// Held through a round of preferences, so two rounds never sign the same proposal.
+    preferences_round: RoundLock<()>,
 }
 
 impl<P: Preset> Preparation<P> {
@@ -46,6 +50,7 @@ impl<P: Preset> Preparation<P> {
         Self {
             context,
             registrations: Mutex::new(BTreeMap::new()),
+            preferences_round: RoundLock::const_new(()),
         }
     }
 
@@ -157,6 +162,12 @@ impl<P: Preset> Preparation<P> {
     /// See `get_upcoming_proposal_slots` in the Gloas validator spec.
     /// See also `get_signed_proposer_preferences` there.
     pub async fn publish_preferences(&self, epoch: Epoch) {
+        // A round still signing or sending from an earlier slot covers this one.
+        // What it leaves unsent is picked up by the next slot's round.
+        let Ok(_round) = self.preferences_round.try_lock() else {
+            debug!(epoch = epoch.0, "proposer preferences round still running");
+            return;
+        };
         let current = self.context.timer.current_slot();
         let mut coming = Vec::new();
         for epoch in [epoch, epoch + 1] {
@@ -175,10 +186,10 @@ impl<P: Preset> Preparation<P> {
         }
         let mut signed = Vec::new();
         for (duty, dependent_root) in coming {
-            if !self
+            if self
                 .context
                 .book()
-                .mark_preferences(duty.slot, dependent_root)
+                .has_preferences(duty.slot, dependent_root)
             {
                 continue;
             }
@@ -219,7 +230,16 @@ impl<P: Preset> Preparation<P> {
             })
             .await;
         match published {
-            Ok(()) => info!(count, "proposer preferences published"),
+            Ok(()) => {
+                let mut book = self.context.book();
+                for preferences in signed.iter() {
+                    let message = &preferences.message;
+                    book.mark_preferences(message.proposal_slot, message.dependent_root);
+                }
+                drop(book);
+                info!(count, "proposer preferences published");
+            }
+            // Nothing is marked, so the next slot signs and sends them again.
             Err(error) => warn!(%error, "proposer preferences refused"),
         }
     }

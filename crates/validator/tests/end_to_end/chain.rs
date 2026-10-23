@@ -88,6 +88,8 @@ pub(crate) struct TestChain {
     head: Root,
     /// Slot of the latest applied block.
     head_slot: Slot,
+    /// Whether a batch of proposer preferences was refused yet.
+    refused_preferences: bool,
     /// What happened so far.
     pub(crate) tally: Tally,
 }
@@ -111,6 +113,7 @@ impl TestChain {
             pending: None,
             head,
             head_slot: Slot(0),
+            refused_preferences: false,
             tally: Tally::default(),
         }
     }
@@ -165,13 +168,27 @@ impl TestChain {
     }
 
     /// Counts signed proposer preferences, each committed to its proposal's shuffling.
-    pub(crate) fn receive_preferences(&mut self, preferences: &[gloas::SignedProposerPreferences]) {
+    ///
+    /// The first batch is refused, so the client has to sign and send it again.
+    ///
+    /// # Returns
+    ///
+    /// Whether the batch was accepted.
+    pub(crate) fn receive_preferences(
+        &mut self,
+        preferences: &[gloas::SignedProposerPreferences],
+    ) -> bool {
+        if !self.refused_preferences {
+            self.refused_preferences = true;
+            return false;
+        }
         for signed in preferences {
             // Invariant: preferences commit to the shuffling one epoch before the proposal.
             let epoch = signed.message.proposal_slot.epoch::<Minimal>();
             assert_eq!(signed.message.dependent_root, self.shuffling_root(epoch));
         }
         self.tally.preferences += preferences.len() as u64;
+        true
     }
 
     /// Registry entries of the given keys.
