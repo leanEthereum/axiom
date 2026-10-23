@@ -12,7 +12,8 @@ use crate::cli::{CliError, arguments::Arguments};
 pub(crate) const PROPOSER_USAGE: &str = "\
     --suggested-fee-recipient <ADDR>
                                  fee recipient when a validator names none
-    --graffiti <TEXT>            graffiti when a block request names none, up to 32 bytes
+    --graffiti <TEXT>            graffiti of every block unless a validator keeps its own,
+                                 up to 32 bytes [default: client versions]
     --builder <URL>              builder API endpoint, such as a relay multiplexer, repeatable
     --builder-header-timeout <MS>
                                  bid deadline, at most 3000 [default: 1000]

@@ -80,7 +80,7 @@ pub struct ProposerService<P: Preset> {
     relays: Option<RelaySet>,
     /// When the chain is too unhealthy to trust builders with a slot.
     breaker: CircuitBreaker,
-    /// The operator's graffiti, for blocks whose request names none.
+    /// The operator's graffiti, which overrides any text a validator does not ask to keep.
     graffiti: Option<Bytes32>,
     /// Whether payloads are prepared for every slot, not only for prepared proposers.
     always_prepare: bool,
@@ -155,9 +155,9 @@ impl<P: Preset> ProposerService<P> {
         self
     }
 
-    /// Writes the operator's graffiti, when one is set, into blocks whose request names none.
+    /// Writes the operator's graffiti, when one is set, into every block a validator lets it.
     ///
-    /// Without one, such blocks carry the client versions that built them.
+    /// Without one, blocks carry the client versions that built them.
     #[must_use]
     pub const fn with_graffiti(mut self, graffiti: Option<Bytes32>) -> Self {
         self.graffiti = graffiti;

@@ -382,7 +382,7 @@ pub struct ProposerSettings {
     pub builder_client: BuilderClientSettings,
     /// When the chain is too unhealthy to ask builders.
     pub builder_fallback: BuilderFallback,
-    /// Graffiti of blocks whose request names none.
+    /// Graffiti of every block a validator does not keep its own text in.
     pub graffiti: Option<Bytes32>,
     /// How long before a slot its payload is prepared; none prepares a third of a slot ahead.
     pub prepare_lookahead: Option<Duration>,

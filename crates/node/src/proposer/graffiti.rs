@@ -51,14 +51,18 @@ impl FromStr for GraffitiPolicy {
 ///     30 to 32      none                the text alone
 /// ```
 ///
-/// The validator's text comes first; the operator's graffiti serves requests that name none.
-/// A validator may keep its text untouched.
-/// Without an engine identity, a validator's text stays as it is.
-/// A block with no text from anyone then carries the client version.
+/// The decision runs in this order, the first that applies winning:
+///
+/// 1. A validator that asks to keep its text gets it untouched.
+/// 2. The operator's graffiti, when set, overrides any other text.
+/// 3. Without a single engine identity, the block carries the client version alone.
+/// 4. Otherwise the validator's text, if any, gets the suffix above.
+///
+/// An engine that answers with no identity, or a multiplexer that answers with several, names no client.
 /// See the client version specification in `src/engine/identification.md` of the engine API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct GraffitiChoice<'a> {
-    /// The operator's graffiti, for requests that name none.
+    /// The operator's graffiti, which overrides any text a validator does not ask to keep.
     pub(crate) operator: Option<Bytes32>,
     /// The validator's graffiti, when its request names one.
     pub(crate) validator: Option<Bytes32>,
@@ -75,25 +79,23 @@ impl GraffitiChoice<'_> {
         validator: Option<Bytes32>,
         policy: GraffitiPolicy,
     ) -> bool {
-        match validator {
-            Some(_) => matches!(policy, GraffitiPolicy::AppendClientVersions),
-            None => operator.is_none(),
-        }
+        let preserved =
+            validator.is_some() && matches!(policy, GraffitiPolicy::PreserveUserGraffiti);
+        !preserved && operator.is_none()
     }
 
     /// The graffiti the block carries.
     pub(crate) fn graffiti(self) -> Bytes32 {
-        match (self.validator, self.policy) {
-            (Some(validator), GraffitiPolicy::PreserveUserGraffiti) => return validator,
-            (None, _) => {
-                if let Some(operator) = self.operator {
-                    return operator;
-                }
-            }
-            (Some(_), GraffitiPolicy::AppendClientVersions) => {}
+        if let (Some(validator), GraffitiPolicy::PreserveUserGraffiti) =
+            (self.validator, self.policy)
+        {
+            return validator;
+        }
+        if let Some(operator) = self.operator {
+            return operator;
         }
         let Some(engine) = self.engine else {
-            return self.validator.unwrap_or_else(|| Self::padded(VERSION));
+            return Self::padded(VERSION);
         };
         let ours = COMMIT.strip_prefix("0x").unwrap_or(COMMIT).to_lowercase();
         let theirs = engine.commit_prefix();
@@ -193,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn the_validator_text_comes_first_and_no_engine_keeps_it() {
+    fn the_operator_overrides_and_no_engine_gives_the_client_version() {
         let engine = geth();
         let validator = Some(GraffitiChoice::padded("hello"));
         let operator = Some(GraffitiChoice::padded("operator"));
@@ -217,10 +219,20 @@ mod tests {
             ),
             GraffitiChoice::padded("hello")
         );
-        // Appending keeps the validator's text over the operator's.
+        // Otherwise the operator's graffiti overrides the validator's text.
         assert_eq!(
             choice(
                 operator,
+                validator,
+                GraffitiPolicy::AppendClientVersions,
+                Some(&engine)
+            ),
+            GraffitiChoice::padded("operator")
+        );
+        // Without operator graffiti, the validator's text gets the suffix.
+        assert_eq!(
+            choice(
+                None,
                 validator,
                 GraffitiPolicy::AppendClientVersions,
                 Some(&engine)
@@ -248,8 +260,13 @@ mod tests {
             validator,
             GraffitiPolicy::PreserveUserGraffiti
         ));
-        assert!(GraffitiChoice::reads_engine(
+        assert!(!GraffitiChoice::reads_engine(
             operator,
+            validator,
+            GraffitiPolicy::AppendClientVersions
+        ));
+        assert!(GraffitiChoice::reads_engine(
+            None,
             validator,
             GraffitiPolicy::AppendClientVersions
         ));
@@ -263,10 +280,10 @@ mod tests {
             ),
             GraffitiChoice::padded("GEfa4fAX0000")
         );
-        // No engine identity: the text unchanged, or the client version without one.
+        // No engine identity: the client version alone, even over a validator's appended text.
         assert_eq!(
             choice(None, validator, GraffitiPolicy::AppendClientVersions, None),
-            GraffitiChoice::padded("hello")
+            GraffitiChoice::padded(VERSION)
         );
         assert_eq!(
             choice(None, None, GraffitiPolicy::AppendClientVersions, None),
