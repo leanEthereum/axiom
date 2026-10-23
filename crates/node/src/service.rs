@@ -6,37 +6,31 @@ use axiom_builder_client::RelaySet;
 use axiom_p2p::swarm::NetworkHandle;
 use axiom_telemetry::{NodeMetrics, Registry};
 use axiom_types::{ChainConfig, Preset, SlotClock};
-use tokio::{
-    sync::watch,
-    task::{self, JoinHandle},
-};
-use tracing::{error, info, warn};
+use tokio::task::{self, JoinHandle};
 
 use crate::{
-    ChainHandle, Clock, EventHub, EventSender, ExecutionLayer, NetworkSettings, NodeConfig,
-    NodeError, NodeKey, ProposerService, ProposerSettings, Publisher,
-    api::ApiServices,
+    ChainHandle, Clock, EventSender, ExecutionLayer, NetworkSettings, NodeConfig, NodeError,
+    NodeKey, ProposerService, ProposerSettings,
     network::{
         AttestationSubnets, Discovery, ForkDigests, NatMetrics, NetworkIdentity, NetworkService,
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
     },
-    race::Either,
-    slasher::SlashingBroadcaster,
-    tasks::{EngineFollower, PayloadPreparer, SyncWatcher, Ticker},
+    running::{OpenedChain, Telemetry},
+    tasks::PayloadPreparer,
 };
 
 /// The running chain, as the services started after it see it.
 #[derive(Clone, Copy, Debug)]
-struct StartedChain<'a, P: Preset> {
+pub(crate) struct StartedChain<'a, P: Preset> {
     /// The chain thread.
-    handle: &'a ChainHandle<P>,
+    pub(crate) handle: &'a ChainHandle<P>,
     /// Genesis and the slot length.
-    slots: SlotClock,
+    pub(crate) slots: SlotClock,
 }
 
 impl<P: Preset> StartedChain<'_, P> {
     /// Starts the proposal desk, and the task that prepares payloads before each slot.
-    fn start_proposer(
+    pub(crate) fn start_proposer(
         self,
         execution: &Arc<ExecutionLayer>,
         clock: &Arc<dyn Clock>,
@@ -79,7 +73,7 @@ impl<P: Preset> StartedChain<'_, P> {
     ///
     /// The network handle, for shutdown and publishing.
     /// Then the service's task, and the node's identity.
-    async fn start_network(
+    pub(crate) async fn start_network(
         self,
         key: NodeKey,
         identity: NetworkIdentity,
@@ -171,7 +165,7 @@ impl<P: Preset> StartedChain<'_, P> {
 
 /// The services every network component shares.
 #[derive(Clone, Debug)]
-struct SharedServices {
+pub(crate) struct SharedServices {
     /// Where accepted gossip goes out to event stream clients.
     events: EventSender,
     /// The execution engine.
@@ -188,7 +182,7 @@ struct SharedServices {
 
 impl SharedServices {
     /// The shared services, with the network's own metrics registered beside the node's.
-    fn new(
+    pub(crate) fn new(
         events: EventSender,
         execution: Arc<ExecutionLayer>,
         clock: Arc<dyn Clock>,
@@ -225,158 +219,31 @@ pub struct Node<P: Preset> {
 impl<P: Preset> Node<P> {
     /// Runs a node until a shutdown future completes.
     ///
+    /// 1. Telemetry and the event hub, so every later component records and publishes.
+    /// 2. The chain thread, with its slasher, monitor, and custody.
+    /// 3. The engine, the network, the proposal desk, the servers, and the loops over the chain.
+    /// 4. Shutdown, or a chain crash, stops everything in reverse dependency order.
+    ///
     /// # Errors
     ///
     /// Fails when a component cannot start, or the chain stops on its own.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "every service starts and stops here in order, read top to bottom"
-    )]
     pub async fn run(
         chain_config: ChainConfig,
         config: NodeConfig,
         clock: Arc<dyn Clock>,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), NodeError> {
-        // Telemetry comes first, so every later component records into the same registry.
-        let registry = Registry::new();
-        let metrics = NodeMetrics::register(&registry).map_err(NodeError::Metrics)?;
-        if let Err(error) = registry.register_process_metrics() {
-            warn!(%error, "process metrics unavailable");
-        }
-
-        // The event stream: the chain and the network publish, the API subscribes.
-        let (hub, event_sender, streams) = EventHub::new();
-        let hub = task::spawn(hub.run());
-
-        // The chain, with its slasher, telemetry, event feed, and the network identity's custody.
-        let (chain, identity) = Box::pin(config.start_chain::<P>(
+        let telemetry = Telemetry::start()?;
+        let opened = Box::pin(OpenedChain::<P>::open(
+            &config,
             chain_config,
             clock.as_ref(),
-            metrics.clone(),
-            event_sender.clone(),
+            &telemetry,
         ))
         .await?;
-        let chain = config.attach_monitor(chain, &registry)?;
-        let (chain, found_slashings) = config.attach_slashing_broadcast(chain);
-        let events = chain.subscribe();
-        let schedule = chain.config().clone();
-        // A zero slot length would divide by zero, so the node's timers clamp it to one.
-        let store_slots = chain.store().slot_clock();
-        let slots = SlotClock::new(
-            store_slots.genesis_ms(),
-            store_slots.slot_duration_ms().max(1),
-        );
-        let (handle, chain_thread) = ChainHandle::spawn(chain).map_err(|error| NodeError::Io {
-            context: "spawning the chain thread",
-            error,
-        })?;
-
-        // The engine, or a stand-in that keeps every payload optimistic.
-        let execution = Arc::new(config.open_engine()?.with_metrics(metrics.clone()));
-        let stats = config.start_client_stats(&handle, &clock, metrics.clone())?;
-
-        // The network, when configured, runs its own event loop.
-        let network = match (identity, &config.network) {
-            (Some(identity), Some(settings)) => {
-                let started = StartedChain {
-                    handle: &handle,
-                    slots,
-                };
-                let services = SharedServices::new(
-                    event_sender,
-                    Arc::clone(&execution),
-                    Arc::clone(&clock),
-                    metrics,
-                    &registry,
-                )?;
-                let (key, identity) = identity;
-                // The network's start holds every service's state; boxing keeps this future small.
-                let starting = Box::pin(started.start_network(key, identity, settings, services));
-                Some(starting.await?)
-            }
-            _ => None,
-        };
-        let (network, identity) = match network {
-            Some((p2p, service, identity)) => (Some((p2p, service)), Some(Arc::new(identity))),
-            None => (None, None),
-        };
-
-        // The proposal desk builds payloads ahead of prepared validators' slots.
-        let started = StartedChain {
-            handle: &handle,
-            slots,
-        };
-        let (proposer, preparer) = started.start_proposer(&execution, &clock, &config.proposer)?;
-
-        // Proposed blocks go out on the network, when there is one, before import.
-        let api = ApiServices {
-            publisher: Arc::new(Publisher::new(
-                handle.clone(),
-                Arc::clone(&execution),
-                Arc::clone(&clock),
-                network.as_ref().map(|(p2p, _)| p2p.clone()),
-            )),
-            proposer: Arc::clone(&proposer),
-            identity,
-            events: streams,
-            execution: Arc::clone(&execution),
-        };
-
-        let broadcaster = SlashingBroadcaster::spawn(found_slashings, &api.publisher);
-
-        // Every server watches one shutdown signal.
-        let (stop, stopped) = watch::channel(false);
-        let servers = Box::pin(config.start_servers(&handle, api, registry, &stopped)).await?;
-
-        // Background loops run until aborted.
-        let mut ticker = task::spawn(Ticker::new(handle.clone(), clock, slots).run());
-        let follower = task::spawn(
-            EngineFollower::new(handle.clone(), events, execution, proposer, schedule).run(),
-        );
-
-        // An operator who only wants the chain synced stops the node once it is.
-        let synced = SyncWatcher::new(handle.clone(), slots).stop(config.shutdown_after_sync);
-        let shutdown = Either::race(shutdown, synced);
-
-        // The ticker only ends when the chain thread is gone, such as after a panic.
-        // The node then stops too, rather than serving from a dead chain.
-        let crashed = matches!(Either::race(shutdown, &mut ticker).await, Either::Right(_));
-        if crashed {
-            error!("chain thread stopped; shutting down");
-        } else {
-            info!("shutting down");
-        }
-
-        // Servers first, so no request reaches a chain that is going away.
-        let _unwatched = stop.send(true);
-        for server in servers {
-            let _finished = server.await;
-        }
-        if let Some((p2p, service)) = network {
-            // A swarm that already stopped needs no second notice.
-            let _stopped = p2p.shutdown().await;
-            service.abort();
-            let _cancelled = service.await;
-        }
-        let loops = [ticker, follower, preparer, hub].into_iter();
-        Self::abort_all(loops.chain(stats).chain(broadcaster)).await;
-
-        // The chain thread ends once the last handle is gone and its queue drains.
-        drop(handle);
-        let joined = task::spawn_blocking(move || chain_thread.join()).await;
-        if crashed || !matches!(joined, Ok(Ok(_))) {
-            return Err(NodeError::ChainStopped);
-        }
-        info!("stopped");
-        Ok(())
-    }
-
-    /// Aborts background loops and waits until each has stopped.
-    async fn abort_all(tasks: impl IntoIterator<Item = JoinHandle<()>>) {
-        for task in tasks {
-            task.abort();
-            let _cancelled = task.await;
-        }
+        let running = Box::pin(opened.serve(&config, clock, telemetry)).await?;
+        running
+            .run_until(shutdown, config.shutdown_after_sync)
+            .await
     }
 }

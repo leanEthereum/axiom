@@ -27,6 +27,7 @@ pub(crate) mod network;
 mod proposer;
 mod publish;
 mod race;
+mod running;
 mod service;
 mod slasher;
 mod target_committees;
