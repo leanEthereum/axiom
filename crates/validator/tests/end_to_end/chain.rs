@@ -95,11 +95,14 @@ pub(crate) struct TestChain {
 impl TestChain {
     /// A chain at its genesis.
     pub(crate) fn new(builder: ChainBuilder<Minimal>) -> Self {
-        let head = builder
-            .state()
-            .beacon()
-            .latest_block_header()
-            .hash_tree_root();
+        // The genesis header leaves its state root zero until slot 1 fills it with the genesis state's.
+        // The block of slot 1 names the filled header as its parent, so the head does too.
+        let state = builder.state();
+        let mut header = state.beacon().latest_block_header().clone();
+        if header.state_root == Root::ZERO {
+            header.state_root = state.hash_tree_root();
+        }
+        let head = header.hash_tree_root();
         Self {
             builder,
             votes: BTreeMap::new(),
@@ -138,14 +141,27 @@ impl TestChain {
         state
     }
 
-    /// The root an epoch's shuffling depends on, the last block before the previous epoch.
+    /// The root an epoch's shuffling depends on: the head's ancestor at the dependent slot.
+    ///
+    /// The dependent slot is the last slot before the lookahead epoch, or genesis.
+    /// A head at or before that slot is its own ancestor there, so the head's root is the answer.
+    /// The state's root history holds only slots before the head's.
+    /// See `get_shuffling_dependent_root` in the phase0 fork choice spec.
     pub(crate) fn shuffling_root(&self, epoch: Epoch) -> Root {
-        let beacon = self.builder.state().beacon();
-        let start = epoch.0.saturating_sub(1) * Minimal::SLOTS_PER_EPOCH;
-        start
-            .checked_sub(1)
-            .and_then(|slot| beacon.block_root_at_slot(Slot(slot)))
-            .unwrap_or(Root::ZERO)
+        let dependent_slot = epoch
+            .saturating_sub(Minimal::MIN_SEED_LOOKAHEAD)
+            .start_slot::<Minimal>()
+            .saturating_sub(1);
+        if self.head_slot <= dependent_slot {
+            return self.head;
+        }
+        // Invariant: duties are asked for the current epoch and the next only.
+        // Their dependent slot is then at most 16 slots behind the head, inside 64 slots of roots.
+        self.builder
+            .state()
+            .beacon()
+            .block_root_at_slot(dependent_slot)
+            .expect("the dependent slot lies within the root history")
     }
 
     /// Counts signed proposer preferences, each committed to its proposal's shuffling.
@@ -763,4 +779,63 @@ fn aggregate_signatures<'a>(signatures: impl Iterator<Item = &'a BlsSignature>) 
             .expect("at least one signature")
             .to_bytes(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_ef_tests::{
+        Case, Vectors,
+        chain_builder::{ChainBuilder, PYSPEC_GENESIS},
+    };
+    use axiom_types::{Epoch, Minimal, Slot, phase0};
+
+    use super::TestChain;
+    use crate::schedule;
+
+    #[test]
+    fn the_shuffling_root_is_the_heads_ancestor_at_the_dependent_slot() {
+        let Some(vectors) = Vectors::locate() else {
+            return;
+        };
+        let genesis: phase0::BeaconState<Minimal> =
+            Case::new(vectors.consensus().join(PYSPEC_GENESIS))
+                .ssz("state")
+                .expect("the genesis vector decodes");
+
+        // Fixture state: the node's chain at genesis, and a twin builder that signs its blocks.
+        let mut proposer = ChainBuilder::<Minimal>::new(schedule(), genesis.clone())
+            .expect("the pyspec genesis builds");
+        let mut chain = TestChain::new(
+            ChainBuilder::new(schedule(), genesis).expect("the pyspec genesis builds"),
+        );
+        let genesis_root = chain.head().0;
+
+        // Epoch 1 depends on slot 0, the genesis block, while the head is still genesis.
+        assert_eq!(chain.shuffling_root(Epoch(1)), genesis_root);
+
+        // Blocks at slots 1 to 7 fill epoch 0.
+        let mut roots = vec![genesis_root];
+        for _ in 1..=7 {
+            let proposal = proposer.propose().expect("the next block builds");
+            chain
+                .apply(proposal.block(), None)
+                .expect("the block applies with its signatures");
+            roots.push(proposal.block().block_root());
+        }
+        // It still does once seven blocks build on it.
+        assert_eq!(chain.shuffling_root(Epoch(1)), genesis_root);
+
+        // Epoch 2 depends on slot 7, the last of epoch 0.
+        // The head sits at slot 7, before any block of epoch 1 lands.
+        // The state's root history stops at slot 6, so the answer is the head itself.
+        assert_eq!(chain.head(), (roots[7], Slot(7)));
+        assert_eq!(chain.shuffling_root(Epoch(2)), roots[7]);
+
+        // Mutation: the block of slot 8 lands; epoch 2 still depends on the block of slot 7.
+        let proposal = proposer.propose().expect("the next block builds");
+        chain
+            .apply(proposal.block(), None)
+            .expect("the block applies with its signatures");
+        assert_eq!(chain.shuffling_root(Epoch(2)), roots[7]);
+    }
 }

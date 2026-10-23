@@ -195,6 +195,14 @@ pub enum BlockError {
         /// Position of the first withdrawal that differs, or the shorter length.
         first_difference: usize,
     },
+    /// The withdrawals root of a pruned payload's header is not the expected list's.
+    #[error("payload header commits to withdrawals root {claimed}, {expected} expected")]
+    WithdrawalsRootMismatch {
+        /// The root the header carries.
+        claimed: Root,
+        /// The root of the withdrawals the state expects.
+        expected: Root,
+    },
     /// The payload does not build on the latest payload.
     #[error("payload parent {claimed} is not the latest payload {expected}")]
     PayloadParentMismatch {

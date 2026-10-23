@@ -6,13 +6,13 @@ use axiom_bls::PublicKey;
 use axiom_types::{
     BlsPubkey, BlsSignature, ChainConfig, CommitteeIndex, Epoch, ForkName, Gwei, Preset, Root,
     Slot, ValidatorIndex, accessors::CoreState, altair, bellatrix, capella, combined, deneb,
-    electra, fulu, gloas, phase0,
+    electra, fulu, gloas, phase0, phase0::BeaconBlockHeader,
 };
 
 use crate::{
-    BlockError, BlockProcessor, CachedState, Caches, EpochCommittees, EpochProcessor, EpochStep,
-    EpochVotes, ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError, TransitionError,
-    Upgrade, Verification,
+    BlindedFork, BlockError, BlockProcessor, CachedState, Caches, EpochCommittees, EpochProcessor,
+    EpochStep, EpochVotes, ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError,
+    TransitionError, Upgrade, Verification,
     gloas::{EnvelopeError, PayloadEnvelope},
     rewards::AttesterRewards,
 };
@@ -245,6 +245,39 @@ impl<P: Preset> State<P> {
         engine: &E,
     ) -> Result<(), TransitionError> {
         let header = S::block_header(block);
+        self.apply_with::<S>(config, &header, signature, |processor| {
+            S::process_block(processor, block, &header, engine)
+        })
+    }
+
+    /// Applies a blinded block of one fork, its payload pruned, to a state already at its slot.
+    ///
+    /// The state moves exactly as under the whole block, whose payload the header commits to.
+    /// Nothing is executed: the block was judged when first imported.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state is of another fork, the block is invalid, or the root differs.
+    pub fn apply_blinded_block<S: BlindedFork<Preset = P>>(
+        &mut self,
+        config: &ChainConfig,
+        block: &S::BlindedBlock,
+        signature: &BlsSignature,
+    ) -> Result<(), TransitionError> {
+        let header = S::blinded_block_header(block);
+        self.apply_with::<S>(config, &header, signature, |processor| {
+            S::process_blinded_block(processor, block, &header)
+        })
+    }
+
+    /// Checks the proposer signature, runs a block's processing, and checks the state root.
+    fn apply_with<S: Fork<Preset = P>>(
+        &mut self,
+        config: &ChainConfig,
+        header: &BeaconBlockHeader,
+        signature: &BlsSignature,
+        process: impl FnOnce(&mut BlockProcessor<'_, S>) -> Result<(), BlockError>,
+    ) -> Result<(), TransitionError> {
         let verification = self.caches.verification;
         let state_fork = self.fork_name();
         let state = self.of_fork::<S>().ok_or(TransitionError::ForkMismatch {
@@ -258,9 +291,9 @@ impl<P: Preset> State<P> {
         };
         let mut processor = BlockProcessor::new(state, config, verification);
         processor
-            .verify_block_signature(&header, signature)
+            .verify_block_signature(header, signature)
             .map_err(invalid)?;
-        S::process_block(&mut processor, block, &header, engine).map_err(invalid)?;
+        process(&mut processor).map_err(invalid)?;
         processor.finish().map_err(invalid)?;
 
         let computed = self.beacon.hash_tree_root();
@@ -700,6 +733,48 @@ impl<P: Preset> SignedBlock<P> for combined::SignedBeaconBlock<P> {
                 engine,
             ),
             Self::Gloas(block) => block.apply_to(state, config, engine),
+        }
+    }
+}
+
+impl<P: Preset> SignedBlock<P> for combined::SignedBlindedBeaconBlock<P> {
+    fn slot(&self) -> Slot {
+        Self::slot(self)
+    }
+
+    /// Applies the blinded block; it needs no engine, its payload having been judged at import.
+    fn apply_to<E: PayloadEngine<P>>(
+        &self,
+        state: &mut State<P>,
+        config: &ChainConfig,
+        _engine: &E,
+    ) -> Result<(), TransitionError> {
+        match self {
+            Self::Bellatrix(block) => state.apply_blinded_block::<bellatrix::BeaconState<P>>(
+                config,
+                &block.message,
+                &block.signature,
+            ),
+            Self::Capella(block) => state.apply_blinded_block::<capella::BeaconState<P>>(
+                config,
+                &block.message,
+                &block.signature,
+            ),
+            Self::Deneb(block) => state.apply_blinded_block::<deneb::BeaconState<P>>(
+                config,
+                &block.message,
+                &block.signature,
+            ),
+            Self::Electra(block) => state.apply_blinded_block::<electra::BeaconState<P>>(
+                config,
+                &block.message,
+                &block.signature,
+            ),
+            Self::Fulu(block) => state.apply_blinded_block::<fulu::BeaconState<P>>(
+                config,
+                &block.message,
+                &block.signature,
+            ),
         }
     }
 }

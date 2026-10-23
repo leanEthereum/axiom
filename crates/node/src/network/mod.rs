@@ -1,6 +1,7 @@
 //! The node on the network: gossip, requests, and sync over the libp2p stack.
 
 mod discovery;
+mod engine_blobs;
 mod forks;
 mod gossip;
 mod handshake;
@@ -18,10 +19,7 @@ mod topics;
 use std::{
     collections::{BTreeSet, HashMap},
     future::pending,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
@@ -57,7 +55,10 @@ use self::{
     handshake::Handshakes,
     peers::{PeerAction, PeerBook, PeerManager, PeerSubnets},
     server::RequestServer,
-    sync::{BackfillOutcome, BackfillSync, BatchOutcome, BlockLookups, LookupEvent, RangeSync},
+    sync::{
+        BackfillOutcome, BackfillPacer, BackfillSync, BatchOutcome, BlockLookups, LookupEvent,
+        RangeSync,
+    },
     topics::Subscriptions,
 };
 use crate::{ChainHandle, Clock, EventSender, ExecutionLayer, NodeError, race::Either};
@@ -240,12 +241,11 @@ impl<P: Preset> NetworkService<P> {
             discovery,
             events,
             subscribe_all_subnets,
+            backfill_rate_limiting,
+            get_blobs,
         } = setup;
         let forks = Arc::new(ForkDigests::new(&config, genesis_validators_root));
-        let (discovery, discovery_events) = discovery
-            .map_or((None, None), |(discovery, events)| {
-                (Some(discovery), Some(events))
-            });
+        let (discovery, discovery_events) = discovery.unzip();
         let (sync, sync_outcomes) = RangeSync::new(
             chain.clone(),
             Arc::clone(&execution),
@@ -253,18 +253,16 @@ impl<P: Preset> NetworkService<P> {
             config.clone(),
             Arc::clone(&forks),
         );
+        let pacer = backfill_rate_limiting.then(|| BackfillPacer::new(Arc::clone(&clock), slots));
         let (backfill, backfill_outcomes) = BackfillSync::new(
             chain.clone(),
             network.clone(),
             config.clone(),
             Arc::clone(&forks),
+            pacer,
         );
         let (lookups, lookup_events) = sync.lookups(metrics.clone());
-        let metadata = Arc::new(LocalMetadata {
-            seq_number: AtomicU64::new(0),
-            attnets: AtomicU64::new(0),
-            custody_group_count: identity.custody_group_count,
-        });
+        let metadata = Arc::new(LocalMetadata::new(identity.custody_group_count));
         let (peer_book, peer_reader) = PeerBook::new();
         let mut service = Self {
             gossip: GossipHandler::new(
@@ -275,11 +273,13 @@ impl<P: Preset> NetworkService<P> {
                 metrics.clone(),
                 Arc::clone(&forks),
                 lookups.sinks(events),
-            ),
+            )
+            .fetching_engine_blobs(get_blobs),
             server: Arc::new(RequestServer::new(
                 chain.clone(),
                 network.clone(),
                 Arc::clone(&metadata),
+                Arc::clone(&execution),
             )),
             sync,
             sync_outcomes: Some(sync_outcomes),
@@ -976,4 +976,8 @@ pub(crate) struct NetworkSetup {
     pub(crate) events: EventSender,
     /// Whether every attestation and sync committee subnet is joined.
     pub(crate) subscribe_all_subnets: bool,
+    /// Whether backfill batches wait for quiet moments of the slot.
+    pub(crate) backfill_rate_limiting: bool,
+    /// Whether new blocks' columns are built from the engine's blobs.
+    pub(crate) get_blobs: bool,
 }

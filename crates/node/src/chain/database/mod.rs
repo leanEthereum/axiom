@@ -1,6 +1,7 @@
 //! The chain's on-disk layout: every table and key format in one place.
 
 mod archive;
+mod blocks;
 mod history;
 mod light_client;
 mod schema;
@@ -17,6 +18,8 @@ use axiom_types::{
     accessors::CoreState, combined, deneb::BlobSidecar, gloas::SignedExecutionPayloadEnvelope,
     phase0::Checkpoint,
 };
+use blocks::BlockRecords;
+pub use blocks::StoredBlock;
 pub use history::{HistoryStart, ReconstructionCursor};
 use light_client::LightClientRecords;
 use schema::Migration;
@@ -54,6 +57,7 @@ const PRUNE_SLOTS_PER_PASS: usize = 1024;
 /// ```text
 ///     table         key                    value
 ///     blocks        block root (32 bytes)  SSZ signed block
+///     blinded_blocks block root (32 bytes) SSZ signed blinded block, once its payload is pruned
 ///     states        block root (32 bytes)  SSZ post-state, kept for the finalized anchor only
 ///     blobs         root (32) + index (8)  SSZ blob sidecar
 ///     columns       root (32) + index (8)  SSZ data column sidecar of a custody column
@@ -86,8 +90,8 @@ pub struct ChainDatabase<P: Preset> {
     config: ChainConfig,
     /// How much history to keep.
     mode: StorageMode,
-    /// Signed blocks by root.
-    blocks: Table,
+    /// Signed blocks by root, whole or blinded.
+    blocks: BlockRecords,
     /// Post-states by block root.
     states: Table,
     /// Blob sidecars by block root and index.
@@ -227,7 +231,7 @@ impl<P: Preset> ChainDatabase<P> {
     /// Names the tables in an open store.
     fn named(store: Store, config: ChainConfig) -> Result<Self, ChainError> {
         Ok(Self {
-            blocks: store.table("blocks")?,
+            blocks: BlockRecords::new(store.table("blocks")?, store.table("blinded_blocks")?),
             states: store.table("states")?,
             blobs: store.table("blobs")?,
             columns: store.table("columns")?,
@@ -245,9 +249,10 @@ impl<P: Preset> ChainDatabase<P> {
     }
 
     /// Every table by name, in the layout's order.
-    const fn tables(&self) -> [(&'static str, Table); 10] {
+    const fn tables(&self) -> [(&'static str, Table); 11] {
         [
-            ("blocks", self.blocks),
+            ("blocks", self.blocks.full_table()),
+            ("blinded_blocks", self.blocks.blinded_table()),
             ("states", self.states),
             ("blobs", self.blobs),
             ("columns", self.columns),
@@ -379,18 +384,79 @@ impl<P: Preset> ChainDatabase<P> {
         root: Root,
         block: &combined::SignedBeaconBlock<P>,
     ) -> Result<(), ChainError> {
-        Ok(self.store.put(self.blocks, &root.0, &block.encode())?)
+        let mut batch = Batch::new();
+        self.blocks.stage(&mut batch, root, block, false)?;
+        Ok(self.store.write(&batch)?)
     }
 
-    /// The block with a root, if stored, in the fork of its slot.
+    /// The block with a root, if stored with its payload, in the fork of its slot.
+    ///
+    /// A block whose payload was pruned is not returned; the stored form names it.
     ///
     /// # Errors
     ///
     /// Fails when the read fails or the stored bytes do not decode.
     pub fn block(&self, root: Root) -> Result<Option<combined::SignedBeaconBlock<P>>, ChainError> {
-        self.read_with(self.blocks, &root.0, "block", |bytes| {
-            combined::SignedBeaconBlock::decode_at(bytes, &self.config)
-        })
+        self.blocks.full(&self.store, root, &self.config)
+    }
+
+    /// The block with a root as stored: whole, or blinded once its payload was pruned.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the read fails or the stored bytes do not decode.
+    pub fn stored_block(&self, root: Root) -> Result<Option<StoredBlock<P>>, ChainError> {
+        self.blocks.stored(&self.store, root, &self.config)
+    }
+
+    /// Prunes the payloads of finalized blocks at finality, keeping their blinded form.
+    ///
+    /// Blocks are then served whole by taking their payload bodies back from the engine.
+    #[must_use]
+    pub const fn pruning_payloads(mut self, prunes: bool) -> Self {
+        self.blocks = self.blocks.pruning_payloads(prunes);
+        self
+    }
+
+    /// Replaces every finalized whole block below the finalized one by its blinded form.
+    ///
+    /// The finalized block itself keeps its payload, as the chain resumes from it.
+    ///
+    /// # Returns
+    ///
+    /// The blocks whose payload left the disk.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a read or the write fails.
+    pub fn prune_payloads(&self) -> Result<usize, ChainError> {
+        // The checkpoint alone is read: decoding the anchor state would cost hundreds of megabytes.
+        let Some(checkpoint) =
+            self.read_with(self.meta, FINALIZED_KEY, "finalized checkpoint", |bytes| {
+                Checkpoint::decode(bytes)
+            })?
+        else {
+            return Ok(0);
+        };
+        let snapshot = self.store.snapshot();
+        let mut batch = Batch::new();
+        let mut pruned = 0;
+        for entry in snapshot.entries(self.canonical)? {
+            let (_, value) = entry?;
+            let root = Root::decode(&value).map_err(|error| ChainError::Corrupt {
+                what: "canonical root",
+                error,
+            })?;
+            if root != checkpoint.root
+                && self
+                    .blocks
+                    .stage_pruning::<P>(&snapshot, &mut batch, root, &self.config)?
+            {
+                pruned += 1;
+            }
+        }
+        self.store.write(&batch)?;
+        Ok(pruned)
     }
 
     /// Stores the verified sidecars of an imported block in one atomic write.
@@ -652,7 +718,8 @@ impl<P: Preset> ChainDatabase<P> {
         state: &combined::BeaconState<P>,
     ) -> Result<(), ChainError> {
         let mut batch = Batch::new();
-        batch.put(self.blocks, &checkpoint.root.0, &signed.encode())?;
+        self.blocks
+            .stage(&mut batch, checkpoint.root, signed, false)?;
         batch.put(self.states, &checkpoint.root.0, &state.encode())?;
         batch.put(self.meta, FINALIZED_KEY, &checkpoint.encode())?;
         batch.put(
@@ -724,9 +791,22 @@ impl<P: Preset> ChainDatabase<P> {
         // Blocks off the finalized chain can never become canonical again, nor their data.
         let snapshot = self.store.snapshot();
         for root in orphans {
-            batch.delete(self.blocks, &root.0)?;
+            self.blocks.stage_removal(&mut batch, *root)?;
             batch.delete(self.envelopes, &root.0)?;
             self.stage_sidecar_removal(&snapshot, &mut batch, *root)?;
+        }
+
+        // Finalized blocks below the new anchor lose their payloads, which the engine keeps.
+        if self.blocks.prunes_payloads() {
+            let superseded = chain
+                .iter()
+                .map(|(_, root)| *root)
+                .chain([previous.root])
+                .filter(|root| *root != checkpoint.root);
+            for root in superseded {
+                self.blocks
+                    .stage_pruning::<P>(&snapshot, &mut batch, root, &self.config)?;
+            }
         }
         Ok(self.store.write(&batch)?)
     }
@@ -764,7 +844,8 @@ impl<P: Preset> ChainDatabase<P> {
         let mut batch = Batch::new();
         let archive = self.mode.interval().is_some();
         for (root, block) in &segment.blocks {
-            batch.put(self.blocks, &root.0, &block.encode())?;
+            // History below the anchor is finalized, so it is stored blinded when payloads are pruned.
+            self.blocks.stage(&mut batch, *root, block, true)?;
             batch.put(self.canonical, &block.slot().0.to_be_bytes(), &root.0)?;
             // The block names its post-state's root, so archive lookups by root reach it at once.
             if archive {
@@ -1063,7 +1144,10 @@ impl<P: Preset> ChainDatabase<P> {
 mod tests {
     use std::{env, fs, path::PathBuf, process, sync::Arc};
 
-    use axiom_types::{Epoch, Minimal, altair, fulu, gloas, phase0};
+    use axiom_ssz::ByteList;
+    use axiom_types::{
+        Epoch, Minimal, altair, capella, combined::SignedBlindedBeaconBlock, fulu, gloas, phase0,
+    };
 
     use super::*;
 
@@ -1111,6 +1195,97 @@ mod tests {
             assert_eq!(database.block(block.block_root()).unwrap(), Some(block));
         }
         assert_eq!(database.block(Root::ZERO).unwrap(), None);
+    }
+
+    /// A Capella block at a slot, its payload naming one transaction.
+    fn capella_at(slot: u64) -> combined::SignedBeaconBlock<Minimal> {
+        let mut block = capella::SignedBeaconBlock::<Minimal>::default();
+        block.message.slot = Slot(slot);
+        let transaction = ByteList::try_from(vec![0x02, slot as u8]).unwrap();
+        block
+            .message
+            .body
+            .execution_payload
+            .transactions
+            .push(transaction)
+            .unwrap();
+        combined::SignedBeaconBlock::Capella(block)
+    }
+
+    #[test]
+    fn finality_blinds_the_blocks_it_passes_when_payloads_are_pruned() {
+        // Fixture state: Capella from genesis, an anchor at slot 1, then finality at slot 3.
+        //
+        //     1 -> 2 -> 3      finalized chain, 3 the new anchor
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Capella);
+        let database = Database::in_memory(config).unwrap().pruning_payloads(true);
+        let blocks = [capella_at(1), capella_at(2), capella_at(3)];
+        let roots = blocks
+            .each_ref()
+            .map(combined::SignedBeaconBlock::block_root);
+        for (block, root) in blocks.iter().zip(roots) {
+            database.put_block(root, block).unwrap();
+        }
+        let state = combined::BeaconState::<Minimal>::Phase0(phase0::BeaconState::default());
+        let first = Checkpoint {
+            epoch: Epoch(0),
+            root: roots[0],
+        };
+        database.put_anchor(first, &blocks[0], &state).unwrap();
+        let checkpoint = Checkpoint {
+            epoch: Epoch(1),
+            root: roots[2],
+        };
+        database
+            .finalize(&Finality {
+                previous: first,
+                checkpoint,
+                state: &state,
+                chain: &[(Slot(2), roots[1]), (Slot(3), roots[2])],
+                orphans: &[],
+                snapshots: &[],
+                state_roots: &[],
+            })
+            .unwrap();
+
+        // The old anchor and block 2 are blinded; the new anchor keeps its payload.
+        for (block, root) in blocks[..2].iter().zip(roots) {
+            assert_eq!(database.block(root).unwrap(), None);
+            let blinded = SignedBlindedBeaconBlock::blinding(block).unwrap();
+            assert_eq!(
+                database.stored_block(root).unwrap(),
+                Some(StoredBlock::Blinded(blinded))
+            );
+        }
+        assert_eq!(
+            database.stored_block(roots[2]).unwrap(),
+            Some(StoredBlock::Full(blocks[2].clone()))
+        );
+
+        // Without pruning, the same finality keeps every payload.
+        let config = ChainConfig::minimal().with_forks_at_genesis(ForkName::Capella);
+        let keeping = Database::in_memory(config).unwrap();
+        for (block, root) in blocks.iter().zip(roots) {
+            keeping.put_block(root, block).unwrap();
+        }
+        keeping.put_anchor(first, &blocks[0], &state).unwrap();
+        keeping
+            .finalize(&Finality {
+                previous: first,
+                checkpoint,
+                state: &state,
+                chain: &[(Slot(2), roots[1]), (Slot(3), roots[2])],
+                orphans: &[],
+                snapshots: &[],
+                state_roots: &[],
+            })
+            .unwrap();
+        assert_eq!(keeping.block(roots[1]).unwrap(), Some(blocks[1].clone()));
+
+        // The command for an existing database blinds the same two blocks.
+        assert_eq!(keeping.prune_payloads().unwrap(), 2);
+        assert_eq!(keeping.block(roots[1]).unwrap(), None);
+        assert_eq!(keeping.block(roots[2]).unwrap(), Some(blocks[2].clone()));
     }
 
     #[test]
@@ -1418,13 +1593,13 @@ mod tests {
 
     #[test]
     fn a_database_from_a_newer_build_is_refused() {
-        // Fixture state: a database recording version 3, one past this build's.
+        // Fixture state: a database recording version 4, one past this build's.
         let directory = TempDirectory::new("future");
         {
             let database = Database::open(&directory.0, config()).unwrap();
             database
                 .store
-                .put(database.meta, SCHEMA_KEY, &SchemaVersion(3).encode())
+                .put(database.meta, SCHEMA_KEY, &SchemaVersion(4).encode())
                 .unwrap();
         }
 
@@ -1433,8 +1608,8 @@ mod tests {
             matches!(
                 error,
                 ChainError::UnknownSchema {
-                    found: SchemaVersion(3),
-                    supported: SchemaVersion(2),
+                    found: SchemaVersion(4),
+                    supported: SchemaVersion(3),
                 }
             ),
             "{error}"

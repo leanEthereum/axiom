@@ -2,12 +2,15 @@
 
 use axiom_beacon_json::{ApiJson, ApiJsonError, ApiJsonErrorKind, ForkedJson};
 use axiom_json::Json;
+use axiom_ssz::Ssz;
 use axiom_types::{
     ForkName, KzgCommitment, Preset, bellatrix, capella,
     combined::{BlindedBlockError, ExecutionPayload, SignedBeaconBlock, SignedBlindedBeaconBlock},
     deneb, fulu,
 };
 use thiserror::Error;
+
+use crate::BuilderError;
 
 /// The payload a relay reveals once the proposer signed the blinded block.
 ///
@@ -104,6 +107,35 @@ pub enum RevealError {
 }
 
 impl<P: Preset> RevealedPayload<P> {
+    /// Decodes a revealed payload of a known fork from its SSZ encoding.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the fork has no builder API, or the bytes do not encode its reveal.
+    pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Self, BuilderError> {
+        let ssz = BuilderError::Ssz;
+        Ok(match fork {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+                return Err(BuilderError::NoBuilderApi { fork });
+            }
+            ForkName::Bellatrix => Self::Bellatrix(Ssz::decode(bytes).map_err(ssz)?),
+            ForkName::Capella => Self::Capella(Ssz::decode(bytes).map_err(ssz)?),
+            ForkName::Deneb => Self::Deneb(Ssz::decode(bytes).map_err(ssz)?),
+            ForkName::Electra => Self::Electra(Ssz::decode(bytes).map_err(ssz)?),
+            ForkName::Fulu => Self::Fulu(Ssz::decode(bytes).map_err(ssz)?),
+        })
+    }
+
+    /// The payload's SSZ encoding, which does not record the fork.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Bellatrix(payload) => payload.encode(),
+            Self::Capella(payload) => payload.encode(),
+            Self::Deneb(revealed) | Self::Electra(revealed) => revealed.encode(),
+            Self::Fulu(revealed) => revealed.encode(),
+        }
+    }
     /// The fork the payload belongs to.
     #[must_use]
     pub const fn fork_name(&self) -> ForkName {

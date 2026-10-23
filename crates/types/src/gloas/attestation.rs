@@ -129,6 +129,16 @@ impl Container for IndexedAttestation {
 }
 
 impl IndexedAttestation {
+    /// The attestation a vote makes in this container, whose signer list is unbounded.
+    #[must_use]
+    pub fn from_vote(vote: &IndexedVote) -> Self {
+        Self {
+            attesting_indices: ProgressiveList::from(vote.indices.clone()),
+            data: vote.data.clone(),
+            signature: vote.signature,
+        }
+    }
+
     /// The vote reduced to the fields every fork shares.
     #[must_use]
     pub fn indexed_vote(&self) -> IndexedVote {
@@ -172,6 +182,15 @@ impl Container for AttesterSlashing {
 }
 
 impl AttesterSlashing {
+    /// The slashing two conflicting votes make in this container.
+    #[must_use]
+    pub fn from_votes(votes: &ConflictingVotes) -> Self {
+        Self {
+            attestation_1: IndexedAttestation::from_vote(&votes.first),
+            attestation_2: IndexedAttestation::from_vote(&votes.second),
+        }
+    }
+
     /// The two votes reduced to the fields every fork shares.
     #[must_use]
     pub fn conflicting_votes(&self) -> ConflictingVotes {

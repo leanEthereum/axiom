@@ -9,6 +9,8 @@ use crate::cli::{CliError, arguments::Arguments};
 /// The usage lines of the behaviour flags.
 pub(crate) const BEHAVIOUR_USAGE: &str = "\
     --max-skip-slots <N|none>    most slots a vote may lie past its block [default: none]
+    --import-all-attestations    pool every subnet vote received, not only those local
+                                 aggregators need
     --enable-fast-confirmation   name the engine's safe block by the fast confirmation rule
     --disable-light-client-server
                                  derive and serve no light client data
@@ -19,6 +21,10 @@ pub(crate) const BEHAVIOUR_USAGE: &str = "\
 
 /// The behaviour flags as given.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each switch is an independent operator flag"
+)]
 pub(crate) struct BehaviourFlags {
     /// Most slots a vote may skip, when bounded.
     max_skip_slots: Option<u64>,
@@ -26,6 +32,8 @@ pub(crate) struct BehaviourFlags {
     fast_confirmation: bool,
     /// Whether light client data is off.
     no_light_client_server: bool,
+    /// Whether every subnet vote is pooled.
+    import_all_attestations: bool,
     /// Whether the node stops once synced.
     pub(crate) shutdown_after_sync: bool,
     /// Where to write the node configuration.
@@ -55,6 +63,7 @@ impl BehaviourFlags {
             }
             "--enable-fast-confirmation" => self.fast_confirmation = true,
             "--disable-light-client-server" => self.no_light_client_server = true,
+            "--import-all-attestations" => self.import_all_attestations = true,
             "--shutdown-after-sync" => self.shutdown_after_sync = true,
             "--dump-config" => self.dump_config = Some(words.path("--dump-config")?),
             "--dump-chain-config" => {
@@ -72,6 +81,7 @@ impl BehaviourFlags {
             fast_confirmation: self.fast_confirmation,
             light_client_server: !self.no_light_client_server,
             sidecar_pruning,
+            import_all_attestations: self.import_all_attestations,
         }
     }
 }
@@ -97,6 +107,7 @@ mod tests {
             "700",
             "--enable-fast-confirmation",
             "--disable-light-client-server",
+            "--import-all-attestations",
         ])
         .unwrap()
         .chain_settings(pruning);
@@ -107,6 +118,7 @@ mod tests {
                 fast_confirmation: true,
                 light_client_server: false,
                 sidecar_pruning: pruning,
+                import_all_attestations: true,
             }
         );
         // No flags keep the chain's defaults; none lifts a bound given before it.

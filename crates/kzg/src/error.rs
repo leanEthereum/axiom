@@ -115,6 +115,33 @@ pub enum KzgError {
     #[error("cell index {0} appears twice")]
     DuplicateCellIndex(u64),
 
+    /// A trusted setup holds another number of points than the scheme is built for.
+    #[error("trusted setup has {actual} {basis} points, expected {expected}")]
+    SetupLength {
+        /// The basis: G1 monomial, G1 Lagrange, or G2 monomial.
+        basis: &'static str,
+        /// Points the scheme needs.
+        expected: usize,
+        /// Points given.
+        actual: usize,
+    },
+
+    /// A trusted setup point is not the compressed encoding of a point in its subgroup.
+    #[error("trusted setup {basis} point {index} is invalid: {source}")]
+    InvalidSetupPoint {
+        /// The basis: G1 monomial, G1 Lagrange, or G2 monomial.
+        basis: &'static str,
+        /// Position of the point in its basis.
+        index: usize,
+        /// Why the bytes are not a valid point.
+        #[source]
+        source: PointDecodeError,
+    },
+
+    /// The process already trusts a setup, which every earlier operation used.
+    #[error("a trusted setup is already in use")]
+    SetupAlreadyTrusted,
+
     /// Recovery received cell indices out of ascending order.
     #[error("cell index {next} follows the larger index {previous}")]
     UnsortedCellIndices {

@@ -142,6 +142,7 @@ impl NodeFlags {
                 shutdown_after_sync: self.behaviour.shutdown_after_sync,
                 monitor,
                 client_stats,
+                trusted_setup: chain.trusted_setup,
             },
             deprecated,
             chain: chain.network.chain,
@@ -216,6 +217,8 @@ mod tests {
                 }),
                 target_peers: 64,
                 subscribe_all_subnets: false,
+                backfill_rate_limiting: true,
+                get_blobs: true,
             })
         );
         assert_eq!(
@@ -265,6 +268,8 @@ mod tests {
             "--target-peers",
             "100",
             "--subscribe-all-subnets",
+            "--disable-backfill-rate-limiting",
+            "--disable-get-blobs",
             "--suggested-fee-recipient",
             "0x00000000219ab540356cbb839cbe05303d7705fa",
         ])
@@ -297,6 +302,8 @@ mod tests {
                 }),
                 target_peers: 100,
                 subscribe_all_subnets: true,
+                backfill_rate_limiting: false,
+                get_blobs: false,
             })
         );
         assert_eq!(
@@ -357,6 +364,7 @@ mod tests {
             SlasherSetup {
                 directory: None,
                 update_period: Some(Duration::from_secs(6)),
+                broadcast: true,
             }
         );
         assert_eq!(
@@ -375,6 +383,7 @@ mod tests {
             DatabaseSettings {
                 auto_compact: true,
                 compact_on_start: true,
+                prune_payloads: true,
             }
         );
         assert!(node.shutdown_after_sync);

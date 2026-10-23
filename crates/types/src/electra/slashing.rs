@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use axiom_ssz::{Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
+use axiom_ssz::{CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, Ssz};
 
 use crate::{Preset, ValidatorIndex, electra::IndexedAttestation, vote::ConflictingVotes};
 
@@ -38,6 +38,18 @@ impl<P: Preset> Container for AttesterSlashing<P> {
 }
 
 impl<P: Preset> AttesterSlashing<P> {
+    /// The slashing two conflicting votes make in this container.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a vote has more signers than the committees of a slot hold.
+    pub fn from_votes(votes: &ConflictingVotes) -> Result<Self, CapacityError> {
+        Ok(Self {
+            attestation_1: IndexedAttestation::from_vote(&votes.first)?,
+            attestation_2: IndexedAttestation::from_vote(&votes.second)?,
+        })
+    }
+
     /// The two votes reduced to the fields every fork shares.
     #[must_use]
     pub fn conflicting_votes(&self) -> ConflictingVotes {

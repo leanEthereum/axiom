@@ -3,20 +3,26 @@
 use std::sync::Arc;
 
 use axiom_execution::{
-    EngineClient, ForkchoiceState, GetPayloadResponse, NewPayload, PayloadAttributes, PayloadId,
+    BlobAndProofV2, ClientVersion, EngineClient, ForkchoiceState, GetBlobsResponse,
+    GetPayloadResponse, NewPayload, PayloadAttributes, PayloadBody, PayloadId,
     PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
 };
 use axiom_fork_choice::PayloadStatus;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    ForkName, Hash32, Preset,
+    ForkName, Hash32, Preset, VersionedHash,
     bellatrix::PowBlock,
-    combined,
+    combined::{self, SignedBlindedBeaconBlock},
     gloas::{ExecutionPayloadBid, SignedExecutionPayloadEnvelope},
 };
 use tracing::{debug, warn};
 
-use crate::{ChainHandle, ExecutionHead, ProposerError};
+use crate::{ChainHandle, ExecutionHead, ProposerError, engine_version::EngineVersions};
+
+/// Payload bodies asked for in one request, the least every engine must serve.
+///
+/// See `engine_getPayloadBodiesByHashV1` in `src/engine/shanghai.md`.
+const BODIES_PER_REQUEST: usize = 32;
 
 /// The execution layer as the consensus node sees it.
 ///
@@ -49,6 +55,8 @@ pub struct ExecutionLayer {
     engine: Option<EngineClient>,
     /// Request timings, by engine method.
     metrics: NodeMetrics,
+    /// The execution client's identity, as the engine last gave it.
+    versions: EngineVersions,
 }
 
 impl ExecutionLayer {
@@ -58,6 +66,7 @@ impl ExecutionLayer {
         Self {
             engine: Some(engine),
             metrics: NodeMetrics::detached(),
+            versions: EngineVersions::default(),
         }
     }
 
@@ -67,6 +76,7 @@ impl ExecutionLayer {
         Self {
             engine: None,
             metrics: NodeMetrics::detached(),
+            versions: EngineVersions::default(),
         }
     }
 
@@ -75,6 +85,100 @@ impl ExecutionLayer {
     pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    /// Every blob of a block from the engine's pool, with its cell proofs.
+    ///
+    /// The engine answers with all of them or none, so a partial pool yields nothing.
+    /// An unreachable engine, or one without the method, yields nothing too.
+    /// See `engine_getBlobsV2` in `src/engine/osaka.md`.
+    pub(crate) async fn blobs<P: Preset>(
+        &self,
+        fork: ForkName,
+        hashes: &[VersionedHash],
+    ) -> Option<Vec<BlobAndProofV2<P>>> {
+        let engine = self.engine.as_ref()?;
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["get_blobs"])
+            .start_timer();
+        let answer = engine.get_blobs::<P>(fork, hashes).await;
+        drop(timer);
+        match answer {
+            Ok(GetBlobsResponse::V2(blobs)) => {
+                if blobs.is_none() {
+                    debug!(blobs = hashes.len(), "engine pool lacks some of the blobs");
+                }
+                blobs
+            }
+            Ok(GetBlobsResponse::V1(_)) => None,
+            Err(error) => {
+                debug!(%fork, %error, "engine returned no blobs");
+                None
+            }
+        }
+    }
+
+    /// Blocks whose payloads were pruned, made whole again from the bodies the engine keeps.
+    ///
+    /// The engine serves at least 32 bodies per request, so the blocks go in groups of 32.
+    /// See `engine_getPayloadBodiesByHashV1` in `src/engine/shanghai.md`.
+    ///
+    /// # Returns
+    ///
+    /// One entry per block, in order.
+    /// An entry is nothing when the engine lacks its body, or the body does not match its header.
+    pub(crate) async fn unblind_all<P: Preset>(
+        &self,
+        blocks: Vec<SignedBlindedBeaconBlock<P>>,
+    ) -> Vec<Option<combined::SignedBeaconBlock<P>>> {
+        let mut whole = Vec::with_capacity(blocks.len());
+        let mut blocks = blocks.into_iter().peekable();
+        while blocks.peek().is_some() {
+            let group: Vec<SignedBlindedBeaconBlock<P>> =
+                blocks.by_ref().take(BODIES_PER_REQUEST).collect();
+            let hashes: Vec<Hash32> = group
+                .iter()
+                .map(SignedBlindedBeaconBlock::execution_block_hash)
+                .collect();
+            let bodies = self.payload_bodies(&hashes).await;
+            for (position, block) in group.into_iter().enumerate() {
+                let body = bodies
+                    .as_ref()
+                    .and_then(|bodies| bodies.get(position).cloned().flatten());
+                whole.push(body.and_then(|body| {
+                    let root = block.block_root();
+                    block
+                        .with_payload_body(body.transactions, body.withdrawals)
+                        .inspect_err(
+                            |error| warn!(%root, %error, "engine body does not rebuild the block"),
+                        )
+                        .ok()
+                }));
+            }
+        }
+        whole
+    }
+
+    /// Payload bodies by execution block hash, or nothing when the engine cannot answer.
+    async fn payload_bodies(&self, hashes: &[Hash32]) -> Option<Vec<Option<PayloadBody>>> {
+        let engine = self.engine.as_ref()?;
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["get_payload_bodies_by_hash"])
+            .start_timer();
+        let answer = engine.payload_bodies_by_hash(hashes).await;
+        drop(timer);
+        answer
+            .inspect_err(|error| warn!(%error, "engine returned no payload bodies"))
+            .ok()
+    }
+
+    /// The execution client's identity, when one client answers for the engine.
+    pub(crate) async fn client_version(&self) -> Option<ClientVersion> {
+        self.versions.single(self.engine.as_ref()?).await
     }
 
     /// Asks the engine to judge the payload a block carries.
@@ -330,8 +434,10 @@ impl ExecutionLayer {
 mod tests {
     use axiom_execution::{JsonCodec, JwtSecret, mock::MockEngine};
     use axiom_json::Json;
-    use axiom_ssz::U256;
-    use axiom_types::{ChainConfig, Minimal, Slot, bellatrix, capella, phase0};
+    use axiom_ssz::{ByteList, U256, Vector};
+    use axiom_types::{
+        ChainConfig, Minimal, Slot, bellatrix, capella, capella::Withdrawal, deneb::Blob, phase0,
+    };
     use tokio::runtime::Builder;
 
     use super::*;
@@ -343,6 +449,89 @@ mod tests {
             latest_valid_hash,
             validation_error: None,
         }
+    }
+
+    #[test]
+    fn pruned_blocks_are_rebuilt_from_the_engine_bodies() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Fixture state: a Capella block with one transaction and one withdrawal, blinded.
+            let mut block = capella::SignedBeaconBlock::<Minimal>::default();
+            let payload = &mut block.message.body.execution_payload;
+            payload.block_hash = Hash32([9; 32]);
+            payload
+                .transactions
+                .push(ByteList::try_from(vec![0x02, 0xf8]).unwrap())
+                .unwrap();
+            payload.withdrawals.push(Withdrawal::default()).unwrap();
+            let body = PayloadBody {
+                transactions: vec![vec![0x02, 0xf8]],
+                withdrawals: Some(vec![Withdrawal::default()]),
+            };
+            let whole = combined::SignedBeaconBlock::Capella(block);
+            let blinded = SignedBlindedBeaconBlock::blinding(&whole).unwrap();
+
+            // The engine knows the first body, lacks the second, and returns a wrong third.
+            let engine = MockEngine::start(JwtSecret::new([7; 32])).await.unwrap();
+            let client = EngineClient::new(engine.url(), JwtSecret::new([7; 32])).unwrap();
+            let layer = ExecutionLayer::new(client);
+            let wrong = PayloadBody {
+                transactions: Vec::new(),
+                ..body.clone()
+            };
+            engine.reply(
+                "engine_getPayloadBodiesByHashV1",
+                Json::Array(vec![body.to_json(), Json::Null, wrong.to_json()]),
+            );
+            let rebuilt = layer
+                .unblind_all(vec![blinded.clone(), blinded.clone(), blinded.clone()])
+                .await;
+            assert_eq!(rebuilt, [Some(whole), None, None]);
+
+            // The bodies were asked for by the payload's block hash.
+            let hash = Json::from(Hash32([9; 32]).to_string());
+            assert_eq!(
+                engine.calls()[0].params,
+                [Json::Array(vec![hash.clone(), hash.clone(), hash])]
+            );
+            engine.stop().await;
+        });
+    }
+
+    #[test]
+    fn engine_blobs_come_whole_or_not_at_all() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Fixture state: an engine whose pool lacks a blob, so version 2 answers null.
+            let engine = MockEngine::start(JwtSecret::new([7; 32])).await.unwrap();
+            let client = EngineClient::new(engine.url(), JwtSecret::new([7; 32])).unwrap();
+            let layer = ExecutionLayer::new(client);
+            let hashes = [VersionedHash([1; 32])];
+            engine.reply("engine_getBlobsV2", Json::Null);
+            assert_eq!(layer.blobs::<Minimal>(ForkName::Fulu, &hashes).await, None);
+
+            // With the blob in the pool, it comes back with its 128 cell proofs.
+            let entry = BlobAndProofV2::<Minimal> {
+                blob: Blob::<Minimal>::default(),
+                proofs: Vector::default(),
+            };
+            engine.reply("engine_getBlobsV2", Json::Array(vec![entry.to_json()]));
+            assert_eq!(
+                layer.blobs::<Minimal>(ForkName::Fulu, &hashes).await,
+                Some(vec![entry])
+            );
+
+            // Before Fulu the pool answers per blob, which builds no columns.
+            assert_eq!(layer.blobs::<Minimal>(ForkName::Deneb, &hashes).await, None);
+
+            // Without an engine nothing is asked.
+            let disconnected = ExecutionLayer::disconnected();
+            assert_eq!(
+                disconnected.blobs::<Minimal>(ForkName::Fulu, &hashes).await,
+                None
+            );
+            engine.stop().await;
+        });
     }
 
     /// A Capella block whose payload names block hash 0x01.

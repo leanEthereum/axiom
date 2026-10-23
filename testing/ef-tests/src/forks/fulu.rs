@@ -156,7 +156,9 @@ impl SpecFork for Fulu {
             "sync_aggregate" => input.apply::<fulu::SyncAggregate<P>>("sync_aggregate"),
             "withdrawals" => input.apply_with::<fulu::ExecutionPayload<P>>(
                 "execution_payload",
-                |payload, processor| processor.apply(&PayloadWithdrawals(&payload.withdrawals)),
+                |payload, processor| {
+                    processor.apply(&PayloadWithdrawals::listed(&payload.withdrawals))
+                },
             ),
             "execution_payload" => {
                 let engine = KnownVerdict(input.execution_verdict()?);

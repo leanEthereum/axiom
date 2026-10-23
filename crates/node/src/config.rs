@@ -17,16 +17,20 @@ use axiom_p2p::{
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
 use axiom_slasher::SlasherConfig;
-use axiom_ssz::DecodeError;
+use axiom_ssz::{DecodeError, List, Ssz};
 use axiom_store::Options;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
 use axiom_types::{
     Bytes32, ChainConfig, ExecutionAddress, Preset, SlotClock,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
+    deneb::BlobSidecar,
 };
 use tokio::{
-    sync::watch,
+    sync::{
+        mpsc::{UnboundedReceiver, unbounded_channel},
+        watch,
+    },
     task::{self, JoinHandle},
 };
 use tracing::{info, warn};
@@ -41,7 +45,8 @@ use crate::{
     genesis::GenesisSync,
     monitor::{MonitorMetrics, ValidatorMonitor},
     network::NetworkIdentity,
-    slasher::SlasherFeed,
+    slasher::{FoundSlashing, SlasherFeed},
+    trusted_setup::TrustedSetupFile,
 };
 
 /// Where the node reaches its execution engine.
@@ -97,6 +102,10 @@ pub struct NetworkSettings {
     pub discovery: Option<DiscoverySettings>,
     /// Whether every attestation and sync committee subnet is joined, not only the node's own.
     pub subscribe_all_subnets: bool,
+    /// Whether backfill batches wait for quiet moments of the slot, leaving the CPU to duties.
+    pub backfill_rate_limiting: bool,
+    /// Whether new blocks' columns are built from the engine's blob pool before peers send them.
+    pub get_blobs: bool,
 }
 
 impl NetworkSettings {
@@ -128,6 +137,8 @@ pub enum AnchorSource {
         state: PathBuf,
         /// The signed block.
         block: PathBuf,
+        /// The block's blob sidecars, an SSZ list, for a block of a fork with whole blobs.
+        blobs: Option<PathBuf>,
     },
     /// A trusted beacon API to download the finalized block and its post-state from.
     Url {
@@ -150,15 +161,25 @@ impl AnchorSource {
         history: &HistorySettings,
         now_ms: u64,
     ) -> Result<Chain<P>, NodeError> {
+        let mut blobs = Vec::new();
         let (state, block, genesis) = match self {
             Self::Genesis(source) => {
                 return Self::genesis(source, chain_config, database, history, now_ms).await;
             }
-            Self::Checkpoint { state, block } => {
+            Self::Checkpoint {
+                state,
+                block,
+                blobs: blob_file,
+            } => {
                 let state = SszFile::new(state, "reading the checkpoint state")
                     .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
                 let block = SszFile::new(block, "reading the checkpoint block")
                     .decode(|bytes| SignedBeaconBlock::<P>::decode_at(bytes, &chain_config))?;
+                if let Some(path) = blob_file {
+                    blobs = SszFile::new(path, "reading the checkpoint blobs")
+                        .decode(List::<BlobSidecar<P>, P::MaxBlobCommitmentsPerBlock>::decode)?
+                        .into_vec();
+                }
                 (state, block, None)
             }
             Self::Url { url, timeout } => {
@@ -184,7 +205,8 @@ impl AnchorSource {
         history.check_recent(&state, &chain_config, now_ms)?;
         // The store refuses a block whose state root is not this state's.
         info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
-        let chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
+        let mut chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
+        chain.import_anchor_blobs(&block, blobs)?;
         let genesis = match (&history.genesis, genesis) {
             (Some(source), _) => Some(source.load::<P>(&chain_config).await?),
             (None, downloaded) => downloaded,
@@ -336,6 +358,8 @@ pub struct NodeConfig {
     pub monitor: MonitorSettings,
     /// Where the node pushes its client stats; none pushes nothing.
     pub client_stats: Option<ClientStatsSettings>,
+    /// A KZG trusted setup file to use in place of the mainnet one; none keeps the mainnet setup.
+    pub trusted_setup: Option<PathBuf>,
 }
 
 /// The PEM files of the beacon API's TLS identity.
@@ -358,8 +382,8 @@ pub struct ProposerSettings {
     pub builder_client: BuilderClientSettings,
     /// When the chain is too unhealthy to ask builders.
     pub builder_fallback: BuilderFallback,
-    /// Graffiti of blocks whose request names none.
-    pub graffiti: Bytes32,
+    /// Graffiti of every block a validator does not keep its own text in.
+    pub graffiti: Option<Bytes32>,
     /// How long before a slot its payload is prepared; none prepares a third of a slot ahead.
     pub prepare_lookahead: Option<Duration>,
     /// Whether payloads are prepared for every slot, not only for prepared proposers.
@@ -375,6 +399,8 @@ pub struct BuilderClientSettings {
     pub header_timeout: Option<Duration>,
     /// The user agent each builder request names, when any.
     pub user_agent: Option<String>,
+    /// Whether builders are spoken to in JSON alone, never SSZ.
+    pub disable_ssz: bool,
 }
 
 impl BuilderClientSettings {
@@ -392,6 +418,11 @@ impl BuilderClientSettings {
                         error: Box::new(error),
                     }
                 })?;
+                let client = if self.disable_ssz {
+                    client.json_only()
+                } else {
+                    client
+                };
                 Ok(match &self.user_agent {
                     Some(agent) => client.with_user_agent(agent.clone()),
                     None => client,
@@ -441,13 +472,26 @@ impl BuilderFallback {
     }
 }
 
-/// Where the slasher keeps its history, and how often it looks for slashings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Where the slasher keeps its history, how often it looks for slashings, and whether it tells.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlasherSetup {
     /// The history's directory; none keeps it beside the chain's, or in memory without one.
     pub directory: Option<PathBuf>,
     /// Time between two passes; none runs one each slot.
     pub update_period: Option<Duration>,
+    /// Whether the evidence found is gossiped, not only pooled for this node's proposals.
+    pub broadcast: bool,
+}
+
+impl Default for SlasherSetup {
+    fn default() -> Self {
+        // Evidence spreads by default, so any proposer can include it, not only this node's.
+        Self {
+            directory: None,
+            update_period: None,
+            broadcast: true,
+        }
+    }
 }
 
 /// Database upkeep at startup and while running.
@@ -457,19 +501,30 @@ pub struct DatabaseSettings {
     pub auto_compact: bool,
     /// Whether every eligible segment is rewritten once at startup.
     pub compact_on_start: bool,
+    /// Whether finalized blocks lose their payloads, kept blinded and rebuilt from the engine.
+    ///
+    /// It applies only with an engine to rebuild from.
+    pub prune_payloads: bool,
 }
 
 impl Default for DatabaseSettings {
     fn default() -> Self {
-        // Space is reclaimed as it goes, and startup does no extra work.
+        // Space is reclaimed as it goes, startup does no extra work, and the engine keeps payloads.
         Self {
             auto_compact: true,
             compact_on_start: false,
+            prune_payloads: true,
         }
     }
 }
 
 impl NodeConfig {
+    /// Whether finalized payloads leave the disk: asked for, and with an engine to rebuild them from.
+    ///
+    /// An archive prunes them too: it replays finalized blocks from their payload headers.
+    const fn prunes_payloads(&self) -> bool {
+        self.database.prune_payloads && self.engine.is_some()
+    }
     /// Opens the database and builds the chain from its anchor, a checkpoint, or genesis.
     ///
     /// A configured weak subjectivity checkpoint then holds the chain to it.
@@ -488,7 +543,8 @@ impl NodeConfig {
             }
             None => ChainDatabase::in_memory(chain_config.clone())?,
         }
-        .with_mode(self.history.mode);
+        .with_mode(self.history.mode)
+        .pruning_payloads(self.prunes_payloads());
         if self.database.compact_on_start {
             info!("compacting the database");
             database.compact()?;
@@ -565,6 +621,22 @@ impl NodeConfig {
         Ok(chain.with_slasher(feed))
     }
 
+    /// Has the chain hand the evidence its slasher finds to a broadcaster, unless kept local.
+    ///
+    /// # Returns
+    ///
+    /// The chain, and the broadcaster's end of the evidence channel when there is one.
+    pub(crate) fn attach_slashing_broadcast<P: Preset>(
+        &self,
+        chain: Chain<P>,
+    ) -> (Chain<P>, Option<UnboundedReceiver<FoundSlashing>>) {
+        if self.slasher.is_none() || !self.slasher_setup.broadcast {
+            return (chain, None);
+        }
+        let (broadcasts, found) = unbounded_channel();
+        (chain.with_slashing_broadcast(broadcasts), Some(found))
+    }
+
     /// The chain the node runs: opened, with its slasher, telemetry, event feed, and custody.
     ///
     /// The network identity fixes which columns the node custodies, so it opens here too.
@@ -579,6 +651,10 @@ impl NodeConfig {
         metrics: NodeMetrics,
         events: EventSender,
     ) -> Result<(Chain<P>, Option<(NodeKey, NetworkIdentity)>), NodeError> {
+        // Every KZG check of the process reads one setup, so the operator's is installed first.
+        if let Some(path) = &self.trusted_setup {
+            TrustedSetupFile(path).trust()?;
+        }
         // A checkpoint download holds a whole state; boxing keeps this future small.
         let chain = Box::pin(self.open_chain::<P>(chain_config, clock)).await?;
         let chain = self

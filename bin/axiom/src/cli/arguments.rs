@@ -1,6 +1,6 @@
 //! The words of a command line, read one flag and its value at a time.
 
-use std::{path::PathBuf, str::FromStr};
+use std::{iter::Peekable, path::PathBuf, str::FromStr};
 
 use crate::cli::CliError;
 
@@ -8,13 +8,15 @@ use crate::cli::CliError;
 #[derive(Debug)]
 pub(crate) struct Arguments<I: Iterator<Item = String>> {
     /// The words not read yet.
-    words: I,
+    words: Peekable<I>,
 }
 
 impl<I: Iterator<Item = String>> Arguments<I> {
     /// A cursor at the first word.
-    pub(crate) const fn new(words: I) -> Self {
-        Self { words }
+    pub(crate) fn new(words: I) -> Self {
+        Self {
+            words: words.peekable(),
+        }
     }
 
     /// The next flag, or none at the end.
@@ -44,6 +46,17 @@ impl<I: Iterator<Item = String>> Arguments<I> {
     pub(crate) fn boolean(&mut self, flag: &'static str) -> Result<bool, CliError> {
         let value = self.value(flag)?;
         Self::truth(&value).ok_or(CliError::InvalidValue { flag, value })
+    }
+
+    /// A switch that may spell out its truth: alone it means true, and a following true or false sets it.
+    pub(crate) fn optional_boolean(&mut self) -> bool {
+        match self.words.peek().and_then(|word| Self::truth(word)) {
+            Some(truth) => {
+                self.words.next();
+                truth
+            }
+            None => true,
+        }
     }
 
     /// The truth a word spells, if it spells one.
@@ -92,6 +105,21 @@ mod tests {
             words.value("--port"),
             Err(CliError::MissingValue("--port"))
         ));
+    }
+
+    #[test]
+    fn an_optional_boolean_takes_only_a_truth() {
+        // Alone, or before another flag, the switch is on and the next word stays a flag.
+        let mut words = arguments(&["--slasher"]);
+        assert!(words.optional_boolean());
+        assert_eq!(words.next_flag().as_deref(), Some("--slasher"));
+        assert!(arguments(&[]).optional_boolean());
+
+        // A spelled-out truth is its value.
+        let mut words = arguments(&["false", "true"]);
+        assert!(!words.optional_boolean());
+        assert!(words.optional_boolean());
+        assert_eq!(words.next_flag(), None);
     }
 
     #[test]

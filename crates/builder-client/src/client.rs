@@ -1,6 +1,9 @@
 //! The client of one builder API endpoint.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axiom_beacon_json::{ApiJson, ForkedJson};
 use axiom_http::{Client, ClientConfig, Endpoint, Limits, Method, Request, Response, StatusCode};
@@ -14,6 +17,15 @@ use axiom_types::{
 
 use crate::{BuilderError, RelayTimeouts, RevealedPayload, versioned::Versioned};
 
+/// The media type of SSZ bodies in the builder API.
+const SSZ: &str = "application/octet-stream";
+
+/// The accept header preferring SSZ and admitting JSON, as the builder API's routes offer both.
+const PREFER_SSZ: &str = "application/octet-stream;q=1.0,application/json;q=0.9";
+
+/// The media type of JSON bodies.
+const JSON: &str = "application/json";
+
 /// A client for the builder API of one relay.
 ///
 /// # Overview
@@ -26,6 +38,11 @@ use crate::{BuilderError, RelayTimeouts, RevealedPayload, versioned::Versioned};
 /// ```
 ///
 /// Public relays speak https; a local sidecar usually speaks plain http.
+///
+/// Bids are asked for in SSZ by preference; a relay may still answer in JSON.
+/// A blinded block goes out in SSZ only once the relay's last bid came in SSZ, proving it speaks it.
+/// SSZ spares the relay and the node the hex encoding of every blob, doubling their size.
+/// See the content negotiation of the getHeader and submitBlindedBlock endpoints.
 ///
 /// Calls may run concurrently; each takes its own pooled connection.
 #[derive(Debug)]
@@ -42,6 +59,10 @@ pub struct RelayClient {
     timeouts: RelayTimeouts,
     /// The user agent each request names, when configured.
     user_agent: Option<String>,
+    /// Whether SSZ is offered at all; without it every exchange is JSON.
+    ssz: bool,
+    /// Whether the relay's last bid came in SSZ.
+    ssz_answered: AtomicBool,
 }
 
 impl RelayClient {
@@ -101,7 +122,16 @@ impl RelayClient {
             pubkey,
             timeouts,
             user_agent: None,
+            ssz: true,
+            ssz_answered: AtomicBool::new(false),
         })
+    }
+
+    /// Exchanges JSON alone, for a relay that mishandles SSZ.
+    #[must_use]
+    pub const fn json_only(mut self) -> Self {
+        self.ssz = false;
+        self
     }
 
     /// Names a user agent on every request, so relay operators can tell clients apart.
@@ -205,23 +235,69 @@ impl RelayClient {
         }
         let path = format!("/eth/v1/builder/header/{slot}/{parent_hash}/{pubkey}");
         let timeout = self.timeouts.header;
+        let accept = if self.ssz { PREFER_SSZ } else { JSON };
         let request = self
             .request(Method::Get, &path)
-            .with_header("accept", "application/json")
+            .with_header("accept", accept)
             .with_header("date-milliseconds", Self::now_millis().to_string())
             .with_header("x-timeout-ms", timeout.as_millis().to_string());
         let response = self.send(&request, timeout).await?;
         match response.status {
             StatusCode::NO_CONTENT => Ok(None),
             StatusCode::OK => {
-                let versioned = Versioned::parse(&response.body, fork)?;
-                Ok(Some(SignedBuilderBid::from_json_in(
-                    versioned.fork,
-                    &versioned.data,
-                )?))
+                let ssz = Self::ssz_body(&response, fork)?;
+                self.ssz_answered.store(ssz.is_some(), Ordering::Relaxed);
+                let bid = match ssz {
+                    Some(bytes) => SignedBuilderBid::decode(bytes, fork)
+                        .map_err(BuilderError::Ssz)?
+                        .ok_or(BuilderError::NoBuilderApi { fork })?,
+                    None => {
+                        let versioned = Versioned::parse(&response.body, fork)?;
+                        SignedBuilderBid::from_json_in(versioned.fork, &versioned.data)?
+                    }
+                };
+                Ok(Some(bid))
             }
             _ => Err(BuilderError::status(&response)),
         }
+    }
+
+    /// Whether a blinded block goes out in SSZ: offered, and the relay's last bid came in it.
+    fn sends_ssz(&self) -> bool {
+        self.ssz && self.ssz_answered.load(Ordering::Relaxed)
+    }
+
+    /// The body of an SSZ response, checked to answer a request of the given fork.
+    ///
+    /// # Returns
+    ///
+    /// The body, or nothing when the response is not SSZ.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an SSZ response names no fork, an unknown one, or another fork.
+    fn ssz_body(response: &Response, expected: ForkName) -> Result<Option<&[u8]>, BuilderError> {
+        let is_ssz = response
+            .headers
+            .get("content-type")
+            .is_some_and(|media| media.split(';').next().map(str::trim) == Some(SSZ));
+        if !is_ssz {
+            return Ok(None);
+        }
+        let version = response
+            .headers
+            .get("eth-consensus-version")
+            .ok_or(BuilderError::MissingVersionHeader)?;
+        let fork = ForkName::from_name(version).ok_or_else(|| BuilderError::UnknownVersion {
+            version: version.to_owned(),
+        })?;
+        if fork != expected {
+            return Err(BuilderError::Version {
+                expected,
+                actual: fork,
+            });
+        }
+        Ok(Some(&response.body))
     }
 
     /// Hands the signed blinded block to the relay for its payload: the submitBlindedBlock endpoint.
@@ -245,11 +321,21 @@ impl RelayClient {
         let fork = block.fork_name();
         let request = self
             .request(Method::Post, "/eth/v1/builder/blinded_blocks")
-            .with_header("accept", "application/json")
-            .with_header("eth-consensus-version", fork.as_str())
-            .with_body("application/json", block.to_json().to_string().into_bytes());
+            .with_header("eth-consensus-version", fork.as_str());
+        let request = if self.sends_ssz() {
+            request
+                .with_header("accept", PREFER_SSZ)
+                .with_body(SSZ, block.encode())
+        } else {
+            request
+                .with_header("accept", JSON)
+                .with_body(JSON, block.to_json().to_string().into_bytes())
+        };
         let response = self.send(&request, self.timeouts.reveal).await?;
         Self::expect(&response, StatusCode::OK)?;
+        if let Some(bytes) = Self::ssz_body(&response, fork)? {
+            return RevealedPayload::decode(bytes, fork);
+        }
         let versioned = Versioned::parse(&response.body, fork)?;
         Ok(RevealedPayload::from_json_in(
             versioned.fork,

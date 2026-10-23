@@ -7,11 +7,10 @@ use axiom_json::{Data, Json};
 use axiom_state_transition::State;
 use axiom_types::{
     BlsPubkey, ChainConfig, Preset, Root, Slot, ValidatorIndex, accessors::CoreState,
-    combined::SignedBeaconBlock,
 };
 
 use super::{ApiContext, ApiError, reply::Freshness};
-use crate::{Chain, ChainError};
+use crate::{Chain, ChainError, StoredBlock};
 
 /// A block named in a path: a keyword, a slot, or a root.
 ///
@@ -68,7 +67,7 @@ impl BlockId {
             .parse()
     }
 
-    /// The block this names and its root, or a 404.
+    /// The block this names, as stored, and its root, or a 404.
     ///
     /// # Errors
     ///
@@ -76,12 +75,12 @@ impl BlockId {
     pub(crate) fn find<P: Preset>(
         self,
         chain: &Chain<P>,
-    ) -> Result<(Root, SignedBeaconBlock<P>), ApiError> {
+    ) -> Result<(Root, StoredBlock<P>), ApiError> {
         let root = self
             .resolve(chain)?
             .ok_or_else(|| ApiError::not_found("block not found"))?;
         let block = chain
-            .block(root)?
+            .stored_block(root)?
             .ok_or_else(|| ApiError::not_found("block not found"))?;
         Ok((root, block))
     }
@@ -100,7 +99,7 @@ impl BlockId {
             Self::Genesis => chain.canonical_root(Slot(0)),
             Self::Slot(slot) => chain.canonical_root(slot),
             // A root is known when its block is stored, whichever branch it is on.
-            Self::Root(root) => Ok(chain.block(root)?.map(|_| root)),
+            Self::Root(root) => Ok(chain.stored_block(root)?.map(|_| root)),
         }
     }
 }

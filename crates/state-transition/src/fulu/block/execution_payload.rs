@@ -4,10 +4,10 @@ use axiom_types::{
     Preset,
     accessors::{CoreState, ExecutionHeaderState},
     deneb::ExecutionPayloadHeader,
-    electra::{BeaconBlockBody, NewPayloadRequest},
+    electra::{BeaconBlockBody, BlindedBeaconBlockBody, NewPayloadRequest},
 };
 
-use crate::{BlockError, BlockProcessor, ExecutionEngine, Fork, Operation, electra};
+use crate::{BlockError, BlockProcessor, ExecutionEngine, Fork, KnownVerdict, Operation, electra};
 
 /// A block body's execution payload, with the engine that judges it, by Fulu's rule.
 ///
@@ -20,6 +20,14 @@ impl<'a, P: Preset, E> PayloadExecution<'a, P, E> {
     /// A body's payload, to be judged by an engine.
     pub const fn new(body: &'a BeaconBlockBody<P>, engine: &'a E) -> Self {
         Self(electra::block::PayloadExecution::new(body, engine))
+    }
+}
+
+impl<'a, P: Preset> PayloadExecution<'a, P, KnownVerdict> {
+    /// A blinded body's payload header, whose payload was pruned after its block was judged.
+    #[must_use]
+    pub const fn blinded(body: &'a BlindedBeaconBlockBody<P>) -> Self {
+        Self(electra::block::PayloadExecution::blinded(body))
     }
 }
 

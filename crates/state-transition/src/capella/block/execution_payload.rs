@@ -1,6 +1,5 @@
 //! The execution payload step of Capella: payloads that carry withdrawals.
 
-use axiom_ssz::Ssz;
 use axiom_types::{
     Preset,
     accessors::{CoreState, ExecutionHeaderState},
@@ -8,7 +7,8 @@ use axiom_types::{
 };
 
 use crate::{
-    BlockError, BlockProcessor, ExecutionEngine, Fork, Operation, capella::block::PayloadAnchor,
+    BlockError, BlockProcessor, ExecutionEngine, Fork, KnownVerdict, Operation, PayloadPart,
+    capella::block::PayloadAnchor,
 };
 
 /// An execution payload, with the engine that judges it, by Capella's rule.
@@ -17,8 +17,8 @@ use crate::{
 /// Deneb added blobs, in its own type.
 #[derive(Debug)]
 pub struct PayloadExecution<'a, P: Preset, E> {
-    /// The payload.
-    payload: &'a ExecutionPayload<P>,
+    /// The payload, or its header once pruned.
+    payload: PayloadPart<'a, ExecutionPayload<P>, ExecutionPayloadHeader<P>>,
     /// The execution engine.
     engine: &'a E,
 }
@@ -26,7 +26,21 @@ pub struct PayloadExecution<'a, P: Preset, E> {
 impl<'a, P: Preset, E> PayloadExecution<'a, P, E> {
     /// A payload, to be judged by an engine.
     pub const fn new(payload: &'a ExecutionPayload<P>, engine: &'a E) -> Self {
-        Self { payload, engine }
+        Self {
+            payload: PayloadPart::Full(payload),
+            engine,
+        }
+    }
+}
+
+impl<'a, P: Preset> PayloadExecution<'a, P, KnownVerdict> {
+    /// A payload header, whose payload was pruned after its block was judged.
+    #[must_use]
+    pub const fn blinded(header: &'a ExecutionPayloadHeader<P>) -> Self {
+        Self {
+            payload: PayloadPart::Header(header),
+            engine: &KnownVerdict(true),
+        }
     }
 }
 
@@ -40,14 +54,15 @@ where
 {
     /// Checks the payload against the chain, has the engine validate it, and caches its header.
     ///
+    /// A pruned payload is checked through its header, and not sent to the engine.
     /// See `process_execution_payload` in the Capella beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
-        let payload = self.payload;
+        let header = self.payload.header();
         let state = processor.state.beacon();
         PayloadAnchor {
-            parent_hash: payload.parent_hash,
-            prev_randao: payload.prev_randao,
-            timestamp: payload.timestamp,
+            parent_hash: header.parent_hash,
+            prev_randao: header.prev_randao,
+            timestamp: header.timestamp,
         }
         .check(
             state,
@@ -55,30 +70,16 @@ where
             processor.config,
         )?;
 
-        let request = NewPayloadRequest {
-            execution_payload: payload.clone(),
-        };
-        if !self.engine.verify_and_notify_new_payload(&request) {
-            return Err(BlockError::PayloadInvalid(payload.block_hash));
+        if let Some(payload) = self.payload.full() {
+            let request = NewPayloadRequest {
+                execution_payload: payload.clone(),
+            };
+            if !self.engine.verify_and_notify_new_payload(&request) {
+                return Err(BlockError::PayloadInvalid(payload.block_hash));
+            }
         }
 
-        *processor.state.beacon.latest_execution_payload_header_mut() = ExecutionPayloadHeader {
-            parent_hash: payload.parent_hash,
-            fee_recipient: payload.fee_recipient,
-            state_root: payload.state_root,
-            receipts_root: payload.receipts_root,
-            logs_bloom: payload.logs_bloom.clone(),
-            prev_randao: payload.prev_randao,
-            block_number: payload.block_number,
-            gas_limit: payload.gas_limit,
-            gas_used: payload.gas_used,
-            timestamp: payload.timestamp,
-            extra_data: payload.extra_data.clone(),
-            base_fee_per_gas: payload.base_fee_per_gas,
-            block_hash: payload.block_hash,
-            transactions_root: payload.transactions.hash_tree_root(),
-            withdrawals_root: payload.withdrawals.hash_tree_root(),
-        };
+        *processor.state.beacon.latest_execution_payload_header_mut() = header;
         Ok(())
     }
 }

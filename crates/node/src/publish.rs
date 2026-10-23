@@ -344,7 +344,7 @@ impl<P: Preset> Publisher<P> {
         match proposal {
             Proposal::DenebBlobs(contents) => {
                 let sidecars = BlockBlobs::deneb(&contents.signed_block)
-                    .sidecars(&contents.blobs, &contents.kzg_proofs, Kzg::mainnet())
+                    .sidecars(&contents.blobs, &contents.kzg_proofs, Kzg::trusted())
                     .map_err(PublishError::Blobs)?;
                 let sidecars = Sidecars::Blobs {
                     sidecars,
@@ -355,7 +355,7 @@ impl<P: Preset> Publisher<P> {
             }
             Proposal::ElectraBlobs(contents) => {
                 let sidecars = BlockBlobs::electra(&contents.signed_block)
-                    .sidecars(&contents.blobs, &contents.kzg_proofs, Kzg::mainnet())
+                    .sidecars(&contents.blobs, &contents.kzg_proofs, Kzg::trusted())
                     .map_err(PublishError::Blobs)?;
                 let sidecars = Sidecars::Blobs {
                     sidecars,
@@ -375,7 +375,7 @@ impl<P: Preset> Publisher<P> {
                     Sidecars::None
                 } else {
                     let columns = BlockColumns::new(&signed_block)
-                        .sidecars(&blobs, &kzg_proofs, Kzg::mainnet())
+                        .sidecars(&blobs, &kzg_proofs, Kzg::trusted())
                         .map_err(PublishError::Columns)?;
                     Sidecars::Columns(columns)
                 };

@@ -48,6 +48,10 @@ impl RewardsRoutes {
         let (parent, block, freshness, config) = context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
+                // Rewards replay the block, so a block whose payload was pruned cannot be priced.
+                let block = block.into_full().ok_or_else(|| {
+                    ApiError::not_found("the block's payload was pruned, so it cannot be replayed")
+                })?;
                 let parent = Self::parent_state(chain, &block)?;
                 let freshness = ApiContext::freshness(chain, root, block.slot());
                 Ok((parent, block, freshness, chain.config().clone()))
@@ -123,6 +127,10 @@ impl RewardsRoutes {
         let (parent, block, freshness, config) = context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
+                // Rewards replay the block, so a block whose payload was pruned cannot be priced.
+                let block = block.into_full().ok_or_else(|| {
+                    ApiError::not_found("the block's payload was pruned, so it cannot be replayed")
+                })?;
                 let parent = Self::parent_state(chain, &block)?;
                 let freshness = ApiContext::freshness(chain, root, block.slot());
                 Ok((parent, block, freshness, chain.config().clone()))

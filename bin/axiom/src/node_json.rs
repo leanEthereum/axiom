@@ -4,8 +4,8 @@ use std::{path::Path, time::Duration};
 
 use axiom_json::{Json, Object};
 use axiom_node::{
-    AnchorSource, GenesisState, HistorySettings, NetworkSettings, NodeConfig, ProposerSettings,
-    StorageMode,
+    AnchorSource, ChainSettings, GenesisState, HistorySettings, NetworkSettings, NodeConfig,
+    ProposerSettings, StorageMode,
 };
 
 /// A node configuration rendered member by member, every field under its own name.
@@ -62,47 +62,8 @@ impl NodeJson<'_> {
         );
         object.insert("history", Self::history(&node.history));
         object.insert("proposer", Self::proposer(&node.proposer));
-        object.insert(
-            "slasher",
-            node.slasher.as_ref().map_or(Json::Null, |slasher| {
-                Json::from([
-                    ("history_length", Json::from(slasher.history_length)),
-                    ("chunk_size", Json::from(slasher.chunk_size)),
-                    (
-                        "validator_chunk_size",
-                        Json::from(slasher.validator_chunk_size),
-                    ),
-                    ("record_chunk_size", Json::from(slasher.record_chunk_size)),
-                    ("prune_period", Json::from(slasher.prune_period)),
-                    (
-                        "directory",
-                        Self::path(node.slasher_setup.directory.as_deref()),
-                    ),
-                    (
-                        "update_period_ms",
-                        Self::millis(node.slasher_setup.update_period),
-                    ),
-                ])
-            }),
-        );
-        let chain = &node.chain;
-        object.insert(
-            "chain",
-            Json::from([
-                ("max_skip_slots", Json::from(chain.max_skip_slots)),
-                ("fast_confirmation", Json::from(chain.fast_confirmation)),
-                ("light_client_server", Json::from(chain.light_client_server)),
-                ("prune_blobs", Json::from(chain.sidecar_pruning.enabled)),
-                (
-                    "epochs_per_blob_prune",
-                    Json::from(chain.sidecar_pruning.interval_epochs),
-                ),
-                (
-                    "blob_prune_margin_epochs",
-                    Json::from(chain.sidecar_pruning.margin_epochs),
-                ),
-            ]),
-        );
+        object.insert("slasher", Self::slasher(node));
+        object.insert("chain", Self::chain(&node.chain));
         object.insert(
             "database",
             Json::from([
@@ -111,21 +72,75 @@ impl NodeJson<'_> {
                     "compact_on_start",
                     Json::from(node.database.compact_on_start),
                 ),
+                ("prune_payloads", Json::from(node.database.prune_payloads)),
             ]),
         );
         object.insert("shutdown_after_sync", Json::from(node.shutdown_after_sync));
+        object.insert("trusted_setup", Self::path(node.trusted_setup.as_deref()));
         Json::Object(object)
+    }
+
+    /// The slasher's layout and where it runs, or null when it is off.
+    fn slasher(node: &NodeConfig) -> Json {
+        node.slasher.as_ref().map_or(Json::Null, |slasher| {
+            Json::from([
+                ("history_length", Json::from(slasher.history_length)),
+                ("chunk_size", Json::from(slasher.chunk_size)),
+                (
+                    "validator_chunk_size",
+                    Json::from(slasher.validator_chunk_size),
+                ),
+                ("record_chunk_size", Json::from(slasher.record_chunk_size)),
+                ("prune_period", Json::from(slasher.prune_period)),
+                (
+                    "directory",
+                    Self::path(node.slasher_setup.directory.as_deref()),
+                ),
+                (
+                    "update_period_ms",
+                    Self::millis(node.slasher_setup.update_period),
+                ),
+                ("broadcast", Json::from(node.slasher_setup.broadcast)),
+            ])
+        })
+    }
+
+    /// The chain thread's settings.
+    fn chain(chain: &ChainSettings) -> Json {
+        Json::from([
+            ("max_skip_slots", Json::from(chain.max_skip_slots)),
+            ("fast_confirmation", Json::from(chain.fast_confirmation)),
+            ("light_client_server", Json::from(chain.light_client_server)),
+            (
+                "import_all_attestations",
+                Json::from(chain.import_all_attestations),
+            ),
+            ("prune_blobs", Json::from(chain.sidecar_pruning.enabled)),
+            (
+                "epochs_per_blob_prune",
+                Json::from(chain.sidecar_pruning.interval_epochs),
+            ),
+            (
+                "blob_prune_margin_epochs",
+                Json::from(chain.sidecar_pruning.margin_epochs),
+            ),
+        ])
     }
 
     /// Where an empty database starts.
     fn anchor(anchor: &AnchorSource) -> Json {
         match anchor {
             AnchorSource::Genesis(genesis) => Json::from([("genesis", Self::genesis(genesis))]),
-            AnchorSource::Checkpoint { state, block } => Json::from([(
+            AnchorSource::Checkpoint {
+                state,
+                block,
+                blobs,
+            } => Json::from([(
                 "checkpoint",
                 Json::from([
                     ("state", Self::path(Some(state))),
                     ("block", Self::path(Some(block))),
+                    ("blobs", Self::path(blobs.as_deref())),
                 ]),
             )]),
             AnchorSource::Url { url, timeout } => Json::from([(
@@ -198,6 +213,11 @@ impl NodeJson<'_> {
                 "subscribe_all_subnets",
                 Json::from(network.subscribe_all_subnets),
             ),
+            (
+                "backfill_rate_limiting",
+                Json::from(network.backfill_rate_limiting),
+            ),
+            ("get_blobs", Json::from(network.get_blobs)),
         ])
     }
 
@@ -232,7 +252,7 @@ impl NodeJson<'_> {
                 "suggested_fee_recipient",
                 Json::from(proposer.default_fee_recipient.to_string()),
             ),
-            ("graffiti", Json::from(proposer.graffiti.to_string())),
+            ("graffiti", Self::text(proposer.graffiti)),
             (
                 "builders",
                 Json::Array(
@@ -250,6 +270,10 @@ impl NodeJson<'_> {
             (
                 "builder_user_agent",
                 Json::from(proposer.builder_client.user_agent.clone()),
+            ),
+            (
+                "builder_disable_ssz",
+                Json::from(proposer.builder_client.disable_ssz),
             ),
             ("builder_fallback_skips", Json::from(fallback.skips)),
             (
@@ -312,7 +336,7 @@ mod tests {
         assert_eq!(object.get("shutdown_after_sync"), Some(&Json::from(false)));
         assert_eq!(
             object.get("database").map(ToString::to_string).as_deref(),
-            Some(r#"{"auto_compact":true,"compact_on_start":false}"#)
+            Some(r#"{"auto_compact":true,"compact_on_start":false,"prune_payloads":true}"#)
         );
     }
 

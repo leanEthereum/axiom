@@ -3,6 +3,7 @@
 //! The chains come from the builder at the pyspec genesis: 64 validators, minimal preset.
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     net::{SocketAddr, TcpListener},
     ops::RangeInclusive,
@@ -21,17 +22,21 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_node::{
-    AnchorSource, Chain, ChainDatabase, ChainError, CheckpointServer, EngineConfig, HistorySegment,
-    HistorySettings, HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError,
-    PortMappingSettings, Reconstruction, SegmentContext, SegmentError, SnapshotInterval,
-    StorageMode, WeakSubjectivity, WeakSubjectivityError,
+    AnchorSource, Chain, ChainDatabase, ChainError, CheckpointServer, DatabaseSettings,
+    EngineConfig, HistorySegment, HistorySettings, HistoryStart, ManualClock, NetworkSettings,
+    Node, NodeConfig, NodeError, PortMappingSettings, Reconstruction, SegmentContext, SegmentError,
+    SnapshotInterval, StorageMode, StoredBlock, WeakSubjectivity, WeakSubjectivityError,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
-use axiom_state_transition::State;
+use axiom_state_transition::{BlockError, KnownVerdict, State, TransitionError, Verification};
 use axiom_types::{
-    BlsSignature, ChainConfig, Epoch, ForkName, Hash32, Minimal, Root, Slot, accessors::CoreState,
-    bellatrix::PowBlock, combined, deneb, electra, fulu, phase0::Checkpoint,
+    BlsSignature, ChainConfig, Epoch, ForkName, Hash32, Minimal, Root, Slot,
+    accessors::CoreState,
+    bellatrix::PowBlock,
+    combined::{self, SignedBlindedBeaconBlock},
+    deneb, electra, fulu,
+    phase0::Checkpoint,
 };
 use tokio::{
     runtime::Builder,
@@ -301,6 +306,102 @@ fn an_archive_rebuilds_the_state_at_every_slot_through_every_fork() {
     restored_bootstraps.sort_by_key(|(root, _)| *root);
     assert_eq!(restored, settled);
     assert_eq!(restored_bootstraps, bootstraps);
+}
+
+#[test]
+fn an_archive_replays_blinded_blocks_to_the_states_of_whole_ones() {
+    let Some(vectors) = Vectors::locate() else {
+        return;
+    };
+    // Fixture state: the same 72 slots through every fork, slots 20 and 43 empty.
+    // Finality at epoch 7 blinds every finalized block from Bellatrix through Fulu.
+    let mut builder = builder(&vectors);
+    let config = builder.config().clone();
+    let genesis = builder.genesis().clone();
+    let terminal = builder.terminal_block_hash();
+    let built = BuiltChain::build(&mut builder, 72, &[20, 43]);
+    let scratch = Scratch::new("blinded-archive");
+    let interval = SnapshotInterval::new(8).expect("eight slots");
+    let archive = ChainDatabase::open(&scratch.0, config.clone())
+        .unwrap()
+        .with_mode(StorageMode::Archive(interval))
+        .pruning_payloads(true);
+    let mut chain = Chain::from_genesis(config.clone(), genesis.clone(), archive).unwrap();
+    known_pow_chain(&mut chain, terminal);
+    import(&mut chain, &built, &genesis);
+    assert_eq!(chain.head().finalized.epoch, Epoch(7));
+
+    // Every finalized block with a payload is now stored blinded; at least one per such fork.
+    let mut blinded_forks = BTreeSet::new();
+    for proposal in &built.proposals {
+        let block = proposal.block();
+        if block.slot() >= Slot(56) {
+            continue;
+        }
+        let stored = chain.stored_block(block.block_root()).unwrap().unwrap();
+        match (stored, SignedBlindedBeaconBlock::blinding(block)) {
+            (StoredBlock::Blinded(stored), Some(blinded)) => {
+                assert_eq!(stored, blinded);
+                blinded_forks.insert(block.fork_name());
+            }
+            (StoredBlock::Full(stored), None) => assert_eq!(&stored, block),
+            (stored, _) => panic!("slot {}: stored as {stored:?}", block.slot()),
+        }
+    }
+    assert_eq!(
+        blinded_forks,
+        BTreeSet::from([
+            ForkName::Bellatrix,
+            ForkName::Capella,
+            ForkName::Deneb,
+            ForkName::Electra,
+            ForkName::Fulu,
+        ])
+    );
+
+    // Replay from the blinded blocks reaches, slot by slot, the states the whole blocks made.
+    for (slot, expected) in (0..).zip(&built.states) {
+        let rebuilt = chain
+            .state_at_slot(Slot(slot))
+            .unwrap()
+            .expect("archive has every slot");
+        assert_eq!(
+            rebuilt.hash_tree_root(),
+            expected.hash_tree_root(),
+            "slot {slot}"
+        );
+    }
+
+    // Mutation: a blinded Capella block whose header names other withdrawals does not apply.
+    let block = built.block_at(25);
+    assert_eq!(block.fork_name(), ForkName::Capella);
+    let Some(SignedBlindedBeaconBlock::Capella(mut blinded)) =
+        SignedBlindedBeaconBlock::blinding(block)
+    else {
+        panic!("a Capella block blinds as one");
+    };
+    let header = &mut blinded.message.body.execution_payload_header;
+    let committed = header.withdrawals_root;
+    header.withdrawals_root = Root([0xee; 32]);
+    let mut state = built.states[24].clone();
+    let error = state
+        .state_transition(
+            &config,
+            &SignedBlindedBeaconBlock::Capella(blinded),
+            Verification::Skip,
+            &KnownVerdict(true),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        TransitionError::Block {
+            slot: Slot(25),
+            source: BlockError::WithdrawalsRootMismatch {
+                claimed: Root([0xee; 32]),
+                expected: committed,
+            },
+        }
+    );
 }
 
 #[test]
@@ -708,6 +809,8 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             custody_group_count: 4,
             discovery: None,
             subscribe_all_subnets: false,
+            backfill_rate_limiting: false,
+            get_blobs: false,
         };
 
         // Node A holds the whole chain from genesis, published over its API.
@@ -721,6 +824,11 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
                 http_address: Some(a_api),
                 engine: Some(engine_config),
                 network: Some(settings(a_p2p, Vec::new())),
+                // The mock engine keeps no payload bodies, so A keeps its payloads to serve them.
+                database: DatabaseSettings {
+                    prune_payloads: false,
+                    ..DatabaseSettings::default()
+                },
                 ..NodeConfig::default()
             },
             a_api,

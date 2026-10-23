@@ -4,20 +4,64 @@ use std::collections::BTreeSet;
 
 use axiom_p2p::eth::reqresp::{ResponseChunk, ResponseCode, Status};
 use axiom_ssz::Ssz;
-use axiom_types::{BlobIndex, ColumnIndex, Epoch, Preset, Root, Slot, deneb::BlobIdentifier};
+use axiom_types::{
+    BlobIndex, ColumnIndex, Epoch, Preset, Root, Slot, combined::SignedBlindedBeaconBlock,
+    deneb::BlobIdentifier,
+};
 
 use super::requests::{
     BlobsByRootRequest, BlocksByHeadRequest, BlocksByRangeRequest, BlocksByRootRequest,
     ColumnsByRangeRequest, ColumnsByRootRequest, EnvelopesByRootRequest, SlotRangeRequest,
     UpdatesByRangeRequest,
 };
-use crate::{Chain, ChainError};
+use crate::{Chain, ChainError, ExecutionLayer, StoredBlock};
 
 /// Most blocks served for one request: MAX_REQUEST_BLOCKS_DENEB.
 const MAX_BLOCKS: u64 = 128;
 
 /// Most blob sidecars served for one request: MAX_REQUEST_BLOB_SIDECARS_ELECTRA.
 const MAX_BLOBS: usize = 1152;
+
+/// Block chunks answered from the chain, some still blinded until the engine returns their payloads.
+///
+/// A node that prunes payloads keeps finalized blocks blinded.
+/// Peers ask for whole blocks, so each blinded one is rebuilt from the body the engine keeps.
+/// The chain thread never waits on the engine: rebuilding happens after the chain query.
+#[derive(Debug)]
+pub(crate) struct BlockChunks<P: Preset> {
+    /// The chunks, a blinded block's holding an empty payload until rebuilt.
+    chunks: Vec<ResponseChunk>,
+    /// Blinded blocks, by the position of their chunk.
+    blinded: Vec<(usize, SignedBlindedBeaconBlock<P>)>,
+}
+
+impl<P: Preset> BlockChunks<P> {
+    /// The chunks with every blinded block made whole.
+    ///
+    /// A block the engine cannot rebuild ends the response there.
+    /// Blocks after it would leave a gap a range request does not allow.
+    pub(crate) async fn complete(self, execution: &ExecutionLayer) -> Vec<ResponseChunk> {
+        let Self {
+            mut chunks,
+            blinded,
+        } = self;
+        if blinded.is_empty() {
+            return chunks;
+        }
+        let (positions, blocks): (Vec<usize>, Vec<_>) = blinded.into_iter().unzip();
+        let whole = execution.unblind_all(blocks).await;
+        for (position, block) in positions.into_iter().zip(whole) {
+            match block {
+                Some(block) => chunks[position].payload = block.encode(),
+                None => {
+                    chunks.truncate(position);
+                    break;
+                }
+            }
+        }
+        chunks
+    }
+}
 
 /// The chain as one request sees it, and the chunks answered so far.
 ///
@@ -29,6 +73,8 @@ pub(crate) struct Responder<'a, P: Preset> {
     chain: &'a Chain<P>,
     /// The chunks answered so far.
     chunks: Vec<ResponseChunk>,
+    /// Blinded blocks among the chunks, by position, to make whole after the query.
+    blinded: Vec<(usize, SignedBlindedBeaconBlock<P>)>,
 }
 
 impl<'a, P: Preset> Responder<'a, P> {
@@ -37,6 +83,15 @@ impl<'a, P: Preset> Responder<'a, P> {
         Self {
             chain,
             chunks: Vec::new(),
+            blinded: Vec::new(),
+        }
+    }
+
+    /// The block chunks answered, with their blinded blocks still to make whole.
+    fn block_chunks(self) -> BlockChunks<P> {
+        BlockChunks {
+            chunks: self.chunks,
+            blinded: self.blinded,
         }
     }
 
@@ -72,11 +127,11 @@ impl<'a, P: Preset> Responder<'a, P> {
     pub(crate) fn blocks_by_range(
         mut self,
         request: BlocksByRangeRequest,
-    ) -> Result<Vec<ResponseChunk>, ChainError> {
+    ) -> Result<BlockChunks<P>, ChainError> {
         for (_, root) in self.canonical(request.start_slot, request.count)? {
             self.push_block(root)?;
         }
-        Ok(self.chunks)
+        Ok(self.block_chunks())
     }
 
     /// Blocks by root, in request order, skipping unknown ones.
@@ -87,11 +142,11 @@ impl<'a, P: Preset> Responder<'a, P> {
     pub(crate) fn blocks_by_root(
         mut self,
         request: &BlocksByRootRequest,
-    ) -> Result<Vec<ResponseChunk>, ChainError> {
+    ) -> Result<BlockChunks<P>, ChainError> {
         for root in request {
             self.push_block(*root)?;
         }
-        Ok(self.chunks)
+        Ok(self.block_chunks())
     }
 
     /// A block and its ancestors, newest first.
@@ -102,17 +157,16 @@ impl<'a, P: Preset> Responder<'a, P> {
     pub(crate) fn blocks_by_head(
         mut self,
         request: BlocksByHeadRequest,
-    ) -> Result<Vec<ResponseChunk>, ChainError> {
+    ) -> Result<BlockChunks<P>, ChainError> {
         let mut root = request.beacon_root;
         let count = request.count.min(MAX_BLOCKS);
         while (self.chunks.len() as u64) < count {
-            let Some(block) = self.chain.block(root)? else {
+            let Some(parent) = self.push_block(root)? else {
                 break;
             };
-            root = block.parent_root();
-            self.chunks.push(self.chunk(block.slot(), block.encode()));
+            root = parent;
         }
-        Ok(self.chunks)
+        Ok(self.block_chunks())
     }
 
     /// Blob sidecars of canonical blocks in a slot range, by block then index.
@@ -312,13 +366,26 @@ impl<'a, P: Preset> Responder<'a, P> {
         Ok(blocks)
     }
 
-    /// Appends a stored block, if there is one.
-    fn push_block(&mut self, root: Root) -> Result<(), ChainError> {
-        if let Some(block) = self.chain.block(root)? {
-            let chunk = self.chunk(block.slot(), block.encode());
-            self.chunks.push(chunk);
-        }
-        Ok(())
+    /// Appends a stored block, if there is one, a blinded one to be made whole later.
+    ///
+    /// # Returns
+    ///
+    /// The root of the block's parent, when the block is stored.
+    fn push_block(&mut self, root: Root) -> Result<Option<Root>, ChainError> {
+        let Some(block) = self.chain.stored_block(root)? else {
+            return Ok(None);
+        };
+        let parent = block.parent_root();
+        let chunk = match block {
+            StoredBlock::Full(block) => self.chunk(block.slot(), block.encode()),
+            StoredBlock::Blinded(block) => {
+                let chunk = self.chunk(block.slot(), Vec::new());
+                self.blinded.push((self.chunks.len(), block));
+                chunk
+            }
+        };
+        self.chunks.push(chunk);
+        Ok(Some(parent))
     }
 
     /// Appends the stored columns of a block among the indices asked for.
@@ -366,9 +433,30 @@ impl RequestBody<'_> {
 #[cfg(test)]
 mod tests {
     use axiom_ssz::Length;
+    use axiom_types::{Minimal, capella, combined};
+    use tokio::runtime::Builder;
 
     use super::*;
     use crate::network::requests::{MaxRequestBlobSidecars, MaxRequestBlocks};
+
+    #[test]
+    fn a_block_the_engine_cannot_rebuild_ends_the_response() {
+        // Fixture state: three chunks, the second a blinded block, and no engine to rebuild it.
+        let blinded = SignedBlindedBeaconBlock::blinding(&combined::SignedBeaconBlock::Capella(
+            capella::SignedBeaconBlock::<Minimal>::default(),
+        ))
+        .unwrap();
+        let chunk = |byte| ResponseChunk::success(None, vec![byte]);
+        let chunks = BlockChunks {
+            chunks: vec![chunk(1), chunk(0), chunk(3)],
+            blinded: vec![(1, blinded)],
+        };
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let answered = runtime.block_on(chunks.complete(&ExecutionLayer::disconnected()));
+
+        // A range answer may not skip a block, so only the chunk before the gap remains.
+        assert_eq!(answered, [chunk(1)]);
+    }
 
     #[test]
     fn the_served_limits_match_the_request_list_bounds() {

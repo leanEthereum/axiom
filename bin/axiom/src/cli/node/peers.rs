@@ -46,10 +46,18 @@ pub(crate) const PEER_USAGE: &str = "\
     --no-discovery               find peers through boot nodes only
     --no-network                 run without peers
     --subscribe-all-subnets      join every attestation and sync committee subnet
+    --disable-backfill-rate-limiting
+                                 process backfill batches as fast as peers serve them
+    --disable-get-blobs          wait for peers to send new blocks' columns, without
+                                 building them from the engine's blob pool
 ";
 
 /// The peer flags as given.
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each switch is an independent operator flag"
+)]
 pub(crate) struct PeerFlags {
     /// The libp2p address.
     listen_address: Option<SocketAddr>,
@@ -75,6 +83,10 @@ pub(crate) struct PeerFlags {
     target_peers: Option<usize>,
     /// Whether every subnet is joined.
     subscribe_all_subnets: bool,
+    /// Whether backfill runs unpaced.
+    no_backfill_rate_limiting: bool,
+    /// Whether the engine's blob pool goes unused.
+    no_get_blobs: bool,
 }
 
 impl PeerFlags {
@@ -98,6 +110,8 @@ impl PeerFlags {
             "--no-discovery" => self.no_discovery = true,
             "--target-peers" => self.target_peers = Some(words.parsed("--target-peers")?),
             "--subscribe-all-subnets" => self.subscribe_all_subnets = true,
+            "--disable-backfill-rate-limiting" => self.no_backfill_rate_limiting = true,
+            "--disable-get-blobs" => self.no_get_blobs = true,
             _ => return Ok(false),
         }
         Ok(true)
@@ -146,6 +160,8 @@ impl PeerFlags {
                 .max(chain.custody_requirement),
             target_peers: self.target_peers.unwrap_or(DEFAULT_TARGET_PEERS),
             subscribe_all_subnets: self.subscribe_all_subnets,
+            backfill_rate_limiting: !self.no_backfill_rate_limiting,
+            get_blobs: !self.no_get_blobs,
         })
     }
 }

@@ -1,7 +1,8 @@
 //! Attestations of Electra, which aggregate across the committees of a slot.
 
 use axiom_ssz::{
-    BitList, BitVector, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
+    BitList, BitVector, CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, List,
+    Ssz,
 };
 
 use crate::{
@@ -125,6 +126,19 @@ impl<P: Preset> Container for IndexedAttestation<P> {
 }
 
 impl<P: Preset> IndexedAttestation<P> {
+    /// The attestation a vote makes in this container.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the vote has more signers than the committees of a slot hold.
+    pub fn from_vote(vote: &IndexedVote) -> Result<Self, CapacityError> {
+        Ok(Self {
+            attesting_indices: List::try_from(vote.indices.clone())?,
+            data: vote.data.clone(),
+            signature: vote.signature,
+        })
+    }
+
     /// The vote reduced to the fields every fork shares.
     #[must_use]
     pub fn indexed_vote(&self) -> IndexedVote {

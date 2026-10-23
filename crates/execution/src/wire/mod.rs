@@ -15,9 +15,11 @@
 
 mod attributes;
 mod blobs;
+mod client_version;
 mod forkchoice;
 mod get_payload;
 mod payload;
+mod payload_body;
 mod pow_block;
 mod primitives;
 mod reader;
@@ -34,11 +36,13 @@ pub use blobs::{
     BlobAndProofV1, BlobAndProofV2, BlobProofs, Blobs, BlobsBundleV1, BlobsBundleV2, CellProofs,
     GetBlobsResponse,
 };
+pub use client_version::ClientVersion;
 pub use forkchoice::{ForkchoiceState, ForkchoiceUpdated, PayloadId};
 pub use get_payload::{
     GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3, GetPayloadResponseV4,
     GetPayloadResponseV5, GetPayloadResponseV6,
 };
+pub use payload_body::PayloadBody;
 pub(crate) use reader::{Fields, Items, Reader};
 pub use requests::{RequestsList, TypedRequests};
 pub use status::{PayloadStatus, PayloadStatusKind};

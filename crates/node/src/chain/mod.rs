@@ -1,5 +1,6 @@
 //! The chain: the fork choice store, its database, and the head it selects.
 
+mod aggregation;
 mod availability;
 mod database;
 mod gossip;
@@ -14,6 +15,7 @@ use std::{
     sync::Arc,
 };
 
+use aggregation::AggregationDuties;
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
@@ -23,32 +25,36 @@ use axiom_fork_choice::{
     DataAvailability, ExecutionStatus, FastConfirmation, ForkChoiceError, ForkChoiceNode,
     NodePayload, PayloadArrival, PayloadStatus, Store,
 };
-use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
+use axiom_gossip::{ChainView, CheckedBlob, GossipValidator, Seen, SubnetVote};
 use axiom_json::Json;
+use axiom_kzg::Kzg;
 use axiom_light_client::{
     LightClientServer, PostState,
     combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
 };
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
+use axiom_p2p::eth::GossipKind;
 use axiom_slasher::Slashing;
+use axiom_ssz::Ssz;
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Gwei, Hash32, Preset,
-    Root, Slot, ValidatorIndex,
+    BlobData, BlsSignature, ChainConfig, ColumnIndex, CommitteeIndex, Epoch, ForkDigest, Gwei,
+    Hash32, Preset, Root, Slot, ValidatorIndex,
     accessors::{CoreState, ForkState},
     altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
     capella::SignedBlsToExecutionChange,
     combined,
     deneb::BlobSidecar,
+    fulu,
     gloas::{self, PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
     phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
 pub use database::{
     ChainDatabase, Finality, HistoryStart, InvalidInterval, RawRecord, ReconstructionCursor,
-    SchemaVersion, SidecarPass, SnapshotInterval, StorageMode, TableUsage,
+    SchemaVersion, SidecarPass, SnapshotInterval, StorageMode, StoredBlock, TableUsage,
 };
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
@@ -60,13 +66,13 @@ pub use history::{
 };
 use queued_votes::QueuedVotes;
 pub use settings::{ChainSettings, SidecarPruning};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     ApiEvent, ChainError, EventSender, EventTopic,
     monitor::{Observed, Source, ValidatorMonitor},
-    slasher::SlasherFeed,
+    slasher::{FoundSlashing, SlasherFeed},
 };
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
@@ -131,6 +137,8 @@ pub struct Chain<P: Preset> {
     sidecars_pruned: Option<Epoch>,
     /// Votes of the current slot, counted from the next one.
     queued_votes: QueuedVotes,
+    /// Committees this node's validators aggregate, whose subnet votes are pooled.
+    aggregation: AggregationDuties,
 }
 
 impl<P: Preset> Chain<P> {
@@ -188,6 +196,68 @@ impl<P: Preset> Chain<P> {
         Ok(chain)
     }
 
+    /// Stores the blobs of the anchor block, which the operator supplied beside it.
+    ///
+    /// Each blob passes the checks gossip would make, so the anchor's data is as good as a peer's:
+    ///
+    /// - it sits at its own index and names the anchor block's header,
+    /// - its commitment is the block's at that index, with a valid inclusion proof,
+    /// - its proof opens the commitment.
+    ///
+    /// Only blocks of forks with whole blob sidecars take blobs; others take an empty list.
+    /// See `BlobSidecar` in the Deneb p2p spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a check fails, the count differs from the commitments, or the write fails.
+    pub fn import_anchor_blobs(
+        &mut self,
+        block: &combined::SignedBeaconBlock<P>,
+        blobs: Vec<BlobSidecar<P>>,
+    ) -> Result<(), ChainError> {
+        let root = block.block_root();
+        let message = block.message();
+        let commitments = match block.fork_name().blob_data() {
+            BlobData::BlobSidecars => message.blob_kzg_commitments(),
+            BlobData::None | BlobData::BlockColumns | BlobData::PayloadColumns => &[],
+        };
+        if blobs.len() != commitments.len() {
+            return Err(ChainError::AnchorBlobCount {
+                slot: block.slot(),
+                expected: commitments.len(),
+                actual: blobs.len(),
+            });
+        }
+        for (index, (blob, commitment)) in blobs.iter().zip(commitments).enumerate() {
+            let checked = CheckedBlob(blob);
+            let failed = if blob.index.0 != index as u64 {
+                Some("index out of place")
+            } else if blob.signed_block_header.message.hash_tree_root() != root {
+                Some("names another block")
+            } else if blob.kzg_commitment != *commitment {
+                Some("commitment differs from the block's")
+            } else if !checked.has_valid_inclusion_proof() {
+                Some("inclusion proof does not verify")
+            } else if !checked.has_valid_kzg_proof(Kzg::trusted()) {
+                Some("proof does not open the commitment")
+            } else {
+                None
+            };
+            if let Some(reason) = failed {
+                return Err(ChainError::InvalidAnchorBlob {
+                    index,
+                    root,
+                    reason,
+                });
+            }
+        }
+        let sidecars: Vec<Sidecar<P>> = blobs
+            .into_iter()
+            .map(|blob| Sidecar::Blob(Arc::new(blob)))
+            .collect();
+        self.database.put_sidecars(root, &sidecars)
+    }
+
     /// The chain a database was left with, resuming from its finalized anchor.
     ///
     /// Blocks after the anchor are not replayed; the node fetches them again from peers.
@@ -242,6 +312,7 @@ impl<P: Preset> Chain<P> {
             fast_confirmation: None,
             sidecars_pruned: None,
             queued_votes: QueuedVotes::default(),
+            aggregation: AggregationDuties::default(),
         })
     }
 
@@ -296,6 +367,12 @@ impl<P: Preset> Chain<P> {
         if let Some(pubkey) = pubkey {
             self.monitor.auto_register(index, pubkey);
         }
+    }
+
+    /// Records that a local validator aggregates a committee, so its subnet votes are pooled.
+    pub(crate) fn expect_aggregation(&mut self, slot: Slot, committee: CommitteeIndex) {
+        let current = self.store.current_slot();
+        self.aggregation.insert(slot, committee, current);
     }
 
     /// Feeds every verified vote and imported block to a slasher.
@@ -534,6 +611,15 @@ impl<P: Preset> Chain<P> {
         self.database.block(root)
     }
 
+    /// A block by root as stored: whole, or blinded once finality pruned its payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn stored_block(&self, root: Root) -> Result<Option<StoredBlock<P>>, ChainError> {
+        self.database.stored_block(root)
+    }
+
     /// The bid a Gloas block committed to, while the fork choice holds the block's state.
     #[must_use]
     pub fn payload_bid(&self, root: &Root) -> Option<gloas::ExecutionPayloadBid> {
@@ -551,7 +637,7 @@ impl<P: Preset> Chain<P> {
         if let Some(node) = self.store.blocks().get(&root) {
             return Ok(Some(node.slot));
         }
-        Ok(self.database.block(root)?.map(|block| block.slot()))
+        Ok(self.database.stored_block(root)?.map(|block| block.slot()))
     }
 
     /// The root that binds signatures and topics to this chain's genesis validator set.
@@ -626,7 +712,7 @@ impl<P: Preset> Chain<P> {
                 slasher.found()
             });
             for slashing in found.into_iter().flatten() {
-                if let Err(error) = self.on_found_slashing(slashing) {
+                if let Err(error) = self.on_found_slashing(&slashing) {
                     warn!(%error, "slasher evidence refused");
                 }
             }
@@ -805,6 +891,40 @@ impl<P: Preset> Chain<P> {
         column: Arc<combined::DataColumnSidecar<P>>,
     ) -> Result<Option<Root>, ChainError> {
         self.submit_sidecar(Sidecar::Column(column))
+    }
+
+    /// Takes the custodied columns built from the engine's blobs, as if they arrived on gossip.
+    ///
+    /// The builder checked every cell proof, and the block passed the gossip rules.
+    /// A column the gossip rules already saw, from the same proposer for the slot, is skipped.
+    /// The others are remembered as seen, so a later copy from a peer is ignored.
+    ///
+    /// # Returns
+    ///
+    /// The columns no peer had sent yet, for the node to publish.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a block the columns release is refused by the fork choice.
+    pub(crate) fn submit_engine_columns(
+        &mut self,
+        columns: Vec<fulu::DataColumnSidecar<P>>,
+    ) -> Result<Vec<combined::DataColumnSidecar<P>>, ChainError> {
+        let mut fresh = Vec::new();
+        for column in columns {
+            if !self.custody().contains(&column.index) {
+                continue;
+            }
+            let header = &column.signed_block_header.message;
+            let key = (header.slot, header.proposer_index, column.index);
+            if !self.gossip.seen.data_column_sidecar_tuples.insert(key) {
+                continue;
+            }
+            let column = combined::DataColumnSidecar::Fulu(column);
+            fresh.push(column.clone());
+            self.submit_column(Arc::new(column))?;
+        }
+        Ok(fresh)
     }
 
     /// Hands over a verified blob sidecar, which may complete a waiting block.
@@ -1220,9 +1340,10 @@ impl<P: Preset> Chain<P> {
         }
     }
 
-    /// Counts one validator's vote, received alone on an attestation subnet.
+    /// Counts and pools one validator's vote, received alone on an attestation subnet.
     ///
     /// The vote becomes an aggregate with one committee and one participant.
+    /// A vote submitted to this node is always pooled, since it is one of its own validators'.
     ///
     /// # Arguments
     ///
@@ -1239,6 +1360,40 @@ impl<P: Preset> Chain<P> {
         &mut self,
         vote: &V,
         claim: PayloadClaim,
+    ) -> Result<ValidatorIndex, ChainError> {
+        self.subnet_vote(vote, claim, true)
+    }
+
+    /// Counts one validator's vote from a subnet's gossip, pooling it only when someone needs it.
+    ///
+    /// The pool takes it when a local validator aggregates its committee, or the operator imports all.
+    /// The fork choice and the slasher see it either way.
+    ///
+    /// # Returns
+    ///
+    /// The attester.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
+    pub fn on_gossip_subnet_vote<V: SubnetVote>(
+        &mut self,
+        vote: &V,
+        claim: PayloadClaim,
+    ) -> Result<ValidatorIndex, ChainError> {
+        let pooled = self.settings.import_all_attestations
+            || self
+                .aggregation
+                .contains(vote.data().slot, vote.committee_index());
+        self.subnet_vote(vote, claim, pooled)
+    }
+
+    /// Counts a subnet vote, and pools it when asked.
+    fn subnet_vote<V: SubnetVote>(
+        &mut self,
+        vote: &V,
+        claim: PayloadClaim,
+        pooled: bool,
     ) -> Result<ValidatorIndex, ChainError> {
         let data = vote.data();
         self.check_skips(data.slot, data.beacon_block_root)?;
@@ -1267,7 +1422,9 @@ impl<P: Preset> Chain<P> {
             bits,
             payload: claim,
         };
-        self.pool_vote(&aggregate);
+        if pooled {
+            self.pool_vote(&aggregate);
+        }
         if let Some(slasher) = &self.slasher {
             slasher.single(attester, data, *vote.signature());
         }
@@ -1328,23 +1485,81 @@ impl<P: Preset> Chain<P> {
     /// # Errors
     ///
     /// Fails when the evidence does not verify, or slashes nobody at the head.
-    pub fn on_found_slashing(&mut self, slashing: Slashing) -> Result<(), ChainError> {
+    pub fn on_found_slashing(&mut self, slashing: &Slashing) -> Result<(), ChainError> {
         match slashing {
             Slashing::Attester(votes) => {
                 self.store
-                    .on_attester_slashing(&votes, Verification::Verify)?;
+                    .on_attester_slashing(votes, Verification::Verify)?;
                 let state = Self::head_beacon(&self.store, self.head)?;
                 info!(validators = ?votes.common_signers(), "slasher found an attester slashing");
-                self.pool.slashings_mut().insert_attester(state, votes)?;
+                self.pool
+                    .slashings_mut()
+                    .insert_attester(state, votes.clone())?;
             }
-            Slashing::Proposer(slashing) => {
+            Slashing::Proposer(proposer_slashing) => {
                 let state = Self::head_beacon(&self.store, self.head)?;
-                let proposer = slashing.signed_header_1.message.proposer_index;
+                let proposer = proposer_slashing.signed_header_1.message.proposer_index;
                 info!(%proposer, "slasher found a proposer slashing");
-                self.pool.slashings_mut().insert_proposer(state, slashing)?;
+                self.pool
+                    .slashings_mut()
+                    .insert_proposer(state, proposer_slashing.clone())?;
             }
         }
+        self.spread_found(slashing);
         Ok(())
+    }
+
+    /// Gossips the evidence the slasher finds and the chain accepts, through a broadcaster.
+    ///
+    /// Without a slasher there is nothing to spread, and the sender is dropped.
+    #[must_use]
+    pub(crate) fn with_slashing_broadcast(
+        mut self,
+        broadcasts: UnboundedSender<FoundSlashing>,
+    ) -> Self {
+        if let Some(slasher) = &mut self.slasher {
+            slasher.broadcast_to(broadcasts);
+        }
+        self
+    }
+
+    /// Gossips evidence the slasher found and the chain pooled, when the operator broadcasts.
+    ///
+    /// The evidence passes the gossip rules first, which also remembers its signers as seen.
+    /// It goes out in the container of the head state's fork, under that fork's digest.
+    pub(crate) fn spread_found(&mut self, found: &Slashing) {
+        if !self.slasher.as_ref().is_some_and(SlasherFeed::broadcasts) {
+            return;
+        }
+        let checked = self.validate_gossip(|validator| match found {
+            Slashing::Attester(votes) => validator.attester_slashing(votes),
+            Slashing::Proposer(slashing) => validator.proposer_slashing(slashing),
+        });
+        if let Err(error) = checked {
+            debug!(%error, "slasher evidence not broadcast");
+            return;
+        }
+        let Ok(state) = Self::head_beacon(&self.store, self.head) else {
+            return;
+        };
+        let (kind, message) = match found {
+            Slashing::Attester(votes) => match state.encode_attester_slashing(votes) {
+                Ok(message) => (GossipKind::AttesterSlashing, message),
+                Err(error) => {
+                    debug!(%error, "slasher evidence does not fit the fork's container");
+                    return;
+                }
+            },
+            Slashing::Proposer(slashing) => (GossipKind::ProposerSlashing, slashing.encode()),
+        };
+        let epoch = state.slot().epoch::<P>();
+        if let Some(slasher) = &self.slasher {
+            slasher.spread(FoundSlashing {
+                kind,
+                epoch,
+                message,
+            });
+        }
     }
 
     /// Keeps a proposer slashing that passed gossip or API checks.
@@ -2105,5 +2320,161 @@ impl<P: Preset> Chain<P> {
     fn announce(&self, event: ChainEvent) {
         // Having no subscriber is normal, so a failed send is not an error.
         let _unheard = self.events.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_das::BlockColumns;
+    use axiom_gossip::BlockBlobs;
+    use axiom_kzg::Blob as KzgBlob;
+    use axiom_types::{
+        BlobIndex, KzgCommitment, KzgProof, Minimal,
+        deneb::{self, Blob},
+        fulu,
+        phase0::BeaconState,
+    };
+
+    use super::*;
+
+    /// A Deneb block at slot 9 committing to two blobs, and their sidecars.
+    fn anchor() -> (
+        combined::SignedBeaconBlock<Minimal>,
+        Vec<BlobSidecar<Minimal>>,
+    ) {
+        let kzg = Kzg::mainnet();
+        let mut block = deneb::SignedBeaconBlock::<Minimal>::default();
+        block.message.slot = Slot(9);
+        let mut blobs = Vec::new();
+        let mut proofs = Vec::new();
+        for seed in [2_u8, 4] {
+            let mut bytes = Blob::<Minimal>::default().as_ref().to_vec();
+            bytes[31] = seed;
+            let blob = Blob::<Minimal>::try_from(bytes.as_slice()).unwrap();
+            let opened = KzgBlob::from_bytes(blob.as_ref()).unwrap();
+            let commitment = kzg.blob_to_kzg_commitment(&opened);
+            let proof = kzg.compute_blob_kzg_proof(&opened, &commitment).unwrap();
+            block
+                .message
+                .body
+                .blob_kzg_commitments
+                .push(KzgCommitment(commitment.0))
+                .unwrap();
+            blobs.push(blob);
+            proofs.push(KzgProof(proof.0));
+        }
+        let sidecars = BlockBlobs::deneb(&block)
+            .sidecars(&blobs, &proofs, kzg)
+            .unwrap();
+        (combined::SignedBeaconBlock::Deneb(block), sidecars)
+    }
+
+    /// A chain to store blobs in; the anchor checks read only the block given.
+    fn empty_chain() -> Chain<Minimal> {
+        let config = ChainConfig::minimal();
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let genesis = combined::BeaconState::Phase0(BeaconState::<Minimal>::default());
+        Chain::from_genesis(config, genesis, database).unwrap()
+    }
+
+    #[test]
+    fn anchor_blobs_are_checked_then_stored() {
+        // Fixture state: a Deneb anchor block with two blobs, and their two sidecars.
+        let (block, sidecars) = anchor();
+        let root = block.block_root();
+        let mut chain = empty_chain();
+        chain.import_anchor_blobs(&block, sidecars.clone()).unwrap();
+        assert_eq!(
+            chain.database().blob(root, BlobIndex(1)).unwrap(),
+            Some(sidecars[1].clone())
+        );
+
+        // One blob short of the two commitments.
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, sidecars[..1].to_vec()),
+            Err(ChainError::AnchorBlobCount {
+                slot: Slot(9),
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        // Mutation: the blobs swap places, so each sits at the other's index.
+        let swapped = vec![sidecars[1].clone(), sidecars[0].clone()];
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, swapped),
+            Err(ChainError::InvalidAnchorBlob {
+                index: 0,
+                reason: "index out of place",
+                ..
+            })
+        ));
+
+        // Mutation: blob 1 carries blob 0's proof, which opens another commitment.
+        let mut forged = sidecars.clone();
+        forged[1].kzg_proof = sidecars[0].kzg_proof;
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, forged),
+            Err(ChainError::InvalidAnchorBlob {
+                index: 1,
+                reason: "proof does not open the commitment",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn engine_columns_enter_once_and_only_for_custody() {
+        // Fixture state: a Fulu block at slot 3 committing to one blob, and its 128 columns.
+        let kzg = Kzg::mainnet();
+        let mut bytes = Blob::<Minimal>::default().as_ref().to_vec();
+        bytes[31] = 7;
+        let blob = Blob::<Minimal>::try_from(bytes.as_slice()).unwrap();
+        let opened = KzgBlob::from_bytes(blob.as_ref()).unwrap();
+        let commitment = kzg.blob_to_kzg_commitment(&opened);
+        let (_, cell_proofs) = kzg.compute_cells_and_kzg_proofs(&opened);
+        let mut block = fulu::SignedBeaconBlock::<Minimal>::default();
+        block.message.slot = Slot(3);
+        block
+            .message
+            .body
+            .blob_kzg_commitments
+            .push(KzgCommitment(commitment.0))
+            .unwrap();
+        let proofs: Vec<KzgProof> = cell_proofs.iter().map(|proof| KzgProof(proof.0)).collect();
+        let columns = BlockColumns::new(&block)
+            .sidecars(&[blob], &proofs, kzg)
+            .unwrap();
+        assert_eq!(columns.len(), 128);
+
+        // A node custodying columns 2 and 9 takes those two, and reports both as new.
+        let mut chain = empty_chain().with_custody([ColumnIndex(2), ColumnIndex(9)]);
+        let fresh = chain.submit_engine_columns(columns.clone()).unwrap();
+        let indices: Vec<ColumnIndex> = fresh
+            .iter()
+            .map(combined::DataColumnSidecar::index)
+            .collect();
+        assert_eq!(indices, [ColumnIndex(2), ColumnIndex(9)]);
+
+        // The same columns again, from the engine or a peer, are not new.
+        assert_eq!(chain.submit_engine_columns(columns).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn blocks_without_blob_sidecars_take_no_blobs() {
+        // A Fulu anchor carries its data in columns, so only an empty list is accepted.
+        let (_, sidecars) = anchor();
+        let fulu = combined::SignedBeaconBlock::Fulu(fulu::SignedBeaconBlock::<Minimal>::default());
+        empty_chain()
+            .import_anchor_blobs(&fulu, Vec::new())
+            .unwrap();
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&fulu, sidecars),
+            Err(ChainError::AnchorBlobCount {
+                expected: 0,
+                actual: 2,
+                ..
+            })
+        ));
     }
 }

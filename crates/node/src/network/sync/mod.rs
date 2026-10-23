@@ -5,6 +5,7 @@
 
 mod backfill;
 mod lookup;
+mod pacing;
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -33,6 +34,7 @@ use tracing::{debug, info, warn};
 pub(crate) use self::{
     backfill::{BackfillOutcome, BackfillSync},
     lookup::{BlockLookups, LookupEvent, MissingBlock},
+    pacing::BackfillPacer,
 };
 use super::{
     forks::ForkDigests,
@@ -151,7 +153,7 @@ impl<P: Preset> Received<P> {
     /// Every Fulu column must be well formed, included, and open its commitments.
     /// Every Gloas column must open the commitments of its block's bid, a block of the batch.
     fn verify(&self, config: &ChainConfig) -> Result<(), String> {
-        let kzg = Kzg::mainnet();
+        let kzg = Kzg::trusted();
         for blob in &self.blobs {
             let checked = CheckedBlob(blob);
             if !checked.has_valid_inclusion_proof() || !checked.has_valid_kzg_proof(kzg) {

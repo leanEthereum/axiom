@@ -31,6 +31,7 @@ pub(crate) const CHAIN_USAGE: &str = "\
                                  longest wait for the genesis state [default: 300]
     --checkpoint-state <FILE>    SSZ post-state of a trusted block, instead of genesis
     --checkpoint-block <FILE>    SSZ signed trusted block, with --checkpoint-state
+    --checkpoint-blobs <FILE>    SSZ list of the trusted block's blob sidecars, before Fulu
     --checkpoint-sync-url <URL>  trusted beacon API to download the finalized checkpoint from
     --checkpoint-sync-url-timeout <SECONDS>
                                  longest wait for each checkpoint download [default: 180]
@@ -41,6 +42,8 @@ pub(crate) const CHAIN_USAGE: &str = "\
     --ignore-ws-check            only warn when the head is past its weak subjectivity period
     --archive                    keep state snapshots and backfill to genesis
     --snapshot-interval <SLOTS>  slots between archive snapshots [default: 2048]
+    --trusted-setup-file-override <FILE>
+                                 KZG trusted setup JSON, in place of the mainnet ceremony's
 ";
 
 /// The chain flags as given.
@@ -62,6 +65,8 @@ pub(crate) struct ChainFlags {
     checkpoint_state: Option<PathBuf>,
     /// The checkpoint block file.
     checkpoint_block: Option<PathBuf>,
+    /// The checkpoint block's blob sidecars.
+    checkpoint_blobs: Option<PathBuf>,
     /// The beacon API to download a checkpoint from.
     checkpoint_sync_url: Option<String>,
     /// Longest wait for each checkpoint download, in seconds.
@@ -74,6 +79,8 @@ pub(crate) struct ChainFlags {
     allow_insecure_genesis_sync: bool,
     /// Whether a stale head only warns.
     ignore_ws_check: bool,
+    /// A KZG trusted setup file.
+    trusted_setup: Option<PathBuf>,
 }
 
 /// What the chain flags resolve to.
@@ -85,6 +92,8 @@ pub(crate) struct ChainChoice {
     pub(crate) anchor: Option<AnchorSource>,
     /// History, pruning, and weak subjectivity.
     pub(crate) history: HistorySettings,
+    /// A KZG trusted setup file in place of the mainnet one.
+    pub(crate) trusted_setup: Option<PathBuf>,
 }
 
 impl ChainFlags {
@@ -107,6 +116,7 @@ impl ChainFlags {
             }
             "--checkpoint-state" => self.checkpoint_state = Some(words.path("--checkpoint-state")?),
             "--checkpoint-block" => self.checkpoint_block = Some(words.path("--checkpoint-block")?),
+            "--checkpoint-blobs" => self.checkpoint_blobs = Some(words.path("--checkpoint-blobs")?),
             "--checkpoint-sync-url" => {
                 self.checkpoint_sync_url = Some(words.value("--checkpoint-sync-url")?);
             }
@@ -126,6 +136,9 @@ impl ChainFlags {
             }
             "--allow-insecure-genesis-sync" => self.allow_insecure_genesis_sync = true,
             "--ignore-ws-check" => self.ignore_ws_check = true,
+            "--trusted-setup-file-override" => {
+                self.trusted_setup = Some(words.path("--trusted-setup-file-override")?);
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -133,6 +146,12 @@ impl ChainFlags {
 
     /// The network, the anchor of an empty database, and the history settings.
     pub(crate) fn resolve(self) -> Result<ChainChoice, CliError> {
+        if self.checkpoint_blobs.is_some() && self.checkpoint_block.is_none() {
+            return Err(CliError::Requires {
+                flag: "--checkpoint-blobs",
+                needs: "--checkpoint-block",
+            });
+        }
         let network = self.network()?;
         let checkpoint_timeout = self
             .checkpoint_sync_url_timeout
@@ -156,7 +175,15 @@ impl ChainFlags {
         ) {
             (None, None, None) => (genesis.map(AnchorSource::Genesis), None),
             (Some(state), Some(block), None) => {
-                (Some(AnchorSource::Checkpoint { state, block }), rebuild)
+                let blobs = self.checkpoint_blobs;
+                (
+                    Some(AnchorSource::Checkpoint {
+                        state,
+                        block,
+                        blobs,
+                    }),
+                    rebuild,
+                )
             }
             (None, None, Some(url)) => (
                 Some(AnchorSource::Url {
@@ -177,6 +204,7 @@ impl ChainFlags {
                 allow_insecure_genesis_sync: self.allow_insecure_genesis_sync,
                 ignore_ws_check: self.ignore_ws_check,
             },
+            trusted_setup: self.trusted_setup,
         })
     }
 
@@ -187,7 +215,7 @@ impl ChainFlags {
             (Some(directory), None, None) => Ok(Network::load(directory)?),
             // A bare configuration names a chain but none of its boot nodes or genesis.
             (None, Some(path), _) => {
-                let (preset, chain) = Cli::choose_chain(None, Some(path))?;
+                let (preset, chain) = Cli::choose_chain(None, None, Some(path))?;
                 Ok(Network {
                     preset,
                     chain,
@@ -340,9 +368,36 @@ mod tests {
             Some(AnchorSource::Checkpoint {
                 state: "s.ssz".into(),
                 block: "b.ssz".into(),
+                blobs: None,
             })
         );
         assert_eq!(pruned.history.genesis, None);
+
+        // Blobs ride along with the block, and need it.
+        let with_blobs = resolve(&[
+            "--checkpoint-state",
+            "s.ssz",
+            "--checkpoint-block",
+            "b.ssz",
+            "--checkpoint-blobs",
+            "blobs.ssz",
+        ])
+        .unwrap();
+        assert_eq!(
+            with_blobs.anchor,
+            Some(AnchorSource::Checkpoint {
+                state: "s.ssz".into(),
+                block: "b.ssz".into(),
+                blobs: Some("blobs.ssz".into()),
+            })
+        );
+        assert!(matches!(
+            resolve(&["--checkpoint-blobs", "blobs.ssz"]),
+            Err(CliError::Requires {
+                flag: "--checkpoint-blobs",
+                needs: "--checkpoint-block",
+            })
+        ));
 
         // An archive takes the network's embedded genesis; a given file wins over it.
         let archive = resolve(&[

@@ -20,7 +20,7 @@ use axiom_types::{CommitteeIndex, ForkName, Root, Slot};
 use thiserror::Error;
 
 use crate::{
-    CheckpointError,
+    CheckpointError, TrustedSetupError,
     chain::{SchemaVersion, WeakSubjectivityError},
 };
 
@@ -45,6 +45,26 @@ pub enum ChainError {
     /// A record the database must hold is missing.
     #[error("database has no {0}")]
     Missing(&'static str),
+    /// The anchor's blobs number other than its block's commitments.
+    #[error("anchor block at slot {slot} commits to {expected} blobs, {actual} were given")]
+    AnchorBlobCount {
+        /// The anchor block's slot.
+        slot: Slot,
+        /// Commitments in the block.
+        expected: usize,
+        /// Blobs given.
+        actual: usize,
+    },
+    /// An anchor blob does not belong to the anchor block, or does not open its commitment.
+    #[error("anchor blob {index} of block {root}: {reason}")]
+    InvalidAnchorBlob {
+        /// Position of the blob in the list given.
+        index: usize,
+        /// The anchor block's root.
+        root: Root,
+        /// The check that failed.
+        reason: &'static str,
+    },
     /// No table of the database has the name.
     #[error("database has no table {0}")]
     UnknownTable(String),
@@ -160,6 +180,15 @@ pub enum NodeError {
         /// The operating system's error.
         #[source]
         error: io::Error,
+    },
+    /// The operator's trusted setup cannot be used.
+    #[error("trusted setup {}: {source}", .path.display())]
+    TrustedSetup {
+        /// The setup file.
+        path: PathBuf,
+        /// What is wrong with it.
+        #[source]
+        source: TrustedSetupError,
     },
     /// A file failed to read.
     #[error("{context} {}: {error}", .path.display())]

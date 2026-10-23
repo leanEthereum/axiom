@@ -12,11 +12,13 @@ use crate::cli::{CliError, arguments::Arguments};
 pub(crate) const PROPOSER_USAGE: &str = "\
     --suggested-fee-recipient <ADDR>
                                  fee recipient when a validator names none
-    --graffiti <TEXT>            graffiti when a block request names none, up to 32 bytes
+    --graffiti <TEXT>            graffiti of every block unless a validator keeps its own,
+                                 up to 32 bytes [default: client versions]
     --builder <URL>              builder API endpoint, such as a relay multiplexer, repeatable
     --builder-header-timeout <MS>
                                  bid deadline, at most 3000 [default: 1000]
     --builder-user-agent <TEXT>  user agent sent to builders [default: axiom/VERSION]
+    --builder-disable-ssz        speak JSON alone to builders, never SSZ
     --builder-fallback-skips <N> missed slots in a row past which builders are not asked
     --builder-fallback-skips-per-epoch <N>
                                  missed slots in the last epoch past which builders are not asked
@@ -47,6 +49,8 @@ pub(crate) struct ProposerFlags {
     header_timeout: Option<Duration>,
     /// The user agent sent to builders.
     user_agent: Option<String>,
+    /// Whether builders get JSON alone.
+    disable_ssz: bool,
     /// Breaker thresholds.
     fallback: BuilderFallback,
     /// How early payloads are prepared.
@@ -90,6 +94,10 @@ impl ProposerFlags {
             "--builder-user-agent" => {
                 self.user_agent = Some(words.value("--builder-user-agent")?);
                 self.builder_tuned = Some("--builder-user-agent");
+            }
+            "--builder-disable-ssz" => {
+                self.disable_ssz = true;
+                self.builder_tuned = Some("--builder-disable-ssz");
             }
             "--builder-fallback-skips" => {
                 self.fallback.skips = Some(words.parsed("--builder-fallback-skips")?);
@@ -154,10 +162,11 @@ impl ProposerFlags {
             builder_client: BuilderClientSettings {
                 header_timeout: self.header_timeout,
                 user_agent: (!self.builders.is_empty()).then_some(user_agent),
+                disable_ssz: self.disable_ssz,
             },
             builders: self.builders,
             builder_fallback: self.fallback,
-            graffiti: self.graffiti.unwrap_or_default(),
+            graffiti: self.graffiti,
             prepare_lookahead: self.lookahead,
             always_prepare_payload: self.always_prepare,
             // The reorg flags have their own group, which sets this.
@@ -213,6 +222,7 @@ mod tests {
                 "2500",
                 "--builder-user-agent",
                 "mev-sidecar",
+                "--builder-disable-ssz",
                 "--builder-fallback-skips",
                 "5",
                 "--builder-fallback-skips-per-epoch",
@@ -237,6 +247,7 @@ mod tests {
                 builder_client: BuilderClientSettings {
                     header_timeout: Some(Duration::from_millis(2500)),
                     user_agent: Some("mev-sidecar".to_owned()),
+                    disable_ssz: true,
                 },
                 builder_fallback: BuilderFallback {
                     skips: Some(5),
@@ -244,7 +255,7 @@ mod tests {
                     epochs_since_finalization: Some(6),
                     disable_checks: false,
                 },
-                graffiti: Bytes32(graffiti),
+                graffiti: Some(Bytes32(graffiti)),
                 prepare_lookahead: Some(Duration::from_secs(8)),
                 always_prepare_payload: true,
                 ..ProposerSettings::default()

@@ -3,12 +3,14 @@
 use std::collections::HashMap;
 
 use axiom_types::{
-    ExecutionAddress, Gwei, Preset, ValidatorIndex, WithdrawalIndex,
+    ExecutionAddress, Gwei, Preset, Root, ValidatorIndex, WithdrawalIndex,
     accessors::{PendingQueueState, WithdrawalState},
     capella::Withdrawal,
 };
 
-use crate::{BlockError, BlockProcessor, Fork, Operation, StateError};
+use crate::{
+    BlockError, BlockProcessor, Fork, Operation, StateError, capella::block::WithdrawalsClaim,
+};
 
 /// The withdrawals a payload must contain, and how far each queue advanced.
 ///
@@ -204,17 +206,28 @@ impl<S: PendingQueueState + WithdrawalState + ?Sized> WithdrawalPlan<'_, S> {
 /// Electra serves the pending partial withdrawals before the sweep.
 /// Capella's rule has no queue, and Gloas moves withdrawals out of the payload.
 #[derive(Clone, Copy, Debug)]
-pub struct PayloadWithdrawals<'a>(pub &'a [Withdrawal]);
+pub struct PayloadWithdrawals<'a>(pub WithdrawalsClaim<'a>);
 
-impl PayloadWithdrawals<'_> {
-    /// Moves the withdrawal index and the validator sweep past these withdrawals.
+impl<'a> PayloadWithdrawals<'a> {
+    /// The withdrawals a whole payload carries.
+    #[must_use]
+    pub const fn listed(withdrawals: &'a [Withdrawal]) -> Self {
+        Self(WithdrawalsClaim::Listed(withdrawals))
+    }
+
+    /// The withdrawals a pruned payload's header commits to.
+    #[must_use]
+    pub const fn committed(root: Root) -> Self {
+        Self(WithdrawalsClaim::Committed(root))
+    }
+
+    /// Moves the withdrawal index and the validator sweep past the withdrawals paid.
     ///
     /// A full payload resumes the sweep right after its last withdrawal.
     /// Otherwise the sweep advances by its whole window.
     ///
     /// See `update_next_withdrawal_index` and `update_next_withdrawal_validator_index` in Capella.
-    pub fn advance_cursors<S: WithdrawalState + ?Sized>(self, state: &mut S) {
-        let withdrawals = self.0;
+    pub fn advance_cursors<S: WithdrawalState + ?Sized>(withdrawals: &[Withdrawal], state: &mut S) {
         if let Some(latest) = withdrawals.last() {
             *state.next_withdrawal_index_mut() = WithdrawalIndex(latest.index.0 + 1);
         }
@@ -239,20 +252,8 @@ impl<S: Fork + PendingQueueState + WithdrawalState> Operation<S> for PayloadWith
     ///
     /// See `process_withdrawals` in the Electra beacon chain spec.
     fn apply(&self, processor: &mut BlockProcessor<'_, S>) -> Result<(), BlockError> {
-        let actual = self.0;
         let expected = ExpectedWithdrawals::compute(processor.state.beacon())?;
-        let expected_withdrawals = expected.withdrawals.as_slice();
-        if actual != expected_withdrawals {
-            return Err(BlockError::WithdrawalsMismatch {
-                expected: expected_withdrawals.len(),
-                actual: actual.len(),
-                first_difference: actual
-                    .iter()
-                    .zip(expected_withdrawals)
-                    .take_while(|(actual, expected)| actual == expected)
-                    .count(),
-            });
-        }
+        self.0.check::<S::Preset>(&expected.withdrawals)?;
 
         for withdrawal in &expected.withdrawals {
             processor
@@ -262,7 +263,7 @@ impl<S: Fork + PendingQueueState + WithdrawalState> Operation<S> for PayloadWith
 
         let state = &mut *processor.state.beacon;
         state.remove_pending_partial_withdrawals(expected.processed_partial_withdrawals);
-        PayloadWithdrawals(&expected.withdrawals).advance_cursors(state);
+        PayloadWithdrawals::advance_cursors(&expected.withdrawals, state);
         Ok(())
     }
 }

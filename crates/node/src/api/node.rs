@@ -6,6 +6,7 @@ use std::{
 };
 
 use axiom_beacon_json::{ApiJson, api::SyncStatus};
+use axiom_execution::JsonCodec;
 use axiom_http::{Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_types::Preset;
@@ -15,23 +16,11 @@ use super::{
     query::Query,
     reply::{ApiError, ApiResult, Reply, Routes},
 };
-use crate::{Chain, chain::SYNCING_DISTANCE, network::PeerRecord};
-
-/// The client's name and version, as reported to peers and tools.
-const VERSION: &str = concat!("axiom/v", env!("CARGO_PKG_VERSION"));
-
-/// The client's two-letter code, in the engine API's client identification format.
-///
-/// The engine API's list of codes has no entry for Axiom, so these are its initials.
-/// See the identification section of the engine API.
-const CLIENT_CODE: &str = "AX";
-
-/// The first four bytes of the source commit, when the build names one.
-///
-/// A build without the variable reports zeros, as the identification format allows.
-const COMMIT: &str = match option_env!("AXIOM_COMMIT") {
-    Some(commit) => commit,
-    None => "0x00000000",
+use crate::{
+    Chain,
+    chain::SYNCING_DISTANCE,
+    client_version::{self, VERSION},
+    network::PeerRecord,
 };
 
 /// Routes under `/eth/v1/node`.
@@ -65,15 +54,7 @@ impl NodeRoutes {
     ///
     /// The engine is not asked for its own version, so only the beacon node is reported.
     fn version_v2<P: Preset>(_context: ApiContext<P>, _request: Request) -> Ready<ApiResult> {
-        let beacon_node = Json::from([
-            ("code", Json::from(CLIENT_CODE)),
-            ("name", Json::from("Axiom")),
-            (
-                "version",
-                Json::from(concat!("v", env!("CARGO_PKG_VERSION"))),
-            ),
-            ("commit", Json::from(COMMIT)),
-        ]);
+        let beacon_node = client_version::ours().to_json();
         ready(Ok(Reply::data(
             Json::from([("beacon_node", beacon_node)]),
             None,

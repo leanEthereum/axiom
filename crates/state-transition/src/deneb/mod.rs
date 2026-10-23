@@ -9,21 +9,17 @@ mod upgrade;
 
 use axiom_types::{
     ChainConfig, Preset, ValidatorIndex,
-    deneb::{BeaconBlock, BeaconState},
+    deneb::{BeaconBlock, BeaconState, BlindedBeaconBlock},
     phase0::BeaconBlockHeader,
 };
 
 use crate::{
-    BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes, Fork,
-    PayloadEngine, Registry, StateError,
-    altair::{AltairEpoch, block::ParticipantDeposit},
+    BlindedFork, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes,
+    Fork, PayloadEngine, Registry, StateError,
+    altair::AltairEpoch,
     capella::{block::PayloadWithdrawals, epoch::HistoricalSummaryUpdate},
-    deneb::block::{Exit, PayloadExecution, UnboundedAttestation},
-    phase0::{
-        ExitQueue, Slashing, SlotRoots,
-        block::{DepositQuota, RandaoReveal},
-        epoch::RegistryUpdates,
-    },
+    deneb::block::{BodyOperations, PayloadExecution},
+    phase0::{ExitQueue, Slashing, SlotRoots, epoch::RegistryUpdates},
     rewards::AttesterRewards,
     sampling::WeightedSampler,
 };
@@ -125,25 +121,32 @@ impl<P: Preset> Fork for BeaconState<P> {
     ) -> Result<(), BlockError> {
         let body = &block.body;
         processor.apply(header)?;
-        processor.apply(&PayloadWithdrawals(&body.execution_payload.withdrawals))?;
+        processor.apply(&PayloadWithdrawals::listed(
+            &body.execution_payload.withdrawals,
+        ))?;
         processor.apply(&PayloadExecution::new(body, engine))?;
-        processor.apply(&RandaoReveal(body.randao_reveal))?;
-        processor.apply(&body.eth1_data)?;
+        BodyOperations::from(body).apply(processor)
+    }
+}
 
-        DepositQuota::of(processor.state.beacon()).check(body.deposits.len())?;
-        processor.apply_all(&body.proposer_slashings)?;
-        processor.apply_all(&body.attester_slashings)?;
-        for attestation in &body.attestations {
-            processor.apply(&UnboundedAttestation(attestation))?;
-        }
-        for deposit in &body.deposits {
-            processor.apply(&ParticipantDeposit(deposit))?;
-        }
-        for exit in &body.voluntary_exits {
-            processor.apply(&Exit(exit))?;
-        }
-        processor.apply_all(&body.bls_to_execution_changes)?;
+impl<P: Preset> BlindedFork for BeaconState<P> {
+    type BlindedBlock = BlindedBeaconBlock<P>;
 
-        processor.apply(&body.sync_aggregate)
+    fn blinded_block_header(block: &BlindedBeaconBlock<P>) -> BeaconBlockHeader {
+        block.header()
+    }
+
+    /// Runs Deneb's block processing on a blinded block, its payload read from the header.
+    fn process_blinded_block(
+        processor: &mut BlockProcessor<'_, Self>,
+        block: &BlindedBeaconBlock<P>,
+        header: &BeaconBlockHeader,
+    ) -> Result<(), BlockError> {
+        let body = &block.body;
+        processor.apply(header)?;
+        let withdrawals_root = body.execution_payload_header.withdrawals_root;
+        processor.apply(&PayloadWithdrawals::committed(withdrawals_root))?;
+        processor.apply(&PayloadExecution::blinded(body))?;
+        BodyOperations::from(body).apply(processor)
     }
 }

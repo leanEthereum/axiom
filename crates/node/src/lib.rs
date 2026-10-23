@@ -14,9 +14,11 @@ mod api;
 mod chain;
 mod checkpoint;
 mod client_stats;
+mod client_version;
 mod clock;
 mod config;
 mod engine;
+mod engine_version;
 mod error;
 mod events;
 mod genesis;
@@ -25,18 +27,20 @@ pub(crate) mod network;
 mod proposer;
 mod publish;
 mod race;
+mod running;
 mod service;
 mod slasher;
 mod target_committees;
 mod tasks;
+mod trusted_setup;
 
 pub use api::BeaconApi;
 pub use chain::{
     Chain, ChainDatabase, ChainEvent, ChainHandle, ChainSettings, ChainStopped, ExecutionHead,
     Finality, Head, HistorySegment, HistoryStart, InvalidInterval, ProposerKeys, RawRecord,
     Reconstruction, ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SidecarPass,
-    SidecarPruning, SnapshotInterval, StateReplay, StorageMode, Submission, TableUsage,
-    VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
+    SidecarPruning, SnapshotInterval, StateReplay, StorageMode, StoredBlock, Submission,
+    TableUsage, VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
 pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use client_stats::{ClientStatsSettings, DEFAULT_PUSH_PERIOD};
@@ -54,6 +58,7 @@ pub use events::{
 pub use genesis::{EmbeddedGenesis, GenesisDownload, GenesisState};
 pub use monitor::MonitorSettings;
 pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
-pub use proposer::{BlockOrder, ProposerError, ProposerReorgs, ProposerService};
+pub use proposer::{BlockOrder, GraffitiPolicy, ProposerError, ProposerReorgs, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;
+pub use trusted_setup::TrustedSetupError;

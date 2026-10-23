@@ -1,6 +1,7 @@
 //! Why the pool refused an operation, or could not pack one.
 
 use axiom_bls::BlsError;
+use axiom_ssz::CapacityError;
 use axiom_state_transition::{BlockError, StateError};
 use axiom_types::{CommitteeIndex, Epoch, ForkName, Slot, ValidatorIndex};
 use thiserror::Error;
@@ -115,4 +116,20 @@ pub enum PoolError {
     /// A recorded vote of the state could not be resolved.
     #[error("block rule: {0}")]
     Block(#[from] BlockError),
+}
+
+impl From<CapacityError> for PoolError {
+    /// A container list that overflows holds signers, the only bounded list the pool fills.
+    fn from(error: CapacityError) -> Self {
+        match error {
+            CapacityError::ExceedsLimit { limit, length }
+            | CapacityError::WrongLength {
+                expected: limit,
+                length,
+            } => Self::TooManySigners {
+                count: length,
+                limit,
+            },
+        }
+    }
 }

@@ -18,16 +18,20 @@ pub struct ChainSettings {
     pub light_client_server: bool,
     /// When expired sidecars leave the disk.
     pub sidecar_pruning: SidecarPruning,
+    /// Whether every subnet vote received is pooled, not only those a local aggregator needs.
+    pub import_all_attestations: bool,
 }
 
 impl Default for ChainSettings {
     fn default() -> Self {
         // Every vote counts, justification names the safe block, and light clients are served.
+        // Subnet votes are pooled only for the committees local validators aggregate.
         Self {
             max_skip_slots: None,
             fast_confirmation: false,
             light_client_server: true,
             sidecar_pruning: SidecarPruning::default(),
+            import_all_attestations: false,
         }
     }
 }

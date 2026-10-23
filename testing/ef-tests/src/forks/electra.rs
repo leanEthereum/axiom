@@ -164,7 +164,9 @@ impl SpecFork for Electra {
             "sync_aggregate" => input.apply::<electra::SyncAggregate<P>>("sync_aggregate"),
             "withdrawals" => input.apply_with::<electra::ExecutionPayload<P>>(
                 "execution_payload",
-                |payload, processor| processor.apply(&PayloadWithdrawals(&payload.withdrawals)),
+                |payload, processor| {
+                    processor.apply(&PayloadWithdrawals::listed(&payload.withdrawals))
+                },
             ),
             "execution_payload" => {
                 let engine = KnownVerdict(input.execution_verdict()?);

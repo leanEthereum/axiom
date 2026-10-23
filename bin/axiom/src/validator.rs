@@ -51,6 +51,7 @@ USAGE:
 
 OPTIONS:
     --network <NAME>               mainnet, sepolia, holesky, hoodi, gnosis, chiado, or minimal
+    --testnet-dir <DIR>            a network's directory, as for the beacon node
     --config <FILE>                chain config YAML; its PRESET_BASE picks the preset
     --datadir <DIR>                keys, definitions, and slashing protection [default: validator]
     --beacon-node <URLS>           beacon API endpoints, comma-separated or repeated,
@@ -243,6 +244,8 @@ struct ValidatorFlags {
     help: bool,
     /// The network name.
     network: Option<String>,
+    /// A network directory.
+    testnet_dir: Option<PathBuf>,
     /// The config file.
     config: Option<PathBuf>,
     /// The data directory.
@@ -290,6 +293,7 @@ impl Default for ValidatorFlags {
         Self {
             help: false,
             network: None,
+            testnet_dir: None,
             config: None,
             datadir: None,
             beacon_nodes: Vec::new(),
@@ -351,6 +355,7 @@ impl ValidatorFlags {
         match flag {
             "-h" | "--help" => self.help = true,
             "--network" => self.network = Some(value("--network")?),
+            "--testnet-dir" => self.testnet_dir = Some(value("--testnet-dir")?.into()),
             "--config" => self.config = Some(value("--config")?.into()),
             "--datadir" => self.datadir = Some(value("--datadir")?.into()),
             "--beacon-node" | "--beacon-nodes" => {
@@ -491,7 +496,11 @@ impl ValidatorFlags {
     /// Checks how the flags combine, and fills in every default.
     fn resolve(self) -> Result<ValidatorRun, CliError> {
         self.check()?;
-        let (preset, chain) = Cli::choose_chain(self.network.as_deref(), self.config.as_deref())?;
+        let (preset, chain) = Cli::choose_chain(
+            self.network.as_deref(),
+            self.testnet_dir.as_deref(),
+            self.config.as_deref(),
+        )?;
         let mut beacon_nodes = self.beacon_nodes;
         if beacon_nodes.is_empty() {
             beacon_nodes.push(DEFAULT_BEACON_NODE.to_owned());
@@ -819,6 +828,15 @@ mod tests {
             ValidatorCommand::Run(run) => *run,
             ValidatorCommand::Help => panic!("expected a run"),
         }
+    }
+
+    #[test]
+    fn a_network_directory_is_read_for_the_chain() {
+        // A directory that does not exist fails on its config file, so the flag reached the chain.
+        assert!(matches!(
+            parse(&["--testnet-dir", "/nonexistent/axiom-devnet"]),
+            Err(CliError::Network(_))
+        ));
     }
 
     #[test]

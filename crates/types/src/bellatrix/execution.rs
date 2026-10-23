@@ -249,6 +249,31 @@ impl<P: Preset> From<&ExecutionPayload<P>> for ExecutionPayloadHeader<P> {
     }
 }
 
+impl<P: Preset> ExecutionPayloadHeader<P> {
+    /// The payload this header commits to, given the transactions its root stands for.
+    ///
+    /// The result's root equals the header's only when the transactions are the committed ones.
+    #[must_use]
+    pub fn with_transactions(&self, transactions: Transactions<P>) -> ExecutionPayload<P> {
+        ExecutionPayload {
+            parent_hash: self.parent_hash,
+            fee_recipient: self.fee_recipient,
+            state_root: self.state_root,
+            receipts_root: self.receipts_root,
+            logs_bloom: self.logs_bloom.clone(),
+            prev_randao: self.prev_randao,
+            block_number: self.block_number,
+            gas_limit: self.gas_limit,
+            gas_used: self.gas_used,
+            timestamp: self.timestamp,
+            extra_data: self.extra_data.clone(),
+            base_fee_per_gas: self.base_fee_per_gas,
+            block_hash: self.block_hash,
+            transactions,
+        }
+    }
+}
+
 /// Everything the execution engine needs to validate a payload.
 ///
 /// See the Bellatrix beacon chain spec.

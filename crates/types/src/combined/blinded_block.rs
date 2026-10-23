@@ -1,6 +1,6 @@
 //! A blinded beacon block of any fork that has one.
 
-use axiom_ssz::{DecodeError, Root, Ssz};
+use axiom_ssz::{CapacityError, DecodeError, Root, Ssz};
 use thiserror::Error;
 
 use crate::{
@@ -31,6 +31,15 @@ pub enum BlindedBlockError {
     /// The payload is not the one the block's header commits to.
     #[error("blinded block does not unblind: {0}")]
     Unblind(#[from] UnblindError),
+    /// A payload body list holds more items than its bound.
+    #[error("payload body overflows: {0}")]
+    BodyCapacity(#[from] CapacityError),
+    /// A payload body of a fork with withdrawals lacks them.
+    #[error("payload body of a {fork} block lacks its withdrawals")]
+    MissingWithdrawals {
+        /// The block's fork.
+        fork: ForkName,
+    },
 }
 
 /// A blinded beacon block of whichever fork it belongs to.

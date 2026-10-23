@@ -10,15 +10,21 @@ use axiom_json::{Json, Limits as JsonLimits};
 use axiom_types::{ForkName, Hash32, Preset, VersionedHash, bellatrix::PowBlock};
 
 use crate::{
-    Claims, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState, ForkchoiceUpdated,
-    ForkchoiceVersion, GetBlobsResponse, GetPayloadResponse, JsonCodec, JwtSecret, NewPayload,
-    PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, rpc::Call, wire::Reader,
+    Claims, ClientVersion, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState,
+    ForkchoiceUpdated, ForkchoiceVersion, GetBlobsResponse, GetPayloadResponse, JsonCodec,
+    JwtSecret, NewPayload, PayloadAttributes, PayloadBody, PayloadId, PayloadStatus, SyncStatus,
+    rpc::Call, wire::Reader,
 };
 
 /// Timeout of every lookup-style call, such as engine_getPayload and engine_getBlobs.
 ///
 /// These read data the engine holds already; the spec allows one second.
 pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Timeout of the payload body lookups, from `src/engine/shanghai.md`.
+///
+/// A body request may name dozens of blocks, each read from the engine's history.
+const PAYLOAD_BODIES_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Most bytes accepted in one response.
 ///
@@ -296,6 +302,102 @@ impl EngineClient {
             &result,
             versioned_hashes.len(),
         )?)
+    }
+
+    /// Swaps client identities with the engine: engine_getClientVersionV1.
+    ///
+    /// See `src/engine/identification.md`.
+    ///
+    /// # Returns
+    ///
+    /// One identity per execution client behind the endpoint; a multiplexer returns several.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, and when the reply is not a list of identities.
+    pub async fn client_version(
+        &self,
+        ours: &ClientVersion,
+    ) -> Result<Vec<ClientVersion>, EngineError> {
+        let result = self
+            .call(
+                "engine_getClientVersionV1",
+                vec![ours.to_json()],
+                LOOKUP_TIMEOUT,
+            )
+            .await?;
+        Ok(Reader::new(&result).items()?.decode()?)
+    }
+
+    /// The bodies of payloads the engine executed, by execution block hash.
+    ///
+    /// See `engine_getPayloadBodiesByHashV1` in `src/engine/shanghai.md`.
+    ///
+    /// # Returns
+    ///
+    /// One entry per hash, in request order, nothing where the engine lacks the block.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, and when the reply has another length than the request.
+    pub async fn payload_bodies_by_hash(
+        &self,
+        hashes: &[Hash32],
+    ) -> Result<Vec<Option<PayloadBody>>, EngineError> {
+        let hashes = Json::Array(hashes.iter().map(JsonCodec::to_json).collect());
+        let result = self
+            .call(
+                "engine_getPayloadBodiesByHashV1",
+                vec![hashes.clone()],
+                PAYLOAD_BODIES_TIMEOUT,
+            )
+            .await?;
+        let bodies: Vec<Option<PayloadBody>> = Reader::new(&result).items()?.decode()?;
+        let requested = hashes.as_array().map_or(0, <[Json]>::len);
+        if bodies.len() != requested {
+            return Err(EngineError::Length {
+                method: "engine_getPayloadBodiesByHashV1",
+                expected: requested,
+                actual: bodies.len(),
+            });
+        }
+        Ok(bodies)
+    }
+
+    /// The bodies of the canonical payloads from an execution block number on.
+    ///
+    /// See `engine_getPayloadBodiesByRangeV1` in `src/engine/shanghai.md`.
+    ///
+    /// # Returns
+    ///
+    /// One entry per block from the start, nothing where the engine lacks it.
+    /// The list stops early at the engine's latest block, so it may be shorter than asked.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, and when the reply is longer than the request.
+    pub async fn payload_bodies_by_range(
+        &self,
+        start: u64,
+        count: u64,
+    ) -> Result<Vec<Option<PayloadBody>>, EngineError> {
+        let params = vec![start.to_json(), count.to_json()];
+        let result = self
+            .call(
+                "engine_getPayloadBodiesByRangeV1",
+                params,
+                PAYLOAD_BODIES_TIMEOUT,
+            )
+            .await?;
+        let bodies: Vec<Option<PayloadBody>> = Reader::new(&result).items()?.decode()?;
+        if bodies.len() as u64 > count {
+            return Err(EngineError::Length {
+                method: "engine_getPayloadBodiesByRangeV1",
+                expected: usize::try_from(count).unwrap_or(usize::MAX),
+                actual: bodies.len(),
+            });
+        }
+        Ok(bodies)
     }
 
     /// The chain id the engine runs: eth_chainId.

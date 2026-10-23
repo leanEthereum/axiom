@@ -1,6 +1,8 @@
 //! Attestations, the votes that drive fork choice and finality.
 
-use axiom_ssz::{BitList, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz};
+use axiom_ssz::{
+    BitList, CapacityError, Container, DecodeError, FieldDecoder, FieldVisitor, List, Ssz,
+};
 
 use crate::{
     BlsSignature, CommitteeIndex, Preset, Root, Slot, ValidatorIndex,
@@ -165,6 +167,19 @@ impl<P: Preset> Container for IndexedAttestation<P> {
 }
 
 impl<P: Preset> IndexedAttestation<P> {
+    /// The attestation a vote makes in this container.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the vote has more signers than one committee holds.
+    pub fn from_vote(vote: &IndexedVote) -> Result<Self, CapacityError> {
+        Ok(Self {
+            attesting_indices: List::try_from(vote.indices.clone())?,
+            data: vote.data.clone(),
+            signature: vote.signature,
+        })
+    }
+
     /// The vote reduced to the fields every fork shares.
     #[must_use]
     pub fn indexed_vote(&self) -> IndexedVote {

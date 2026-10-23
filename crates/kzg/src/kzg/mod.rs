@@ -17,6 +17,8 @@ mod recovery;
 
 use std::{fmt, sync::OnceLock};
 
+use axiom_bls12_381::{G1_COMPRESSED_BYTES, G2_COMPRESSED_BYTES};
+
 use self::{
     blob_scheme::BlobScheme, cell_batch::CellBatch, cell_prover::CellProver,
     cell_verifier::CellVerifier, cosets::Cosets, recovery::CellRecovery,
@@ -27,7 +29,10 @@ use crate::{
     fft::Domain, setup::TrustedSetup,
 };
 
-/// The KZG commitment scheme over the mainnet trusted setup.
+/// The context the process trusts, set once.
+static TRUSTED: OnceLock<Kzg> = OnceLock::new();
+
+/// The KZG commitment scheme over a trusted setup, by default the mainnet one.
 ///
 /// Building it decodes the setup and precomputes roots of unity, so one shared instance serves all calls.
 /// The FK20 tables for cell proofs are built on first use, since verifiers never need them.
@@ -51,6 +56,44 @@ impl Kzg {
     pub fn mainnet() -> &'static Self {
         static MAINNET: OnceLock<Kzg> = OnceLock::new();
         MAINNET.get_or_init(|| Self::new(TrustedSetup::mainnet()))
+    }
+
+    /// The context over a trusted setup given as compressed points.
+    ///
+    /// Each basis lists its points in the order of the setup files.
+    /// The Lagrange basis is in natural order.
+    /// See `trusted_setup_4096.json` in the consensus specs.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a basis has another number of points than the scheme needs.
+    /// Fails when a point is not in its subgroup.
+    pub fn from_trusted_setup(
+        g1_monomial: &[[u8; G1_COMPRESSED_BYTES]],
+        g1_lagrange: &[[u8; G1_COMPRESSED_BYTES]],
+        g2_monomial: &[[u8; G2_COMPRESSED_BYTES]],
+    ) -> Result<Self, KzgError> {
+        TrustedSetup::from_compressed(g1_monomial, g1_lagrange, g2_monomial).map(Self::new)
+    }
+
+    /// Makes this context the one the process trusts, before any operation reads it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the process already trusts a context, which earlier operations may have used.
+    pub fn trust(self) -> Result<&'static Self, KzgError> {
+        TRUSTED
+            .set(self)
+            .map_err(|_| KzgError::SetupAlreadyTrusted)?;
+        TRUSTED.get().ok_or(KzgError::SetupAlreadyTrusted)
+    }
+
+    /// The context the process trusts: one an operator installed, else the mainnet setup.
+    ///
+    /// A node reads its context here, so an operator's setup reaches every operation alike.
+    #[must_use]
+    pub fn trusted() -> &'static Self {
+        TRUSTED.get_or_init(|| Self::new(TrustedSetup::mainnet()))
     }
 
     /// Hands each part its share of the setup and the domains it works over.

@@ -3,6 +3,7 @@
 mod context;
 mod engine_payload;
 mod error;
+mod graffiti;
 mod preparation;
 mod reorg;
 
@@ -29,6 +30,8 @@ use axiom_types::{
 };
 use context::ProposalContext;
 pub use error::ProposerError;
+use graffiti::GraffitiChoice;
+pub use graffiti::GraffitiPolicy;
 use preparation::Preparations;
 pub(crate) use reorg::EngineTarget;
 pub use reorg::ProposerReorgs;
@@ -77,8 +80,8 @@ pub struct ProposerService<P: Preset> {
     relays: Option<RelaySet>,
     /// When the chain is too unhealthy to trust builders with a slot.
     breaker: CircuitBreaker,
-    /// Graffiti of blocks whose request names none.
-    graffiti: Bytes32,
+    /// The operator's graffiti, which overrides any text a validator does not ask to keep.
+    graffiti: Option<Bytes32>,
     /// Whether payloads are prepared for every slot, not only for prepared proposers.
     always_prepare: bool,
     /// Whether proposals orphan a late, weak head.
@@ -107,7 +110,7 @@ impl<P: Preset> ProposerService<P> {
             envelope: Mutex::new(None),
             relays,
             breaker: CircuitBreaker::for_preset::<P>(),
-            graffiti: Bytes32::default(),
+            graffiti: None,
             always_prepare: false,
             reorgs: ProposerReorgs::Enabled,
             clock,
@@ -152,9 +155,11 @@ impl<P: Preset> ProposerService<P> {
         self
     }
 
-    /// Writes this graffiti into blocks whose request names none.
+    /// Writes the operator's graffiti, when one is set, into every block a validator lets it.
+    ///
+    /// Without one, blocks carry the client versions that built them.
     #[must_use]
-    pub const fn with_graffiti(mut self, graffiti: Bytes32) -> Self {
+    pub const fn with_graffiti(mut self, graffiti: Option<Bytes32>) -> Self {
         self.graffiti = graffiti;
         self
     }
@@ -168,10 +173,26 @@ impl<P: Preset> ProposerService<P> {
         self
     }
 
-    /// Graffiti of blocks whose request names none.
-    #[must_use]
-    pub const fn graffiti(&self) -> Bytes32 {
-        self.graffiti
+    /// The graffiti of a block, from a request's text and policy, the operator's, and the engine's.
+    ///
+    /// The engine is asked for its identity only when the answer can change the graffiti.
+    pub(crate) async fn block_graffiti(
+        &self,
+        requested: Option<Bytes32>,
+        policy: GraffitiPolicy,
+    ) -> Bytes32 {
+        let engine = if GraffitiChoice::reads_engine(self.graffiti, requested, policy) {
+            self.execution.client_version().await
+        } else {
+            None
+        };
+        GraffitiChoice {
+            operator: self.graffiti,
+            validator: requested,
+            policy,
+            engine: engine.as_ref(),
+        }
+        .graffiti()
     }
 
     /// Records builder registrations, and forwards them to every builder.
