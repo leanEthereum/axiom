@@ -14,7 +14,7 @@ use tokio::runtime::{Builder, Runtime};
 
 use super::{ApiServices, BeaconApi};
 use crate::{
-    Chain, ChainDatabase, ChainHandle, Clock, EventHub, ExecutionLayer, ManualClock,
+    Chain, ChainDatabase, ChainHandle, ChainSettings, Clock, EventHub, ExecutionLayer, ManualClock,
     ProposerService, Publisher,
 };
 
@@ -42,9 +42,20 @@ pub(crate) struct TestApi {
 impl TestApi {
     /// An API over a chain from a genesis state, in a configuration.
     pub(crate) fn new(config: ChainConfig, genesis: combined::BeaconState<Minimal>) -> Self {
+        Self::with_settings(config, genesis, ChainSettings::default())
+    }
+
+    /// An API over a chain from a genesis state, applying the operator's choices.
+    pub(crate) fn with_settings(
+        config: ChainConfig,
+        genesis: combined::BeaconState<Minimal>,
+        settings: ChainSettings,
+    ) -> Self {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
         let database = ChainDatabase::in_memory(config.clone()).unwrap();
-        let chain = Chain::from_genesis(config, genesis, database).unwrap();
+        let chain = Chain::from_genesis(config, genesis, database)
+            .unwrap()
+            .with_settings(settings);
         // The thread ends once the last handle drops.
         let (chain, _thread) = ChainHandle::spawn(chain).unwrap();
         let clock = Arc::new(ManualClock::at(GENESIS_TIME * 1000));
@@ -86,6 +97,23 @@ impl TestApi {
 
     /// An API over a phase0 genesis of given validators and balances.
     pub(crate) fn phase0_with(registry: impl IntoIterator<Item = (Validator, Gwei)>) -> Self {
+        Self::new(ChainConfig::minimal(), Self::phase0_genesis(registry))
+    }
+
+    /// An API over a phase0 genesis of some active validators, applying the operator's choices.
+    pub(crate) fn phase0_settled(validators: u64, settings: ChainSettings) -> Self {
+        let registry = (0..validators).map(|index| (validator(index), BALANCE));
+        Self::with_settings(
+            ChainConfig::minimal(),
+            Self::phase0_genesis(registry),
+            settings,
+        )
+    }
+
+    /// A phase0 genesis state of given validators and balances.
+    fn phase0_genesis(
+        registry: impl IntoIterator<Item = (Validator, Gwei)>,
+    ) -> combined::BeaconState<Minimal> {
         // Invariant: the header commits to the empty body, as the genesis block's does.
         // Otherwise the roots the state records would differ from the anchor's.
         let mut state = phase0::BeaconState::<Minimal> {
@@ -100,7 +128,7 @@ impl TestApi {
             state.validators.push(record).unwrap();
             state.balances.push(balance).unwrap();
         }
-        Self::new(ChainConfig::minimal(), combined::BeaconState::Phase0(state))
+        combined::BeaconState::Phase0(state)
     }
 
     /// An API over a Gloas genesis of some validators.

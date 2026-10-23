@@ -160,6 +160,7 @@ impl PreparationRoutes {
     ///
     /// The node joins the attestation subnets of its own identity only.
     /// An aggregator on another subnet still receives the aggregates of its committee.
+    /// An aggregator's committee has its subnet votes pooled, so its aggregate is ready to serve.
     /// See `prepareBeaconCommitteeSubnet` in the beacon API.
     async fn beacon_committee_subscriptions<P: Preset>(
         context: ApiContext<P>,
@@ -172,6 +173,9 @@ impl PreparationRoutes {
             .query(move |chain| {
                 for subscription in &subscriptions {
                     chain.auto_register(subscription.validator_index);
+                    if subscription.is_aggregator {
+                        chain.expect_aggregation(subscription.slot, subscription.committee_index);
+                    }
                 }
                 Ok(())
             })
@@ -219,12 +223,18 @@ mod tests {
     use axiom_http::Method;
     use axiom_json::Json;
     use axiom_types::{
-        BlsSignature, Domain, Epoch, ExecutionAddress, Slot, ValidatorIndex,
-        constants::DOMAIN_PROPOSER_PREFERENCES, gloas::ProposerPreferences,
+        BlsSignature, CommitteeIndex, Domain, Epoch, ExecutionAddress, Slot, ValidatorIndex,
+        constants::DOMAIN_PROPOSER_PREFERENCES,
+        gloas::ProposerPreferences,
+        phase0::AttestationData,
+        vote::{CommitteeVote, PayloadClaim},
     };
 
     use super::*;
-    use crate::api::fixture::{TestApi, secret};
+    use crate::{
+        ChainSettings,
+        api::fixture::{TestApi, secret},
+    };
 
     #[test]
     fn fee_recipients_of_unknown_validators_are_accepted() {
@@ -274,6 +284,71 @@ mod tests {
                 ])
             )
         );
+    }
+
+    /// A vote by the first member of committee 0 of slot 1, unsigned.
+    fn first_vote(api: &TestApi) -> CommitteeVote {
+        api.run(|chain| {
+            let committees = chain.committees_at(Epoch(0)).unwrap();
+            let committee = committees.committee(Slot(1), CommitteeIndex(0)).unwrap();
+            let mut bits = vec![false; committee.len()];
+            bits[0] = true;
+            CommitteeVote {
+                data: AttestationData {
+                    slot: Slot(1),
+                    ..AttestationData::default()
+                },
+                signature: BlsSignature::default(),
+                committees: vec![CommitteeIndex(0)],
+                bits,
+                payload: PayloadClaim::Silent,
+            }
+        })
+    }
+
+    /// Hands a vote to the chain as gossip, and counts the pool after.
+    ///
+    /// Counting fails on the unsigned vote, after the pool had its say.
+    fn gossip(api: &TestApi, vote: CommitteeVote) -> usize {
+        api.run(move |chain| {
+            let _uncounted = chain.on_gossip_subnet_vote(&vote, PayloadClaim::Silent);
+            chain.pool().attestations().len()
+        })
+    }
+
+    #[test]
+    fn gossip_votes_are_pooled_for_local_aggregators_only() {
+        // Fixture state: 64 validators at slot 1, so committee 0 of slot 1 has members.
+        let api = TestApi::phase0(64);
+        api.at_slot(Slot(1));
+        let vote = first_vote(&api);
+
+        // No local validator aggregates committee 0, so the pool stays empty.
+        assert_eq!(gossip(&api, vote.clone()), 0);
+
+        // An aggregator of committee 0 at slot 1 subscribes; the same vote is now pooled.
+        let subscription = r#"[{"validator_index":"5","committee_index":"0","committees_at_slot":"1","slot":"1","is_aggregator":true}]"#;
+        assert_eq!(
+            api.post(
+                "/eth/v1/validator/beacon_committee_subscriptions",
+                subscription
+            ),
+            (StatusCode::OK, Json::Null)
+        );
+        assert_eq!(gossip(&api, vote), 1);
+    }
+
+    #[test]
+    fn importing_all_pools_every_gossip_vote() {
+        // Fixture state: the same vote, on a chain told to import all, with no aggregator.
+        let settings = ChainSettings {
+            import_all_attestations: true,
+            ..ChainSettings::default()
+        };
+        let api = TestApi::phase0_settled(64, settings);
+        api.at_slot(Slot(1));
+        let vote = first_vote(&api);
+        assert_eq!(gossip(&api, vote), 1);
     }
 
     #[test]

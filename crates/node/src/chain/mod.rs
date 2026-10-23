@@ -1,5 +1,6 @@
 //! The chain: the fork choice store, its database, and the head it selects.
 
+mod aggregation;
 mod availability;
 mod database;
 mod gossip;
@@ -14,6 +15,7 @@ use std::{
     sync::Arc,
 };
 
+use aggregation::AggregationDuties;
 pub(crate) use availability::Sidecar;
 pub use availability::Submission;
 use availability::{AvailabilityBuffer, Needed, Pending, ReadyBlock, ReadyEnvelope};
@@ -34,8 +36,8 @@ use axiom_slasher::Slashing;
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    BlobData, BlsSignature, ChainConfig, ColumnIndex, Epoch, ForkDigest, Gwei, Hash32, Preset,
-    Root, Slot, ValidatorIndex,
+    BlobData, BlsSignature, ChainConfig, ColumnIndex, CommitteeIndex, Epoch, ForkDigest, Gwei,
+    Hash32, Preset, Root, Slot, ValidatorIndex,
     accessors::{CoreState, ForkState},
     altair::{SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix::PowBlock,
@@ -131,6 +133,8 @@ pub struct Chain<P: Preset> {
     sidecars_pruned: Option<Epoch>,
     /// Votes of the current slot, counted from the next one.
     queued_votes: QueuedVotes,
+    /// Committees this node's validators aggregate, whose subnet votes are pooled.
+    aggregation: AggregationDuties,
 }
 
 impl<P: Preset> Chain<P> {
@@ -242,6 +246,7 @@ impl<P: Preset> Chain<P> {
             fast_confirmation: None,
             sidecars_pruned: None,
             queued_votes: QueuedVotes::default(),
+            aggregation: AggregationDuties::default(),
         })
     }
 
@@ -296,6 +301,12 @@ impl<P: Preset> Chain<P> {
         if let Some(pubkey) = pubkey {
             self.monitor.auto_register(index, pubkey);
         }
+    }
+
+    /// Records that a local validator aggregates a committee, so its subnet votes are pooled.
+    pub(crate) fn expect_aggregation(&mut self, slot: Slot, committee: CommitteeIndex) {
+        let current = self.store.current_slot();
+        self.aggregation.insert(slot, committee, current);
     }
 
     /// Feeds every verified vote and imported block to a slasher.
@@ -1220,9 +1231,10 @@ impl<P: Preset> Chain<P> {
         }
     }
 
-    /// Counts one validator's vote, received alone on an attestation subnet.
+    /// Counts and pools one validator's vote, received alone on an attestation subnet.
     ///
     /// The vote becomes an aggregate with one committee and one participant.
+    /// A vote submitted to this node is always pooled, since it is one of its own validators'.
     ///
     /// # Arguments
     ///
@@ -1239,6 +1251,40 @@ impl<P: Preset> Chain<P> {
         &mut self,
         vote: &V,
         claim: PayloadClaim,
+    ) -> Result<ValidatorIndex, ChainError> {
+        self.subnet_vote(vote, claim, true)
+    }
+
+    /// Counts one validator's vote from a subnet's gossip, pooling it only when someone needs it.
+    ///
+    /// The pool takes it when a local validator aggregates its committee, or the operator imports all.
+    /// The fork choice and the slasher see it either way.
+    ///
+    /// # Returns
+    ///
+    /// The attester.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the attester is not in the committee named, or the fork choice refuses the vote.
+    pub fn on_gossip_subnet_vote<V: SubnetVote>(
+        &mut self,
+        vote: &V,
+        claim: PayloadClaim,
+    ) -> Result<ValidatorIndex, ChainError> {
+        let pooled = self.settings.import_all_attestations
+            || self
+                .aggregation
+                .contains(vote.data().slot, vote.committee_index());
+        self.subnet_vote(vote, claim, pooled)
+    }
+
+    /// Counts a subnet vote, and pools it when asked.
+    fn subnet_vote<V: SubnetVote>(
+        &mut self,
+        vote: &V,
+        claim: PayloadClaim,
+        pooled: bool,
     ) -> Result<ValidatorIndex, ChainError> {
         let data = vote.data();
         self.check_skips(data.slot, data.beacon_block_root)?;
@@ -1267,7 +1313,9 @@ impl<P: Preset> Chain<P> {
             bits,
             payload: claim,
         };
-        self.pool_vote(&aggregate);
+        if pooled {
+            self.pool_vote(&aggregate);
+        }
         if let Some(slasher) = &self.slasher {
             slasher.single(attester, data, *vote.signature());
         }

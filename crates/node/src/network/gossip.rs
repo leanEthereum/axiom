@@ -347,7 +347,7 @@ impl<P: Preset> GossipHandler<P> {
                     |vote| {
                         let claim = F::VOTE_INDEX.payload_claim(vote.data().index);
                         Some(Self::job(move |chain| {
-                            let attester = chain.on_subnet_vote(&vote, claim)?;
+                            let attester = chain.on_gossip_subnet_vote(&vote, claim)?;
                             let data = vote.data();
                             chain.observe(Observed::Single { attester, data }, Source::Gossip, now);
                             Ok(())

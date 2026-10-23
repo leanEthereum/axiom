@@ -92,6 +92,10 @@ impl NodeJson<'_> {
                 ("max_skip_slots", Json::from(chain.max_skip_slots)),
                 ("fast_confirmation", Json::from(chain.fast_confirmation)),
                 ("light_client_server", Json::from(chain.light_client_server)),
+                (
+                    "import_all_attestations",
+                    Json::from(chain.import_all_attestations),
+                ),
                 ("prune_blobs", Json::from(chain.sidecar_pruning.enabled)),
                 (
                     "epochs_per_blob_prune",
