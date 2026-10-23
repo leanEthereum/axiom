@@ -75,6 +75,7 @@ impl NodeJson<'_> {
             ]),
         );
         object.insert("shutdown_after_sync", Json::from(node.shutdown_after_sync));
+        object.insert("trusted_setup", Self::path(node.trusted_setup.as_deref()));
         Json::Object(object)
     }
 

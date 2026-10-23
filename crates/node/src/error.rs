@@ -20,7 +20,7 @@ use axiom_types::{CommitteeIndex, ForkName, Root, Slot};
 use thiserror::Error;
 
 use crate::{
-    CheckpointError,
+    CheckpointError, TrustedSetupError,
     chain::{SchemaVersion, WeakSubjectivityError},
 };
 
@@ -160,6 +160,15 @@ pub enum NodeError {
         /// The operating system's error.
         #[source]
         error: io::Error,
+    },
+    /// The operator's trusted setup cannot be used.
+    #[error("trusted setup {}: {source}", .path.display())]
+    TrustedSetup {
+        /// The setup file.
+        path: PathBuf,
+        /// What is wrong with it.
+        #[source]
+        source: TrustedSetupError,
     },
     /// A file failed to read.
     #[error("{context} {}: {error}", .path.display())]

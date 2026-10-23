@@ -24,7 +24,9 @@
 
 use axiom_bls12_381::{G1_COMPRESSED_BYTES, G1Affine, G2_COMPRESSED_BYTES, G2Affine};
 
-use crate::{FIELD_ELEMENTS_PER_BLOB, basis::Basis, bit_reversal::BitReversal, parallel::Threads};
+use crate::{
+    FIELD_ELEMENTS_PER_BLOB, KzgError, basis::Basis, bit_reversal::BitReversal, parallel::Threads,
+};
 
 /// The mainnet setup file, as c-kzg-4844 distributes it.
 ///
@@ -35,6 +37,15 @@ const MAINNET: &str = include_str!("trusted_setup.txt");
 ///
 /// Cell proofs open 64 points at once and need [s^64]_2, so 65 powers suffice.
 const G2_POINTS: usize = 65;
+
+/// Name of the G1 powers in setup files and errors.
+const G1_MONOMIAL: &str = "G1 monomial";
+
+/// Name of the G1 Lagrange basis in setup files and errors.
+const G1_LAGRANGE: &str = "G1 Lagrange";
+
+/// Name of the G2 powers in setup files and errors.
+const G2_MONOMIAL: &str = "G2 monomial";
 
 /// The decoded points of the trusted setup.
 #[derive(Clone, Debug)]
@@ -60,6 +71,65 @@ impl TrustedSetup {
             unreachable!("the embedded mainnet trusted setup decodes");
         };
         setup
+    }
+
+    /// Decodes a setup given as compressed points, checking counts, curves, and subgroups.
+    ///
+    /// The Lagrange basis comes in natural order, as the setup files list it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a basis has another number of points than the scheme needs, or a point is invalid.
+    pub(crate) fn from_compressed(
+        g1_monomial: &[[u8; G1_COMPRESSED_BYTES]],
+        g1_lagrange: &[[u8; G1_COMPRESSED_BYTES]],
+        g2_monomial: &[[u8; G2_COMPRESSED_BYTES]],
+    ) -> Result<Self, KzgError> {
+        for (basis, expected, actual) in [
+            (G1_MONOMIAL, FIELD_ELEMENTS_PER_BLOB, g1_monomial.len()),
+            (G1_LAGRANGE, FIELD_ELEMENTS_PER_BLOB, g1_lagrange.len()),
+            (G2_MONOMIAL, G2_POINTS, g2_monomial.len()),
+        ] {
+            if actual != expected {
+                return Err(KzgError::SetupLength {
+                    basis,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        // An operator's file is not a constant of the crate, so every point gets its subgroup check.
+        let threads = Threads::available();
+        let g1 = |basis: &'static str, points: &[[u8; G1_COMPRESSED_BYTES]]| {
+            let indexed: Vec<(usize, &[u8; G1_COMPRESSED_BYTES])> =
+                points.iter().enumerate().collect();
+            threads.map::<_, _, Result<Vec<G1Affine>, KzgError>>(&indexed, |(index, bytes)| {
+                G1Affine::from_compressed(bytes).map_err(|source| KzgError::InvalidSetupPoint {
+                    basis,
+                    index: *index,
+                    source,
+                })
+            })
+        };
+        let g1_monomial = g1(G1_MONOMIAL, g1_monomial)?;
+        let mut g1_lagrange_brp = g1(G1_LAGRANGE, g1_lagrange)?;
+        let g2_monomial = g2_monomial
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                G2Affine::from_compressed(bytes).map_err(|source| KzgError::InvalidSetupPoint {
+                    basis: G2_MONOMIAL,
+                    index,
+                    source,
+                })
+            })
+            .collect::<Result<Vec<G2Affine>, KzgError>>()?;
+        BitReversal::of_length(FIELD_ELEMENTS_PER_BLOB).permute(&mut g1_lagrange_brp);
+        Ok(Self {
+            g1_lagrange_brp: Basis::new(g1_lagrange_brp),
+            g1_monomial: Basis::new(g1_monomial),
+            g2_monomial,
+        })
     }
 
     /// Decodes a setup in the text format, checking counts and the curve equation.
@@ -185,6 +255,56 @@ mod tests {
             .map(G1Projective::from)
             .sum();
         assert_eq!(G1Affine::from(sum), G1Affine::GENERATOR);
+    }
+
+    #[test]
+    fn a_setup_of_compressed_points_decodes_as_the_embedded_one() {
+        // The embedded points, compressed again and in natural order, rebuild the same setup.
+        let mainnet = TrustedSetup::mainnet();
+        let mut lagrange: Vec<G1Affine> = mainnet.g1_lagrange_brp.points().to_vec();
+        BitReversal::of_length(FIELD_ELEMENTS_PER_BLOB).permute(&mut lagrange);
+        let compress = |points: &[G1Affine]| -> Vec<[u8; G1_COMPRESSED_BYTES]> {
+            points.iter().map(G1Affine::to_compressed).collect()
+        };
+        let g1_monomial = compress(mainnet.g1_monomial.points());
+        let g1_lagrange = compress(&lagrange);
+        let g2_monomial: Vec<[u8; G2_COMPRESSED_BYTES]> = mainnet
+            .g2_monomial
+            .iter()
+            .map(G2Affine::to_compressed)
+            .collect();
+        let rebuilt =
+            TrustedSetup::from_compressed(&g1_monomial, &g1_lagrange, &g2_monomial).unwrap();
+        assert_eq!(
+            rebuilt.g1_lagrange_brp.points(),
+            mainnet.g1_lagrange_brp.points()
+        );
+        assert_eq!(rebuilt.g1_monomial.points(), mainnet.g1_monomial.points());
+        assert_eq!(rebuilt.g2_monomial, mainnet.g2_monomial);
+
+        // One G2 power short of the 65 the cell proofs need.
+        assert_eq!(
+            TrustedSetup::from_compressed(&g1_monomial, &g1_lagrange, &g2_monomial[..64])
+                .unwrap_err(),
+            KzgError::SetupLength {
+                basis: G2_MONOMIAL,
+                expected: 65,
+                actual: 64,
+            }
+        );
+
+        // A Lagrange point flipped to another encoding no longer decodes.
+        let mut broken = g1_lagrange;
+        broken[7] = [0xff; G1_COMPRESSED_BYTES];
+        let source = G1Affine::from_compressed(&broken[7]).unwrap_err();
+        assert_eq!(
+            TrustedSetup::from_compressed(&g1_monomial, &broken, &g2_monomial).unwrap_err(),
+            KzgError::InvalidSetupPoint {
+                basis: G1_LAGRANGE,
+                index: 7,
+                source,
+            }
+        );
     }
 
     #[test]

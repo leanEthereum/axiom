@@ -29,6 +29,7 @@ mod service;
 mod slasher;
 mod target_committees;
 mod tasks;
+mod trusted_setup;
 
 pub use api::BeaconApi;
 pub use chain::{
@@ -57,3 +58,4 @@ pub use network::{DiscoverySettings, NodeKey, PortMappingSettings};
 pub use proposer::{BlockOrder, ProposerError, ProposerReorgs, ProposerService};
 pub use publish::{Proposal, PublishError, Published, Publisher};
 pub use service::Node;
+pub use trusted_setup::TrustedSetupError;

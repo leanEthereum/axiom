@@ -418,7 +418,7 @@ impl<P: Preset> GossipHandler<P> {
                 // Forks without blob sidecars have no such topic; a message there is noise.
                 let limits = BlobSubnets::of(fork, validator.config())
                     .ok_or_else(|| GossipError::ignore("fork has no blob sidecars"))?;
-                validator.blob_sidecar(sidecar, now, SubnetId(subnet), limits, Kzg::mainnet())
+                validator.blob_sidecar(sidecar, now, SubnetId(subnet), limits, Kzg::trusted())
             },
             |sidecar| {
                 self.announce_blob(&sidecar);
@@ -456,7 +456,7 @@ impl<P: Preset> GossipHandler<P> {
                             sidecar,
                             now,
                             SubnetId(subnet),
-                            Kzg::mainnet(),
+                            Kzg::trusted(),
                         )
                     },
                     |sidecar| submit(sidecar.into()),
@@ -472,7 +472,7 @@ impl<P: Preset> GossipHandler<P> {
                             sidecar,
                             now,
                             SubnetId(subnet),
-                            Kzg::mainnet(),
+                            Kzg::trusted(),
                         )
                     },
                     |sidecar| submit(sidecar.into()),

@@ -45,6 +45,7 @@ use crate::{
     monitor::{MonitorMetrics, ValidatorMonitor},
     network::NetworkIdentity,
     slasher::{FoundSlashing, SlasherFeed},
+    trusted_setup::TrustedSetupFile,
 };
 
 /// Where the node reaches its execution engine.
@@ -341,6 +342,8 @@ pub struct NodeConfig {
     pub monitor: MonitorSettings,
     /// Where the node pushes its client stats; none pushes nothing.
     pub client_stats: Option<ClientStatsSettings>,
+    /// A KZG trusted setup file to use in place of the mainnet one; none keeps the mainnet setup.
+    pub trusted_setup: Option<PathBuf>,
 }
 
 /// The PEM files of the beacon API's TLS identity.
@@ -613,6 +616,10 @@ impl NodeConfig {
         metrics: NodeMetrics,
         events: EventSender,
     ) -> Result<(Chain<P>, Option<(NodeKey, NetworkIdentity)>), NodeError> {
+        // Every KZG check of the process reads one setup, so the operator's is installed first.
+        if let Some(path) = &self.trusted_setup {
+            TrustedSetupFile(path).trust()?;
+        }
         // A checkpoint download holds a whole state; boxing keeps this future small.
         let chain = Box::pin(self.open_chain::<P>(chain_config, clock)).await?;
         let chain = self

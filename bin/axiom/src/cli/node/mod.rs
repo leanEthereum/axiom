@@ -142,6 +142,7 @@ impl NodeFlags {
                 shutdown_after_sync: self.behaviour.shutdown_after_sync,
                 monitor,
                 client_stats,
+                trusted_setup: chain.trusted_setup,
             },
             deprecated,
             chain: chain.network.chain,

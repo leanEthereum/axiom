@@ -41,6 +41,8 @@ pub(crate) const CHAIN_USAGE: &str = "\
     --ignore-ws-check            only warn when the head is past its weak subjectivity period
     --archive                    keep state snapshots and backfill to genesis
     --snapshot-interval <SLOTS>  slots between archive snapshots [default: 2048]
+    --trusted-setup-file-override <FILE>
+                                 KZG trusted setup JSON, in place of the mainnet ceremony's
 ";
 
 /// The chain flags as given.
@@ -74,6 +76,8 @@ pub(crate) struct ChainFlags {
     allow_insecure_genesis_sync: bool,
     /// Whether a stale head only warns.
     ignore_ws_check: bool,
+    /// A KZG trusted setup file.
+    trusted_setup: Option<PathBuf>,
 }
 
 /// What the chain flags resolve to.
@@ -85,6 +89,8 @@ pub(crate) struct ChainChoice {
     pub(crate) anchor: Option<AnchorSource>,
     /// History, pruning, and weak subjectivity.
     pub(crate) history: HistorySettings,
+    /// A KZG trusted setup file in place of the mainnet one.
+    pub(crate) trusted_setup: Option<PathBuf>,
 }
 
 impl ChainFlags {
@@ -126,6 +132,9 @@ impl ChainFlags {
             }
             "--allow-insecure-genesis-sync" => self.allow_insecure_genesis_sync = true,
             "--ignore-ws-check" => self.ignore_ws_check = true,
+            "--trusted-setup-file-override" => {
+                self.trusted_setup = Some(words.path("--trusted-setup-file-override")?);
+            }
             _ => return Ok(false),
         }
         Ok(true)
@@ -177,6 +186,7 @@ impl ChainFlags {
                 allow_insecure_genesis_sync: self.allow_insecure_genesis_sync,
                 ignore_ws_check: self.ignore_ws_check,
             },
+            trusted_setup: self.trusted_setup,
         })
     }
 
