@@ -189,6 +189,7 @@ async fn run(genesis: phase0::BeaconState<Minimal>) {
     // - Contributions: each member holds seats in one subcommittee and aggregates it, every slot.
     // - Payload votes: 16 seats at each of the 17 Gloas slots.
     // - Preferences: one per Gloas proposal from epoch 7 to epoch 10, published a slot or more ahead.
+    //   The node refuses the first batch of 8; the next slot signs and sends it again.
     assert_eq!(
         chain.tally,
         Tally {

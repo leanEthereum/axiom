@@ -24,8 +24,9 @@ use crate::{
 /// 1. Rank the beacon nodes by health.
 /// 2. Refresh duties for this epoch and the next.
 /// 3. On an epoch's first slot, check for doppelgangers and send preparations.
-/// 4. Start the slot's duties, each in its own task, each waiting for its deadline.
-/// 5. Refresh the gauges a metrics scrape reads.
+/// 4. Publish proposer preferences for coming proposals whose dependent root lacks them.
+/// 5. Start the slot's duties, each in its own task, each waiting for its deadline.
+/// 6. Refresh the gauges a metrics scrape reads.
 ///
 /// A slow duty never delays the next slot: the loop moves on as soon as the tasks start.
 /// With attesting disabled, only proposals run, as an emergency measure that keeps blocks coming.
@@ -102,8 +103,12 @@ impl<P: Preset> ValidatorClient<P> {
                 self.doppelganger.check(epoch).await;
             }
             let preparation = Arc::clone(&self.preparation);
-            task::spawn(async move { preparation.run(epoch).await });
+            task::spawn(async move { preparation.run().await });
         }
+        // Why: a late or reorged block at the dependent slot changes the root mid-epoch.
+        // The refresh above has just recorded it, and gossip expects preferences over it.
+        let preparation = Arc::clone(&self.preparation);
+        task::spawn(async move { preparation.publish_preferences(epoch).await });
 
         let proposer = BlockProposer::new(context.clone());
         task::spawn(async move { proposer.propose(slot).await });

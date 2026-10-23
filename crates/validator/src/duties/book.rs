@@ -18,6 +18,9 @@ pub struct AttesterSeat {
 ///
 /// Attester and proposer duties carry the root their shuffling depends on.
 /// A refresh that reports another root replaces the epoch's duties, since a reorg moved them.
+///
+/// Proposer preferences are keyed by proposal slot and dependent root, as gossip keys them.
+/// A slot whose root changes takes fresh preferences, signed over the new root.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DutyBook {
     /// Proposers by epoch.
@@ -28,8 +31,8 @@ pub struct DutyBook {
     sync: BTreeMap<u64, Vec<SyncDuty>>,
     /// Payload timeliness seats by epoch.
     ptc: BTreeMap<Epoch, Vec<PtcDuty>>,
-    /// Slots whose proposer preferences were already published.
-    preferences: BTreeSet<Slot>,
+    /// Dependent roots whose proposer preferences were already published, by proposal slot.
+    preferences: BTreeMap<Slot, BTreeSet<Root>>,
 }
 
 impl DutyBook {
@@ -126,13 +129,24 @@ impl DutyBook {
         self.ptc.get(&epoch).map_or(0, Vec::len)
     }
 
-    /// Marks a slot's proposer preferences as published.
+    /// Whether a slot's proposer preferences were published over a dependent root.
+    #[must_use]
+    pub fn has_preferences(&self, slot: Slot, dependent_root: Root) -> bool {
+        self.preferences
+            .get(&slot)
+            .is_some_and(|roots| roots.contains(&dependent_root))
+    }
+
+    /// Marks a slot's proposer preferences as published over a dependent root.
     ///
-    /// # Returns
-    ///
-    /// Whether they were not published before.
-    pub fn mark_preferences(&mut self, slot: Slot) -> bool {
-        self.preferences.insert(slot)
+    /// Only a node's acceptance marks them, so a failed sign or send is retried.
+    /// Earlier roots stay marked until pruned, so a root a reorg brings back is not signed twice.
+    /// See `validate_proposer_preferences_gossip` in the Gloas p2p spec.
+    pub fn mark_preferences(&mut self, slot: Slot, dependent_root: Root) {
+        self.preferences
+            .entry(slot)
+            .or_default()
+            .insert(dependent_root);
     }
 
     /// Forgets everything before an epoch.
@@ -196,5 +210,38 @@ mod tests {
         book.set_sync(1, vec![duty(2)]);
         assert_eq!(book.sync_at::<Minimal>(Slot(62)), [duty(1)]);
         assert_eq!(book.sync_at::<Minimal>(Slot(63)), [duty(2)]);
+    }
+
+    #[test]
+    fn preferences_are_published_once_per_slot_and_dependent_root() {
+        // Fixture state: minimal epochs of 8 slots; a proposal at slot 12, in epoch 1.
+        // Its shuffling depends on the block at slot 7, first seen as root 0xaa.
+        let mut book = DutyBook::default();
+        let (first, second) = (Root([0xaa; 32]), Root([0xbb; 32]));
+
+        // Until a node accepts them, every round finds the pair missing and sends it.
+        // The end-to-end suite has its node refuse the first batch, to pin the retry.
+        assert!(!book.has_preferences(Slot(12), first));
+
+        // A node accepts them; later rounds over 0xaa send nothing new.
+        book.mark_preferences(Slot(12), first);
+        assert!(book.has_preferences(Slot(12), first));
+
+        // Mutation: a reorg replaces the block at slot 7 with root 0xbb.
+        // Gossip keys preferences by slot and root, so the slot needs them again.
+        assert!(!book.has_preferences(Slot(12), second));
+        book.mark_preferences(Slot(12), second);
+        assert!(book.has_preferences(Slot(12), second));
+
+        // The reorg reverting to 0xaa finds those preferences already sent.
+        assert!(book.has_preferences(Slot(12), first));
+
+        // Another slot over the same root is a separate proposal.
+        assert!(!book.has_preferences(Slot(13), second));
+
+        // Pruning before epoch 2 forgets every mark of epoch 1.
+        book.prune::<Minimal>(Epoch(2));
+        assert!(!book.has_preferences(Slot(12), first));
+        assert!(!book.has_preferences(Slot(12), second));
     }
 }
