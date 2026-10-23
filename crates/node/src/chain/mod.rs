@@ -54,7 +54,7 @@ use axiom_types::{
 };
 pub use database::{
     ChainDatabase, Finality, HistoryStart, InvalidInterval, RawRecord, ReconstructionCursor,
-    SchemaVersion, SidecarPass, SnapshotInterval, StorageMode, TableUsage,
+    SchemaVersion, SidecarPass, SnapshotInterval, StorageMode, StoredBlock, TableUsage,
 };
 use gossip::GossipMemory;
 pub use handle::{ChainHandle, ChainStopped};
@@ -611,6 +611,15 @@ impl<P: Preset> Chain<P> {
         self.database.block(root)
     }
 
+    /// A block by root as stored: whole, or blinded once finality pruned its payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the database is unreadable.
+    pub fn stored_block(&self, root: Root) -> Result<Option<StoredBlock<P>>, ChainError> {
+        self.database.stored_block(root)
+    }
+
     /// The bid a Gloas block committed to, while the fork choice holds the block's state.
     #[must_use]
     pub fn payload_bid(&self, root: &Root) -> Option<gloas::ExecutionPayloadBid> {
@@ -628,7 +637,7 @@ impl<P: Preset> Chain<P> {
         if let Some(node) = self.store.blocks().get(&root) {
             return Ok(Some(node.slot));
         }
-        Ok(self.database.block(root)?.map(|block| block.slot()))
+        Ok(self.database.stored_block(root)?.map(|block| block.slot()))
     }
 
     /// The root that binds signatures and topics to this chain's genesis validator set.

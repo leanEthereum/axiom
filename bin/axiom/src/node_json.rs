@@ -72,6 +72,7 @@ impl NodeJson<'_> {
                     "compact_on_start",
                     Json::from(node.database.compact_on_start),
                 ),
+                ("prune_payloads", Json::from(node.database.prune_payloads)),
             ]),
         );
         object.insert("shutdown_after_sync", Json::from(node.shutdown_after_sync));
@@ -335,7 +336,7 @@ mod tests {
         assert_eq!(object.get("shutdown_after_sync"), Some(&Json::from(false)));
         assert_eq!(
             object.get("database").map(ToString::to_string).as_deref(),
-            Some(r#"{"auto_compact":true,"compact_on_start":false}"#)
+            Some(r#"{"auto_compact":true,"compact_on_start":false,"prune_payloads":true}"#)
         );
     }
 

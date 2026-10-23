@@ -68,7 +68,7 @@ impl TestApi {
         );
         let proposer = ProposerService::new(
             chain.clone(),
-            execution,
+            Arc::clone(&execution),
             Arc::clone(&clock) as Arc<dyn Clock>,
             ExecutionAddress::default(),
             None,
@@ -80,6 +80,7 @@ impl TestApi {
             proposer: Arc::new(proposer),
             identity: None,
             events,
+            execution,
         };
         let router = BeaconApi::router(chain.clone(), services);
         Self {

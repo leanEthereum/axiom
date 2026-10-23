@@ -20,9 +20,9 @@ use super::{
         ColumnsByRangeRequest, ColumnsByRootRequest, EnvelopesByRootRequest, SlotRangeRequest,
         UpdatesByRangeRequest,
     },
-    responder::{RequestBody, Responder},
+    responder::{BlockChunks, RequestBody, Responder},
 };
-use crate::{Chain, ChainError, ChainHandle};
+use crate::{Chain, ChainError, ChainHandle, ExecutionLayer};
 
 /// What the node tells peers about itself.
 #[derive(Debug)]
@@ -63,6 +63,8 @@ pub(crate) struct RequestServer<P: Preset> {
     network: NetworkHandle,
     /// The node's metadata.
     metadata: Arc<LocalMetadata>,
+    /// The engine, which rebuilds blocks whose payloads were pruned.
+    execution: Arc<ExecutionLayer>,
 }
 
 impl<P: Preset> RequestServer<P> {
@@ -71,11 +73,13 @@ impl<P: Preset> RequestServer<P> {
         chain: ChainHandle<P>,
         network: NetworkHandle,
         metadata: Arc<LocalMetadata>,
+        execution: Arc<ExecutionLayer>,
     ) -> Self {
         Self {
             chain,
             network,
             metadata,
+            execution,
         }
     }
 
@@ -132,17 +136,17 @@ impl<P: Preset> RequestServer<P> {
             Protocol::GoodbyeV1 => Ok(Vec::new()),
             Protocol::BeaconBlocksByRangeV2 => {
                 let request = RequestBody(&payload).decode::<BlocksByRangeRequest>()?;
-                self.query(move |chain| Responder::new(chain).blocks_by_range(request))
+                self.blocks(move |chain| Responder::new(chain).blocks_by_range(request))
                     .await
             }
             Protocol::BeaconBlocksByRootV2 => {
                 let request = RequestBody(&payload).decode::<BlocksByRootRequest>()?;
-                self.query(move |chain| Responder::new(chain).blocks_by_root(&request))
+                self.blocks(move |chain| Responder::new(chain).blocks_by_root(&request))
                     .await
             }
             Protocol::BeaconBlocksByHeadV1 => {
                 let request = RequestBody(&payload).decode::<BlocksByHeadRequest>()?;
-                self.query(move |chain| Responder::new(chain).blocks_by_head(request))
+                self.blocks(move |chain| Responder::new(chain).blocks_by_head(request))
                     .await
             }
             Protocol::DataColumnSidecarsByRangeV1 => {
@@ -229,6 +233,20 @@ impl<P: Preset> RequestServer<P> {
             ));
         }
         Ok(chunks)
+    }
+
+    /// Runs a block query on the chain thread, then makes its blinded blocks whole from the engine.
+    async fn blocks(
+        &self,
+        query: impl FnOnce(&mut Chain<P>) -> Result<BlockChunks<P>, ChainError> + Send + 'static,
+    ) -> Result<Vec<ResponseChunk>, ResponseChunk> {
+        let chunks = self
+            .chain
+            .run(query)
+            .await
+            .map_err(|_| ResponseChunk::error(ResponseCode::ServerError, "chain stopped"))?
+            .map_err(|error| ResponseChunk::error(ResponseCode::ServerError, &error.to_string()))?;
+        Ok(chunks.complete(&self.execution).await)
     }
 
     /// Runs a query on the chain thread, mapping its failure to a server error.

@@ -501,19 +501,31 @@ pub struct DatabaseSettings {
     pub auto_compact: bool,
     /// Whether every eligible segment is rewritten once at startup.
     pub compact_on_start: bool,
+    /// Whether finalized blocks lose their payloads, kept blinded and rebuilt from the engine.
+    ///
+    /// It applies only with an engine to rebuild from, and outside archive mode.
+    /// An archive replays finalized blocks to rebuild past states, and replay needs every payload.
+    pub prune_payloads: bool,
 }
 
 impl Default for DatabaseSettings {
     fn default() -> Self {
-        // Space is reclaimed as it goes, and startup does no extra work.
+        // Space is reclaimed as it goes, startup does no extra work, and the engine keeps payloads.
         Self {
             auto_compact: true,
             compact_on_start: false,
+            prune_payloads: true,
         }
     }
 }
 
 impl NodeConfig {
+    /// Whether finalized payloads leave the disk: asked for, with an engine, and outside archive mode.
+    const fn prunes_payloads(&self) -> bool {
+        self.database.prune_payloads
+            && self.engine.is_some()
+            && matches!(self.history.mode, StorageMode::Pruned)
+    }
     /// Opens the database and builds the chain from its anchor, a checkpoint, or genesis.
     ///
     /// A configured weak subjectivity checkpoint then holds the chain to it.
@@ -532,7 +544,8 @@ impl NodeConfig {
             }
             None => ChainDatabase::in_memory(chain_config.clone())?,
         }
-        .with_mode(self.history.mode);
+        .with_mode(self.history.mode)
+        .pruning_payloads(self.prunes_payloads());
         if self.database.compact_on_start {
             info!("compacting the database");
             database.compact()?;

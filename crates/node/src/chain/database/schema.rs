@@ -23,8 +23,9 @@ impl SchemaVersion {
 
     /// The layout this build writes.
     ///
-    /// It adds state snapshots, the state root index, light client data, and the history start.
-    pub const CURRENT: Self = Self(2);
+    /// Version 2 added state snapshots, the state root index, light client data, and the history start.
+    /// Version 3 adds blinded blocks, whose payloads were pruned.
+    pub const CURRENT: Self = Self(3);
 
     /// The record as stored: eight big-endian bytes.
     pub(super) const fn encode(self) -> [u8; 8] {
@@ -51,6 +52,10 @@ pub(super) enum Migration {
     /// Version 1 kept no such record.
     /// Its canonical index began at the anchor, so the earliest indexed block is the start.
     HistoryStart,
+    /// Version 2 to 3: blocks may sit blinded in their own table.
+    ///
+    /// Version 2 kept every payload, so the new table starts empty and nothing moves.
+    BlindedBlocks,
 }
 
 impl Migration {
@@ -58,6 +63,7 @@ impl Migration {
     pub(super) const fn from(version: SchemaVersion) -> Option<Self> {
         match version.0 {
             1 => Some(Self::HistoryStart),
+            2 => Some(Self::BlindedBlocks),
             _ => None,
         }
     }
@@ -66,6 +72,7 @@ impl Migration {
     pub(super) const fn target(self) -> SchemaVersion {
         match self {
             Self::HistoryStart => SchemaVersion(2),
+            Self::BlindedBlocks => SchemaVersion(3),
         }
     }
 
@@ -94,6 +101,7 @@ impl Migration {
                     },
                 )
             }
+            Self::BlindedBlocks => Ok(()),
         }
     }
 }
@@ -113,7 +121,7 @@ mod tests {
             steps += 1;
         }
         assert_eq!(version, SchemaVersion::CURRENT);
-        assert_eq!(steps, 1);
+        assert_eq!(steps, 2);
     }
 
     #[test]

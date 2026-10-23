@@ -383,6 +383,7 @@ mod tests {
             DatabaseSettings {
                 auto_compact: true,
                 compact_on_start: true,
+                prune_payloads: true,
             }
         );
         assert!(node.shutdown_after_sync);

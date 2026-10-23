@@ -73,6 +73,8 @@ pub(crate) struct ApiContext<P: Preset> {
     identity: Option<Arc<NodeIdentity>>,
     /// Opens event streams.
     events: EventSubscriptions,
+    /// The engine, which rebuilds blocks whose payloads were pruned.
+    execution: Arc<ExecutionLayer>,
 }
 
 impl<P: Preset> Clone for ApiContext<P> {
@@ -83,6 +85,7 @@ impl<P: Preset> Clone for ApiContext<P> {
             proposer: Arc::clone(&self.proposer),
             identity: self.identity.clone(),
             events: self.events.clone(),
+            execution: Arc::clone(&self.execution),
         }
     }
 }
@@ -160,6 +163,8 @@ pub(crate) struct ApiServices<P: Preset> {
     pub identity: Option<Arc<NodeIdentity>>,
     /// Opens event streams.
     pub events: EventSubscriptions,
+    /// The engine, which rebuilds blocks whose payloads were pruned.
+    pub execution: Arc<ExecutionLayer>,
 }
 
 /// Builds the beacon API's routes.
@@ -181,6 +186,7 @@ impl BeaconApi {
             proposer,
             identity,
             events,
+            execution,
         } = services;
         Self::build(ApiContext {
             chain,
@@ -188,6 +194,7 @@ impl BeaconApi {
             proposer,
             identity,
             events,
+            execution,
         })
         .0
     }
@@ -206,7 +213,7 @@ impl BeaconApi {
         );
         let proposer = ProposerService::new(
             chain.clone(),
-            execution,
+            Arc::clone(&execution),
             Arc::new(SystemClock),
             ExecutionAddress::ZERO,
             None,
@@ -219,6 +226,7 @@ impl BeaconApi {
             proposer: Arc::new(proposer),
             identity: None,
             events,
+            execution,
         };
         Self::build(context).1
     }

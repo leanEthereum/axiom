@@ -22,7 +22,7 @@ use super::{
     query::Query,
     reply::{ApiError, ApiResult, Freshness, Reply, Routes},
 };
-use crate::{Chain, ChainStopped, Proposal, PublishError, Published};
+use crate::{Chain, ChainStopped, Proposal, PublishError, Published, StoredBlock};
 
 /// Routes under `/eth/v1/beacon` and `/eth/v2/beacon`, states and light clients aside.
 #[derive(Clone, Copy, Debug)]
@@ -136,7 +136,7 @@ impl BeaconRoutes {
                     finalized: true,
                 };
                 for root in roots {
-                    let Some(block) = chain.block(root)? else {
+                    let Some(block) = chain.stored_block(root)? else {
                         continue;
                     };
                     // The flags of a list hold for every item: optimistic if any is, finalized if all are.
@@ -170,9 +170,9 @@ impl BeaconRoutes {
     fn header_json<P: Preset>(
         chain: &Chain<P>,
         root: Root,
-        block: &SignedBeaconBlock<P>,
+        block: &StoredBlock<P>,
     ) -> Result<Json, ApiError> {
-        let header = block.message().header();
+        let header = block.header();
         let canonical = chain.canonical_root(header.slot)? == Some(root);
         Ok(Json::from([
             ("root", Reply::text(&root)),
@@ -204,10 +204,13 @@ impl BeaconRoutes {
     }
 
     /// A whole signed block, as JSON or SSZ.
+    ///
+    /// A block whose payload was pruned is rebuilt from the body the engine keeps.
     async fn block<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
         let encoding = Encoding::accepted(&request, true)?;
         let id = BlockId::from_request(&request)?;
         let (block, freshness) = Self::find(&context, id).await?;
+        let block = Self::whole(&context, block).await?;
         Ok(Reply::object(
             encoding,
             block.fork_name(),
@@ -226,15 +229,19 @@ impl BeaconRoutes {
         let id = BlockId::from_request(&request)?;
         let (block, freshness) = Self::find(&context, id).await?;
         let fork = block.fork_name();
-        let reply = match SignedBlindedBeaconBlock::blinding(&block) {
-            Some(blinded) => Reply::object(
+        let blinded = match block {
+            StoredBlock::Full(block) => SignedBlindedBeaconBlock::blinding(&block).ok_or(block),
+            StoredBlock::Blinded(blinded) => Ok(blinded),
+        };
+        let reply = match blinded {
+            Ok(blinded) => Reply::object(
                 encoding,
                 fork,
                 Some(freshness),
                 || blinded.to_json(),
                 || blinded.encode(),
             ),
-            None => Reply::object(
+            Err(block) => Reply::object(
                 encoding,
                 fork,
                 Some(freshness),
@@ -252,6 +259,7 @@ impl BeaconRoutes {
         Encoding::accepted(&request, false)?;
         let id = BlockId::from_request(&request)?;
         let (block, freshness) = Self::find(&context, id).await?;
+        let block = Self::whole(&context, block).await?;
         let fork = block.fork_name();
         let attestations = block
             .to_json()
@@ -269,11 +277,11 @@ impl BeaconRoutes {
         ))
     }
 
-    /// A block and its freshness, or a 404.
+    /// A block as stored, and its freshness, or a 404.
     async fn find<P: Preset>(
         context: &ApiContext<P>,
         id: BlockId,
-    ) -> Result<(SignedBeaconBlock<P>, Freshness), ApiError> {
+    ) -> Result<(StoredBlock<P>, Freshness), ApiError> {
         context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
@@ -281,6 +289,29 @@ impl BeaconRoutes {
                 Ok((block, freshness))
             })
             .await
+    }
+
+    /// A stored block made whole, its pruned payload rebuilt from the body the engine keeps.
+    ///
+    /// # Errors
+    ///
+    /// Fails with a 404 when the engine cannot return the body.
+    async fn whole<P: Preset>(
+        context: &ApiContext<P>,
+        block: StoredBlock<P>,
+    ) -> Result<SignedBeaconBlock<P>, ApiError> {
+        match block {
+            StoredBlock::Full(block) => Ok(block),
+            StoredBlock::Blinded(blinded) => context
+                .execution
+                .unblind_all(vec![blinded])
+                .await
+                .pop()
+                .flatten()
+                .ok_or_else(|| {
+                    ApiError::not_found("the block's payload was pruned and the engine lacks it")
+                }),
+        }
     }
 
     /// The blob sidecars of a Deneb or Electra block, optionally by index.
@@ -298,7 +329,7 @@ impl BeaconRoutes {
         let (sidecars, fork, freshness) = context
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
-                let count = block.message().blob_kzg_commitments().len() as u64;
+                let count = block.blob_kzg_commitments().len() as u64;
                 let wanted: Vec<u64> = if indices.is_empty() {
                     (0..count).collect()
                 } else {
@@ -345,8 +376,7 @@ impl BeaconRoutes {
             .query(move |chain| {
                 let (root, block) = id.find(chain)?;
                 let fork = block.fork_name();
-                let mut commitments: Vec<KzgCommitment> =
-                    block.message().blob_kzg_commitments().to_vec();
+                let mut commitments: Vec<KzgCommitment> = block.blob_kzg_commitments();
                 // A Gloas block commits to its blobs through its bid.
                 if let Some(bid) = chain.payload_bid(&root) {
                     commitments.extend(bid.blob_kzg_commitments.iter().copied());

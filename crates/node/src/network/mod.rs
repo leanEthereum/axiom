@@ -279,6 +279,7 @@ impl<P: Preset> NetworkService<P> {
                 chain.clone(),
                 network.clone(),
                 Arc::clone(&metadata),
+                Arc::clone(&execution),
             )),
             sync,
             sync_outcomes: Some(sync_outcomes),

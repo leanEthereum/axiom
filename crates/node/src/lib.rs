@@ -38,8 +38,8 @@ pub use chain::{
     Chain, ChainDatabase, ChainEvent, ChainHandle, ChainSettings, ChainStopped, ExecutionHead,
     Finality, Head, HistorySegment, HistoryStart, InvalidInterval, ProposerKeys, RawRecord,
     Reconstruction, ReconstructionCursor, SchemaVersion, SegmentContext, SegmentError, SidecarPass,
-    SidecarPruning, SnapshotInterval, StateReplay, StorageMode, Submission, TableUsage,
-    VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
+    SidecarPruning, SnapshotInterval, StateReplay, StorageMode, StoredBlock, Submission,
+    TableUsage, VerifiedSegment, WeakSubjectivity, WeakSubjectivityError,
 };
 pub use checkpoint::{CheckpointError, CheckpointServer};
 pub use client_stats::{ClientStatsSettings, DEFAULT_PUSH_PERIOD};

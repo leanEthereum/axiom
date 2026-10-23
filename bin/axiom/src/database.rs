@@ -28,6 +28,7 @@ COMMANDS:
     version                      the database's layout version
     migrate                      bring the layout to this build's version
     prune-blobs                  delete sidecars past their retention window
+    prune-payloads               keep finalized blocks blinded, below the finalized block
     prune-states                 delete archived state snapshots; changes nothing without --confirm
     compact                      give back the space of deleted records
 
@@ -36,8 +37,9 @@ OPTIONS:
     --network <NAME>             the chain whose records the database holds [default: mainnet]
     --testnet-dir <DIR>          a network directory instead of a name
     --config <FILE>              a chain config YAML instead of a name
-    --table <NAME>               inspect: blocks, states, blobs, columns, envelopes, canonical,
-                                 snapshots, state_roots, light_client, or meta
+    --table <NAME>               inspect: blocks, blinded_blocks, states, blobs, columns,
+                                 envelopes, canonical, snapshots, state_roots, light_client,
+                                 or meta
     --output <KIND>              inspect: summary, sizes, or values [default: summary]
     --output-dir <DIR>           inspect: where values are written, one file per key
     --to <VERSION>               migrate: the version to reach [default: this build's]
@@ -59,6 +61,8 @@ enum Action {
     },
     /// Deletes expired sidecars.
     PruneBlobs,
+    /// Blinds finalized blocks.
+    PrunePayloads,
     /// Deletes archived states.
     PruneStates {
         /// Whether to delete for real.
@@ -142,9 +146,8 @@ impl DatabaseCommand {
         };
         let command = match command.as_str() {
             "-h" | "--help" => return Ok(Self::Help),
-            "inspect" | "version" | "migrate" | "prune-blobs" | "prune-states" | "compact" => {
-                command
-            }
+            "inspect" | "version" | "migrate" | "prune-blobs" | "prune-payloads"
+            | "prune-states" | "compact" => command,
             _ => return Err(CliError::UnknownCommand(command)),
         };
         let mut flags = DatabaseFlags::default();
@@ -231,6 +234,7 @@ impl DatabaseFlags {
                 to: self.to.map(SchemaVersion),
             },
             "prune-blobs" => Action::PruneBlobs,
+            "prune-payloads" => Action::PrunePayloads,
             "prune-states" => Action::PruneStates {
                 confirm: self.confirm,
             },
@@ -321,6 +325,11 @@ impl DatabaseRun {
             Action::PruneBlobs => {
                 let blocks = Self::prune_blobs(&database, &directory)?;
                 writeln!(out, "pruned the sidecars of {blocks} blocks")?;
+            }
+            Action::PrunePayloads => {
+                let blocks = database.prune_payloads()?;
+                database.compact()?;
+                writeln!(out, "pruned the payloads of {blocks} blocks")?;
             }
             Action::PruneStates { confirm } => {
                 let snapshots = Self::snapshots(&database)?;
@@ -566,12 +575,12 @@ mod tests {
             format!("database version: {}\n", SchemaVersion::CURRENT)
         );
 
-        // Ten tables; only the metadata table holds a record, the layout version.
+        // Eleven tables; only the metadata table holds a record, the layout version.
         let summary = scratch.report(&["inspect"]).unwrap();
         let lines: Vec<&str> = summary.lines().collect();
-        assert_eq!(lines.len(), 11, "{summary}");
+        assert_eq!(lines.len(), 12, "{summary}");
         assert_eq!(
-            lines[10].split_whitespace().collect::<Vec<_>>(),
+            lines[11].split_whitespace().collect::<Vec<_>>(),
             ["meta", "1", "6", "8"]
         );
 
@@ -597,6 +606,10 @@ mod tests {
             "deleted 0 archived states\n"
         );
         assert_eq!(scratch.report(&["compact"]).unwrap(), "compacted\n");
+        assert_eq!(
+            scratch.report(&["prune-payloads"]).unwrap(),
+            "pruned the payloads of 0 blocks\n"
+        );
         assert_eq!(
             scratch.report(&["migrate"]).unwrap(),
             format!("database version: {0} -> {0}\n", SchemaVersion::CURRENT)

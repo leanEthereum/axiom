@@ -18,6 +18,8 @@ pub(crate) const STORAGE_USAGE: &str = "\
                                  epochs between sidecar pruning rounds [default: 256]
     --blob-prune-margin-epochs <EPOCHS>
                                  epochs of sidecars kept past the window [default: 0]
+    --prune-payloads <BOOL>      keep finalized blocks blinded, rebuilding their payloads from
+                                 the engine; needs an engine, off in archive mode [default: true]
 ";
 
 /// How the chain database is deleted before the node starts.
@@ -48,6 +50,8 @@ pub(crate) struct StorageFlags {
     epochs_per_blob_prune: Option<u64>,
     /// Epochs kept past the window.
     blob_prune_margin_epochs: Option<u64>,
+    /// Whether finalized payloads leave the disk.
+    prune_payloads: Option<bool>,
 }
 
 /// What the storage flags resolve to.
@@ -77,6 +81,7 @@ impl StorageFlags {
             "--compact-db" => self.compact = true,
             "--auto-compact-db" => self.auto_compact = Some(words.boolean("--auto-compact-db")?),
             "--prune-blobs" => self.prune_blobs = Some(words.boolean("--prune-blobs")?),
+            "--prune-payloads" => self.prune_payloads = Some(words.boolean("--prune-payloads")?),
             "--epochs-per-blob-prune" => {
                 self.epochs_per_blob_prune = Some(words.parsed("--epochs-per-blob-prune")?);
             }
@@ -102,6 +107,7 @@ impl StorageFlags {
             database: DatabaseSettings {
                 auto_compact: self.auto_compact.unwrap_or(true),
                 compact_on_start: self.compact,
+                prune_payloads: self.prune_payloads.unwrap_or(true),
             },
             pruning: SidecarPruning {
                 enabled: self.prune_blobs.unwrap_or(defaults.enabled),
@@ -158,6 +164,8 @@ mod tests {
             "256",
             "--blob-prune-margin-epochs",
             "16",
+            "--prune-payloads",
+            "false",
         ])
         .unwrap();
         assert_eq!(
@@ -168,6 +176,7 @@ mod tests {
                 database: DatabaseSettings {
                     auto_compact: false,
                     compact_on_start: true,
+                    prune_payloads: false,
                 },
                 pruning: SidecarPruning {
                     enabled: false,

@@ -320,6 +320,7 @@ impl<P: Preset> Node<P> {
             proposer: Arc::clone(&proposer),
             identity,
             events: streams,
+            execution: Arc::clone(&execution),
         };
 
         let broadcaster = SlashingBroadcaster::spawn(found_slashings, &api.publisher);
