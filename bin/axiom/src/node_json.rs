@@ -4,8 +4,8 @@ use std::{path::Path, time::Duration};
 
 use axiom_json::{Json, Object};
 use axiom_node::{
-    AnchorSource, GenesisState, HistorySettings, NetworkSettings, NodeConfig, ProposerSettings,
-    StorageMode,
+    AnchorSource, ChainSettings, GenesisState, HistorySettings, NetworkSettings, NodeConfig,
+    ProposerSettings, StorageMode,
 };
 
 /// A node configuration rendered member by member, every field under its own name.
@@ -62,51 +62,8 @@ impl NodeJson<'_> {
         );
         object.insert("history", Self::history(&node.history));
         object.insert("proposer", Self::proposer(&node.proposer));
-        object.insert(
-            "slasher",
-            node.slasher.as_ref().map_or(Json::Null, |slasher| {
-                Json::from([
-                    ("history_length", Json::from(slasher.history_length)),
-                    ("chunk_size", Json::from(slasher.chunk_size)),
-                    (
-                        "validator_chunk_size",
-                        Json::from(slasher.validator_chunk_size),
-                    ),
-                    ("record_chunk_size", Json::from(slasher.record_chunk_size)),
-                    ("prune_period", Json::from(slasher.prune_period)),
-                    (
-                        "directory",
-                        Self::path(node.slasher_setup.directory.as_deref()),
-                    ),
-                    (
-                        "update_period_ms",
-                        Self::millis(node.slasher_setup.update_period),
-                    ),
-                ])
-            }),
-        );
-        let chain = &node.chain;
-        object.insert(
-            "chain",
-            Json::from([
-                ("max_skip_slots", Json::from(chain.max_skip_slots)),
-                ("fast_confirmation", Json::from(chain.fast_confirmation)),
-                ("light_client_server", Json::from(chain.light_client_server)),
-                (
-                    "import_all_attestations",
-                    Json::from(chain.import_all_attestations),
-                ),
-                ("prune_blobs", Json::from(chain.sidecar_pruning.enabled)),
-                (
-                    "epochs_per_blob_prune",
-                    Json::from(chain.sidecar_pruning.interval_epochs),
-                ),
-                (
-                    "blob_prune_margin_epochs",
-                    Json::from(chain.sidecar_pruning.margin_epochs),
-                ),
-            ]),
-        );
+        object.insert("slasher", Self::slasher(node));
+        object.insert("chain", Self::chain(&node.chain));
         object.insert(
             "database",
             Json::from([
@@ -119,6 +76,52 @@ impl NodeJson<'_> {
         );
         object.insert("shutdown_after_sync", Json::from(node.shutdown_after_sync));
         Json::Object(object)
+    }
+
+    /// The slasher's layout and where it runs, or null when it is off.
+    fn slasher(node: &NodeConfig) -> Json {
+        node.slasher.as_ref().map_or(Json::Null, |slasher| {
+            Json::from([
+                ("history_length", Json::from(slasher.history_length)),
+                ("chunk_size", Json::from(slasher.chunk_size)),
+                (
+                    "validator_chunk_size",
+                    Json::from(slasher.validator_chunk_size),
+                ),
+                ("record_chunk_size", Json::from(slasher.record_chunk_size)),
+                ("prune_period", Json::from(slasher.prune_period)),
+                (
+                    "directory",
+                    Self::path(node.slasher_setup.directory.as_deref()),
+                ),
+                (
+                    "update_period_ms",
+                    Self::millis(node.slasher_setup.update_period),
+                ),
+            ])
+        })
+    }
+
+    /// The chain thread's settings.
+    fn chain(chain: &ChainSettings) -> Json {
+        Json::from([
+            ("max_skip_slots", Json::from(chain.max_skip_slots)),
+            ("fast_confirmation", Json::from(chain.fast_confirmation)),
+            ("light_client_server", Json::from(chain.light_client_server)),
+            (
+                "import_all_attestations",
+                Json::from(chain.import_all_attestations),
+            ),
+            ("prune_blobs", Json::from(chain.sidecar_pruning.enabled)),
+            (
+                "epochs_per_blob_prune",
+                Json::from(chain.sidecar_pruning.interval_epochs),
+            ),
+            (
+                "blob_prune_margin_epochs",
+                Json::from(chain.sidecar_pruning.margin_epochs),
+            ),
+        ])
     }
 
     /// Where an empty database starts.
