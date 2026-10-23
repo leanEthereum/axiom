@@ -250,7 +250,7 @@ impl NodeJson<'_> {
                 "suggested_fee_recipient",
                 Json::from(proposer.default_fee_recipient.to_string()),
             ),
-            ("graffiti", Json::from(proposer.graffiti.to_string())),
+            ("graffiti", Self::text(proposer.graffiti)),
             (
                 "builders",
                 Json::Array(

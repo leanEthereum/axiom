@@ -6,11 +6,11 @@ use std::{
 };
 
 use axiom_execution::{
-    BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2, CAPABILITIES, EngineClient,
-    EngineError, ForkchoiceState, ForkchoiceUpdated, ForkchoiceVersion, GetBlobsResponse,
-    GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3, GetPayloadResponseV4,
-    GetPayloadResponseV5, GetPayloadResponseV6, JsonCodec, JwtSecret, NewPayload,
-    PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
+    BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2, CAPABILITIES, ClientVersion,
+    EngineClient, EngineError, ForkchoiceState, ForkchoiceUpdated, ForkchoiceVersion,
+    GetBlobsResponse, GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3,
+    GetPayloadResponseV4, GetPayloadResponseV5, GetPayloadResponseV6, JsonCodec, JwtSecret,
+    NewPayload, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
     PayloadAttributesV4, PayloadId, PayloadStatus, PayloadStatusKind, RpcError, SyncStatus,
     WireError, WireErrorKind,
     mock::{MockEngine, RecordedCall},
@@ -894,6 +894,38 @@ fn get_blobs_v2_all_or_nothing() {
             })
         );
         engine.stop().await;
+    });
+}
+
+#[test]
+fn client_versions_are_swapped() {
+    run(async {
+        let (engine, client) = connect().await;
+        engine.reply(
+            "engine_getClientVersionV1",
+            json(
+                r#"[{"code":"GE","name":"go-ethereum","version":"v1.14.0","commit":"0xfa4ff922"}]"#,
+            ),
+        );
+        let ours = ClientVersion {
+            code: "AX".to_owned(),
+            name: "Axiom".to_owned(),
+            version: "v0.1.0".to_owned(),
+            commit: [0, 0, 0, 0],
+        };
+
+        // The engine's identity comes back; ours went out as the one parameter.
+        let theirs = client.client_version(&ours).await.unwrap();
+        assert_eq!(
+            theirs,
+            [ClientVersion {
+                code: "GE".to_owned(),
+                name: "go-ethereum".to_owned(),
+                version: "v1.14.0".to_owned(),
+                commit: [0xfa, 0x4f, 0xf9, 0x22],
+            }]
+        );
+        assert_eq!(engine.calls()[0].params, [ours.to_json()]);
     });
 }
 

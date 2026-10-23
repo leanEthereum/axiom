@@ -10,9 +10,10 @@ use axiom_json::{Json, Limits as JsonLimits};
 use axiom_types::{ForkName, Hash32, Preset, VersionedHash, bellatrix::PowBlock};
 
 use crate::{
-    Claims, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState, ForkchoiceUpdated,
-    ForkchoiceVersion, GetBlobsResponse, GetPayloadResponse, JsonCodec, JwtSecret, NewPayload,
-    PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, rpc::Call, wire::Reader,
+    Claims, ClientVersion, EXECUTION_TIMEOUT, EngineError, EngineMethods, ForkchoiceState,
+    ForkchoiceUpdated, ForkchoiceVersion, GetBlobsResponse, GetPayloadResponse, JsonCodec,
+    JwtSecret, NewPayload, PayloadAttributes, PayloadId, PayloadStatus, SyncStatus, rpc::Call,
+    wire::Reader,
 };
 
 /// Timeout of every lookup-style call, such as engine_getPayload and engine_getBlobs.
@@ -296,6 +297,31 @@ impl EngineClient {
             &result,
             versioned_hashes.len(),
         )?)
+    }
+
+    /// Swaps client identities with the engine: engine_getClientVersionV1.
+    ///
+    /// See `src/engine/identification.md`.
+    ///
+    /// # Returns
+    ///
+    /// One identity per execution client behind the endpoint; a multiplexer returns several.
+    ///
+    /// # Errors
+    ///
+    /// Fails like any call, and when the reply is not a list of identities.
+    pub async fn client_version(
+        &self,
+        ours: &ClientVersion,
+    ) -> Result<Vec<ClientVersion>, EngineError> {
+        let result = self
+            .call(
+                "engine_getClientVersionV1",
+                vec![ours.to_json()],
+                LOOKUP_TIMEOUT,
+            )
+            .await?;
+        Ok(Reader::new(&result).items()?.decode()?)
     }
 
     /// The chain id the engine runs: eth_chainId.

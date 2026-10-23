@@ -26,8 +26,8 @@ use super::{
     reply::{ApiError, ApiResult, Reply, Routes},
 };
 use crate::{
-    BlockOrder, Chain, ChainStopped, Proposal as PublishProposal, ProposerError, PublishError,
-    Published,
+    BlockOrder, Chain, ChainStopped, GraffitiPolicy, Proposal as PublishProposal, ProposerError,
+    PublishError, Published,
 };
 
 /// Wei per Gwei, to state consensus rewards in the unit the API uses.
@@ -70,7 +70,7 @@ impl ValidatorRoutes {
     ///
     /// The value headers state what the block's consensus rewards and its payload pay, in wei.
     async fn produce_v3<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let order = Self::block_order(&request, context.proposer.graffiti())?;
+        let order = Self::block_order(&context, &request).await?;
         let fork = Self::slot_fork(&context, order.slot).await?;
         if fork.separates_payloads() {
             return Err(ApiError::bad_request(format!(
@@ -123,7 +123,7 @@ impl ValidatorRoutes {
     ///
     /// Without the payload, the node keeps the envelope for the validator to fetch.
     async fn produce_v4<P: Preset>(context: ApiContext<P>, request: Request) -> ApiResult {
-        let order = Self::block_order(&request, context.proposer.graffiti())?;
+        let order = Self::block_order(&context, &request).await?;
         let include_payload = Query::of(&request).flag("include_payload")?;
         // The builder configuration must decode; its entries ask for bids this node does not fetch.
         if Encoding::of_body(&request, true)? == Encoding::Json {
@@ -518,14 +518,23 @@ impl ValidatorRoutes {
 
     /// The proposal a block request asks for, from its path and query.
     ///
-    /// A request naming no graffiti gets the node's.
-    fn block_order(request: &Request, graffiti: Bytes32) -> Result<BlockOrder, ApiError> {
+    /// The graffiti weighs the request's text and policy against the node's choices.
+    /// The policy parameter extends the standard routes; a request without it appends versions.
+    async fn block_order<P: Preset>(
+        context: &ApiContext<P>,
+        request: &Request,
+    ) -> Result<BlockOrder, ApiError> {
         let slot = Slot(Self::path_number(request, "slot")?);
         let query = Query::of(request);
         let randao_reveal = BlsSignature(query.bytes::<96>("randao_reveal")?);
-        let graffiti = query
-            .optional_bytes::<32>("graffiti")?
-            .map_or(graffiti, Bytes32);
+        let requested = query.optional_bytes::<32>("graffiti")?.map(Bytes32);
+        let policy = query
+            .text("graffiti_policy")
+            .map(str::parse::<GraffitiPolicy>)
+            .transpose()
+            .map_err(ApiError::bad_request)?
+            .unwrap_or_default();
+        let graffiti = context.proposer.block_graffiti(requested, policy).await;
         // Skipping needs the point at infinity as the reveal, so no real reveal is ignored.
         let randao = if query.flag("skip_randao_verification")? {
             if randao_reveal.0 != Signature::INFINITY_BYTES {

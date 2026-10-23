@@ -34,9 +34,14 @@ pub const EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
 /// Timeout of engine_newPayloadV5, which `src/engine/amsterdam.md` shortens to six seconds.
 const AMSTERDAM_NEW_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Engine methods this client calls whatever the fork, as announced to the engine.
+///
+/// See `src/engine/identification.md`.
+pub const FORK_INDEPENDENT: &[&str] = &["engine_getClientVersionV1"];
+
 /// Engine methods this client calls, as announced to the engine.
 ///
-/// It is the union of the table's methods, in family and version order.
+/// It is the union of the table's methods, in family and version order, then the fork-independent ones.
 pub const CAPABILITIES: &[&str] = &[
     "engine_newPayloadV1",
     "engine_newPayloadV2",
@@ -55,6 +60,7 @@ pub const CAPABILITIES: &[&str] = &[
     "engine_getPayloadV6",
     "engine_getBlobsV1",
     "engine_getBlobsV2",
+    "engine_getClientVersionV1",
 ];
 
 /// The versions of every engine method one fork calls.
@@ -351,6 +357,7 @@ mod tests {
             .chain(forkchoice)
             .chain(get_payload)
             .chain(get_blobs)
+            .chain(FORK_INDEPENDENT.iter().copied())
         {
             if !union.contains(&method) {
                 union.push(method);
@@ -359,7 +366,7 @@ mod tests {
 
         // Each method version of the table appears once.
         assert_eq!(union, CAPABILITIES);
-        assert_eq!(CAPABILITIES.len(), 17);
+        assert_eq!(CAPABILITIES.len(), 18);
     }
 
     #[test]

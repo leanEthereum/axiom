@@ -157,7 +157,7 @@ impl ProposerFlags {
             },
             builders: self.builders,
             builder_fallback: self.fallback,
-            graffiti: self.graffiti.unwrap_or_default(),
+            graffiti: self.graffiti,
             prepare_lookahead: self.lookahead,
             always_prepare_payload: self.always_prepare,
             // The reorg flags have their own group, which sets this.
@@ -244,7 +244,7 @@ mod tests {
                     epochs_since_finalization: Some(6),
                     disable_checks: false,
                 },
-                graffiti: Bytes32(graffiti),
+                graffiti: Some(Bytes32(graffiti)),
                 prepare_lookahead: Some(Duration::from_secs(8)),
                 always_prepare_payload: true,
                 ..ProposerSettings::default()

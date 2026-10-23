@@ -15,6 +15,7 @@
 
 mod attributes;
 mod blobs;
+mod client_version;
 mod forkchoice;
 mod get_payload;
 mod payload;
@@ -34,6 +35,7 @@ pub use blobs::{
     BlobAndProofV1, BlobAndProofV2, BlobProofs, Blobs, BlobsBundleV1, BlobsBundleV2, CellProofs,
     GetBlobsResponse,
 };
+pub use client_version::ClientVersion;
 pub use forkchoice::{ForkchoiceState, ForkchoiceUpdated, PayloadId};
 pub use get_payload::{
     GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3, GetPayloadResponseV4,

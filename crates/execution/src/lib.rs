@@ -75,13 +75,13 @@ pub use error::{
     EngineError, EnvelopeError, NewPayloadError, RequestsError, WireError, WireErrorKind,
 };
 pub use methods::{
-    CAPABILITIES, EXECUTION_TIMEOUT, EngineMethods, ForkchoiceVersion, GetBlobsVersion,
-    GetPayloadVersion, NewPayloadVersion,
+    CAPABILITIES, EXECUTION_TIMEOUT, EngineMethods, FORK_INDEPENDENT, ForkchoiceVersion,
+    GetBlobsVersion, GetPayloadVersion, NewPayloadVersion,
 };
 pub use new_payload::NewPayload;
 pub use rpc::RpcError;
 pub use wire::{
-    BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2, ForkchoiceState,
+    BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2, ClientVersion, ForkchoiceState,
     ForkchoiceUpdated, GetBlobsResponse, GetPayloadResponse, GetPayloadResponseV2,
     GetPayloadResponseV3, GetPayloadResponseV4, GetPayloadResponseV5, GetPayloadResponseV6,
     JsonCodec, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,

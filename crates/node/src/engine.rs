@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use axiom_execution::{
-    EngineClient, ForkchoiceState, GetPayloadResponse, NewPayload, PayloadAttributes, PayloadId,
-    PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
+    ClientVersion, EngineClient, ForkchoiceState, GetPayloadResponse, NewPayload,
+    PayloadAttributes, PayloadId, PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
 };
 use axiom_fork_choice::PayloadStatus;
 use axiom_telemetry::NodeMetrics;
@@ -16,7 +16,7 @@ use axiom_types::{
 };
 use tracing::{debug, warn};
 
-use crate::{ChainHandle, ExecutionHead, ProposerError};
+use crate::{ChainHandle, ExecutionHead, ProposerError, engine_version::EngineVersions};
 
 /// The execution layer as the consensus node sees it.
 ///
@@ -49,6 +49,8 @@ pub struct ExecutionLayer {
     engine: Option<EngineClient>,
     /// Request timings, by engine method.
     metrics: NodeMetrics,
+    /// The execution client's identity, as the engine last gave it.
+    versions: EngineVersions,
 }
 
 impl ExecutionLayer {
@@ -58,6 +60,7 @@ impl ExecutionLayer {
         Self {
             engine: Some(engine),
             metrics: NodeMetrics::detached(),
+            versions: EngineVersions::default(),
         }
     }
 
@@ -67,6 +70,7 @@ impl ExecutionLayer {
         Self {
             engine: None,
             metrics: NodeMetrics::detached(),
+            versions: EngineVersions::default(),
         }
     }
 
@@ -75,6 +79,11 @@ impl ExecutionLayer {
     pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    /// The execution client's identity, when one client answers for the engine.
+    pub(crate) async fn client_version(&self) -> Option<ClientVersion> {
+        self.versions.single(self.engine.as_ref()?).await
     }
 
     /// Asks the engine to judge the payload a block carries.
