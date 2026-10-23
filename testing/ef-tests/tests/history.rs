@@ -21,10 +21,10 @@ use axiom_fork_choice::PayloadStatus;
 use axiom_http::{Client, ClientConfig, Endpoint, Method, Request, Response, StatusCode};
 use axiom_json::{Data, Json};
 use axiom_node::{
-    AnchorSource, Chain, ChainDatabase, ChainError, CheckpointServer, EngineConfig, HistorySegment,
-    HistorySettings, HistoryStart, ManualClock, NetworkSettings, Node, NodeConfig, NodeError,
-    PortMappingSettings, Reconstruction, SegmentContext, SegmentError, SnapshotInterval,
-    StorageMode, WeakSubjectivity, WeakSubjectivityError,
+    AnchorSource, Chain, ChainDatabase, ChainError, CheckpointServer, DatabaseSettings,
+    EngineConfig, HistorySegment, HistorySettings, HistoryStart, ManualClock, NetworkSettings,
+    Node, NodeConfig, NodeError, PortMappingSettings, Reconstruction, SegmentContext, SegmentError,
+    SnapshotInterval, StorageMode, WeakSubjectivity, WeakSubjectivityError,
 };
 use axiom_p2p::Multiaddr;
 use axiom_ssz::{Ssz, U256};
@@ -723,6 +723,11 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
                 http_address: Some(a_api),
                 engine: Some(engine_config),
                 network: Some(settings(a_p2p, Vec::new())),
+                // The mock engine keeps no payload bodies, so A keeps its payloads to serve them.
+                database: DatabaseSettings {
+                    prune_payloads: false,
+                    ..DatabaseSettings::default()
+                },
                 ..NodeConfig::default()
             },
             a_api,
