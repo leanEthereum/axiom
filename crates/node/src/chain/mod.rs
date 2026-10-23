@@ -25,8 +25,9 @@ use axiom_fork_choice::{
     DataAvailability, ExecutionStatus, FastConfirmation, ForkChoiceError, ForkChoiceNode,
     NodePayload, PayloadArrival, PayloadStatus, Store,
 };
-use axiom_gossip::{ChainView, GossipValidator, Seen, SubnetVote};
+use axiom_gossip::{ChainView, CheckedBlob, GossipValidator, Seen, SubnetVote};
 use axiom_json::Json;
+use axiom_kzg::Kzg;
 use axiom_light_client::{
     LightClientServer, PostState,
     combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
@@ -192,6 +193,68 @@ impl<P: Preset> Chain<P> {
         chain.offer_bootstrap(root, signed);
         chain.persist_light_client(Slot(0))?;
         Ok(chain)
+    }
+
+    /// Stores the blobs of the anchor block, which the operator supplied beside it.
+    ///
+    /// Each blob passes the checks gossip would make, so the anchor's data is as good as a peer's:
+    ///
+    /// - it sits at its own index and names the anchor block's header,
+    /// - its commitment is the block's at that index, with a valid inclusion proof,
+    /// - its proof opens the commitment.
+    ///
+    /// Only blocks of forks with whole blob sidecars take blobs; others take an empty list.
+    /// See `BlobSidecar` in the Deneb p2p spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a check fails, the count differs from the commitments, or the write fails.
+    pub fn import_anchor_blobs(
+        &mut self,
+        block: &combined::SignedBeaconBlock<P>,
+        blobs: Vec<BlobSidecar<P>>,
+    ) -> Result<(), ChainError> {
+        let root = block.block_root();
+        let message = block.message();
+        let commitments = match block.fork_name().blob_data() {
+            BlobData::BlobSidecars => message.blob_kzg_commitments(),
+            BlobData::None | BlobData::BlockColumns | BlobData::PayloadColumns => &[],
+        };
+        if blobs.len() != commitments.len() {
+            return Err(ChainError::AnchorBlobCount {
+                slot: block.slot(),
+                expected: commitments.len(),
+                actual: blobs.len(),
+            });
+        }
+        for (index, (blob, commitment)) in blobs.iter().zip(commitments).enumerate() {
+            let checked = CheckedBlob(blob);
+            let failed = if blob.index.0 != index as u64 {
+                Some("index out of place")
+            } else if blob.signed_block_header.message.hash_tree_root() != root {
+                Some("names another block")
+            } else if blob.kzg_commitment != *commitment {
+                Some("commitment differs from the block's")
+            } else if !checked.has_valid_inclusion_proof() {
+                Some("inclusion proof does not verify")
+            } else if !checked.has_valid_kzg_proof(Kzg::trusted()) {
+                Some("proof does not open the commitment")
+            } else {
+                None
+            };
+            if let Some(reason) = failed {
+                return Err(ChainError::InvalidAnchorBlob {
+                    index,
+                    root,
+                    reason,
+                });
+            }
+        }
+        let sidecars: Vec<Sidecar<P>> = blobs
+            .into_iter()
+            .map(|blob| Sidecar::Blob(Arc::new(blob)))
+            .collect();
+        self.database.put_sidecars(root, &sidecars)
     }
 
     /// The chain a database was left with, resuming from its finalized anchor.
@@ -2213,5 +2276,123 @@ impl<P: Preset> Chain<P> {
     fn announce(&self, event: ChainEvent) {
         // Having no subscriber is normal, so a failed send is not an error.
         let _unheard = self.events.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axiom_gossip::BlockBlobs;
+    use axiom_kzg::Blob as KzgBlob;
+    use axiom_types::{
+        BlobIndex, KzgCommitment, KzgProof, Minimal,
+        deneb::{self, Blob},
+        fulu,
+        phase0::BeaconState,
+    };
+
+    use super::*;
+
+    /// A Deneb block at slot 9 committing to two blobs, and their sidecars.
+    fn anchor() -> (
+        combined::SignedBeaconBlock<Minimal>,
+        Vec<BlobSidecar<Minimal>>,
+    ) {
+        let kzg = Kzg::mainnet();
+        let mut block = deneb::SignedBeaconBlock::<Minimal>::default();
+        block.message.slot = Slot(9);
+        let mut blobs = Vec::new();
+        let mut proofs = Vec::new();
+        for seed in [2_u8, 4] {
+            let mut bytes = Blob::<Minimal>::default().as_ref().to_vec();
+            bytes[31] = seed;
+            let blob = Blob::<Minimal>::try_from(bytes.as_slice()).unwrap();
+            let opened = KzgBlob::from_bytes(blob.as_ref()).unwrap();
+            let commitment = kzg.blob_to_kzg_commitment(&opened);
+            let proof = kzg.compute_blob_kzg_proof(&opened, &commitment).unwrap();
+            block
+                .message
+                .body
+                .blob_kzg_commitments
+                .push(KzgCommitment(commitment.0))
+                .unwrap();
+            blobs.push(blob);
+            proofs.push(KzgProof(proof.0));
+        }
+        let sidecars = BlockBlobs::deneb(&block)
+            .sidecars(&blobs, &proofs, kzg)
+            .unwrap();
+        (combined::SignedBeaconBlock::Deneb(block), sidecars)
+    }
+
+    /// A chain to store blobs in; the anchor checks read only the block given.
+    fn empty_chain() -> Chain<Minimal> {
+        let config = ChainConfig::minimal();
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let genesis = combined::BeaconState::Phase0(BeaconState::<Minimal>::default());
+        Chain::from_genesis(config, genesis, database).unwrap()
+    }
+
+    #[test]
+    fn anchor_blobs_are_checked_then_stored() {
+        // Fixture state: a Deneb anchor block with two blobs, and their two sidecars.
+        let (block, sidecars) = anchor();
+        let root = block.block_root();
+        let mut chain = empty_chain();
+        chain.import_anchor_blobs(&block, sidecars.clone()).unwrap();
+        assert_eq!(
+            chain.database().blob(root, BlobIndex(1)).unwrap(),
+            Some(sidecars[1].clone())
+        );
+
+        // One blob short of the two commitments.
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, sidecars[..1].to_vec()),
+            Err(ChainError::AnchorBlobCount {
+                slot: Slot(9),
+                expected: 2,
+                actual: 1,
+            })
+        ));
+
+        // Mutation: the blobs swap places, so each sits at the other's index.
+        let swapped = vec![sidecars[1].clone(), sidecars[0].clone()];
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, swapped),
+            Err(ChainError::InvalidAnchorBlob {
+                index: 0,
+                reason: "index out of place",
+                ..
+            })
+        ));
+
+        // Mutation: blob 1 carries blob 0's proof, which opens another commitment.
+        let mut forged = sidecars.clone();
+        forged[1].kzg_proof = sidecars[0].kzg_proof;
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&block, forged),
+            Err(ChainError::InvalidAnchorBlob {
+                index: 1,
+                reason: "proof does not open the commitment",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn blocks_without_blob_sidecars_take_no_blobs() {
+        // A Fulu anchor carries its data in columns, so only an empty list is accepted.
+        let (_, sidecars) = anchor();
+        let fulu = combined::SignedBeaconBlock::Fulu(fulu::SignedBeaconBlock::<Minimal>::default());
+        empty_chain()
+            .import_anchor_blobs(&fulu, Vec::new())
+            .unwrap();
+        assert!(matches!(
+            empty_chain().import_anchor_blobs(&fulu, sidecars),
+            Err(ChainError::AnchorBlobCount {
+                expected: 0,
+                actual: 2,
+                ..
+            })
+        ));
     }
 }

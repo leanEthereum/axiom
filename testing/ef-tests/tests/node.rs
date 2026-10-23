@@ -801,6 +801,7 @@ fn a_node_starts_from_a_checkpoint_and_builds_on_it() {
             anchor: Some(AnchorSource::Checkpoint {
                 state: state_path,
                 block: block_path,
+                blobs: None,
             }),
             http_address: Some(address),
             ..NodeConfig::default()

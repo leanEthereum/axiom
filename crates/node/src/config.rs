@@ -17,13 +17,14 @@ use axiom_p2p::{
     swarm::{self, NetworkConfig, NetworkEvents, NetworkHandle},
 };
 use axiom_slasher::SlasherConfig;
-use axiom_ssz::DecodeError;
+use axiom_ssz::{DecodeError, List, Ssz};
 use axiom_store::Options;
 use axiom_telemetry::{MetricsServer, NodeMetrics, Registry};
 use axiom_types::{
     Bytes32, ChainConfig, ExecutionAddress, Preset, SlotClock,
     accessors::CoreState,
     combined::{BeaconState, SignedBeaconBlock},
+    deneb::BlobSidecar,
 };
 use tokio::{
     sync::{
@@ -134,6 +135,8 @@ pub enum AnchorSource {
         state: PathBuf,
         /// The signed block.
         block: PathBuf,
+        /// The block's blob sidecars, an SSZ list, for a block of a fork with whole blobs.
+        blobs: Option<PathBuf>,
     },
     /// A trusted beacon API to download the finalized block and its post-state from.
     Url {
@@ -156,15 +159,25 @@ impl AnchorSource {
         history: &HistorySettings,
         now_ms: u64,
     ) -> Result<Chain<P>, NodeError> {
+        let mut blobs = Vec::new();
         let (state, block, genesis) = match self {
             Self::Genesis(source) => {
                 return Self::genesis(source, chain_config, database, history, now_ms).await;
             }
-            Self::Checkpoint { state, block } => {
+            Self::Checkpoint {
+                state,
+                block,
+                blobs: blob_file,
+            } => {
                 let state = SszFile::new(state, "reading the checkpoint state")
                     .decode(|bytes| BeaconState::<P>::decode_at(bytes, &chain_config))?;
                 let block = SszFile::new(block, "reading the checkpoint block")
                     .decode(|bytes| SignedBeaconBlock::<P>::decode_at(bytes, &chain_config))?;
+                if let Some(path) = blob_file {
+                    blobs = SszFile::new(path, "reading the checkpoint blobs")
+                        .decode(List::<BlobSidecar<P>, P::MaxBlobCommitmentsPerBlock>::decode)?
+                        .into_vec();
+                }
                 (state, block, None)
             }
             Self::Url { url, timeout } => {
@@ -190,7 +203,8 @@ impl AnchorSource {
         history.check_recent(&state, &chain_config, now_ms)?;
         // The store refuses a block whose state root is not this state's.
         info!(slot = %block.slot(), fork = %block.fork_name(), "starting from a checkpoint");
-        let chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
+        let mut chain = Chain::from_anchor(chain_config.clone(), state, &block, database)?;
+        chain.import_anchor_blobs(&block, blobs)?;
         let genesis = match (&history.genesis, genesis) {
             (Some(source), _) => Some(source.load::<P>(&chain_config).await?),
             (None, downloaded) => downloaded,

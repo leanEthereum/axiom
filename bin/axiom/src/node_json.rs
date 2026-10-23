@@ -130,11 +130,16 @@ impl NodeJson<'_> {
     fn anchor(anchor: &AnchorSource) -> Json {
         match anchor {
             AnchorSource::Genesis(genesis) => Json::from([("genesis", Self::genesis(genesis))]),
-            AnchorSource::Checkpoint { state, block } => Json::from([(
+            AnchorSource::Checkpoint {
+                state,
+                block,
+                blobs,
+            } => Json::from([(
                 "checkpoint",
                 Json::from([
                     ("state", Self::path(Some(state))),
                     ("block", Self::path(Some(block))),
+                    ("blobs", Self::path(blobs.as_deref())),
                 ]),
             )]),
             AnchorSource::Url { url, timeout } => Json::from([(
