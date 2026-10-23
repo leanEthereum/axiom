@@ -709,6 +709,7 @@ fn a_checkpoint_synced_node_backfills_to_genesis_and_resumes_after_a_restart() {
             discovery: None,
             subscribe_all_subnets: false,
             backfill_rate_limiting: false,
+            get_blobs: false,
         };
 
         // Node A holds the whole chain from genesis, published over its API.

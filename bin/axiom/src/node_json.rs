@@ -216,6 +216,7 @@ impl NodeJson<'_> {
                 "backfill_rate_limiting",
                 Json::from(network.backfill_rate_limiting),
             ),
+            ("get_blobs", Json::from(network.get_blobs)),
         ])
     }
 

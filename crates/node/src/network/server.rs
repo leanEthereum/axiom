@@ -35,6 +35,17 @@ pub(crate) struct LocalMetadata {
     pub(crate) custody_group_count: u64,
 }
 
+impl LocalMetadata {
+    /// The metadata of a node that joined no subnet yet, at sequence number zero.
+    pub(crate) const fn new(custody_group_count: u64) -> Self {
+        Self {
+            seq_number: AtomicU64::new(0),
+            attnets: AtomicU64::new(0),
+            custody_group_count,
+        }
+    }
+}
+
 /// Bytes of metadata in its second version: the third version appends one field.
 ///
 /// See MetaData v2 in the Altair p2p spec and MetaData v3 in the Fulu p2p spec.

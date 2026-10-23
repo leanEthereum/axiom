@@ -664,6 +664,7 @@ fn range_sync(quic: bool) {
             discovery: None,
             subscribe_all_subnets: false,
             backfill_rate_limiting: false,
+            get_blobs: false,
         };
         let a = TestNode::start(
             &fixture,
@@ -739,6 +740,7 @@ fn a_node_finds_its_peer_through_discovery() {
                 }),
                 subscribe_all_subnets: false,
                 backfill_rate_limiting: false,
+                get_blobs: false,
             }
         };
         let a = TestNode::start(&fixture, Some(settings(Vec::new()))).await;
@@ -854,6 +856,7 @@ fn a_node_on_a_dead_branch_rewinds_and_syncs_the_peer_chain() {
             discovery: None,
             subscribe_all_subnets: false,
             backfill_rate_limiting: false,
+            get_blobs: false,
         };
         let boot: Multiaddr = format!("/ip4/127.0.0.1/tcp/{}", a_address.port()).parse().unwrap();
         let b = TestNode::start(&fixture, Some(settings(free_address(), vec![boot]))).await;
@@ -1030,6 +1033,7 @@ fn a_node_syncs_from_genesis_through_every_fork() {
             discovery: None,
             subscribe_all_subnets: false,
             backfill_rate_limiting: false,
+            get_blobs: false,
         };
         let node_config = |network, engine| NodeConfig {
             anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
@@ -1425,6 +1429,22 @@ fn a_node_reports_the_rewards_its_blocks_and_epochs_paid() {
     let _ignored = fs::remove_dir_all(&directory);
 }
 
+/// Network settings over TCP alone, without discovery, NAT, or the engine's blob pool.
+fn plain_network(listen_address: SocketAddr, boot_nodes: Vec<Multiaddr>) -> NetworkSettings {
+    NetworkSettings {
+        quic_port: None,
+        target_peers: 64,
+        port_mapping: PortMappingSettings::default(),
+        listen_address,
+        boot_nodes,
+        custody_group_count: 4,
+        discovery: None,
+        subscribe_all_subnets: false,
+        backfill_rate_limiting: false,
+        get_blobs: false,
+    }
+}
+
 /// Publishes two blocks with blobs to node A, and checks node B range-syncs blocks and blobs.
 ///
 /// The genesis is the anchor of a fork choice case of the fork, with every fork up to it active.
@@ -1476,17 +1496,7 @@ fn publish_blobs_and_sync(fork: ForkName) {
     runtime.block_on(async {
         let start = |listen_address, boot_nodes| {
             let api = free_address();
-            let network = NetworkSettings {
-                quic_port: None,
-                target_peers: 64,
-                port_mapping: PortMappingSettings::default(),
-                listen_address,
-                boot_nodes,
-                custody_group_count: 4,
-                discovery: None,
-                subscribe_all_subnets: false,
-                backfill_rate_limiting: false,
-            };
+            let network = plain_network(listen_address, boot_nodes);
             let node_config = NodeConfig {
                 anchor: Some(AnchorSource::Genesis(genesis_path.clone().into())),
                 http_address: Some(api),
@@ -1777,6 +1787,7 @@ fn a_node_that_missed_gossip_blocks_recovers_them_by_lookup() {
             quic_port: None,
             subscribe_all_subnets: false,
             backfill_rate_limiting: false,
+            get_blobs: false,
             target_peers: 64,
             port_mapping: PortMappingSettings::default(),
             listen_address,

@@ -104,6 +104,8 @@ pub struct NetworkSettings {
     pub subscribe_all_subnets: bool,
     /// Whether backfill batches wait for quiet moments of the slot, leaving the CPU to duties.
     pub backfill_rate_limiting: bool,
+    /// Whether new blocks' columns are built from the engine's blob pool before peers send them.
+    pub get_blobs: bool,
 }
 
 impl NetworkSettings {

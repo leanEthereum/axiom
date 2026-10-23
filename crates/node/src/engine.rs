@@ -3,13 +3,14 @@
 use std::sync::Arc;
 
 use axiom_execution::{
-    ClientVersion, EngineClient, ForkchoiceState, GetPayloadResponse, NewPayload,
-    PayloadAttributes, PayloadId, PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
+    BlobAndProofV2, ClientVersion, EngineClient, ForkchoiceState, GetBlobsResponse,
+    GetPayloadResponse, NewPayload, PayloadAttributes, PayloadId,
+    PayloadStatus as EnginePayloadStatus, PayloadStatusKind,
 };
 use axiom_fork_choice::PayloadStatus;
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
-    ForkName, Hash32, Preset,
+    ForkName, Hash32, Preset, VersionedHash,
     bellatrix::PowBlock,
     combined,
     gloas::{ExecutionPayloadBid, SignedExecutionPayloadEnvelope},
@@ -79,6 +80,39 @@ impl ExecutionLayer {
     pub fn with_metrics(mut self, metrics: NodeMetrics) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    /// Every blob of a block from the engine's pool, with its cell proofs.
+    ///
+    /// The engine answers with all of them or none, so a partial pool yields nothing.
+    /// An unreachable engine, or one without the method, yields nothing too.
+    /// See `engine_getBlobsV2` in `src/engine/osaka.md`.
+    pub(crate) async fn blobs<P: Preset>(
+        &self,
+        fork: ForkName,
+        hashes: &[VersionedHash],
+    ) -> Option<Vec<BlobAndProofV2<P>>> {
+        let engine = self.engine.as_ref()?;
+        let timer = self
+            .metrics
+            .engine_request_seconds
+            .with_label_values(["get_blobs"])
+            .start_timer();
+        let answer = engine.get_blobs::<P>(fork, hashes).await;
+        drop(timer);
+        match answer {
+            Ok(GetBlobsResponse::V2(blobs)) => {
+                if blobs.is_none() {
+                    debug!(blobs = hashes.len(), "engine pool lacks some of the blobs");
+                }
+                blobs
+            }
+            Ok(GetBlobsResponse::V1(_)) => None,
+            Err(error) => {
+                debug!(%fork, %error, "engine returned no blobs");
+                None
+            }
+        }
     }
 
     /// The execution client's identity, when one client answers for the engine.
@@ -339,8 +373,8 @@ impl ExecutionLayer {
 mod tests {
     use axiom_execution::{JsonCodec, JwtSecret, mock::MockEngine};
     use axiom_json::Json;
-    use axiom_ssz::U256;
-    use axiom_types::{ChainConfig, Minimal, Slot, bellatrix, capella, phase0};
+    use axiom_ssz::{U256, Vector};
+    use axiom_types::{ChainConfig, Minimal, Slot, bellatrix, capella, deneb::Blob, phase0};
     use tokio::runtime::Builder;
 
     use super::*;
@@ -352,6 +386,42 @@ mod tests {
             latest_valid_hash,
             validation_error: None,
         }
+    }
+
+    #[test]
+    fn engine_blobs_come_whole_or_not_at_all() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // Fixture state: an engine whose pool lacks a blob, so version 2 answers null.
+            let engine = MockEngine::start(JwtSecret::new([7; 32])).await.unwrap();
+            let client = EngineClient::new(engine.url(), JwtSecret::new([7; 32])).unwrap();
+            let layer = ExecutionLayer::new(client);
+            let hashes = [VersionedHash([1; 32])];
+            engine.reply("engine_getBlobsV2", Json::Null);
+            assert_eq!(layer.blobs::<Minimal>(ForkName::Fulu, &hashes).await, None);
+
+            // With the blob in the pool, it comes back with its 128 cell proofs.
+            let entry = BlobAndProofV2::<Minimal> {
+                blob: Blob::<Minimal>::default(),
+                proofs: Vector::default(),
+            };
+            engine.reply("engine_getBlobsV2", Json::Array(vec![entry.to_json()]));
+            assert_eq!(
+                layer.blobs::<Minimal>(ForkName::Fulu, &hashes).await,
+                Some(vec![entry])
+            );
+
+            // Before Fulu the pool answers per blob, which builds no columns.
+            assert_eq!(layer.blobs::<Minimal>(ForkName::Deneb, &hashes).await, None);
+
+            // Without an engine nothing is asked.
+            let disconnected = ExecutionLayer::disconnected();
+            assert_eq!(
+                disconnected.blobs::<Minimal>(ForkName::Fulu, &hashes).await,
+                None
+            );
+            engine.stop().await;
+        });
     }
 
     /// A Capella block whose payload names block hash 0x01.

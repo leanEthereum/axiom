@@ -218,6 +218,7 @@ mod tests {
                 target_peers: 64,
                 subscribe_all_subnets: false,
                 backfill_rate_limiting: true,
+                get_blobs: true,
             })
         );
         assert_eq!(
@@ -268,6 +269,7 @@ mod tests {
             "100",
             "--subscribe-all-subnets",
             "--disable-backfill-rate-limiting",
+            "--disable-get-blobs",
             "--suggested-fee-recipient",
             "0x00000000219ab540356cbb839cbe05303d7705fa",
         ])
@@ -301,6 +303,7 @@ mod tests {
                 target_peers: 100,
                 subscribe_all_subnets: true,
                 backfill_rate_limiting: false,
+                get_blobs: false,
             })
         );
         assert_eq!(

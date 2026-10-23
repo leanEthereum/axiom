@@ -47,6 +47,7 @@ use axiom_types::{
     capella::SignedBlsToExecutionChange,
     combined,
     deneb::BlobSidecar,
+    fulu,
     gloas::{self, PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
     phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
@@ -881,6 +882,40 @@ impl<P: Preset> Chain<P> {
         column: Arc<combined::DataColumnSidecar<P>>,
     ) -> Result<Option<Root>, ChainError> {
         self.submit_sidecar(Sidecar::Column(column))
+    }
+
+    /// Takes the custodied columns built from the engine's blobs, as if they arrived on gossip.
+    ///
+    /// The builder checked every cell proof, and the block passed the gossip rules.
+    /// A column the gossip rules already saw, from the same proposer for the slot, is skipped.
+    /// The others are remembered as seen, so a later copy from a peer is ignored.
+    ///
+    /// # Returns
+    ///
+    /// The columns no peer had sent yet, for the node to publish.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a block the columns release is refused by the fork choice.
+    pub(crate) fn submit_engine_columns(
+        &mut self,
+        columns: Vec<fulu::DataColumnSidecar<P>>,
+    ) -> Result<Vec<combined::DataColumnSidecar<P>>, ChainError> {
+        let mut fresh = Vec::new();
+        for column in columns {
+            if !self.custody().contains(&column.index) {
+                continue;
+            }
+            let header = &column.signed_block_header.message;
+            let key = (header.slot, header.proposer_index, column.index);
+            if !self.gossip.seen.data_column_sidecar_tuples.insert(key) {
+                continue;
+            }
+            let column = combined::DataColumnSidecar::Fulu(column);
+            fresh.push(column.clone());
+            self.submit_column(Arc::new(column))?;
+        }
+        Ok(fresh)
     }
 
     /// Hands over a verified blob sidecar, which may complete a waiting block.
@@ -2281,6 +2316,7 @@ impl<P: Preset> Chain<P> {
 
 #[cfg(test)]
 mod tests {
+    use axiom_das::BlockColumns;
     use axiom_gossip::BlockBlobs;
     use axiom_kzg::Blob as KzgBlob;
     use axiom_types::{
@@ -2376,6 +2412,43 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn engine_columns_enter_once_and_only_for_custody() {
+        // Fixture state: a Fulu block at slot 3 committing to one blob, and its 128 columns.
+        let kzg = Kzg::mainnet();
+        let mut bytes = Blob::<Minimal>::default().as_ref().to_vec();
+        bytes[31] = 7;
+        let blob = Blob::<Minimal>::try_from(bytes.as_slice()).unwrap();
+        let opened = KzgBlob::from_bytes(blob.as_ref()).unwrap();
+        let commitment = kzg.blob_to_kzg_commitment(&opened);
+        let (_, cell_proofs) = kzg.compute_cells_and_kzg_proofs(&opened);
+        let mut block = fulu::SignedBeaconBlock::<Minimal>::default();
+        block.message.slot = Slot(3);
+        block
+            .message
+            .body
+            .blob_kzg_commitments
+            .push(KzgCommitment(commitment.0))
+            .unwrap();
+        let proofs: Vec<KzgProof> = cell_proofs.iter().map(|proof| KzgProof(proof.0)).collect();
+        let columns = BlockColumns::new(&block)
+            .sidecars(&[blob], &proofs, kzg)
+            .unwrap();
+        assert_eq!(columns.len(), 128);
+
+        // A node custodying columns 2 and 9 takes those two, and reports both as new.
+        let mut chain = empty_chain().with_custody([ColumnIndex(2), ColumnIndex(9)]);
+        let fresh = chain.submit_engine_columns(columns.clone()).unwrap();
+        let indices: Vec<ColumnIndex> = fresh
+            .iter()
+            .map(combined::DataColumnSidecar::index)
+            .collect();
+        assert_eq!(indices, [ColumnIndex(2), ColumnIndex(9)]);
+
+        // The same columns again, from the engine or a peer, are not new.
+        assert_eq!(chain.submit_engine_columns(columns).unwrap(), Vec::new());
     }
 
     #[test]

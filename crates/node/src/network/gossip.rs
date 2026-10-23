@@ -32,10 +32,11 @@ use axiom_types::{
     },
     phase0::{self, ProposerSlashing, SignedVoluntaryExit},
 };
-use tokio::{sync::mpsc::UnboundedSender, time};
+use tokio::{sync::mpsc::UnboundedSender, task, time};
 use tracing::{debug, warn};
 
 use super::{
+    engine_blobs::EngineBlobs,
     forks::ForkDigests,
     sync::{LookupEvent, MissingBlock},
 };
@@ -124,6 +125,8 @@ pub(crate) struct GossipHandler<P: Preset> {
     forks: Arc<ForkDigests>,
     /// Where accepted messages and missing blocks go.
     sinks: GossipSinks<P>,
+    /// What builds a new block's columns from the engine's blobs, unless the operator turned it off.
+    engine_blobs: Option<EngineBlobs<P>>,
 }
 
 /// Where gossip goes besides the chain: event stream clients, and lookups.
@@ -154,6 +157,7 @@ impl<P: Preset> Clone for GossipHandler<P> {
             metrics: self.metrics.clone(),
             forks: Arc::clone(&self.forks),
             sinks: self.sinks.clone(),
+            engine_blobs: self.engine_blobs.clone(),
         }
     }
 }
@@ -177,7 +181,21 @@ impl<P: Preset> GossipHandler<P> {
             metrics,
             forks,
             sinks,
+            engine_blobs: None,
         }
+    }
+
+    /// Builds each new block's columns from the engine's blobs when enabled, if all are in its pool.
+    #[must_use]
+    pub(crate) fn fetching_engine_blobs(mut self, enabled: bool) -> Self {
+        self.engine_blobs = enabled.then(|| {
+            EngineBlobs::new(
+                self.chain.clone(),
+                Arc::clone(&self.execution),
+                self.network.clone(),
+            )
+        });
+        self
     }
 
     /// Validates one message from a peer, reports the verdict, then acts on it.
@@ -720,6 +738,10 @@ impl<P: Preset> GossipHandler<P> {
     async fn apply(&self, accepted: Accepted<P>, source: PeerId) {
         let outcome = match accepted {
             Accepted::Block { block, seen_ms } => {
+                // The engine's pool may hold the blobs; fetching them runs beside the import.
+                if let Some(engine_blobs) = &self.engine_blobs {
+                    task::spawn(engine_blobs.clone().fetch(Arc::clone(&block)));
+                }
                 let payload = self.execution.verdict(&self.chain, &block).await;
                 // Gossip admits a block up to the clock disparity early; it waits for its slot.
                 let slot = block.slot();
