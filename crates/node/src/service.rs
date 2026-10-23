@@ -21,6 +21,7 @@ use crate::{
         NetworkSetup, NodeIdentity, PeerLimits, PeerMetrics, RecordSetup,
     },
     race::Either,
+    slasher::SlashingBroadcaster,
     tasks::{EngineFollower, PayloadPreparer, SyncWatcher, Ticker},
 };
 
@@ -226,6 +227,10 @@ impl<P: Preset> Node<P> {
     /// # Errors
     ///
     /// Fails when a component cannot start, or the chain stops on its own.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every service starts and stops here in order, read top to bottom"
+    )]
     pub async fn run(
         chain_config: ChainConfig,
         config: NodeConfig,
@@ -252,6 +257,7 @@ impl<P: Preset> Node<P> {
         ))
         .await?;
         let chain = config.attach_monitor(chain, &registry)?;
+        let (chain, found_slashings) = config.attach_slashing_broadcast(chain);
         let events = chain.subscribe();
         let schedule = chain.config().clone();
         // A zero slot length would divide by zero, so the node's timers clamp it to one.
@@ -315,6 +321,8 @@ impl<P: Preset> Node<P> {
             events: streams,
         };
 
+        let broadcaster = SlashingBroadcaster::spawn(found_slashings, &api.publisher);
+
         // Every server watches one shutdown signal.
         let (stop, stopped) = watch::channel(false);
         let servers = Box::pin(config.start_servers(&handle, api, registry, &stopped)).await?;
@@ -349,7 +357,8 @@ impl<P: Preset> Node<P> {
             service.abort();
             let _cancelled = service.await;
         }
-        Self::abort_all([ticker, follower, preparer, hub].into_iter().chain(stats)).await;
+        let loops = [ticker, follower, preparer, hub].into_iter();
+        Self::abort_all(loops.chain(stats).chain(broadcaster)).await;
 
         // The chain thread ends once the last handle is gone and its queue drains.
         drop(handle);

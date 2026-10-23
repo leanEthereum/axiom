@@ -158,6 +158,21 @@ pub trait SlashingEvidence {
     }
 }
 
+/// Evidence a slasher found, in no fork's container, checked as gossip would before it spreads.
+impl SlashingEvidence for ConflictingVotes {
+    fn votes(&self) -> [IndexedVote<'_>; 2] {
+        [&self.first, &self.second].map(|vote| IndexedVote {
+            indices: &vote.indices,
+            data: &vote.data,
+            signature: &vote.signature,
+        })
+    }
+
+    fn conflicting_votes(&self) -> ConflictingVotes {
+        self.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axiom_types::{Minimal, phase0::AttesterSlashing, vote::PayloadClaim};

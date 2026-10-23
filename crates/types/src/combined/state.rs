@@ -12,6 +12,7 @@ use crate::{
         BeaconBlockHeader, BlockRoots, Checkpoint, Eth1Data, Eth1DataVotes, Fork, HistoricalRoots,
         JustificationBits, RandaoMixes, Slashings, StateRoots, Validator,
     },
+    vote::ConflictingVotes,
 };
 
 /// Bytes before the slot in every state's encoding: the genesis time and validators root.
@@ -55,6 +56,30 @@ impl<P: Preset> BeaconState<P> {
             Self::Fulu(state) => state.hash_tree_root(),
             Self::Gloas(state) => state.hash_tree_root(),
         }
+    }
+
+    /// The SSZ encoding of two conflicting votes as an attester slashing of this state's fork.
+    ///
+    /// Phase0 through Deneb share one container, Electra and Fulu another, and Gloas its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a vote has more signers than the fork's container holds.
+    pub fn encode_attester_slashing(
+        &self,
+        votes: &ConflictingVotes,
+    ) -> Result<Vec<u8>, CapacityError> {
+        Ok(match self {
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_) => phase0::AttesterSlashing::<P>::from_votes(votes)?.encode(),
+            Self::Electra(_) | Self::Fulu(_) => {
+                electra::AttesterSlashing::<P>::from_votes(votes)?.encode()
+            }
+            Self::Gloas(_) => gloas::AttesterSlashing::from_votes(votes).encode(),
+        })
     }
 
     /// The node at a generalized index and its proof up to the state root.
@@ -463,7 +488,57 @@ impl<P: Preset> From<gloas::BeaconState<P>> for BeaconState<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Epoch, Minimal};
+    use crate::{BlsSignature, Epoch, Minimal, ValidatorIndex, vote::IndexedVote};
+
+    #[test]
+    fn attester_slashings_take_the_container_of_the_state_fork() {
+        // Fixture state: validators 1 and 2 sign two votes of epoch 0 for different roots.
+        let vote = |root: u8| IndexedVote {
+            indices: vec![ValidatorIndex(1), ValidatorIndex(2)],
+            data: phase0::AttestationData {
+                beacon_block_root: Root([root; 32]),
+                ..phase0::AttestationData::default()
+            },
+            signature: BlsSignature::default(),
+        };
+        let votes = ConflictingVotes {
+            first: vote(1),
+            second: vote(2),
+        };
+
+        // Each encoding decodes as its fork's container, back to the same votes.
+        let deneb = BeaconState::Deneb(deneb::BeaconState::<Minimal>::default());
+        let bytes = deneb.encode_attester_slashing(&votes).unwrap();
+        let decoded = phase0::AttesterSlashing::<Minimal>::decode(&bytes).unwrap();
+        assert_eq!(decoded.conflicting_votes(), votes);
+
+        let fulu = BeaconState::Fulu(fulu::BeaconState::<Minimal>::default());
+        let bytes = fulu.encode_attester_slashing(&votes).unwrap();
+        let decoded = electra::AttesterSlashing::<Minimal>::decode(&bytes).unwrap();
+        assert_eq!(decoded.conflicting_votes(), votes);
+
+        let gloas = BeaconState::Gloas(gloas::BeaconState::<Minimal>::default());
+        let bytes = gloas.encode_attester_slashing(&votes).unwrap();
+        let decoded = gloas::AttesterSlashing::decode(&bytes).unwrap();
+        assert_eq!(decoded.conflicting_votes(), votes);
+
+        // The phase0 list holds one committee, at most 2048 signers in the minimal preset.
+        let crowded = IndexedVote {
+            indices: (0..2049).map(ValidatorIndex).collect(),
+            ..vote(1)
+        };
+        let crowded = ConflictingVotes {
+            first: crowded,
+            second: vote(2),
+        };
+        assert_eq!(
+            deneb.encode_attester_slashing(&crowded),
+            Err(CapacityError::ExceedsLimit {
+                limit: 2048,
+                length: 2049,
+            })
+        );
+    }
 
     #[test]
     fn decode_at_reads_the_fork_from_the_slot() {

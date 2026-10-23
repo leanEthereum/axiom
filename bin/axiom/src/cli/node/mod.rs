@@ -360,6 +360,7 @@ mod tests {
             SlasherSetup {
                 directory: None,
                 update_period: Some(Duration::from_secs(6)),
+                broadcast: true,
             }
         );
         assert_eq!(

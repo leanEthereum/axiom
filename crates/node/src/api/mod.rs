@@ -12,7 +12,7 @@ mod duties;
 mod encoding;
 mod events;
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 mod ids;
 mod light_client;
 mod liveness;

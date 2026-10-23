@@ -1,18 +1,29 @@
 //! The slasher beside the chain: fed verified votes and headers, it hands back evidence.
 
-use std::{io, marker::PhantomData, path::Path, sync::mpsc as std_mpsc, thread, time::Duration};
+use std::{
+    io,
+    marker::PhantomData,
+    path::Path,
+    sync::{Arc, mpsc as std_mpsc},
+    thread,
+    time::Duration,
+};
 
 use axiom_fork_choice::Store;
+use axiom_p2p::eth::GossipKind;
 use axiom_slasher::{Slasher, SlasherConfig, SlasherDatabase, SlasherError, Slashing};
 use axiom_types::{
     BlsSignature, Epoch, Preset, ValidatorIndex, combined,
     phase0::{AttestationData, SignedBeaconBlockHeader},
     vote::{CommitteeVote, IndexedVote},
 };
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::{
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender, error::TrySendError},
+    task::{self, JoinHandle},
+};
 use tracing::{debug, info, warn};
 
-use crate::{NodeError, target_committees::TargetCommittees};
+use crate::{NodeError, Publisher, target_committees::TargetCommittees};
 
 /// Observations that may queue for the slasher thread before new ones are dropped.
 ///
@@ -58,6 +69,8 @@ pub(crate) struct SlasherFeed<P: Preset> {
     period_ms: u64,
     /// When the last pass was asked for, in Unix milliseconds.
     last_pass_ms: Option<u64>,
+    /// Where accepted evidence goes to be gossiped, when the operator broadcasts it.
+    broadcasts: Option<UnboundedSender<FoundSlashing>>,
     /// The preset of the states committees come from.
     preset: PhantomData<P>,
 }
@@ -96,6 +109,7 @@ impl<P: Preset> SlasherFeed<P> {
             committees: TargetCommittees::default(),
             period_ms: 0,
             last_pass_ms: None,
+            broadcasts: None,
             preset: PhantomData,
         })
     }
@@ -169,12 +183,78 @@ impl<P: Preset> SlasherFeed<P> {
         self.evidence.try_iter().collect()
     }
 
+    /// Sends the evidence the chain accepts on to a broadcaster.
+    pub(crate) fn broadcast_to(&mut self, broadcasts: UnboundedSender<FoundSlashing>) {
+        self.broadcasts = Some(broadcasts);
+    }
+
+    /// Whether accepted evidence goes out on the network.
+    pub(crate) const fn broadcasts(&self) -> bool {
+        self.broadcasts.is_some()
+    }
+
+    /// Hands encoded evidence to the broadcaster, if there is one.
+    pub(crate) fn spread(&self, found: FoundSlashing) {
+        if let Some(broadcasts) = &self.broadcasts {
+            // A stopped broadcaster means the node is stopping; the evidence stays pooled.
+            let _stopped = broadcasts.send(found);
+        }
+    }
+
     /// Queues an observation, dropping it when the slasher thread is far behind.
     fn send(&self, observation: Observation) {
         match self.queue.try_send(observation) {
             Err(TrySendError::Full(_)) => warn!("slasher queue full; observation dropped"),
             // A stopped thread already logged why.
             Ok(()) | Err(TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+/// Evidence the slasher found, encoded for its gossip topic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FoundSlashing {
+    /// The attester or proposer slashing topic.
+    pub(crate) kind: GossipKind,
+    /// The epoch whose fork encoded the evidence, which picks the topic's digest.
+    pub(crate) epoch: Epoch,
+    /// The evidence, SSZ-encoded in that fork's container.
+    pub(crate) message: Vec<u8>,
+}
+
+/// Gossips the evidence the slasher found, so every proposer can include it.
+///
+/// Evidence reaches the network only after the chain pooled it and checked it as gossip would.
+/// Evidence already received from a peer is therefore never sent back out.
+/// See `validate_attester_slashing_gossip` in the phase0 p2p spec.
+#[derive(Debug)]
+pub(crate) struct SlashingBroadcaster<P: Preset> {
+    /// Evidence from the chain thread.
+    found: UnboundedReceiver<FoundSlashing>,
+    /// The gossip publisher.
+    publisher: Arc<Publisher<P>>,
+}
+
+impl<P: Preset> SlashingBroadcaster<P> {
+    /// Starts broadcasting the evidence a channel brings, when the chain has one.
+    pub(crate) fn spawn(
+        found: Option<UnboundedReceiver<FoundSlashing>>,
+        publisher: &Arc<Publisher<P>>,
+    ) -> Option<JoinHandle<()>> {
+        let broadcaster = Self {
+            found: found?,
+            publisher: Arc::clone(publisher),
+        };
+        Some(task::spawn(broadcaster.run()))
+    }
+
+    /// Publishes evidence until the chain drops its end.
+    async fn run(mut self) {
+        while let Some(found) = self.found.recv().await {
+            info!(kind = %found.kind, "broadcasting slasher evidence");
+            self.publisher
+                .gossip(found.kind, found.epoch, found.message)
+                .await;
         }
     }
 }
@@ -229,9 +309,75 @@ impl<P: Preset> SlasherWorker<P> {
 
 #[cfg(test)]
 mod tests {
-    use axiom_types::Minimal;
+    use axiom_ssz::Ssz;
+    use axiom_types::{
+        BlsSignature, ChainConfig, Domain, Minimal, Root, Slot,
+        constants::DOMAIN_BEACON_PROPOSER,
+        phase0::{self, BeaconBlockHeader, ProposerSlashing},
+    };
+    use tokio::sync::mpsc::unbounded_channel;
 
     use super::*;
+    use crate::{
+        Chain, ChainDatabase,
+        api::fixture::{BALANCE, TestApi, secret, validator},
+    };
+
+    #[test]
+    fn found_evidence_goes_out_once_checked_and_pooled() {
+        // Fixture state: 8 validators at genesis, a slasher, and a broadcast channel.
+        let config = ChainConfig::minimal();
+        let registry = (0..8).map(|index| (validator(index), BALANCE));
+        let genesis = TestApi::phase0_genesis(registry);
+        let database = ChainDatabase::in_memory(config.clone()).unwrap();
+        let feed = SlasherFeed::start(SlasherConfig::default(), None).unwrap();
+        let (broadcasts, mut found) = unbounded_channel();
+        let mut chain = Chain::<Minimal>::from_genesis(config, genesis, database)
+            .unwrap()
+            .with_slasher(feed)
+            .with_slashing_broadcast(broadcasts);
+
+        // Validator 3 signs two different headers for slot 0.
+        let domain = Domain::compute(
+            DOMAIN_BEACON_PROPOSER,
+            chain.config().fork_version_at(Epoch(0)),
+            chain.genesis_validators_root(),
+        );
+        let header = |body: u8| {
+            let message = BeaconBlockHeader {
+                slot: Slot(0),
+                proposer_index: ValidatorIndex(3),
+                body_root: Root([body; 32]),
+                ..BeaconBlockHeader::default()
+            };
+            let root = phase0::SigningData::signing_root(&message, domain);
+            SignedBeaconBlockHeader {
+                message,
+                signature: BlsSignature(secret(3).sign(&root.0).to_bytes()),
+            }
+        };
+        let slashing = ProposerSlashing {
+            signed_header_1: header(1),
+            signed_header_2: header(2),
+        };
+
+        // The evidence is pooled, then handed out in its container, under epoch 0.
+        chain
+            .on_found_slashing(&Slashing::Proposer(slashing.clone()))
+            .unwrap();
+        assert_eq!(
+            found.try_recv(),
+            Ok(FoundSlashing {
+                kind: GossipKind::ProposerSlashing,
+                epoch: Epoch(0),
+                message: slashing.encode(),
+            })
+        );
+
+        // Gossip rules now know the proposer, so the same evidence never goes out twice.
+        chain.spread_found(&Slashing::Proposer(slashing));
+        assert!(found.try_recv().is_err());
+    }
 
     #[test]
     fn passes_wait_for_the_update_period() {

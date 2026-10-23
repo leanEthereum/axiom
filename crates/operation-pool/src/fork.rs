@@ -2,20 +2,19 @@
 
 use std::fmt::Debug;
 
-use axiom_ssz::{Length, List, ProgressiveList};
 use axiom_state_transition::{
     ActiveBalance, BlockError, BlockProcessor, CachedState, Fork, altair::flags::Inclusion,
     deneb::block::Exit as DenebExit, electra::block::Exit as ElectraExit,
     gloas::block::IncludedAttestation,
 };
 use axiom_types::{
-    ParticipationFlags, Preset, ValidatorIndex,
+    ParticipationFlags, Preset,
     accessors::{BuilderState, CoreState, ParticipationState},
     altair, bellatrix, capella,
     constants::{TIMELY_HEAD_FLAG_INDEX, TIMELY_SOURCE_FLAG_INDEX},
     deneb, electra, fulu, gloas,
     phase0::{self, AttestationData, SignedVoluntaryExit},
-    vote::{ConflictingVotes, IndexedVote},
+    vote::ConflictingVotes,
 };
 
 use crate::{
@@ -219,47 +218,6 @@ impl Ledgers {
     }
 }
 
-/// The signers of one vote, as the list of an indexed attestation.
-#[derive(Clone, Copy, Debug)]
-struct Signers<'a>(&'a IndexedVote);
-
-impl Signers<'_> {
-    /// The signers in a bounded list.
-    fn bounded<N: Length>(self) -> Result<List<ValidatorIndex, N>, PoolError> {
-        List::try_from(self.0.indices.clone()).map_err(|_| PoolError::TooManySigners {
-            count: self.0.indices.len(),
-            limit: N::LEN,
-        })
-    }
-
-    /// The phase0 indexed attestation of the vote.
-    fn phase0<P: Preset>(self) -> Result<phase0::IndexedAttestation<P>, PoolError> {
-        Ok(phase0::IndexedAttestation {
-            attesting_indices: self.bounded()?,
-            data: self.0.data.clone(),
-            signature: self.0.signature,
-        })
-    }
-
-    /// The Electra indexed attestation of the vote.
-    fn electra<P: Preset>(self) -> Result<electra::IndexedAttestation<P>, PoolError> {
-        Ok(electra::IndexedAttestation {
-            attesting_indices: self.bounded()?,
-            data: self.0.data.clone(),
-            signature: self.0.signature,
-        })
-    }
-
-    /// The Gloas indexed attestation of the vote, whose list is unbounded.
-    fn gloas(self) -> gloas::IndexedAttestation {
-        gloas::IndexedAttestation {
-            attesting_indices: ProgressiveList::from(self.0.indices.clone()),
-            data: self.0.data.clone(),
-            signature: self.0.signature,
-        }
-    }
-}
-
 impl<P: Preset> PoolFork for phase0::BeaconState<P> {
     type Attestation = phase0::Attestation<P>;
     type AttesterSlashing = phase0::AttesterSlashing<P>;
@@ -294,10 +252,7 @@ impl<P: Preset> PoolFork for phase0::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(phase0::AttesterSlashing {
-            attestation_1: Signers(&votes.first).phase0()?,
-            attestation_2: Signers(&votes.second).phase0()?,
-        })
+        Ok(phase0::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -341,10 +296,7 @@ impl<P: Preset> PoolFork for altair::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(phase0::AttesterSlashing {
-            attestation_1: Signers(&votes.first).phase0()?,
-            attestation_2: Signers(&votes.second).phase0()?,
-        })
+        Ok(phase0::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -388,10 +340,7 @@ impl<P: Preset> PoolFork for bellatrix::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(phase0::AttesterSlashing {
-            attestation_1: Signers(&votes.first).phase0()?,
-            attestation_2: Signers(&votes.second).phase0()?,
-        })
+        Ok(phase0::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -435,10 +384,7 @@ impl<P: Preset> PoolFork for capella::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(phase0::AttesterSlashing {
-            attestation_1: Signers(&votes.first).phase0()?,
-            attestation_2: Signers(&votes.second).phase0()?,
-        })
+        Ok(phase0::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -482,10 +428,7 @@ impl<P: Preset> PoolFork for deneb::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(phase0::AttesterSlashing {
-            attestation_1: Signers(&votes.first).phase0()?,
-            attestation_2: Signers(&votes.second).phase0()?,
-        })
+        Ok(phase0::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -534,10 +477,7 @@ impl<P: Preset> PoolFork for electra::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(electra::AttesterSlashing {
-            attestation_1: Signers(&votes.first).electra()?,
-            attestation_2: Signers(&votes.second).electra()?,
-        })
+        Ok(electra::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -586,10 +526,7 @@ impl<P: Preset> PoolFork for fulu::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(electra::AttesterSlashing {
-            attestation_1: Signers(&votes.first).electra()?,
-            attestation_2: Signers(&votes.second).electra()?,
-        })
+        Ok(electra::AttesterSlashing::from_votes(votes)?)
     }
 
     fn apply_attester_slashing(
@@ -664,10 +601,7 @@ impl<P: Preset> PoolFork for gloas::BeaconState<P> {
     }
 
     fn attester_slashing(votes: &ConflictingVotes) -> Result<Self::AttesterSlashing, PoolError> {
-        Ok(gloas::AttesterSlashing {
-            attestation_1: Signers(&votes.first).gloas(),
-            attestation_2: Signers(&votes.second).gloas(),
-        })
+        Ok(gloas::AttesterSlashing::from_votes(votes))
     }
 
     fn apply_attester_slashing(

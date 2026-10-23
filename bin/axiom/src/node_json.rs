@@ -98,6 +98,7 @@ impl NodeJson<'_> {
                     "update_period_ms",
                     Self::millis(node.slasher_setup.update_period),
                 ),
+                ("broadcast", Json::from(node.slasher_setup.broadcast)),
             ])
         })
     }

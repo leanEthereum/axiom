@@ -111,7 +111,7 @@ impl TestApi {
     }
 
     /// A phase0 genesis state of given validators and balances.
-    fn phase0_genesis(
+    pub(crate) fn phase0_genesis(
         registry: impl IntoIterator<Item = (Validator, Gwei)>,
     ) -> combined::BeaconState<Minimal> {
         // Invariant: the header commits to the empty body, as the genesis block's does.

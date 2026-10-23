@@ -32,7 +32,9 @@ use axiom_light_client::{
     combined::{LightClientFinalityUpdate, LightClientOptimisticUpdate, LightClientUpdate},
 };
 use axiom_operation_pool::{CommitteeAggregate, OperationPool, SyncPool};
+use axiom_p2p::eth::GossipKind;
 use axiom_slasher::Slashing;
+use axiom_ssz::Ssz;
 use axiom_state_transition::{EpochCommittees, State, Verification, gloas::ptc::PtcWindow};
 use axiom_telemetry::NodeMetrics;
 use axiom_types::{
@@ -62,13 +64,13 @@ pub use history::{
 };
 use queued_votes::QueuedVotes;
 pub use settings::{ChainSettings, SidecarPruning};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc::UnboundedSender};
 use tracing::{debug, error, info, warn};
 
 use crate::{
     ApiEvent, ChainError, EventSender, EventTopic,
     monitor::{Observed, Source, ValidatorMonitor},
-    slasher::SlasherFeed,
+    slasher::{FoundSlashing, SlasherFeed},
 };
 
 /// How many chain events a slow subscriber may fall behind before it starts losing them.
@@ -637,7 +639,7 @@ impl<P: Preset> Chain<P> {
                 slasher.found()
             });
             for slashing in found.into_iter().flatten() {
-                if let Err(error) = self.on_found_slashing(slashing) {
+                if let Err(error) = self.on_found_slashing(&slashing) {
                     warn!(%error, "slasher evidence refused");
                 }
             }
@@ -1376,23 +1378,81 @@ impl<P: Preset> Chain<P> {
     /// # Errors
     ///
     /// Fails when the evidence does not verify, or slashes nobody at the head.
-    pub fn on_found_slashing(&mut self, slashing: Slashing) -> Result<(), ChainError> {
+    pub fn on_found_slashing(&mut self, slashing: &Slashing) -> Result<(), ChainError> {
         match slashing {
             Slashing::Attester(votes) => {
                 self.store
-                    .on_attester_slashing(&votes, Verification::Verify)?;
+                    .on_attester_slashing(votes, Verification::Verify)?;
                 let state = Self::head_beacon(&self.store, self.head)?;
                 info!(validators = ?votes.common_signers(), "slasher found an attester slashing");
-                self.pool.slashings_mut().insert_attester(state, votes)?;
+                self.pool
+                    .slashings_mut()
+                    .insert_attester(state, votes.clone())?;
             }
-            Slashing::Proposer(slashing) => {
+            Slashing::Proposer(proposer_slashing) => {
                 let state = Self::head_beacon(&self.store, self.head)?;
-                let proposer = slashing.signed_header_1.message.proposer_index;
+                let proposer = proposer_slashing.signed_header_1.message.proposer_index;
                 info!(%proposer, "slasher found a proposer slashing");
-                self.pool.slashings_mut().insert_proposer(state, slashing)?;
+                self.pool
+                    .slashings_mut()
+                    .insert_proposer(state, proposer_slashing.clone())?;
             }
         }
+        self.spread_found(slashing);
         Ok(())
+    }
+
+    /// Gossips the evidence the slasher finds and the chain accepts, through a broadcaster.
+    ///
+    /// Without a slasher there is nothing to spread, and the sender is dropped.
+    #[must_use]
+    pub(crate) fn with_slashing_broadcast(
+        mut self,
+        broadcasts: UnboundedSender<FoundSlashing>,
+    ) -> Self {
+        if let Some(slasher) = &mut self.slasher {
+            slasher.broadcast_to(broadcasts);
+        }
+        self
+    }
+
+    /// Gossips evidence the slasher found and the chain pooled, when the operator broadcasts.
+    ///
+    /// The evidence passes the gossip rules first, which also remembers its signers as seen.
+    /// It goes out in the container of the head state's fork, under that fork's digest.
+    pub(crate) fn spread_found(&mut self, found: &Slashing) {
+        if !self.slasher.as_ref().is_some_and(SlasherFeed::broadcasts) {
+            return;
+        }
+        let checked = self.validate_gossip(|validator| match found {
+            Slashing::Attester(votes) => validator.attester_slashing(votes),
+            Slashing::Proposer(slashing) => validator.proposer_slashing(slashing),
+        });
+        if let Err(error) = checked {
+            debug!(%error, "slasher evidence not broadcast");
+            return;
+        }
+        let Ok(state) = Self::head_beacon(&self.store, self.head) else {
+            return;
+        };
+        let (kind, message) = match found {
+            Slashing::Attester(votes) => match state.encode_attester_slashing(votes) {
+                Ok(message) => (GossipKind::AttesterSlashing, message),
+                Err(error) => {
+                    debug!(%error, "slasher evidence does not fit the fork's container");
+                    return;
+                }
+            },
+            Slashing::Proposer(slashing) => (GossipKind::ProposerSlashing, slashing.encode()),
+        };
+        let epoch = state.slot().epoch::<P>();
+        if let Some(slasher) = &self.slasher {
+            slasher.spread(FoundSlashing {
+                kind,
+                epoch,
+                message,
+            });
+        }
     }
 
     /// Keeps a proposer slashing that passed gossip or API checks.

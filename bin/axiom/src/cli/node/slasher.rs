@@ -17,6 +17,7 @@ pub(crate) const SLASHER_USAGE: &str = "\
     --slasher-dir <DIR>          the slasher's database directory [default: DATADIR/slasher]
     --slasher-update-period <SECONDS>
                                  time between slasher passes [default: one slot]
+    --slasher-broadcast [<BOOL>] gossip the slashings the slasher finds [default: true]
 ";
 
 /// The slasher flags as given.
@@ -34,6 +35,8 @@ pub(crate) struct SlasherFlags {
     directory: Option<PathBuf>,
     /// Seconds between passes.
     update_period: Option<u64>,
+    /// Whether found slashings are gossiped, when given.
+    broadcast: Option<bool>,
 }
 
 impl SlasherFlags {
@@ -56,6 +59,7 @@ impl SlasherFlags {
             "--slasher-update-period" => {
                 self.update_period = Some(words.parsed("--slasher-update-period")?);
             }
+            "--slasher-broadcast" => self.broadcast = Some(words.optional_boolean()),
             _ => return Ok(false),
         }
         Ok(true)
@@ -73,6 +77,7 @@ impl SlasherFlags {
                 ),
                 ("--slasher-dir", self.directory.is_some()),
                 ("--slasher-update-period", self.update_period.is_some()),
+                ("--slasher-broadcast", self.broadcast.is_some()),
             ];
             return match settings.iter().find(|(_, given)| *given) {
                 Some((flag, _)) => Err(CliError::SlasherDisabled(flag)),
@@ -93,6 +98,7 @@ impl SlasherFlags {
         let setup = SlasherSetup {
             directory: self.directory,
             update_period: self.update_period.map(Duration::from_secs),
+            broadcast: self.broadcast.unwrap_or(true),
         };
         Ok((Some(config), setup))
     }
@@ -128,6 +134,8 @@ mod tests {
             "/slasher",
             "--slasher-update-period",
             "36",
+            "--slasher-broadcast",
+            "false",
         ])
         .unwrap();
         assert_eq!(
@@ -144,8 +152,12 @@ mod tests {
             SlasherSetup {
                 directory: Some("/slasher".into()),
                 update_period: Some(Duration::from_secs(36)),
+                broadcast: false,
             }
         );
+        // Alone, the broadcast flag keeps its default of on.
+        let (_, alone) = resolve(&["--slasher", "--slasher-broadcast"]).unwrap();
+        assert!(alone.broadcast);
         // The bare flag takes every default.
         assert_eq!(
             resolve(&["--slasher"]).unwrap(),

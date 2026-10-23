@@ -26,7 +26,10 @@ use axiom_types::{
     combined::{BeaconState, SignedBeaconBlock},
 };
 use tokio::{
-    sync::watch,
+    sync::{
+        mpsc::{UnboundedReceiver, unbounded_channel},
+        watch,
+    },
     task::{self, JoinHandle},
 };
 use tracing::{info, warn};
@@ -41,7 +44,7 @@ use crate::{
     genesis::GenesisSync,
     monitor::{MonitorMetrics, ValidatorMonitor},
     network::NetworkIdentity,
-    slasher::SlasherFeed,
+    slasher::{FoundSlashing, SlasherFeed},
 };
 
 /// Where the node reaches its execution engine.
@@ -443,13 +446,26 @@ impl BuilderFallback {
     }
 }
 
-/// Where the slasher keeps its history, and how often it looks for slashings.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Where the slasher keeps its history, how often it looks for slashings, and whether it tells.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlasherSetup {
     /// The history's directory; none keeps it beside the chain's, or in memory without one.
     pub directory: Option<PathBuf>,
     /// Time between two passes; none runs one each slot.
     pub update_period: Option<Duration>,
+    /// Whether the evidence found is gossiped, not only pooled for this node's proposals.
+    pub broadcast: bool,
+}
+
+impl Default for SlasherSetup {
+    fn default() -> Self {
+        // Evidence spreads by default, so any proposer can include it, not only this node's.
+        Self {
+            directory: None,
+            update_period: None,
+            broadcast: true,
+        }
+    }
 }
 
 /// Database upkeep at startup and while running.
@@ -565,6 +581,22 @@ impl NodeConfig {
         let feed = SlasherFeed::start(settings, directory.as_deref())?
             .with_update_period(self.slasher_setup.update_period);
         Ok(chain.with_slasher(feed))
+    }
+
+    /// Has the chain hand the evidence its slasher finds to a broadcaster, unless kept local.
+    ///
+    /// # Returns
+    ///
+    /// The chain, and the broadcaster's end of the evidence channel when there is one.
+    pub(crate) fn attach_slashing_broadcast<P: Preset>(
+        &self,
+        chain: Chain<P>,
+    ) -> (Chain<P>, Option<UnboundedReceiver<FoundSlashing>>) {
+        if self.slasher.is_none() || !self.slasher_setup.broadcast {
+            return (chain, None);
+        }
+        let (broadcasts, found) = unbounded_channel();
+        (chain.with_slashing_broadcast(broadcasts), Some(found))
     }
 
     /// The chain the node runs: opened, with its slasher, telemetry, event feed, and custody.
