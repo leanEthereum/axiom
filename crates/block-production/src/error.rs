@@ -89,6 +89,18 @@ pub enum ProductionError {
         source: BlockError,
     },
 
+    /// The parent's payload carried requests in another fork's container than the block reports.
+    ///
+    /// A block reports its parent payload's requests in its own fork's container.
+    /// Requests of another fork's container cannot be restated without changing their root.
+    #[error("a {fork} block cannot report the requests of a {parent} payload")]
+    ParentRequestsFork {
+        /// The fork of the block being built.
+        fork: ForkName,
+        /// The fork of the parent payload's requests.
+        parent: ForkName,
+    },
+
     /// The self-built envelope does not verify against the block's post-state.
     #[error("the envelope of the block at slot {slot} is invalid: {source}")]
     Envelope {

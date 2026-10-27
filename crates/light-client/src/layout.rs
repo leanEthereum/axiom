@@ -36,6 +36,7 @@ impl Layout {
     ///
     /// Phase0 has no sync committees, so it shares Altair's row; no light client data proves into it.
     /// Electra pushed the state past 32 fields, and Gloas made it progressive, see EIP-7688.
+    /// Hstar appends fields to Gloas's progressive state and body, which moves no existing index.
     #[must_use]
     pub const fn of(fork: ForkName) -> Self {
         let (finalized_root, current_sync_committee, next_sync_committee) = match fork {
@@ -45,13 +46,13 @@ impl Layout {
             | ForkName::Capella
             | ForkName::Deneb => (105, 54, 55),
             ForkName::Electra | ForkName::Fulu => (169, 86, 87),
-            ForkName::Gloas => (735, 2945, 2946),
+            ForkName::Gloas | ForkName::Hstar => (735, 2945, 2946),
         };
         let execution = match fork {
             ForkName::Phase0 | ForkName::Altair | ForkName::Bellatrix => Execution::Absent,
             ForkName::Capella => Execution::Capella,
             ForkName::Deneb | ForkName::Electra | ForkName::Fulu => Execution::Deneb,
-            ForkName::Gloas => Execution::Bid,
+            ForkName::Gloas | ForkName::Hstar => Execution::Bid,
         };
         Self {
             finalized_root: GeneralizedIndex::new(finalized_root),
@@ -133,6 +134,9 @@ impl Execution {
 
 #[cfg(test)]
 mod tests {
+    use axiom_ssz::Ssz;
+    use axiom_types::{BlsPubkey, Minimal, hstar};
+
     use super::*;
 
     #[test]
@@ -160,5 +164,20 @@ mod tests {
         assert_eq!(Layout::of(ForkName::Gloas).next_sync_committee.get(), 2946);
         // Bellatrix bodies hold a payload, yet light client headers ignore it.
         assert_eq!(Layout::of(ForkName::Bellatrix).execution, Execution::Absent);
+    }
+
+    #[test]
+    fn hstar_proves_at_gloas_indices() {
+        // Invariant: a progressive container places each field by its position alone.
+        // Hstar appends two state fields, so Gloas's sync committee index still holds.
+        //
+        // Fixture state: an Hstar state whose next sync committee has aggregate key 0x07.
+        let mut state = hstar::BeaconState::<Minimal>::default();
+        state.next_sync_committee.aggregate_pubkey = BlsPubkey([7; 48]);
+        let layout = Layout::of(ForkName::Hstar);
+
+        // The node at Gloas's index is that committee's root.
+        let (node, _) = state.prove(layout.next_sync_committee).unwrap();
+        assert_eq!(node, state.next_sync_committee.hash_tree_root());
     }
 }

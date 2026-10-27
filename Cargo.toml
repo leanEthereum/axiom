@@ -121,6 +121,12 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # The JSON formatter is written in the telemetry crate, since the upstream one pulls serde.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "fmt", "ansi"] }
 
+# leanXMSS, the hash-based signature of the post-quantum key registry, see EIP-8450.
+# The registry verifies proofs of possession through these bindings to leanVM's leanXMSS.
+# A separate implementation could drift from the scheme leanVM aggregates.
+# Pinned to one commit, since the scheme's byte layout is consensus-critical.
+lean-pq = { git = "https://github.com/ethereum/lean-pq-bindings", rev = "e980e6c148da5816cd278c50b60909cf3268d491" }
+
 # Test-only.
 proptest = "1.7"
 
@@ -131,6 +137,14 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# leanXMSS key generation hashes about 2^24 times, minutes long without optimization.
+# Its two hashing crates are optimized even in debug builds, so tests stay fast.
+[profile.dev.package.primitives]
+opt-level = 3
+
+[profile.dev.package.signatures]
+opt-level = 3
 
 [profile.profiling]
 inherits = "release"

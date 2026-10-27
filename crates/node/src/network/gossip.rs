@@ -30,6 +30,7 @@ use axiom_types::{
         self, PayloadAttestationMessage, SignedExecutionPayloadBid, SignedExecutionPayloadEnvelope,
         SignedProposerPreferences,
     },
+    hstar::{self, SignedPqKeyRegistration},
     phase0::{self, ProposerSlashing, SignedVoluntaryExit},
 };
 use tokio::{sync::mpsc::UnboundedSender, task, time};
@@ -238,6 +239,7 @@ impl<P: Preset> GossipHandler<P> {
             }
             ForkName::Fulu => self.validate_in::<fulu::BeaconState<P>>(kind, data).await,
             ForkName::Gloas => self.validate_in::<gloas::BeaconState<P>>(kind, data).await,
+            ForkName::Hstar => self.validate_in::<hstar::BeaconState<P>>(kind, data).await,
         }
     }
 
@@ -644,6 +646,21 @@ impl<P: Preset> GossipHandler<P> {
                 )
                 .await
             }
+            GossipKind::PqKeyRegistration => {
+                self.check(
+                    data,
+                    Announce::Nothing,
+                    move |validator, registration: &SignedPqKeyRegistration| {
+                        validator.pq_key_registration(registration, now)
+                    },
+                    |registration| {
+                        Some(Self::job(move |chain| {
+                            chain.on_pq_key_registration(registration)
+                        }))
+                    },
+                )
+                .await
+            }
             // Every other topic has its own validation above.
             _ => (ValidationOutcome::Ignore, None),
         }
@@ -902,6 +919,7 @@ impl<P: Preset> GossipHandler<P> {
             GossipKind::PayloadAttestationMessage => "payload_attestation_message",
             GossipKind::ExecutionPayloadBid => "execution_payload_bid",
             GossipKind::ProposerPreferences => "proposer_preferences",
+            GossipKind::PqKeyRegistration => "pq_key_registration",
         }
     }
 }

@@ -38,7 +38,8 @@ impl BlobCommitments<'_> {
             | combined::BeaconBlock::Altair(_)
             | combined::BeaconBlock::Bellatrix(_)
             | combined::BeaconBlock::Capella(_)
-            | combined::BeaconBlock::Gloas(_) => {
+            | combined::BeaconBlock::Gloas(_)
+            | combined::BeaconBlock::Hstar(_) => {
                 return Err(ChainBuilderError::NoBlobCommitments { slot, fork });
             }
         };

@@ -20,7 +20,7 @@ use axiom_json::Json;
 use axiom_ssz::U256;
 use axiom_types::{Preset, bellatrix, capella, deneb, electra, gloas};
 
-use super::{BlobsBundleV1, BlobsBundleV2, Fields, JsonCodec};
+use super::{BlobsBundleV1, BlobsBundleV2, Fields, JsonCodec, RequestsList};
 use crate::{GetPayloadVersion, WireError};
 
 /// A Capella payload the engine built, with its value.
@@ -180,7 +180,10 @@ impl<P: Preset> JsonCodec for GetPayloadResponseV5<P> {
     }
 }
 
-/// A Gloas payload the engine built, with its blobs' cell proofs and its requests.
+/// A Gloas or Hstar payload the engine built, with its blobs' cell proofs and its requests.
+///
+/// Both forks fetch with this version, but each knows its own request types.
+/// The requests therefore stay a raw list, checked when decoded for the slot's fork.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GetPayloadResponseV6<P: Preset> {
     /// The payload.
@@ -195,8 +198,8 @@ pub struct GetPayloadResponseV6<P: Preset> {
     /// The engine's advice to prefer this payload over a builder's.
     pub should_override_builder: bool,
 
-    /// Requests the payload's transactions triggered, builder requests included.
-    pub execution_requests: gloas::ExecutionRequests,
+    /// Requests the payload's transactions triggered, as the engine listed them.
+    pub execution_requests: RequestsList,
 }
 
 impl<P: Preset> JsonCodec for GetPayloadResponseV6<P> {
@@ -371,7 +374,7 @@ mod tests {
                 value,
                 bundle_v2(),
                 any::<bool>(),
-                gloas_requests()
+                gloas_requests().prop_map(|requests| RequestsList::encode(&requests))
             )
                 .prop_map(
                     |(

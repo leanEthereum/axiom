@@ -17,7 +17,7 @@ pub use gnosis::Gnosis;
 pub use mainnet::Mainnet;
 pub use minimal::Minimal;
 
-use crate::Gwei;
+use crate::{Epoch, Gwei};
 
 /// A set of compile-time protocol constants.
 ///
@@ -266,6 +266,23 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
 
     /// Largest encoded signed payload bid accepted on the wire.
     const MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE: u64;
+
+    /// Post-quantum key registrations per block.
+    ///
+    /// A registration is 2541 bytes, so eight bound a block's growth to about 20 KiB.
+    /// See EIP-8450.
+    const MAX_PQ_KEY_REGISTRATIONS: u64;
+
+    /// Post-quantum key authorization requests per execution payload.
+    ///
+    /// Equals the request contract's dequeue limit per block, see EIP-8450.
+    const MAX_PQ_KEY_AUTHORIZATION_REQUESTS_PER_PAYLOAD: u64;
+
+    /// Epochs during which a withdrawal address's key authorization can be consumed.
+    ///
+    /// Expiry bounds the authorization queue at one short-lived entry per validator.
+    /// See EIP-8450.
+    const PQ_KEY_AUTHORIZATION_EXPIRY: Epoch;
 
     /// Validators in one committee, which bounds an attestation before Electra.
     ///
@@ -713,6 +730,15 @@ pub trait Preset: Copy + Debug + Default + Eq + Hash + Send + Sync + 'static {
             (
                 "MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE",
                 Self::MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE,
+            ),
+            ("MAX_PQ_KEY_REGISTRATIONS", Self::MAX_PQ_KEY_REGISTRATIONS),
+            (
+                "MAX_PQ_KEY_AUTHORIZATION_REQUESTS_PER_PAYLOAD",
+                Self::MAX_PQ_KEY_AUTHORIZATION_REQUESTS_PER_PAYLOAD,
+            ),
+            (
+                "PQ_KEY_AUTHORIZATION_EXPIRY",
+                Self::PQ_KEY_AUTHORIZATION_EXPIRY.0,
             ),
         ]
     }

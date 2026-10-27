@@ -2,9 +2,9 @@
 
 use axiom_types::{
     Bytes32, CommitteeIndex, Epoch, Preset, Root, Slot, ValidatorIndex,
-    accessors::{BuilderState, CoreState},
+    accessors::{BuilderState, ForkState},
     constants::DOMAIN_PTC_ATTESTER,
-    gloas::{BeaconState, PayloadTimelinessCommittee},
+    gloas::PayloadTimelinessCommittee,
 };
 
 use crate::{BlockError, CachedState, EpochCommittees, StateError, sampling::WeightedSampler};
@@ -16,7 +16,7 @@ use crate::{BlockError, CachedState, EpochCommittees, StateError, sampling::Weig
 pub struct PtcWindow;
 
 impl PtcWindow {
-    /// Fills the window from the state's current epoch, for a state that just became Gloas.
+    /// Fills the window from the state's current epoch, for a state that just gained builders.
     ///
     /// The previous epoch has no committees yet, so its slots hold zero indices.
     /// See `initialize_ptc_window` in the Gloas fork spec.
@@ -24,17 +24,17 @@ impl PtcWindow {
     /// # Errors
     ///
     /// Fails when an epoch of the window has no active validator.
-    pub fn initialize<P: Preset>(
-        state: &mut CachedState<'_, BeaconState<P>>,
+    pub fn initialize<S: BuilderState + ForkState>(
+        state: &mut CachedState<'_, S>,
     ) -> Result<(), StateError> {
         let current = state.beacon().current_epoch();
         let mut committees = Vec::with_capacity(state.beacon().ptc_window().len());
         // Phase 1: an empty previous epoch.
-        for _ in 0..P::SLOTS_PER_EPOCH {
-            committees.push(PayloadTimelinessCommittee::<P>::default());
+        for _ in 0..S::Preset::SLOTS_PER_EPOCH {
+            committees.push(PayloadTimelinessCommittee::<S::Preset>::default());
         }
         // Phase 2: the current epoch and the next MIN_SEED_LOOKAHEAD epochs.
-        for offset in 0..=P::MIN_SEED_LOOKAHEAD {
+        for offset in 0..=S::Preset::MIN_SEED_LOOKAHEAD {
             committees.extend(Self::epoch_committees(state, current + offset)?);
         }
         *state.beacon.ptc_window_mut() =
@@ -55,13 +55,15 @@ impl PtcWindow {
     /// # Errors
     ///
     /// Fails when the new epoch has no active validator.
-    pub fn shift<P: Preset>(state: &mut CachedState<'_, BeaconState<P>>) -> Result<(), StateError> {
-        let epoch = state.beacon().current_epoch() + P::MIN_SEED_LOOKAHEAD + 1;
+    pub fn shift<S: BuilderState + ForkState>(
+        state: &mut CachedState<'_, S>,
+    ) -> Result<(), StateError> {
+        let epoch = state.beacon().current_epoch() + S::Preset::MIN_SEED_LOOKAHEAD + 1;
         let committees = Self::epoch_committees(state, epoch)?;
         let window = state.beacon.ptc_window_mut();
-        let shifted: Vec<PayloadTimelinessCommittee<P>> = window
+        let shifted: Vec<PayloadTimelinessCommittee<S::Preset>> = window
             .iter()
-            .skip(P::SLOTS_PER_EPOCH as usize)
+            .skip(S::Preset::SLOTS_PER_EPOCH as usize)
             .cloned()
             .chain(committees)
             .collect();
@@ -114,13 +116,13 @@ impl PtcWindow {
     /// # Errors
     ///
     /// Fails when the epoch has no active validator.
-    fn epoch_committees<P: Preset>(
-        state: &mut CachedState<'_, BeaconState<P>>,
+    fn epoch_committees<S: BuilderState + ForkState>(
+        state: &mut CachedState<'_, S>,
         epoch: Epoch,
-    ) -> Result<Vec<PayloadTimelinessCommittee<P>>, StateError> {
+    ) -> Result<Vec<PayloadTimelinessCommittee<S::Preset>>, StateError> {
         let committees = state.compute_committees(epoch);
-        let start = epoch.start_slot::<P>();
-        (0..P::SLOTS_PER_EPOCH)
+        let start = epoch.start_slot::<S::Preset>();
+        (0..S::Preset::SLOTS_PER_EPOCH)
             .map(|index| Self::committee(state.beacon(), &committees, Slot(start.0 + index)))
             .collect()
     }
@@ -139,12 +141,12 @@ impl PtcWindow {
     /// # Errors
     ///
     /// Fails when the slot's epoch has no active validator.
-    pub fn committee<P: Preset>(
-        state: &BeaconState<P>,
+    pub fn committee<S: ForkState>(
+        state: &S,
         committees: &EpochCommittees,
         slot: Slot,
-    ) -> Result<PayloadTimelinessCommittee<P>, StateError> {
-        let epoch = slot.epoch::<P>();
+    ) -> Result<PayloadTimelinessCommittee<S::Preset>, StateError> {
+        let epoch = slot.epoch::<S::Preset>();
         let candidates: Vec<ValidatorIndex> = (0..committees.committees_per_slot())
             .filter_map(|index| committees.committee(slot, CommitteeIndex(index)))
             .flatten()
@@ -159,7 +161,7 @@ impl PtcWindow {
         preimage[32..].copy_from_slice(&slot.0.to_le_bytes());
         let seed = Bytes32(Root::sha256(&preimage).0);
         let members: Vec<ValidatorIndex> = WeightedSampler::in_order(state, &candidates, seed)
-            .take(P::PTC_SIZE as usize)
+            .take(S::Preset::PTC_SIZE as usize)
             .collect();
         members.try_into().map_err(|source| StateError::Capacity {
             list: "payload timeliness committee",

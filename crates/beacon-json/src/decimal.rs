@@ -23,6 +23,9 @@ const U256_DIGITS: usize = 78;
 /// The largest 8-bit value, as the error message prints it.
 const U8_MAX: &str = "255";
 
+/// The largest 32-bit value, as the error message prints it.
+const U32_MAX: &str = "4294967295";
+
 /// The largest 64-bit value, as the error message prints it.
 const U64_MAX: &str = "18446744073709551615";
 
@@ -86,6 +89,15 @@ impl<'a> Decimal<'a> {
         u8::try_from(value).map_err(|_| DecimalError::Overflow {
             digits: self.0.len(),
             max: U8_MAX,
+        })
+    }
+
+    /// The value as a 32-bit integer.
+    pub(crate) fn to_u32(self) -> Result<u32, DecimalError> {
+        let value = self.to_u64()?;
+        u32::try_from(value).map_err(|_| DecimalError::Overflow {
+            digits: self.0.len(),
+            max: U32_MAX,
         })
     }
 

@@ -3,7 +3,7 @@
 use axiom_block_production::{LocalBuild, LocalPayload, PayloadRequest};
 use axiom_execution::{
     GetPayloadResponse, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2,
-    PayloadAttributesV3, PayloadAttributesV4,
+    PayloadAttributesV3, PayloadAttributesV4, RequestsError,
 };
 use axiom_ssz::{List, ProgressiveList, U256};
 use axiom_types::{ExecutionAddress, ForkName, Preset, deneb, fulu};
@@ -50,7 +50,7 @@ impl BuildOrder {
                     parent_beacon_block_root: request.parent_beacon_block_root,
                 })
             }
-            ForkName::Gloas => PayloadAttributes::V4(PayloadAttributesV4 {
+            ForkName::Gloas | ForkName::Hstar => PayloadAttributes::V4(PayloadAttributesV4 {
                 timestamp: request.timestamp,
                 prev_randao: request.prev_randao,
                 suggested_fee_recipient: self.fee_recipient,
@@ -69,12 +69,19 @@ impl BuildOrder {
 pub(crate) struct EnginePayload;
 
 impl EnginePayload {
-    /// The local build of an engine response.
+    /// The local build of an engine response, for a slot of a fork.
     ///
     /// The engine's first version reports no value, so the payload counts as worth nothing.
-    #[must_use]
-    pub(crate) fn local_build<P: Preset>(response: GetPayloadResponse<P>) -> LocalBuild<P> {
-        match response {
+    /// Gloas and Hstar share the sixth version, whose requests list each fork reads as its own.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the requests list holds a type the fork does not know, or is malformed.
+    pub(crate) fn local_build<P: Preset>(
+        response: GetPayloadResponse<P>,
+        fork: ForkName,
+    ) -> Result<LocalBuild<P>, RequestsError> {
+        Ok(match response {
             GetPayloadResponse::V1(payload) => LocalBuild {
                 payload: LocalPayload::Bellatrix(payload),
                 value: U256::default(),
@@ -118,18 +125,32 @@ impl EnginePayload {
                 },
                 value: response.block_value,
             },
-            GetPayloadResponse::V6(response) => LocalBuild {
-                payload: LocalPayload::Gloas {
-                    payload: response.execution_payload,
-                    blobs: fulu::BlobsBundle {
-                        commitments: response.blobs_bundle.commitments,
-                        proofs: response.blobs_bundle.proofs,
-                        blobs: response.blobs_bundle.blobs,
-                    },
-                    requests: response.execution_requests,
-                },
-                value: response.block_value,
-            },
-        }
+            GetPayloadResponse::V6(response) => {
+                let blobs = fulu::BlobsBundle {
+                    commitments: response.blobs_bundle.commitments,
+                    proofs: response.blobs_bundle.proofs,
+                    blobs: response.blobs_bundle.blobs,
+                };
+                let payload = response.execution_payload;
+                let requests = response.execution_requests;
+                let payload = if fork == ForkName::Hstar {
+                    LocalPayload::Hstar {
+                        payload,
+                        blobs,
+                        requests: requests.decode()?,
+                    }
+                } else {
+                    LocalPayload::Gloas {
+                        payload,
+                        blobs,
+                        requests: requests.decode()?,
+                    }
+                };
+                LocalBuild {
+                    payload,
+                    value: response.block_value,
+                }
+            }
+        })
     }
 }

@@ -10,7 +10,7 @@ use axiom_types::{
     altair, bellatrix,
     capella::{self, Withdrawal},
     constants::DOMAIN_RANDAO,
-    deneb, electra, fulu, gloas, phase0,
+    deneb, electra, fulu, gloas, hstar, phase0,
     phase0::{Deposit, SigningData},
 };
 
@@ -116,6 +116,7 @@ impl<'a, P: Preset> BlockProducer<'a, P> {
             ForkName::Electra => self.produce_in::<electra::BeaconState<P>>(state, request),
             ForkName::Fulu => self.produce_in::<fulu::BeaconState<P>>(state, request),
             ForkName::Gloas => self.produce_in::<gloas::BeaconState<P>>(state, request),
+            ForkName::Hstar => self.produce_in::<hstar::BeaconState<P>>(state, request),
         }
     }
 
@@ -141,6 +142,7 @@ impl<'a, P: Preset> BlockProducer<'a, P> {
             ForkName::Electra => Self::due::<electra::BeaconState<P>>(&trial, parent_payload),
             ForkName::Fulu => Self::due::<fulu::BeaconState<P>>(&trial, parent_payload),
             ForkName::Gloas => Self::due::<gloas::BeaconState<P>>(&trial, parent_payload),
+            ForkName::Hstar => Self::due::<hstar::BeaconState<P>>(&trial, parent_payload),
         }?;
         let beacon = state.beacon();
         Ok(PayloadRequest {

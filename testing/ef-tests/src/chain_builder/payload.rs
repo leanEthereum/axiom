@@ -1,6 +1,5 @@
 //! The execution payload of a built block: the fields consensus checks, and stand-ins for the rest.
 
-use axiom_ssz::Ssz;
 use axiom_types::{
     Bytes32, ChainConfig, Gwei, Hash32, Preset, Root, Slot, bellatrix,
     capella::{self, Withdrawal},
@@ -112,6 +111,7 @@ impl PayloadParts {
     pub(crate) fn self_built_bid(
         self,
         parent_block_root: Root,
+        execution_requests_root: Root,
     ) -> gloas::SignedExecutionPayloadBid {
         let bid = gloas::ExecutionPayloadBid {
             parent_block_hash: self.parent_hash,
@@ -123,7 +123,7 @@ impl PayloadParts {
             slot: self.slot,
             value: Gwei::ZERO,
             execution_payment: Gwei::ZERO,
-            execution_requests_root: gloas::ExecutionRequests::default().hash_tree_root(),
+            execution_requests_root,
             ..gloas::ExecutionPayloadBid::default()
         };
         gloas::SignedExecutionPayloadBid {

@@ -25,6 +25,7 @@ use axiom_types::{
     constants::SYNC_COMMITTEE_SUBNET_COUNT,
     deneb, electra, fulu,
     gloas::{self, PayloadAttestationMessage},
+    hstar,
     phase0::{self, ProposerSlashing, SignedVoluntaryExit},
     vote::ConflictingVotes,
 };
@@ -145,6 +146,7 @@ impl PoolRoutes {
             ForkName::Electra => Self::votes_in::<electra::BeaconState<P>>(context, request).await,
             ForkName::Fulu => Self::votes_in::<fulu::BeaconState<P>>(context, request).await,
             ForkName::Gloas => Self::votes_in::<gloas::BeaconState<P>>(context, request).await,
+            ForkName::Hstar => Self::votes_in::<hstar::BeaconState<P>>(context, request).await,
         }
     }
 
@@ -170,6 +172,7 @@ impl PoolRoutes {
             }
             ForkName::Fulu => Self::aggregates_in::<fulu::BeaconState<P>>(context, request).await,
             ForkName::Gloas => Self::aggregates_in::<gloas::BeaconState<P>>(context, request).await,
+            ForkName::Hstar => Self::aggregates_in::<hstar::BeaconState<P>>(context, request).await,
         }
     }
 
@@ -195,6 +198,7 @@ impl PoolRoutes {
             }
             ForkName::Fulu => Self::slashings_in::<fulu::BeaconState<P>>(context, request).await,
             ForkName::Gloas => Self::slashings_in::<gloas::BeaconState<P>>(context, request).await,
+            ForkName::Hstar => Self::slashings_in::<hstar::BeaconState<P>>(context, request).await,
         }
     }
 
@@ -380,6 +384,9 @@ impl PoolRoutes {
                     }),
                     ForkName::Gloas => chain.validate_gossip(|validator| {
                         validator.voluntary_exit::<gloas::BeaconState<P>>(&exit, now)
+                    }),
+                    ForkName::Hstar => chain.validate_gossip(|validator| {
+                        validator.voluntary_exit::<hstar::BeaconState<P>>(&exit, now)
                     }),
                 };
                 verdict.map_err(Self::refusal)?;
@@ -714,6 +721,9 @@ impl PoolRoutes {
             ForkName::Gloas => gloas::BeaconState::<P>::attestation(packed)
                 .map_err(invalid)?
                 .to_json(),
+            ForkName::Hstar => hstar::BeaconState::<P>::attestation(packed)
+                .map_err(invalid)?
+                .to_json(),
         })
     }
 
@@ -742,6 +752,9 @@ impl PoolRoutes {
                 .ok()?
                 .to_json(),
             ForkName::Gloas => gloas::BeaconState::<P>::attester_slashing(votes)
+                .ok()?
+                .to_json(),
+            ForkName::Hstar => hstar::BeaconState::<P>::attester_slashing(votes)
                 .ok()?
                 .to_json(),
         };

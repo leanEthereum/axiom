@@ -33,6 +33,7 @@ mod fork;
 mod packing;
 mod payload_attestations;
 mod pool;
+mod registrations;
 mod slashings;
 mod sync;
 
@@ -46,5 +47,6 @@ pub use fork::PoolFork;
 pub use packing::{AttestationPacker, Eligibility, FLAGS, Ledger, PackedAttestation, RewardRule};
 pub use payload_attestations::PayloadAttestationPool;
 pub use pool::{BlockOperations, OperationPool};
+pub use registrations::RegistrationPool;
 pub use slashings::SlashingPool;
 pub use sync::SyncPool;

@@ -68,7 +68,14 @@ fn schedule() -> ChainConfig {
         slot_duration_ms: SLOT_MS,
         ..ChainConfig::minimal()
     };
-    for (epoch, fork) in ForkName::ALL.into_iter().enumerate().skip(1) {
+    // Hstar stays in the far future.
+    // The run drives the envelope pipeline of Gloas only.
+    for (epoch, fork) in ForkName::ALL
+        .into_iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, fork)| *fork != ForkName::Hstar)
+    {
         config = config.with_fork_epoch(fork, Epoch(epoch as u64));
     }
     config

@@ -4,7 +4,7 @@ use axiom_ssz::{BYTES_PER_LENGTH_OFFSET, DecodeError, Root, Ssz};
 
 use crate::{
     BlsSignature, ChainConfig, ForkName, Preset, Slot, altair, altair::SyncAggregate, bellatrix,
-    capella, combined::BeaconBlock, deneb, electra, fulu, gloas, phase0,
+    capella, combined::BeaconBlock, deneb, electra, fulu, gloas, hstar, phase0,
 };
 
 /// Bytes before the block in a signed block's encoding: the block's offset and the signature.
@@ -34,6 +34,8 @@ pub enum SignedBeaconBlock<P: Preset> {
     Fulu(fulu::SignedBeaconBlock<P>),
     /// A signed Gloas block.
     Gloas(gloas::SignedBeaconBlock<P>),
+    /// A signed Hstar block.
+    Hstar(hstar::SignedBeaconBlock<P>),
 }
 
 impl<P: Preset> SignedBeaconBlock<P> {
@@ -65,6 +67,9 @@ impl<P: Preset> SignedBeaconBlock<P> {
             BeaconBlock::Gloas(message) => {
                 Self::Gloas(gloas::SignedBeaconBlock { message, signature })
             }
+            BeaconBlock::Hstar(message) => {
+                Self::Hstar(hstar::SignedBeaconBlock { message, signature })
+            }
         }
     }
 
@@ -80,6 +85,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Electra(_) => ForkName::Electra,
             Self::Fulu(_) => ForkName::Fulu,
             Self::Gloas(_) => ForkName::Gloas,
+            Self::Hstar(_) => ForkName::Hstar,
         }
     }
 
@@ -94,6 +100,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => signed.message.slot,
             Self::Electra(signed) | Self::Fulu(signed) => signed.message.slot,
             Self::Gloas(signed) => signed.message.slot,
+            Self::Hstar(signed) => signed.message.slot,
         }
     }
 
@@ -108,6 +115,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => signed.message.parent_root,
             Self::Electra(signed) | Self::Fulu(signed) => signed.message.parent_root,
             Self::Gloas(signed) => signed.message.parent_root,
+            Self::Hstar(signed) => signed.message.parent_root,
         }
     }
 
@@ -122,6 +130,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => &signed.signature,
             Self::Electra(signed) | Self::Fulu(signed) => &signed.signature,
             Self::Gloas(signed) => &signed.signature,
+            Self::Hstar(signed) => &signed.signature,
         }
     }
 
@@ -136,6 +145,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => signed.message.hash_tree_root(),
             Self::Electra(signed) | Self::Fulu(signed) => signed.message.hash_tree_root(),
             Self::Gloas(signed) => signed.message.hash_tree_root(),
+            Self::Hstar(signed) => signed.message.hash_tree_root(),
         }
     }
 
@@ -151,6 +161,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Electra(signed) => BeaconBlock::Electra(signed.message.clone()),
             Self::Fulu(signed) => BeaconBlock::Fulu(signed.message.clone()),
             Self::Gloas(signed) => BeaconBlock::Gloas(signed.message.clone()),
+            Self::Hstar(signed) => BeaconBlock::Hstar(signed.message.clone()),
         }
     }
 
@@ -165,6 +176,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => Some(&signed.message.body.sync_aggregate),
             Self::Electra(signed) | Self::Fulu(signed) => Some(&signed.message.body.sync_aggregate),
             Self::Gloas(signed) => Some(&signed.message.body.sync_aggregate),
+            Self::Hstar(signed) => Some(&signed.message.body.sync_aggregate),
         }
     }
 
@@ -179,6 +191,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             Self::Deneb(signed) => signed.encode(),
             Self::Electra(signed) | Self::Fulu(signed) => signed.encode(),
             Self::Gloas(signed) => signed.encode(),
+            Self::Hstar(signed) => signed.encode(),
         }
     }
 
@@ -197,6 +210,7 @@ impl<P: Preset> SignedBeaconBlock<P> {
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
             ForkName::Gloas => Self::Gloas(Ssz::decode(bytes)?),
+            ForkName::Hstar => Self::Hstar(Ssz::decode(bytes)?),
         })
     }
 

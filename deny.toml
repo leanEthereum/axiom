@@ -17,6 +17,68 @@ allow = [
   "Zlib",
 ]
 
+# The leanVM crates behind the leanXMSS bindings declare no license in their manifests.
+# Their repository is dual-licensed MIT or Apache-2.0, in its root license files.
+[[licenses.clarify]]
+crate = "fiat_shamir"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "keccak_gkr"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "lean_compiler"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "lean_da"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "leanvm"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "leanvm_core"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "parallel"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "pcs"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "primitives"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "rec_aggregation"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "signatures"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "verifier"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -26,3 +88,8 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# leanXMSS bindings and the leanVM crates they wrap, see EIP-8450.
+allow-git = [
+  "https://github.com/ethereum/lean-pq-bindings",
+  "https://github.com/leanEthereum/leanVM.git",
+]

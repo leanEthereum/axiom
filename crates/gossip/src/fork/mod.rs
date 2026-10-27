@@ -16,6 +16,7 @@ mod deneb;
 mod electra;
 mod fulu;
 mod gloas;
+mod hstar;
 mod phase0;
 
 use axiom_ssz::Ssz;

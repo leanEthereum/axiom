@@ -25,7 +25,8 @@ pub use body::{BodyParts, Bounded};
 pub use error::ProductionError;
 pub use eth1::{Eth1Candidate, Eth1Vote};
 pub use execution::{
-    BuilderBoost, ExecutionChoice, GloasBid, LocalBuild, LocalPayload, ParentPayload, Wei,
+    BuilderBoost, ExecutionChoice, GloasBid, LocalBuild, LocalPayload, ParentPayload,
+    RevealedRequests, Wei,
 };
 pub use fork::BlockFork;
 pub use produced::{Built, ProducedBlock, Proposal};

@@ -77,6 +77,7 @@ impl<P: Preset> DataColumnSidecar<P> {
 
     /// Decodes a column of the fork in force at its block's slot.
     ///
+    /// Hstar kept the Gloas column, so its bytes are read in that format.
     /// Forks before Fulu have no columns, so their bytes are read in the first column format.
     /// Callers check the fork's blob data first and never get there.
     ///
@@ -85,7 +86,7 @@ impl<P: Preset> DataColumnSidecar<P> {
     /// Fails when the bytes are not the encoding of that fork's column.
     pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Self, DecodeError> {
         Ok(match fork {
-            ForkName::Gloas => Self::Gloas(Ssz::decode(bytes)?),
+            ForkName::Gloas | ForkName::Hstar => Self::Gloas(Ssz::decode(bytes)?),
             ForkName::Phase0
             | ForkName::Altair
             | ForkName::Bellatrix

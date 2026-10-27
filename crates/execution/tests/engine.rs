@@ -11,8 +11,8 @@ use axiom_execution::{
     GetBlobsResponse, GetPayloadResponse, GetPayloadResponseV2, GetPayloadResponseV3,
     GetPayloadResponseV4, GetPayloadResponseV5, GetPayloadResponseV6, JsonCodec, JwtSecret,
     NewPayload, PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
-    PayloadAttributesV4, PayloadBody, PayloadId, PayloadStatus, PayloadStatusKind, RpcError,
-    SyncStatus, WireError, WireErrorKind,
+    PayloadAttributesV4, PayloadBody, PayloadId, PayloadStatus, PayloadStatusKind, RequestsList,
+    RpcError, SyncStatus, WireError, WireErrorKind,
     mock::{MockEngine, RecordedCall},
 };
 use axiom_http::StatusCode;
@@ -317,13 +317,16 @@ fn gloas_new_payload() -> NewPayload<Minimal> {
         blob_kzg_commitments: ProgressiveList::from(vec![COMMITMENT]),
         ..gloas::ExecutionPayloadBid::default()
     };
-    let envelope = gloas::ExecutionPayloadEnvelope {
-        payload: payload_v4(),
-        execution_requests: gloas_requests(),
-        parent_beacon_block_root: PARENT_ROOT,
-        ..gloas::ExecutionPayloadEnvelope::default()
+    let envelope = gloas::SignedExecutionPayloadEnvelope {
+        message: gloas::ExecutionPayloadEnvelope {
+            payload: payload_v4(),
+            execution_requests: gloas_requests(),
+            parent_beacon_block_root: PARENT_ROOT,
+            ..gloas::ExecutionPayloadEnvelope::default()
+        },
+        ..gloas::SignedExecutionPayloadEnvelope::default()
     };
-    NewPayload::from_envelope(&envelope, &bid).expect("one blob is within the limit")
+    NewPayload::from_envelope(&envelope.into(), &bid).expect("one blob is within the limit")
 }
 
 #[test]
@@ -737,7 +740,7 @@ fn get_payload_cases() -> [(ForkName, &'static str, String, GetPayloadResponse<M
                 block_value: one_ether,
                 blobs_bundle: bundle_v2,
                 should_override_builder: false,
-                execution_requests: gloas_requests(),
+                execution_requests: RequestsList::encode(&gloas_requests()),
             }),
         ),
     ]

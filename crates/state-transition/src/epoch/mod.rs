@@ -18,6 +18,8 @@ pub enum EpochStep {
     RewardsAndPenalties,
     /// Queue, activate, and eject validators.
     RegistryUpdates,
+    /// Drop the post-quantum key authorizations that expire before the next epoch.
+    PendingPqKeyAuthorizations,
     /// Charge the correlation penalty to slashed validators.
     Slashings,
     /// Clear eth1 data votes at the end of a voting period.
@@ -52,11 +54,12 @@ pub enum EpochStep {
 
 impl EpochStep {
     /// Every step of every fork.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::JustificationAndFinalization,
         Self::InactivityUpdates,
         Self::RewardsAndPenalties,
         Self::RegistryUpdates,
+        Self::PendingPqKeyAuthorizations,
         Self::Slashings,
         Self::Eth1DataReset,
         Self::PendingDeposits,
@@ -82,6 +85,7 @@ impl EpochStep {
             Self::InactivityUpdates => "inactivity_updates",
             Self::RewardsAndPenalties => "rewards_and_penalties",
             Self::RegistryUpdates => "registry_updates",
+            Self::PendingPqKeyAuthorizations => "pending_pq_key_authorizations",
             Self::Slashings => "slashings",
             Self::Eth1DataReset => "eth1_data_reset",
             Self::PendingDeposits => "pending_deposits",

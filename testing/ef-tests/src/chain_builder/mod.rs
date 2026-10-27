@@ -434,7 +434,13 @@ mod tests {
             terminal_total_difficulty: U256::from_u64(1000),
             ..ChainConfig::minimal()
         };
-        for (epoch, fork) in ForkName::ALL.into_iter().enumerate().skip(1) {
+        // Hstar stays in the far future, as in the node harnesses that build on this one.
+        for (epoch, fork) in ForkName::ALL
+            .into_iter()
+            .enumerate()
+            .skip(1)
+            .take_while(|(_, fork)| *fork != ForkName::Hstar)
+        {
             config = config.with_fork_epoch(fork, Epoch(epoch as u64));
         }
         config

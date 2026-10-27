@@ -11,6 +11,8 @@ use axiom_types::{
 };
 use thiserror::Error;
 
+use crate::hstar::block::RegistrationError;
+
 /// A state that violates an invariant the protocol relies on.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -369,6 +371,15 @@ pub enum BlockError {
         validator: ValidatorIndex,
         /// The rule the exit breaks.
         reason: &'static str,
+    },
+    /// A post-quantum key registration breaks one of its rules, see EIP-8450.
+    #[error("key registration of validator {validator}: {reason}")]
+    InvalidPqKeyRegistration {
+        /// The validator the registration is for.
+        validator: ValidatorIndex,
+        /// The rule the registration breaks.
+        #[source]
+        reason: RegistrationError,
     },
     /// A credential change breaks one of its rules.
     #[error("credential change of validator {validator}: {reason}")]

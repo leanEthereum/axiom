@@ -29,6 +29,7 @@ mod error;
 mod fixture;
 mod fork;
 mod gloas;
+mod hstar;
 mod layout;
 mod post_state;
 mod quality;

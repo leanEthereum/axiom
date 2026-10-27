@@ -6,8 +6,11 @@ use axiom_ssz::{
 
 use crate::{
     ChainConfig, ForkName, Gwei, Hash32, Preset, Slot,
-    accessors::{BuilderState, CoreState, LookaheadState, PendingQueueState, SyncCommitteeState},
-    altair, bellatrix, capella, deneb, electra, fulu, gloas, phase0,
+    accessors::{
+        BuilderState, CoreState, LookaheadState, PendingQueueState, PqRegistryState,
+        SyncCommitteeState,
+    },
+    altair, bellatrix, capella, deneb, electra, fulu, gloas, hstar, phase0,
     phase0::{
         BeaconBlockHeader, BlockRoots, Checkpoint, Eth1Data, Eth1DataVotes, Fork, HistoricalRoots,
         JustificationBits, RandaoMixes, Slashings, StateRoots, Validator,
@@ -40,6 +43,8 @@ pub enum BeaconState<P: Preset> {
     Fulu(fulu::BeaconState<P>),
     /// A Gloas state.
     Gloas(gloas::BeaconState<P>),
+    /// An Hstar state.
+    Hstar(hstar::BeaconState<P>),
 }
 
 impl<P: Preset> BeaconState<P> {
@@ -55,12 +60,13 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state.hash_tree_root(),
             Self::Fulu(state) => state.hash_tree_root(),
             Self::Gloas(state) => state.hash_tree_root(),
+            Self::Hstar(state) => state.hash_tree_root(),
         }
     }
 
     /// The SSZ encoding of two conflicting votes as an attester slashing of this state's fork.
     ///
-    /// Phase0 through Deneb share one container, Electra and Fulu another, and Gloas its own.
+    /// Phase0 through Deneb share one container, Electra and Fulu another, and Gloas a third.
     ///
     /// # Errors
     ///
@@ -78,7 +84,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(_) | Self::Fulu(_) => {
                 electra::AttesterSlashing::<P>::from_votes(votes)?.encode()
             }
-            Self::Gloas(_) => gloas::AttesterSlashing::from_votes(votes).encode(),
+            Self::Gloas(_) | Self::Hstar(_) => gloas::AttesterSlashing::from_votes(votes).encode(),
         })
     }
 
@@ -97,6 +103,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state.prove(index),
             Self::Fulu(state) => state.prove(index),
             Self::Gloas(state) => state.prove(index),
+            Self::Hstar(state) => state.prove(index),
         }
     }
 
@@ -112,6 +119,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state.encode(),
             Self::Fulu(state) => state.encode(),
             Self::Gloas(state) => state.encode(),
+            Self::Hstar(state) => state.encode(),
         }
     }
 
@@ -130,6 +138,7 @@ impl<P: Preset> BeaconState<P> {
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
             ForkName::Gloas => Self::Gloas(Ssz::decode(bytes)?),
+            ForkName::Hstar => Self::Hstar(Ssz::decode(bytes)?),
         })
     }
 
@@ -159,6 +168,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state,
             Self::Fulu(state) => state,
             Self::Gloas(state) => state,
+            Self::Hstar(state) => state,
         }
     }
 
@@ -173,6 +183,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => state,
             Self::Fulu(state) => state,
             Self::Gloas(state) => state,
+            Self::Hstar(state) => state,
         }
     }
 
@@ -188,6 +199,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => Some(state),
             Self::Fulu(state) => Some(state),
             Self::Gloas(state) => Some(state),
+            Self::Hstar(state) => Some(state),
         }
     }
 
@@ -203,6 +215,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => Some(state),
             Self::Fulu(state) => Some(state),
             Self::Gloas(state) => Some(state),
+            Self::Hstar(state) => Some(state),
         }
     }
 
@@ -218,6 +231,7 @@ impl<P: Preset> BeaconState<P> {
             | Self::Electra(_) => None,
             Self::Fulu(state) => Some(state),
             Self::Gloas(state) => Some(state),
+            Self::Hstar(state) => Some(state),
         }
     }
 
@@ -226,6 +240,7 @@ impl<P: Preset> BeaconState<P> {
     pub fn builders(&self) -> Option<&dyn BuilderState<Preset = P>> {
         match self {
             Self::Gloas(state) => Some(state),
+            Self::Hstar(state) => Some(state),
             Self::Phase0(_)
             | Self::Altair(_)
             | Self::Bellatrix(_)
@@ -233,6 +248,22 @@ impl<P: Preset> BeaconState<P> {
             | Self::Deneb(_)
             | Self::Electra(_)
             | Self::Fulu(_) => None,
+        }
+    }
+
+    /// The post-quantum key registry, from Hstar on.
+    #[must_use]
+    pub fn pq_registry(&self) -> Option<&dyn PqRegistryState<Preset = P>> {
+        match self {
+            Self::Hstar(state) => Some(state),
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_)
+            | Self::Electra(_)
+            | Self::Fulu(_)
+            | Self::Gloas(_) => None,
         }
     }
 
@@ -249,6 +280,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Electra(state) => Some(state.latest_execution_payload_header.block_hash),
             Self::Fulu(state) => Some(state.latest_execution_payload_header.block_hash),
             Self::Gloas(state) => Some(state.latest_block_hash),
+            Self::Hstar(state) => Some(state.latest_block_hash),
         }
     }
 
@@ -276,7 +308,7 @@ impl<P: Preset> BeaconState<P> {
             Self::Fulu(state) => {
                 state.latest_execution_payload_header != fulu::ExecutionPayloadHeader::default()
             }
-            Self::Gloas(_) => true,
+            Self::Gloas(_) | Self::Hstar(_) => true,
         }
     }
 }
@@ -485,6 +517,12 @@ impl<P: Preset> From<gloas::BeaconState<P>> for BeaconState<P> {
     }
 }
 
+impl<P: Preset> From<hstar::BeaconState<P>> for BeaconState<P> {
+    fn from(state: hstar::BeaconState<P>) -> Self {
+        Self::Hstar(state)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +648,19 @@ mod tests {
             gloas.latest_execution_block_hash(),
             Some(Hash32([0x22; 32]))
         );
+    }
+
+    #[test]
+    fn only_hstar_has_a_key_registry() {
+        // Gloas has builders but no key registry.
+        let gloas = BeaconState::<Minimal>::from(gloas::BeaconState::default());
+        assert!(gloas.builders().is_some());
+        assert!(gloas.pq_registry().is_none());
+
+        // Hstar keeps the builders and adds the registry.
+        let hstar = BeaconState::<Minimal>::from(hstar::BeaconState::default());
+        assert!(hstar.builders().is_some());
+        assert!(hstar.pq_registry().is_some());
     }
 
     #[test]

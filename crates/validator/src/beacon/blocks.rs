@@ -45,7 +45,8 @@ impl<P: Preset> ProducedBlock<P> {
             | ForkName::Altair
             | ForkName::Bellatrix
             | ForkName::Capella
-            | ForkName::Gloas => Self::Block(combined::BeaconBlock::decode(bytes, fork)?),
+            | ForkName::Gloas
+            | ForkName::Hstar => Self::Block(combined::BeaconBlock::decode(bytes, fork)?),
             ForkName::Deneb => Self::Deneb(Ssz::decode(bytes)?),
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
@@ -174,7 +175,8 @@ impl<P: Preset> SignedProposal<P> {
             | ForkName::Altair
             | ForkName::Bellatrix
             | ForkName::Capella
-            | ForkName::Gloas => Self::Block(combined::SignedBeaconBlock::decode(bytes, fork)?),
+            | ForkName::Gloas
+            | ForkName::Hstar => Self::Block(combined::SignedBeaconBlock::decode(bytes, fork)?),
             ForkName::Deneb => Self::Deneb(Ssz::decode(bytes)?),
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),

@@ -75,7 +75,12 @@ fn every_fork() -> ChainConfig {
         terminal_total_difficulty: U256::from_u64(TERMINAL_TOTAL_DIFFICULTY),
         ..ChainConfig::minimal()
     };
-    for (epoch, fork) in (1..).zip(ForkName::ALL.into_iter().skip(1)) {
+    for (epoch, fork) in (1..).zip(
+        ForkName::ALL
+            .into_iter()
+            .skip(1)
+            .take_while(|fork| *fork != ForkName::Hstar),
+    ) {
         config = config.with_fork_epoch(fork, Epoch(epoch));
     }
     config

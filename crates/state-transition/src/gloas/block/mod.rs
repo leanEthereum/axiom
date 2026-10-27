@@ -14,5 +14,5 @@ mod withdrawals;
 
 pub use attestation::IncludedAttestation;
 pub use body_limits::BodyLimits;
-pub use parent_payload::{ParentPayload, ParentRequests};
+pub use parent_payload::{ArrivedParentBid, ParentPayload, ParentRequests};
 pub use withdrawals::{CommittedWithdrawals, ExpectedWithdrawals};

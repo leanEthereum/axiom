@@ -24,11 +24,15 @@ pub enum ForkName {
     Fulu,
     /// Enshrined proposer-builder separation, see EIP-7732.
     Gloas,
+    /// The post-quantum validator key registry, see EIP-8450.
+    ///
+    /// It stands for the fork that activates the registry, with nothing else in it.
+    Hstar,
 }
 
 impl ForkName {
     /// Every fork, in activation order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Phase0,
         Self::Altair,
         Self::Bellatrix,
@@ -37,6 +41,7 @@ impl ForkName {
         Self::Electra,
         Self::Fulu,
         Self::Gloas,
+        Self::Hstar,
     ];
 
     /// The fork's name in lowercase, as the spec's test vectors spell it.
@@ -51,6 +56,7 @@ impl ForkName {
             Self::Electra => "electra",
             Self::Fulu => "fulu",
             Self::Gloas => "gloas",
+            Self::Hstar => "hstar",
         }
     }
 
@@ -72,6 +78,7 @@ impl ForkName {
             Self::Electra => Some(Self::Deneb),
             Self::Fulu => Some(Self::Electra),
             Self::Gloas => Some(Self::Fulu),
+            Self::Hstar => Some(Self::Gloas),
         }
     }
 
@@ -86,7 +93,8 @@ impl ForkName {
             Self::Deneb => Some(Self::Electra),
             Self::Electra => Some(Self::Fulu),
             Self::Fulu => Some(Self::Gloas),
-            Self::Gloas => None,
+            Self::Gloas => Some(Self::Hstar),
+            Self::Hstar => None,
         }
     }
 
@@ -104,7 +112,8 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra
             | Self::Fulu
-            | Self::Gloas => P::INACTIVITY_PENALTY_QUOTIENT_BELLATRIX,
+            | Self::Gloas
+            | Self::Hstar => P::INACTIVITY_PENALTY_QUOTIENT_BELLATRIX,
         }
     }
 
@@ -120,7 +129,9 @@ impl ForkName {
             Self::Bellatrix | Self::Capella | Self::Deneb => {
                 P::MIN_SLASHING_PENALTY_QUOTIENT_BELLATRIX
             }
-            Self::Electra | Self::Fulu | Self::Gloas => P::MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => {
+                P::MIN_SLASHING_PENALTY_QUOTIENT_ELECTRA
+            }
         }
     }
 
@@ -138,7 +149,8 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra
             | Self::Fulu
-            | Self::Gloas => P::PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX,
+            | Self::Gloas
+            | Self::Hstar => P::PROPORTIONAL_SLASHING_MULTIPLIER_BELLATRIX,
         }
     }
 
@@ -152,7 +164,9 @@ impl ForkName {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => {
                 P::WHISTLEBLOWER_REWARD_QUOTIENT
             }
-            Self::Electra | Self::Fulu | Self::Gloas => P::WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => {
+                P::WHISTLEBLOWER_REWARD_QUOTIENT_ELECTRA
+            }
         }
     }
 
@@ -166,7 +180,7 @@ impl ForkName {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => {
                 P::MAX_ATTESTATIONS
             }
-            Self::Electra | Self::Fulu | Self::Gloas => P::MAX_ATTESTATIONS_ELECTRA,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => P::MAX_ATTESTATIONS_ELECTRA,
         }
     }
 
@@ -180,7 +194,9 @@ impl ForkName {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => {
                 P::MAX_ATTESTER_SLASHINGS
             }
-            Self::Electra | Self::Fulu | Self::Gloas => P::MAX_ATTESTER_SLASHINGS_ELECTRA,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => {
+                P::MAX_ATTESTER_SLASHINGS_ELECTRA
+            }
         }
     }
 
@@ -192,7 +208,7 @@ impl ForkName {
     pub const fn random_value_bytes(self) -> usize {
         match self {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => 1,
-            Self::Electra | Self::Fulu | Self::Gloas => 2,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => 2,
         }
     }
 
@@ -206,7 +222,9 @@ impl ForkName {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => {
                 P::MAX_EFFECTIVE_BALANCE
             }
-            Self::Electra | Self::Fulu | Self::Gloas => P::MAX_EFFECTIVE_BALANCE_ELECTRA,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => {
+                P::MAX_EFFECTIVE_BALANCE_ELECTRA
+            }
         }
     }
 
@@ -224,7 +242,8 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra
             | Self::Fulu
-            | Self::Gloas => true,
+            | Self::Gloas
+            | Self::Hstar => true,
         }
     }
 
@@ -235,7 +254,7 @@ impl ForkName {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella => BlobData::None,
             Self::Deneb | Self::Electra => BlobData::BlobSidecars,
             Self::Fulu => BlobData::BlockColumns,
-            Self::Gloas => BlobData::PayloadColumns,
+            Self::Gloas | Self::Hstar => BlobData::PayloadColumns,
         }
     }
 
@@ -246,7 +265,7 @@ impl ForkName {
     pub const fn single_attestations(self) -> bool {
         match self {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => false,
-            Self::Electra | Self::Fulu | Self::Gloas => true,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => true,
         }
     }
 
@@ -264,7 +283,7 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra
             | Self::Fulu => false,
-            Self::Gloas => true,
+            Self::Gloas | Self::Hstar => true,
         }
     }
 
@@ -276,7 +295,7 @@ impl ForkName {
     pub const fn names_committee_in_vote(self) -> bool {
         match self {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella | Self::Deneb => true,
-            Self::Electra | Self::Fulu | Self::Gloas => false,
+            Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => false,
         }
     }
 
@@ -288,7 +307,7 @@ impl ForkName {
     pub const fn has_builder_api(self) -> bool {
         match self {
             Self::Bellatrix | Self::Capella | Self::Deneb | Self::Electra | Self::Fulu => true,
-            Self::Phase0 | Self::Altair | Self::Gloas => false,
+            Self::Phase0 | Self::Altair | Self::Gloas | Self::Hstar => false,
         }
     }
 
@@ -306,7 +325,8 @@ impl ForkName {
             | Self::Deneb
             | Self::Electra
             | Self::Fulu
-            | Self::Gloas => false,
+            | Self::Gloas
+            | Self::Hstar => false,
         }
     }
 
@@ -323,7 +343,7 @@ impl ForkName {
             | Self::Capella
             | Self::Deneb
             | Self::Electra => false,
-            Self::Fulu | Self::Gloas => true,
+            Self::Fulu | Self::Gloas | Self::Hstar => true,
         }
     }
     /// The fork whose version signs a voluntary exit while this fork is in force.
@@ -334,7 +354,7 @@ impl ForkName {
     pub const fn voluntary_exit_fork(self) -> Self {
         match self {
             Self::Phase0 | Self::Altair | Self::Bellatrix | Self::Capella => self,
-            Self::Deneb | Self::Electra | Self::Fulu | Self::Gloas => Self::Capella,
+            Self::Deneb | Self::Electra | Self::Fulu | Self::Gloas | Self::Hstar => Self::Capella,
         }
     }
 }
@@ -357,7 +377,7 @@ mod tests {
             assert_eq!(pair[0].next(), Some(pair[1]));
             assert_eq!(pair[1].previous(), Some(pair[0]));
         }
-        assert_eq!(ForkName::Gloas.next(), None);
+        assert_eq!(ForkName::Hstar.next(), None);
     }
 
     #[test]
@@ -370,7 +390,7 @@ mod tests {
             inactivity,
             [
                 67_108_864, 50_331_648, 16_777_216, 16_777_216, 16_777_216, 16_777_216, 16_777_216,
-                16_777_216
+                16_777_216, 16_777_216
             ]
         );
 
@@ -378,26 +398,29 @@ mod tests {
         let slashing: Vec<u64> = ForkName::ALL
             .map(ForkName::min_slashing_penalty_quotient::<Mainnet>)
             .to_vec();
-        assert_eq!(slashing, [128, 64, 32, 32, 32, 4096, 4096, 4096]);
+        assert_eq!(slashing, [128, 64, 32, 32, 32, 4096, 4096, 4096, 4096]);
 
         // Correlation multipliers: 1, 2, then 3 from Bellatrix on.
         let multiplier: Vec<u64> = ForkName::ALL
             .map(ForkName::proportional_slashing_multiplier::<Mainnet>)
             .to_vec();
-        assert_eq!(multiplier, [1, 2, 3, 3, 3, 3, 3, 3]);
+        assert_eq!(multiplier, [1, 2, 3, 3, 3, 3, 3, 3, 3]);
 
         // Whistleblower quotients: 512 through Deneb, then 4096 from Electra on.
         let whistleblower: Vec<u64> = ForkName::ALL
             .map(ForkName::whistleblower_reward_quotient::<Mainnet>)
             .to_vec();
-        assert_eq!(whistleblower, [512, 512, 512, 512, 512, 4096, 4096, 4096]);
+        assert_eq!(
+            whistleblower,
+            [512, 512, 512, 512, 512, 4096, 4096, 4096, 4096]
+        );
     }
 
     #[test]
     fn sampling_widens_at_electra() {
         // One-byte draws against 32 ETH through Deneb, then two-byte draws against 2048 ETH.
         let bytes: Vec<usize> = ForkName::ALL.map(ForkName::random_value_bytes).to_vec();
-        assert_eq!(bytes, [1, 1, 1, 1, 1, 2, 2, 2]);
+        assert_eq!(bytes, [1, 1, 1, 1, 1, 2, 2, 2, 2]);
 
         let ceilings: Vec<u64> = ForkName::ALL
             .map(|fork| fork.max_sampling_balance::<Mainnet>().0)
@@ -412,6 +435,7 @@ mod tests {
                 32_000_000_000,
                 2_048_000_000_000,
                 2_048_000_000_000,
+                2_048_000_000_000,
                 2_048_000_000_000
             ]
         );
@@ -423,12 +447,12 @@ mod tests {
         let attestations: Vec<u64> = ForkName::ALL
             .map(ForkName::max_attestations::<Minimal>)
             .to_vec();
-        assert_eq!(attestations, [128, 128, 128, 128, 128, 8, 8, 8]);
+        assert_eq!(attestations, [128, 128, 128, 128, 128, 8, 8, 8, 8]);
 
         let slashings: Vec<u64> = ForkName::ALL
             .map(ForkName::max_attester_slashings::<Minimal>)
             .to_vec();
-        assert_eq!(slashings, [2, 2, 2, 2, 2, 1, 1, 1]);
+        assert_eq!(slashings, [2, 2, 2, 2, 2, 1, 1, 1, 1]);
     }
 
     #[test]
@@ -439,10 +463,13 @@ mod tests {
         let named: Vec<bool> = ForkName::ALL
             .map(ForkName::names_committee_in_vote)
             .to_vec();
-        assert_eq!(named, [true, true, true, true, true, false, false, false]);
+        assert_eq!(
+            named,
+            [true, true, true, true, true, false, false, false, false]
+        );
         assert_eq!(
             builder_api,
-            [false, false, true, true, true, true, true, false]
+            [false, false, true, true, true, true, true, false, false]
         );
     }
 
@@ -459,6 +486,7 @@ mod tests {
                 ForkName::Phase0,
                 ForkName::Altair,
                 ForkName::Bellatrix,
+                ForkName::Capella,
                 ForkName::Capella,
                 ForkName::Capella,
                 ForkName::Capella,

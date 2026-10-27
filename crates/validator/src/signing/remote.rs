@@ -208,7 +208,8 @@ impl RemoteBody {
             | ForkName::Deneb
             | ForkName::Electra
             | ForkName::Fulu
-            | ForkName::Gloas => true,
+            | ForkName::Gloas
+            | ForkName::Hstar => true,
         }
     }
 

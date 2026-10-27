@@ -5,14 +5,15 @@ use std::sync::Arc;
 use axiom_state_transition::{BlockProcessor, EpochCommittees, State, Verification};
 use axiom_types::{
     ChainConfig, CommitteeIndex, Preset, Slot, ValidatorIndex,
-    accessors::CoreState,
     capella::SignedBlsToExecutionChange,
+    combined,
+    hstar::SignedPqKeyRegistration,
     phase0::{ProposerSlashing, SignedVoluntaryExit},
 };
 
 use crate::{
     AttestationPacker, AttestationPool, BidPool, PayloadAttestationPool, PoolError, PoolFork,
-    SlashingPool, SyncPool, ValidatorRequests,
+    RegistrationPool, SlashingPool, SyncPool, ValidatorRequests,
 };
 
 /// The operations of one block, in the containers of the block's fork.
@@ -28,6 +29,8 @@ pub struct BlockOperations<S: PoolFork> {
     pub voluntary_exits: Vec<SignedVoluntaryExit>,
     /// Withdrawal credential changes, none before Capella.
     pub bls_to_execution_changes: Vec<SignedBlsToExecutionChange>,
+    /// Post-quantum key registrations, none before Hstar.
+    pub pq_key_registrations: Vec<SignedPqKeyRegistration>,
 }
 
 /// The operations a node keeps for the blocks its validators propose.
@@ -57,6 +60,8 @@ pub struct OperationPool<P: Preset> {
     payload_attestations: PayloadAttestationPool,
     /// Builders' bids for coming payloads.
     bids: BidPool,
+    /// Post-quantum key registrations.
+    registrations: RegistrationPool,
 }
 
 impl<P: Preset> OperationPool<P> {
@@ -126,6 +131,17 @@ impl<P: Preset> OperationPool<P> {
         &mut self.bids
     }
 
+    /// The post-quantum key registrations.
+    #[must_use]
+    pub const fn registrations(&self) -> &RegistrationPool {
+        &self.registrations
+    }
+
+    /// The post-quantum key registrations, to add what gossip forwards.
+    pub const fn registrations_mut(&mut self) -> &mut RegistrationPool {
+        &mut self.registrations
+    }
+
     /// Drops what no block from a slot on can include.
     pub fn on_slot(&mut self, slot: Slot) {
         self.bids.prune(slot);
@@ -135,9 +151,12 @@ impl<P: Preset> OperationPool<P> {
     }
 
     /// Drops what a finalized state already carried out.
-    pub fn on_finalized<S: CoreState>(&mut self, state: &S) {
+    pub fn on_finalized(&mut self, state: &combined::BeaconState<P>) {
         self.slashings.prune(state);
         self.requests.prune(state);
+        if let Some(registry) = state.pq_registry() {
+            self.registrations.prune(registry);
+        }
     }
 
     /// The operations of a block of one fork, for the state at the block's slot.
@@ -231,12 +250,14 @@ impl<P: Preset> OperationPool<P> {
             .take(S::CREDENTIAL_CHANGE_LIMIT as usize)
             .cloned()
             .collect();
+        let pq_key_registrations = S::pq_key_registrations(&mut processor, &self.registrations);
         Ok(BlockOperations {
             proposer_slashings,
             attester_slashings,
             attestations,
             voluntary_exits,
             bls_to_execution_changes,
+            pq_key_registrations,
         })
     }
 }

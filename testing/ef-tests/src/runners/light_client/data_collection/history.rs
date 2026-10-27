@@ -10,7 +10,7 @@ use axiom_types::{
     altair::{self, SyncAggregate},
     bellatrix, capella,
     combined::{BeaconState, SignedBeaconBlock},
-    deneb, electra, gloas, phase0,
+    deneb, electra, gloas, hstar, phase0,
 };
 
 use crate::Failure;
@@ -136,6 +136,19 @@ impl<P: Preset> BlockRecord<P> {
                         ..gloas::BeaconBlock::default()
                     },
                     ..gloas::SignedBeaconBlock::default()
+                })
+            }
+            BeaconState::Hstar(beacon) => {
+                let mut body = hstar::BeaconBlockBody::default();
+                body.signed_execution_payload_bid.message =
+                    beacon.latest_execution_payload_bid.clone();
+                SignedBeaconBlock::Hstar(hstar::SignedBeaconBlock {
+                    message: hstar::BeaconBlock {
+                        state_root,
+                        body,
+                        ..hstar::BeaconBlock::default()
+                    },
+                    ..hstar::SignedBeaconBlock::default()
                 })
             }
         };

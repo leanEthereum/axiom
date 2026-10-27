@@ -6,7 +6,7 @@ use axiom_state_transition::{
     gloas::block::{ExpectedWithdrawals, ParentPayload as ParentPayloadRule},
 };
 use axiom_types::{
-    Gwei, Preset, Root,
+    ForkName, Gwei, Preset, Root,
     accessors::{BuilderState, CoreState, ForkState},
     capella::Withdrawal,
     combined,
@@ -20,7 +20,7 @@ use axiom_types::{
 
 use crate::{
     BlockFork, BodyParts, Built, ExecutionChoice, GloasBid, LocalPayload, ParentPayload,
-    ProducedBlock, ProductionError, Trial,
+    ProducedBlock, ProductionError, RevealedRequests, Trial,
 };
 
 impl<P: Preset> BlockFork for BeaconState<P> {
@@ -80,7 +80,13 @@ impl<P: Preset> BlockFork for BeaconState<P> {
             .ok_or(ProductionError::WrongState(Self::FORK))?;
         let latest = state.latest_execution_payload_bid();
         let (parent_block_hash, parent_execution_requests) = match parent {
-            ParentPayload::Full(requests) => (latest.block_hash, requests),
+            ParentPayload::Full(RevealedRequests::Gloas(requests)) => (latest.block_hash, requests),
+            ParentPayload::Full(RevealedRequests::Hstar(_)) => {
+                return Err(ProductionError::ParentRequestsFork {
+                    fork: Self::FORK,
+                    parent: ForkName::Hstar,
+                });
+            }
             ParentPayload::Empty => (latest.parent_block_hash, ExecutionRequests::default()),
         };
         let (signed_bid, revealed) = match bid {
@@ -185,10 +191,17 @@ impl ParentSettlement {
         parent: &ParentPayload,
     ) -> Result<State<P>, ProductionError> {
         let mut settled = trial.state().clone();
-        let ParentPayload::Full(requests) = parent else {
-            return Ok(settled);
-        };
         let fork = settled.fork_name();
+        let requests = match parent {
+            ParentPayload::Empty => return Ok(settled),
+            ParentPayload::Full(RevealedRequests::Gloas(requests)) => requests,
+            ParentPayload::Full(RevealedRequests::Hstar(_)) => {
+                return Err(ProductionError::ParentRequestsFork {
+                    fork,
+                    parent: ForkName::Hstar,
+                });
+            }
+        };
         let slot = settled.beacon().slot();
         let latest_block_hash = BeaconState::<P>::from_any(settled.beacon())
             .ok_or(ProductionError::WrongState(fork))?

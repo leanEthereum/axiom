@@ -5,8 +5,8 @@
 use axiom_state_transition::State;
 use axiom_types::{
     BlsSignature, BuilderIndex, ChainConfig, CommitteeIndex, Domain, Epoch, Gwei, Hash32, Preset,
-    Slot, ValidatorIndex,
-    accessors::CoreState,
+    Root, Slot, ValidatorIndex,
+    accessors::BuilderState,
     combined, deneb,
     gloas::{
         AggregateAndProof, Attestation, AttestationData, AttesterSlashing, BeaconBlock,
@@ -58,7 +58,8 @@ impl<P: Preset> GossipFork for BeaconState<P> {
         block: &BeaconBlock<P>,
     ) -> Verdict {
         // A block that builds on its parent's payload needs that payload verified.
-        if ParentPayload::of(view, block).is_full() && !view.is_payload_verified(&block.parent_root)
+        if ParentPayload::of(view, block.parent_root, Self::payload_bid(block)).is_full()
+            && !view.is_payload_verified(&block.parent_root)
         {
             return Err(GossipError::ignore("parent payload is not verified")
                 .with(Detail::Block(block.parent_root)));
@@ -88,7 +89,7 @@ impl<P: Preset> GossipFork for BeaconState<P> {
         block: &BeaconBlock<P>,
         parent_state: &State<P>,
     ) -> Verdict {
-        if ParentPayload::of(view, block).is_full() {
+        if ParentPayload::of(view, block.parent_root, Self::payload_bid(block)).is_full() {
             return Ok(());
         }
         // A block on an empty parent builds on the execution head the parent's state recorded.
@@ -105,7 +106,7 @@ impl<P: Preset> GossipFork for BeaconState<P> {
 
 /// Whether a block builds on its parent's payload or on the parent alone.
 #[derive(Clone, Copy, Debug)]
-struct ParentPayload {
+pub(crate) struct ParentPayload {
     /// The payload the block's bid builds on.
     parent_block_hash: Hash32,
     /// The payload the parent's bid promised, when the parent is known.
@@ -113,24 +114,27 @@ struct ParentPayload {
 }
 
 impl ParentPayload {
-    /// What a view knows of a block's parent payload.
-    fn of<P: Preset>(view: &ChainView<'_, P>, block: &BeaconBlock<P>) -> Self {
+    /// What a view knows of the parent payload a block's bid builds on.
+    ///
+    /// A block without a bid builds on no payload, so its parent never counts as full.
+    pub(crate) fn of<P: Preset>(
+        view: &ChainView<'_, P>,
+        parent_root: Root,
+        bid: Option<&ExecutionPayloadBid>,
+    ) -> Self {
         Self {
-            parent_block_hash: block
-                .body
-                .signed_execution_payload_bid
-                .message
-                .parent_block_hash,
-            promised: view
-                .block(&block.parent_root)
-                .map(|parent| parent.execution_block_hash),
+            parent_block_hash: bid.map_or(Hash32::ZERO, |bid| bid.parent_block_hash),
+            promised: bid.and_then(|_| {
+                view.block(&parent_root)
+                    .map(|parent| parent.execution_block_hash)
+            }),
         }
     }
 
     /// Whether the block builds on the payload its parent promised.
     ///
     /// See `is_parent_node_full` in the Gloas fork choice spec.
-    fn is_full(self) -> bool {
+    pub(crate) fn is_full(self) -> bool {
         self.promised == Some(self.parent_block_hash)
     }
 }
@@ -317,7 +321,7 @@ impl SlashingEvidence for AttesterSlashing {
     }
 }
 
-/// The payload timeliness committee of a slot, as a Gloas state's window holds it.
+/// The payload timeliness committee of a slot, as the window of a state with builders holds it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ptc;
 
@@ -325,23 +329,23 @@ impl Ptc {
     /// The members for a slot of the previous, current, or next epoch, or nobody outside them.
     ///
     /// See `get_ptc` in the Gloas beacon chain spec.
-    pub(crate) fn of<P: Preset>(state: &BeaconState<P>, slot: Slot) -> Vec<ValidatorIndex> {
-        let epoch = slot.epoch::<P>().0;
+    pub(crate) fn of<S: BuilderState + ?Sized>(state: &S, slot: Slot) -> Vec<ValidatorIndex> {
+        let epoch = slot.epoch::<S::Preset>().0;
         let state_epoch = state.current_epoch().0;
         // The window holds the previous, current, and lookahead epochs, oldest first.
         let first = state_epoch.saturating_sub(1);
-        let last = state_epoch + P::MIN_SEED_LOOKAHEAD;
+        let last = state_epoch + S::Preset::MIN_SEED_LOOKAHEAD;
         if epoch < first || epoch > last {
             return Vec::new();
         }
         let offset = if epoch < state_epoch {
             0
         } else {
-            (epoch - state_epoch + 1) * P::SLOTS_PER_EPOCH
+            (epoch - state_epoch + 1) * S::Preset::SLOTS_PER_EPOCH
         };
-        let position = (offset + slot.0 % P::SLOTS_PER_EPOCH) as usize;
+        let position = (offset + slot.0 % S::Preset::SLOTS_PER_EPOCH) as usize;
         state
-            .ptc_window
+            .ptc_window()
             .get(position)
             .map(|committee| committee.to_vec())
             .unwrap_or_default()
@@ -361,18 +365,18 @@ impl BuilderFunds {
     /// The funds of a builder in a state, nothing for an unknown builder.
     ///
     /// See `get_pending_balance_to_withdraw_for_builder` in the Gloas beacon chain spec.
-    pub(crate) fn of<P: Preset>(state: &BeaconState<P>, index: BuilderIndex) -> Self {
+    pub(crate) fn of<S: BuilderState + ?Sized>(state: &S, index: BuilderIndex) -> Self {
         let balance = state
-            .builders
+            .builders()
             .get(index.as_usize())
             .map_or(Gwei(0), |builder| builder.balance);
         let withdrawals = state
-            .builder_pending_withdrawals
+            .builder_pending_withdrawals()
             .iter()
             .filter(|withdrawal| withdrawal.builder_index == index)
             .map(|withdrawal| withdrawal.amount);
         let payments = state
-            .builder_pending_payments
+            .builder_pending_payments()
             .iter()
             .filter(|payment| payment.withdrawal.builder_index == index)
             .map(|payment| payment.withdrawal.amount);

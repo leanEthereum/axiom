@@ -58,7 +58,8 @@ impl BlobSubnets {
             | ForkName::Bellatrix
             | ForkName::Capella
             | ForkName::Fulu
-            | ForkName::Gloas => None,
+            | ForkName::Gloas
+            | ForkName::Hstar => None,
         }
     }
 

@@ -12,8 +12,8 @@ use axiom_ssz::{
 };
 use axiom_types::{
     BlobIndex, BlsPubkey, BlsSignature, BuilderIndex, Bytes32, ColumnIndex, CommitteeIndex, Epoch,
-    ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, Root, Slot, ValidatorIndex, Version,
-    WithdrawalIndex,
+    ExecutionAddress, Gwei, Hash16, Hash32, KzgCommitment, KzgProof, Root, Slot, ValidatorIndex,
+    Version, WithdrawalIndex, XmssLeafIndex, XmssPublicKey,
 };
 
 use crate::ApiJson;
@@ -163,6 +163,25 @@ impl Sample for BlobIndex {
 }
 
 impl Sample for ColumnIndex {
+    fn sample(sampler: &mut Sampler) -> Self {
+        Self(sampler.draw())
+    }
+}
+
+impl Sample for XmssLeafIndex {
+    fn sample(sampler: &mut Sampler) -> Self {
+        // The low half of a word covers every 32-bit value.
+        Self(sampler.word() as u32)
+    }
+}
+
+impl Sample for Hash16 {
+    fn sample(sampler: &mut Sampler) -> Self {
+        Self(sampler.draw())
+    }
+}
+
+impl Sample for XmssPublicKey {
     fn sample(sampler: &mut Sampler) -> Self {
         Self(sampler.draw())
     }

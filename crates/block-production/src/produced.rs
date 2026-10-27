@@ -4,19 +4,15 @@ use axiom_ssz::{Ssz, U256};
 use axiom_state_transition::State;
 use axiom_types::{
     ForkName, Gwei, Preset, Root, Slot, altair, bellatrix, capella, combined, deneb, electra, fulu,
-    gloas, phase0,
+    gloas, hstar, phase0,
 };
 
 /// An unsigned block, with what a validator needs beside it to publish.
 ///
 /// From Deneb to Fulu a full block travels with its blobs and proofs.
-/// A Gloas self-built block travels with its payload envelope.
+/// A self-built block from Gloas on travels with its payload envelope.
 /// A block on a builder's payload is blinded until the builder reveals it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "one block per proposal, moved straight into its encoding"
-)]
 pub enum ProducedBlock<P: Preset> {
     /// A phase0 block.
     Phase0(phase0::BeaconBlock<P>),
@@ -36,6 +32,10 @@ pub enum ProducedBlock<P: Preset> {
     GloasContents(gloas::BlockContents<P>),
     /// A Gloas block committing to a builder's bid.
     Gloas(gloas::BeaconBlock<P>),
+    /// A self-built Hstar block, its envelope, and its blobs.
+    HstarContents(hstar::BlockContents<P>),
+    /// An Hstar block committing to a builder's bid.
+    Hstar(hstar::BeaconBlock<P>),
     /// A block on a builder's payload, which the builder reveals after signing.
     Blinded(combined::BlindedBeaconBlock<P>),
 }
@@ -53,6 +53,7 @@ impl<P: Preset> ProducedBlock<P> {
             Self::Electra(_) => ForkName::Electra,
             Self::Fulu(_) => ForkName::Fulu,
             Self::GloasContents(_) | Self::Gloas(_) => ForkName::Gloas,
+            Self::HstarContents(_) | Self::Hstar(_) => ForkName::Hstar,
             Self::Blinded(block) => block.fork_name(),
         }
     }
@@ -78,6 +79,8 @@ impl<P: Preset> ProducedBlock<P> {
             Self::Fulu(contents) => combined::BeaconBlock::Fulu(contents.block.clone()),
             Self::GloasContents(contents) => combined::BeaconBlock::Gloas(contents.block.clone()),
             Self::Gloas(block) => combined::BeaconBlock::Gloas(block.clone()),
+            Self::HstarContents(contents) => combined::BeaconBlock::Hstar(contents.block.clone()),
+            Self::Hstar(block) => combined::BeaconBlock::Hstar(block.clone()),
             Self::Blinded(_) => return None,
         };
         Some(block)
@@ -116,6 +119,8 @@ impl<P: Preset> ProducedBlock<P> {
             Self::Fulu(contents) => contents.encode(),
             Self::GloasContents(contents) => contents.encode(),
             Self::Gloas(block) => block.encode(),
+            Self::HstarContents(contents) => contents.encode(),
+            Self::Hstar(block) => block.encode(),
             Self::Blinded(block) => block.encode(),
         }
     }

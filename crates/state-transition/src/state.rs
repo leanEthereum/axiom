@@ -6,14 +6,14 @@ use axiom_bls::PublicKey;
 use axiom_types::{
     BlsPubkey, BlsSignature, ChainConfig, CommitteeIndex, Epoch, ForkName, Gwei, Preset, Root,
     Slot, ValidatorIndex, accessors::CoreState, altair, bellatrix, capella, combined, deneb,
-    electra, fulu, gloas, phase0, phase0::BeaconBlockHeader,
+    electra, fulu, gloas, hstar, phase0, phase0::BeaconBlockHeader,
 };
 
 use crate::{
     BlindedFork, BlockError, BlockProcessor, CachedState, Caches, EpochCommittees, EpochProcessor,
     EpochStep, EpochVotes, ExecutionEngine, Fork, PayloadEngine, PubkeyCache, StateError,
     TransitionError, Upgrade, Verification,
-    gloas::{EnvelopeError, PayloadEnvelope},
+    gloas::{EnvelopeError, PayloadEnvelope, RevealedPayload},
     rewards::AttesterRewards,
 };
 
@@ -198,8 +198,11 @@ impl<P: Preset> State<P> {
             combined::BeaconState::Fulu(pre) => {
                 gloas::BeaconState::upgrade(pre, caches, config)?.into()
             }
+            combined::BeaconState::Gloas(pre) => {
+                hstar::BeaconState::upgrade(pre, caches, config)?.into()
+            }
             // Invariant: a state of the last fork returned early, so this arm puts it back unchanged.
-            combined::BeaconState::Gloas(pre) => pre.into(),
+            combined::BeaconState::Hstar(pre) => pre.into(),
         };
         Ok(())
     }
@@ -306,28 +309,30 @@ impl<P: Preset> State<P> {
         Ok(())
     }
 
-    /// Checks a Gloas execution payload envelope against the state its block produced.
+    /// Checks an execution payload envelope against the state its block produced.
     ///
-    /// The envelope is the second input of a Gloas slot, after the block that bid for it.
+    /// The envelope is the second input of a slot from Gloas on, after the block that bid for it.
     /// It changes no state: the next block reports its requests, which then take effect.
     /// See `verify_execution_payload_envelope` in the Gloas fork choice spec.
     ///
     /// # Errors
     ///
-    /// Fails when the state is not Gloas, or the envelope breaks a rule.
-    pub fn verify_execution_payload_envelope<E>(
+    /// Fails when the state is not of the envelope's fork, or the envelope breaks a rule.
+    pub fn verify_execution_payload_envelope<V, E>(
         &mut self,
         config: &ChainConfig,
-        envelope: &gloas::SignedExecutionPayloadEnvelope<P>,
+        envelope: &V,
         verification: Verification,
         engine: &E,
     ) -> Result<(), EnvelopeError>
     where
-        E: ExecutionEngine<gloas::NewPayloadRequest<P>>,
+        V: RevealedPayload,
+        V::State: Fork<Preset = P>,
+        E: ExecutionEngine<V::Request>,
     {
         let fork = self.fork_name();
         let mut state = self
-            .of_fork::<gloas::BeaconState<P>>()
+            .of_fork::<V::State>()
             .ok_or(EnvelopeError::WrongFork(fork))?;
         PayloadEnvelope(envelope).verify(&mut state, config, verification, engine)
     }
@@ -515,6 +520,7 @@ impl<P: Preset> State<P> {
             combined::BeaconState::Electra(state) => task.run(CachedState::new(state, caches)),
             combined::BeaconState::Fulu(state) => task.run(CachedState::new(state, caches)),
             combined::BeaconState::Gloas(state) => task.run(CachedState::new(state, caches)),
+            combined::BeaconState::Hstar(state) => task.run(CachedState::new(state, caches)),
         }
     }
 
@@ -529,6 +535,7 @@ impl<P: Preset> State<P> {
             combined::BeaconState::Electra(state) => task.run(state),
             combined::BeaconState::Fulu(state) => task.run(state),
             combined::BeaconState::Gloas(state) => task.run(state),
+            combined::BeaconState::Hstar(state) => task.run(state),
         }
     }
 }
@@ -703,6 +710,26 @@ impl<P: Preset> SignedBlock<P> for gloas::SignedBeaconBlock<P> {
     }
 }
 
+impl<P: Preset> SignedBlock<P> for hstar::SignedBeaconBlock<P> {
+    fn slot(&self) -> Slot {
+        self.message.slot
+    }
+
+    fn apply_to<E: PayloadEngine<P>>(
+        &self,
+        state: &mut State<P>,
+        config: &ChainConfig,
+        engine: &E,
+    ) -> Result<(), TransitionError> {
+        state.apply_block::<hstar::BeaconState<P>, E>(
+            config,
+            &self.message,
+            &self.signature,
+            engine,
+        )
+    }
+}
+
 impl<P: Preset> SignedBlock<P> for combined::SignedBeaconBlock<P> {
     fn slot(&self) -> Slot {
         Self::slot(self)
@@ -733,6 +760,7 @@ impl<P: Preset> SignedBlock<P> for combined::SignedBeaconBlock<P> {
                 engine,
             ),
             Self::Gloas(block) => block.apply_to(state, config, engine),
+            Self::Hstar(block) => block.apply_to(state, config, engine),
         }
     }
 }
@@ -935,12 +963,12 @@ mod tests {
 
     #[test]
     fn the_last_fork_has_nothing_to_upgrade_to() {
-        // Fixture state: a default Gloas state, which no fork follows.
-        let mut state = State::new(gloas::BeaconState::<Minimal>::default());
+        // Fixture state: a default Hstar state, which no fork follows.
+        let mut state = State::new(hstar::BeaconState::<Minimal>::default());
 
         let outcome = state.upgrade(&ChainConfig::minimal());
 
-        assert_eq!(outcome, Err(StateError::NoNextFork(ForkName::Gloas)));
-        assert_eq!(state.fork_name(), ForkName::Gloas);
+        assert_eq!(outcome, Err(StateError::NoNextFork(ForkName::Hstar)));
+        assert_eq!(state.fork_name(), ForkName::Hstar);
     }
 }

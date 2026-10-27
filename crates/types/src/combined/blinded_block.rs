@@ -156,7 +156,7 @@ impl<P: Preset> BlindedBeaconBlock<P> {
     /// Fails when the fork has no blinded block, or the bytes do not encode one of that fork.
     pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Self, BlindedBlockError> {
         Ok(match fork {
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(BlindedBlockError::NoBlindedBlock { fork });
             }
             ForkName::Bellatrix => Self::Bellatrix(Ssz::decode(bytes)?),

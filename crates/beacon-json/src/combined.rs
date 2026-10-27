@@ -28,6 +28,7 @@ impl<P: Preset> ForkedJson for BeaconBlock<P> {
             Self::Deneb(block) => block.to_json(),
             Self::Electra(block) | Self::Fulu(block) => block.to_json(),
             Self::Gloas(block) => block.to_json(),
+            Self::Hstar(block) => block.to_json(),
         }
     }
 
@@ -41,6 +42,7 @@ impl<P: Preset> ForkedJson for BeaconBlock<P> {
             ForkName::Electra => Self::Electra(ApiJson::from_json(value)?),
             ForkName::Fulu => Self::Fulu(ApiJson::from_json(value)?),
             ForkName::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+            ForkName::Hstar => Self::Hstar(ApiJson::from_json(value)?),
         })
     }
 }
@@ -55,6 +57,7 @@ impl<P: Preset> ForkedJson for SignedBeaconBlock<P> {
             Self::Deneb(block) => block.to_json(),
             Self::Electra(block) | Self::Fulu(block) => block.to_json(),
             Self::Gloas(block) => block.to_json(),
+            Self::Hstar(block) => block.to_json(),
         }
     }
 
@@ -68,6 +71,7 @@ impl<P: Preset> ForkedJson for SignedBeaconBlock<P> {
             ForkName::Electra => Self::Electra(ApiJson::from_json(value)?),
             ForkName::Fulu => Self::Fulu(ApiJson::from_json(value)?),
             ForkName::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+            ForkName::Hstar => Self::Hstar(ApiJson::from_json(value)?),
         })
     }
 }
@@ -83,6 +87,7 @@ impl<P: Preset> ForkedJson for BeaconState<P> {
             Self::Electra(state) => state.to_json(),
             Self::Fulu(state) => state.to_json(),
             Self::Gloas(state) => state.to_json(),
+            Self::Hstar(state) => state.to_json(),
         }
     }
 
@@ -96,6 +101,7 @@ impl<P: Preset> ForkedJson for BeaconState<P> {
             ForkName::Electra => Self::Electra(ApiJson::from_json(value)?),
             ForkName::Fulu => Self::Fulu(ApiJson::from_json(value)?),
             ForkName::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+            ForkName::Hstar => Self::Hstar(ApiJson::from_json(value)?),
         })
     }
 }
@@ -113,7 +119,7 @@ impl<P: Preset> ForkedJson for BlindedBeaconBlock<P> {
     fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
         Ok(match fork {
             // Blinding starts with the payload at Bellatrix and ends with the bid at Gloas.
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(ApiJsonError::absent(fork, "blinded block"));
             }
             ForkName::Bellatrix => Self::Bellatrix(ApiJson::from_json(value)?),
@@ -137,7 +143,7 @@ impl<P: Preset> ForkedJson for SignedBlindedBeaconBlock<P> {
 
     fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
         Ok(match fork {
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(ApiJsonError::absent(fork, "signed blinded block"));
             }
             ForkName::Bellatrix => Self::Bellatrix(ApiJson::from_json(value)?),
@@ -162,7 +168,7 @@ impl<P: Preset> ForkedJson for SignedBuilderBid<P> {
     fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
         Ok(match fork {
             // The builder API sells payloads from Bellatrix until Gloas enshrines the bid.
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(ApiJsonError::absent(fork, "signed builder bid"));
             }
             ForkName::Bellatrix => Self::Bellatrix(ApiJson::from_json(value)?),
@@ -188,7 +194,7 @@ impl<P: Preset> ForkedJson for ExecutionPayload<P> {
     fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
         Ok(match fork {
             // Gloas moves the payload into an envelope, a container of its own.
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(ApiJsonError::absent(fork, "execution payload in its block"));
             }
             ForkName::Bellatrix => Self::Bellatrix(ApiJson::from_json(value)?),
@@ -218,7 +224,7 @@ impl<P: Preset> ForkedJson for DataColumnSidecar<P> {
             | ForkName::Deneb
             | ForkName::Electra => return Err(ApiJsonError::absent(fork, "data column sidecar")),
             ForkName::Fulu => Self::Fulu(ApiJson::from_json(value)?),
-            ForkName::Gloas => Self::Gloas(ApiJson::from_json(value)?),
+            ForkName::Gloas | ForkName::Hstar => Self::Gloas(ApiJson::from_json(value)?),
         })
     }
 }

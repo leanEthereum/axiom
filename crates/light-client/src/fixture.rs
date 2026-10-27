@@ -9,7 +9,7 @@ use axiom_types::{
     bellatrix, capella,
     combined::{BeaconState, SignedBeaconBlock},
     constants::DOMAIN_SYNC_COMMITTEE,
-    deneb, electra, fulu, gloas, phase0,
+    deneb, electra, fulu, gloas, hstar, phase0,
     phase0::{BeaconBlockHeader, Checkpoint},
 };
 
@@ -162,6 +162,17 @@ impl Chain {
                 (state.current_sync_committee, state.next_sync_committee) = committees;
                 block.message.state_root = seal(&mut state, block.message.header(), finalized);
                 (state.into(), SignedBeaconBlock::Gloas(block))
+            }
+            ForkName::Hstar => {
+                let mut block = hstar::SignedBeaconBlock::<Minimal>::default();
+                (block.message.slot, block.message.parent_root) = (slot, parent_root);
+                block.message.body.sync_aggregate = aggregate;
+                let bid = &mut block.message.body.signed_execution_payload_bid.message;
+                bid.parent_block_hash = hash;
+                let mut state = hstar::BeaconState::<Minimal>::default();
+                (state.current_sync_committee, state.next_sync_committee) = committees;
+                block.message.state_root = seal(&mut state, block.message.header(), finalized);
+                (state.into(), SignedBeaconBlock::Hstar(block))
             }
         }
     }

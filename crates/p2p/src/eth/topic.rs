@@ -50,6 +50,8 @@ pub enum GossipKind {
     ExecutionPayloadBid,
     /// Proposers' signed preferences for their coming slots, Gloas.
     ProposerPreferences,
+    /// Post-quantum key registrations, Hstar, see EIP-8450.
+    PqKeyRegistration,
 }
 
 impl fmt::Display for GossipKind {
@@ -74,6 +76,7 @@ impl fmt::Display for GossipKind {
             Self::PayloadAttestationMessage => f.write_str("payload_attestation_message"),
             Self::ExecutionPayloadBid => f.write_str("execution_payload_bid"),
             Self::ProposerPreferences => f.write_str("proposer_preferences"),
+            Self::PqKeyRegistration => f.write_str("pq_key_registration"),
         }
     }
 }
@@ -99,6 +102,7 @@ impl FromStr for GossipKind {
             "payload_attestation_message" => Some(Self::PayloadAttestationMessage),
             "execution_payload_bid" => Some(Self::ExecutionPayloadBid),
             "proposer_preferences" => Some(Self::ProposerPreferences),
+            "pq_key_registration" => Some(Self::PqKeyRegistration),
             _ => None,
         };
         if let Some(kind) = fixed {
@@ -262,6 +266,7 @@ mod tests {
             ),
             (GossipKind::ExecutionPayloadBid, "execution_payload_bid"),
             (GossipKind::ProposerPreferences, "proposer_preferences"),
+            (GossipKind::PqKeyRegistration, "pq_key_registration"),
         ] {
             let text = format!("/eth2/01020304/{name}/ssz_snappy");
             let topic = GossipTopic {

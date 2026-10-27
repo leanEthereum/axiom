@@ -11,11 +11,94 @@ mod upgrade;
 
 use axiom_types::{
     ChainConfig, Gwei, Preset, ValidatorIndex,
-    accessors::{BuilderState, CoreState, LookaheadState},
+    accessors::{
+        BuilderState, CoreState, LookaheadState, ParticipationState, SyncCommitteeState,
+        WithdrawalState,
+    },
     gloas::{BeaconBlock, BeaconState, BuilderPendingPayment},
     phase0::BeaconBlockHeader,
 };
-pub use envelope::{EnvelopeError, PayloadEnvelope};
+pub use envelope::{EnvelopeError, EnvelopeParts, PayloadEnvelope, RevealedPayload};
+
+/// Gloas's slot, slashing, and epoch rules, for every state with builders.
+///
+/// Gloas and the forks that keep its rules all run these.
+#[derive(Clone, Copy, Debug)]
+pub struct GloasEpoch;
+
+impl GloasEpoch {
+    /// Slashes as Electra does, then cancels the slashed proposer's builder payments.
+    ///
+    /// See `slash_validator` in the Gloas beacon chain spec.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a validator does not exist or a balance overflows.
+    pub fn slash_validator<S: Fork + BuilderState>(
+        registry: &mut Registry<'_, S>,
+        slashed: ValidatorIndex,
+        whistleblower: Option<ValidatorIndex>,
+    ) -> Result<(), StateError> {
+        Slashing {
+            slashed,
+            whistleblower,
+        }
+        .apply(registry)?;
+        for payment in registry
+            .state
+            .beacon
+            .builder_pending_payments_mut()
+            .iter_mut()
+        {
+            if payment.proposer_index == slashed {
+                *payment = BuilderPendingPayment::default();
+            }
+        }
+        Ok(())
+    }
+
+    /// Caches the slot's roots, and clears the next slot's payload availability.
+    ///
+    /// See `process_slot` in the Gloas beacon chain spec.
+    pub fn process_slot<S: BuilderState>(state: &mut S) {
+        SlotRoots::of(state).record(state);
+        let next = ((state.slot().0 + 1) % S::Preset::SLOTS_PER_HISTORICAL_ROOT) as usize;
+        state.execution_payload_availability_mut().set(next, false);
+    }
+
+    /// Runs a step Gloas or an earlier fork defined.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the state breaks an invariant, or the fork has no rule for the step here.
+    pub fn run<S>(processor: &mut EpochProcessor<'_, S>, step: EpochStep) -> Result<(), StateError>
+    where
+        S: BalanceChurn
+            + BuilderState
+            + LookaheadState
+            + ParticipationState
+            + SyncCommitteeState
+            + WithdrawalState,
+    {
+        match step {
+            // Gloas only changed the churn that sizes the deposit pass, through its churn table.
+            EpochStep::PendingDeposits => {
+                let mut registry = processor.registry();
+                DepositQueue::new(&registry).apply(&mut registry)
+            }
+            EpochStep::BuilderPendingPayments => {
+                BuilderPayments::new::<S::Preset>(processor.total_active_balance)?
+                    .apply(&mut *processor.state.beacon);
+                Ok(())
+            }
+            EpochStep::ProposerLookahead => {
+                ProposerLookahead::new(processor.current_epoch).shift(&mut *processor.state.beacon)
+            }
+            EpochStep::PtcWindow => PtcWindow::shift(&mut processor.state),
+            _ => ElectraEpoch::run(processor, step),
+        }
+    }
+}
 
 use crate::{
     ActiveBalance, BlockError, BlockProcessor, CachedState, EpochProcessor, EpochStep, EpochVotes,
@@ -74,62 +157,23 @@ impl<P: Preset> Fork for BeaconState<P> {
         Self::initiate_balance_exit(registry, index)
     }
 
-    /// Slashes as Electra does, then cancels the slashed proposer's builder payments.
-    ///
-    /// See `slash_validator` in the Gloas beacon chain spec.
     fn slash_validator(
         registry: &mut Registry<'_, Self>,
         slashed: ValidatorIndex,
         whistleblower: Option<ValidatorIndex>,
     ) -> Result<(), StateError> {
-        Slashing {
-            slashed,
-            whistleblower,
-        }
-        .apply(registry)?;
-        for payment in registry
-            .state
-            .beacon
-            .builder_pending_payments_mut()
-            .iter_mut()
-        {
-            if payment.proposer_index == slashed {
-                *payment = BuilderPendingPayment::default();
-            }
-        }
-        Ok(())
+        GloasEpoch::slash_validator(registry, slashed, whistleblower)
     }
 
-    /// Caches the slot's roots, and clears the next slot's payload availability.
-    ///
-    /// See `process_slot` in the Gloas beacon chain spec.
     fn process_slot(state: &mut Self) {
-        SlotRoots::of(state).record(state);
-        let next = ((state.slot.0 + 1) % P::SLOTS_PER_HISTORICAL_ROOT) as usize;
-        state.execution_payload_availability_mut().set(next, false);
+        GloasEpoch::process_slot(state);
     }
 
     fn process_epoch_step(
         processor: &mut EpochProcessor<'_, Self>,
         step: EpochStep,
     ) -> Result<(), StateError> {
-        match step {
-            // Gloas only changed the churn that sizes the deposit pass, through its churn table.
-            EpochStep::PendingDeposits => {
-                let mut registry = processor.registry();
-                DepositQueue::new(&registry).apply(&mut registry)
-            }
-            EpochStep::BuilderPendingPayments => {
-                BuilderPayments::new::<P>(processor.total_active_balance)?
-                    .apply(&mut *processor.state.beacon);
-                Ok(())
-            }
-            EpochStep::ProposerLookahead => {
-                ProposerLookahead::new(processor.current_epoch).shift(&mut *processor.state.beacon)
-            }
-            EpochStep::PtcWindow => PtcWindow::shift(&mut processor.state),
-            _ => ElectraEpoch::run(processor, step),
-        }
+        GloasEpoch::run(processor, step)
     }
 
     fn attester_rewards(
