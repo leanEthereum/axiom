@@ -3,15 +3,21 @@
 use axiom_bls::PublicKey;
 use axiom_ssz::Ssz;
 use axiom_types::{
-    BuilderIndex, Bytes32, ChainConfig, ForkName, Hash32, KzgCommitment, Preset, Root, Slot,
+    BlsSignature, BuilderIndex, Bytes32, ChainConfig, Domain, ForkName, Hash32, KzgCommitment,
+    Preset, Root, Slot,
     accessors::{BuilderState, CoreState},
     constants::{BUILDER_INDEX_SELF_BUILD, DOMAIN_BEACON_BUILDER},
-    gloas::{BeaconState, NewPayloadRequest, SignedExecutionPayloadEnvelope},
+    gloas::{
+        BeaconState, ExecutionPayload, NewPayloadRequest, SignedExecutionPayloadEnvelope,
+        VersionedHashes,
+    },
     phase0::SigningData,
 };
 use thiserror::Error;
 
-use crate::{BlockError, CachedState, ExecutionEngine, SignatureBatch, StateError, Verification};
+use crate::{
+    BlockError, CachedState, ExecutionEngine, Fork, SignatureBatch, StateError, Verification,
+};
 
 /// An envelope that does not deliver the payload its block's bid committed to.
 ///
@@ -132,6 +138,83 @@ pub enum EnvelopeError {
     State(#[from] StateError),
 }
 
+/// A signed envelope of a fork that reveals payloads apart from their blocks.
+///
+/// Forks from Gloas on share the envelope rule and differ only in the requests the payload carries.
+/// Each fork's envelope exposes the fields the rule reads, and builds its own engine request.
+pub trait RevealedPayload {
+    /// The state of the envelope's fork, which the envelope is checked against.
+    type State: Fork + BuilderState;
+
+    /// What the execution engine validates for the envelope's payload.
+    type Request;
+
+    /// The fields the envelope rule reads, every one of a type the forks share.
+    fn parts(&self) -> EnvelopeParts<'_, <Self::State as CoreState>::Preset>;
+
+    /// The root the builder signs: the unsigned envelope's, under a domain.
+    fn signing_root(&self, domain: Domain) -> Root;
+
+    /// The engine's request for the payload, with the hashes of the bid's blob commitments.
+    fn new_payload_request(
+        &self,
+        versioned_hashes: VersionedHashes<<Self::State as CoreState>::Preset>,
+    ) -> Self::Request;
+}
+
+/// The fields of a signed envelope that the envelope rule reads.
+#[derive(Clone, Copy, Debug)]
+pub struct EnvelopeParts<'a, P: Preset> {
+    /// The revealed payload.
+    pub payload: &'a ExecutionPayload<P>,
+
+    /// Root of the payload's execution requests, which the bid committed to.
+    pub requests_root: Root,
+
+    /// The builder revealing the payload.
+    pub builder_index: BuilderIndex,
+
+    /// Block whose bid the payload honours.
+    pub beacon_block_root: Root,
+
+    /// Parent of that block, see EIP-4788.
+    pub parent_beacon_block_root: Root,
+
+    /// The builder's signature.
+    pub signature: &'a BlsSignature,
+}
+
+impl<P: Preset> RevealedPayload for SignedExecutionPayloadEnvelope<P> {
+    type State = BeaconState<P>;
+    type Request = NewPayloadRequest<P>;
+
+    fn parts(&self) -> EnvelopeParts<'_, P> {
+        let envelope = &self.message;
+        EnvelopeParts {
+            payload: &envelope.payload,
+            requests_root: envelope.execution_requests.hash_tree_root(),
+            builder_index: envelope.builder_index,
+            beacon_block_root: envelope.beacon_block_root,
+            parent_beacon_block_root: envelope.parent_beacon_block_root,
+            signature: &self.signature,
+        }
+    }
+
+    fn signing_root(&self, domain: Domain) -> Root {
+        SigningData::signing_root(&self.message, domain)
+    }
+
+    fn new_payload_request(&self, versioned_hashes: VersionedHashes<P>) -> NewPayloadRequest<P> {
+        let envelope = &self.message;
+        NewPayloadRequest {
+            execution_payload: envelope.payload.clone(),
+            versioned_hashes,
+            parent_beacon_block_root: envelope.parent_beacon_block_root,
+            execution_requests: envelope.execution_requests.clone(),
+        }
+    }
+}
+
 /// A signed execution payload envelope, checked against the state after its block.
 ///
 /// # Overview
@@ -146,9 +229,9 @@ pub enum EnvelopeError {
 ///
 /// See EIP-7732 and `verify_execution_payload_envelope` in the Gloas fork choice spec.
 #[derive(Clone, Copy, Debug)]
-pub struct PayloadEnvelope<'a, P: Preset>(pub &'a SignedExecutionPayloadEnvelope<P>);
+pub struct PayloadEnvelope<'a, V>(pub &'a V);
 
-impl<P: Preset> PayloadEnvelope<'_, P> {
+impl<V: RevealedPayload> PayloadEnvelope<'_, V> {
     /// Checks the envelope against the state its block produced.
     ///
     /// # Algorithm
@@ -163,24 +246,23 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
     /// # Errors
     ///
     /// Fails at the first broken rule.
-    pub fn verify<E: ExecutionEngine<NewPayloadRequest<P>>>(
-        self,
-        state: &mut CachedState<'_, BeaconState<P>>,
+    pub fn verify<E: ExecutionEngine<V::Request>>(
+        &self,
+        state: &mut CachedState<'_, V::State>,
         config: &ChainConfig,
         verification: Verification,
         engine: &E,
     ) -> Result<(), EnvelopeError> {
-        let envelope = &self.0.message;
-        let payload = &envelope.payload;
+        let parts = self.0.parts();
 
-        self.check_signature(state, verification)?;
+        self.check_signature(state, &parts, verification)?;
         let beacon = state.beacon();
-        self.check_block(beacon)?;
-        self.check_bid(beacon)?;
-        self.check_payload(beacon, config)?;
+        Self::check_block(beacon, &parts)?;
+        Self::check_bid(beacon, &parts)?;
+        Self::check_payload(beacon, &parts, config)?;
 
         // Phase 6: the engine's verdict.
-        let commitments = &beacon.latest_execution_payload_bid.blob_kzg_commitments;
+        let commitments = &beacon.latest_execution_payload_bid().blob_kzg_commitments;
         let versioned_hashes = commitments
             .iter()
             .map(KzgCommitment::versioned_hash)
@@ -188,35 +270,30 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
             .try_into()
             .map_err(|_| EnvelopeError::TooManyBlobs {
                 count: commitments.len(),
-                limit: P::MAX_BLOB_COMMITMENTS_PER_BLOCK,
+                limit: <<V::State as CoreState>::Preset as Preset>::MAX_BLOB_COMMITMENTS_PER_BLOCK,
             })?;
-        let request = NewPayloadRequest {
-            execution_payload: payload.clone(),
-            versioned_hashes,
-            parent_beacon_block_root: envelope.parent_beacon_block_root,
-            execution_requests: envelope.execution_requests.clone(),
-        };
+        let request = self.0.new_payload_request(versioned_hashes);
         if !engine.verify_and_notify_new_payload(&request) {
-            return Err(EnvelopeError::PayloadInvalid(payload.block_hash));
+            return Err(EnvelopeError::PayloadInvalid(parts.payload.block_hash));
         }
         Ok(())
     }
 
     /// Checks that the bid's builder, or the proposer when self-built, signed the envelope.
     fn check_signature(
-        self,
-        state: &mut CachedState<'_, BeaconState<P>>,
+        &self,
+        state: &mut CachedState<'_, V::State>,
+        parts: &EnvelopeParts<'_, <V::State as CoreState>::Preset>,
         verification: Verification,
     ) -> Result<(), EnvelopeError> {
-        let envelope = &self.0.message;
         let mut signatures = SignatureBatch::new(verification);
         if signatures.is_enabled() {
-            let key = self.signer_key(state)?;
+            let key = Self::signer_key(state, parts.builder_index)?;
             let beacon = state.beacon();
             let domain = beacon.domain(DOMAIN_BEACON_BUILDER, beacon.current_epoch());
-            let root = SigningData::signing_root(envelope, domain);
+            let root = self.0.signing_root(domain);
             signatures
-                .push(key, root, &self.0.signature)
+                .push(key, root, parts.signature)
                 .map_err(EnvelopeError::Signature)?;
             signatures.verify().map_err(EnvelopeError::Signature)?;
         }
@@ -225,20 +302,22 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
     }
 
     /// Checks that the envelope names the latest block and its parent.
-    fn check_block(self, beacon: &BeaconState<P>) -> Result<(), EnvelopeError> {
-        let envelope = &self.0.message;
-        let mut header = beacon.latest_block_header.clone();
-        header.state_root = beacon.hash_tree_root();
+    fn check_block(
+        beacon: &V::State,
+        parts: &EnvelopeParts<'_, <V::State as CoreState>::Preset>,
+    ) -> Result<(), EnvelopeError> {
+        let mut header = beacon.latest_block_header().clone();
+        header.state_root = beacon.state_root();
         let block_root = header.hash_tree_root();
-        if envelope.beacon_block_root != block_root {
+        if parts.beacon_block_root != block_root {
             return Err(EnvelopeError::BlockRootMismatch {
-                claimed: envelope.beacon_block_root,
+                claimed: parts.beacon_block_root,
                 expected: block_root,
             });
         }
-        if envelope.parent_beacon_block_root != header.parent_root {
+        if parts.parent_beacon_block_root != header.parent_root {
             return Err(EnvelopeError::ParentRootMismatch {
-                claimed: envelope.parent_beacon_block_root,
+                claimed: parts.parent_beacon_block_root,
                 expected: header.parent_root,
             });
         }
@@ -247,13 +326,15 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
     }
 
     /// Checks the envelope against the bid: builder, randomness, gas limit, hash, and requests.
-    fn check_bid(self, beacon: &BeaconState<P>) -> Result<(), EnvelopeError> {
-        let envelope = &self.0.message;
-        let payload = &envelope.payload;
-        let bid = &beacon.latest_execution_payload_bid;
-        if envelope.builder_index != bid.builder_index {
+    fn check_bid(
+        beacon: &V::State,
+        parts: &EnvelopeParts<'_, <V::State as CoreState>::Preset>,
+    ) -> Result<(), EnvelopeError> {
+        let payload = parts.payload;
+        let bid = beacon.latest_execution_payload_bid();
+        if parts.builder_index != bid.builder_index {
             return Err(EnvelopeError::BuilderMismatch {
-                claimed: envelope.builder_index,
+                claimed: parts.builder_index,
                 committed: bid.builder_index,
             });
         }
@@ -275,10 +356,9 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
                 committed: bid.block_hash,
             });
         }
-        let requests_root = envelope.execution_requests.hash_tree_root();
-        if requests_root != bid.execution_requests_root {
+        if parts.requests_root != bid.execution_requests_root {
             return Err(EnvelopeError::RequestsRootMismatch {
-                actual: requests_root,
+                actual: parts.requests_root,
                 committed: bid.execution_requests_root,
             });
         }
@@ -288,33 +368,33 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
 
     /// Checks the payload's slot, parent, time, and withdrawals against the state.
     fn check_payload(
-        self,
-        beacon: &BeaconState<P>,
+        beacon: &V::State,
+        parts: &EnvelopeParts<'_, <V::State as CoreState>::Preset>,
         config: &ChainConfig,
     ) -> Result<(), EnvelopeError> {
-        let payload = &self.0.message.payload;
-        if payload.slot_number != beacon.slot.0 {
+        let payload = parts.payload;
+        let slot = beacon.slot();
+        if payload.slot_number != slot.0 {
             return Err(EnvelopeError::SlotMismatch {
                 claimed: payload.slot_number,
-                state: beacon.slot,
+                state: slot,
             });
         }
-        if payload.parent_hash != beacon.latest_block_hash {
+        let latest_block_hash = beacon.latest_block_hash();
+        if payload.parent_hash != latest_block_hash {
             return Err(EnvelopeError::ParentHashMismatch {
                 claimed: payload.parent_hash,
-                expected: beacon.latest_block_hash,
+                expected: latest_block_hash,
             });
         }
         // Timing: genesis time plus the slot's whole milliseconds, truncated to seconds.
-        let slot_ms =
-            beacon
-                .slot
-                .0
-                .checked_mul(config.slot_duration_ms)
-                .ok_or(StateError::Overflow {
-                    quantity: "slot time in milliseconds",
-                })?;
-        let expected_timestamp = beacon.genesis_time + slot_ms / 1000;
+        let slot_ms = slot
+            .0
+            .checked_mul(config.slot_duration_ms)
+            .ok_or(StateError::Overflow {
+                quantity: "slot time in milliseconds",
+            })?;
+        let expected_timestamp = beacon.genesis_time() + slot_ms / 1000;
         if payload.timestamp != expected_timestamp {
             return Err(EnvelopeError::TimestampMismatch {
                 claimed: payload.timestamp,
@@ -324,7 +404,7 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
 
         // Phase 5: the withdrawals its block fixed.
         let withdrawals_root = payload.withdrawals.hash_tree_root();
-        let expected_withdrawals = beacon.payload_expected_withdrawals.hash_tree_root();
+        let expected_withdrawals = beacon.payload_expected_withdrawals().hash_tree_root();
         if withdrawals_root != expected_withdrawals {
             return Err(EnvelopeError::WithdrawalsMismatch {
                 actual: withdrawals_root,
@@ -339,12 +419,11 @@ impl<P: Preset> PayloadEnvelope<'_, P> {
     ///
     /// See `verify_execution_payload_envelope_signature` in the Gloas beacon chain spec.
     fn signer_key(
-        self,
-        state: &mut CachedState<'_, BeaconState<P>>,
+        state: &mut CachedState<'_, V::State>,
+        index: BuilderIndex,
     ) -> Result<PublicKey, EnvelopeError> {
-        let index = self.0.message.builder_index;
         if index == BUILDER_INDEX_SELF_BUILD {
-            let proposer = state.beacon().latest_block_header.proposer_index;
+            let proposer = state.beacon().latest_block_header().proposer_index;
             return Ok(state.public_key(proposer)?);
         }
         let builders = state.beacon().builders();

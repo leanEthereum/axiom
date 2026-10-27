@@ -2,7 +2,7 @@
 //!
 //! Names follow the consensus specs, so a reader can search both side by side.
 
-use crate::{BlsSignature, BuilderIndex, DomainType, Gwei};
+use crate::{BlsSignature, BuilderIndex, DomainType, Gwei, XmssLeafIndex};
 
 /// Bits of justification history the state keeps, enough for the four finality rules.
 ///
@@ -86,6 +86,43 @@ pub const BUILDER_DEPOSIT_REQUEST_TYPE: u8 = 0x03;
 ///
 /// See EIP-7732 and the Gloas beacon chain spec.
 pub const BUILDER_EXIT_REQUEST_TYPE: u8 = 0x04;
+
+/// Execution request type byte of post-quantum key authorizations.
+///
+/// The value is provisional: it must stay unique across all active request types.
+/// See EIP-7685 and EIP-8450.
+pub const PQ_KEY_AUTHORIZATION_REQUEST_TYPE: u8 = 0x06;
+
+/// Version of a post-quantum registry entry with no registered key.
+///
+/// The all-zero entry carries it, so a fresh validator needs no explicit write.
+/// See EIP-8450.
+pub const PQ_KEYS_VERSION_UNSET: u8 = 0;
+
+/// Version of a two-layer leanXMSS key over Keccak-256.
+///
+/// The version byte names the verifier, independently of the fork that registered the key.
+/// See EIP-8450.
+pub const PQ_KEYS_VERSION_1: u8 = 1;
+
+/// Leaf index at which a registration's proof of possession is signed.
+///
+/// Leaf 0 falls in the genesis slot under a fixed slot schedule, which no duty uses after the fork.
+/// It is therefore free under both leaf allocations a signer may choose.
+/// See EIP-8450.
+pub const PQ_POSSESSION_XMSS_INDEX: XmssLeafIndex = XmssLeafIndex(0);
+
+/// Hash chains per leanXMSS one-time key.
+///
+/// A 16-byte digest gives 64 base-4 digits, and the signer grinds the last 6 to zero.
+/// See `XMSS_CHAINS` in EIP-8450.
+pub const XMSS_CHAINS: usize = 58;
+
+/// Height of the tree of each leanXMSS layer.
+///
+/// Two layers of height 16 give a lifetime of 2^32 leaf indices.
+/// See `XMSS_TREE_HEIGHT` in EIP-8450.
+pub const XMSS_TREE_HEIGHT: usize = 16;
 
 /// Bit that marks a withdrawal's validator index as a builder index.
 ///
@@ -195,6 +232,18 @@ pub const DOMAIN_PROPOSER_PREFERENCES: DomainType = DomainType([0x0d, 0, 0, 0]);
 
 /// Domain of builder deposits.
 pub const DOMAIN_BUILDER_DEPOSIT: DomainType = DomainType([0x0e, 0, 0, 0]);
+
+/// Domain of a validator's BLS authorization of its post-quantum key registration.
+///
+/// It is computed against the genesis fork version, so a registration stays valid across forks.
+/// See EIP-8450.
+pub const DOMAIN_PQ_KEY_REGISTRATION: DomainType = DomainType([0x12, 0, 0, 0]);
+
+/// Domain of the proof of possession signed by a registered leanXMSS key.
+///
+/// It is computed against the genesis fork version, as the registration domain is.
+/// See EIP-8450.
+pub const DOMAIN_PQ_KEY_POSSESSION: DomainType = DomainType([0x13, 0, 0, 0]);
 
 /// Domain prefix reserved for applications built on beacon chain keys.
 pub const DOMAIN_APPLICATION_MASK: DomainType = DomainType([0x00, 0, 0, 0x01]);

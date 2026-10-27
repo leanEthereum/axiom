@@ -16,7 +16,7 @@ use axiom_state_transition::State;
 use axiom_types::{
     BlsSignature, Bytes32, CommitteeIndex, ForkName, Preset, Root, Slot, accessors::CoreState,
     altair, bellatrix, capella, combined, combined::SignedBlindedBeaconBlock, deneb, electra, fulu,
-    gloas, phase0, phase0::AttestationData,
+    gloas, hstar, phase0, phase0::AttestationData,
 };
 
 use super::{
@@ -152,7 +152,14 @@ impl ValidatorRoutes {
             ProducedBlock::GloasContents(contents) => {
                 (contents.block.to_json(), contents.block.encode(), false)
             }
+            ProducedBlock::HstarContents(contents) if include_payload => {
+                (contents.to_json(), contents.encode(), true)
+            }
+            ProducedBlock::HstarContents(contents) => {
+                (contents.block.to_json(), contents.block.encode(), false)
+            }
             ProducedBlock::Gloas(block) => (block.to_json(), block.encode(), false),
+            ProducedBlock::Hstar(block) => (block.to_json(), block.encode(), false),
             other => {
                 return Err(ApiError::internal(format!(
                     "unexpected {} block",
@@ -492,6 +499,9 @@ impl ValidatorRoutes {
             ForkName::Gloas => {
                 Self::pair(&gloas::BeaconState::<P>::attestation(packed).map_err(invalid)?)
             }
+            ForkName::Hstar => {
+                Self::pair(&hstar::BeaconState::<P>::attestation(packed).map_err(invalid)?)
+            }
         })
     }
 
@@ -511,7 +521,9 @@ impl ValidatorRoutes {
             ProducedBlock::Electra(contents) => contents.to_json(),
             ProducedBlock::Fulu(contents) => contents.to_json(),
             ProducedBlock::GloasContents(contents) => contents.to_json(),
+            ProducedBlock::HstarContents(contents) => contents.to_json(),
             ProducedBlock::Gloas(block) => block.to_json(),
+            ProducedBlock::Hstar(block) => block.to_json(),
             ProducedBlock::Blinded(block) => ForkedJson::to_json(block),
         }
     }

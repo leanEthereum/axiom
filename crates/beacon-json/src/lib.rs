@@ -39,6 +39,7 @@ mod electra;
 mod error;
 mod fulu;
 mod gloas;
+mod hstar;
 mod phase0;
 mod primitives;
 mod reader;

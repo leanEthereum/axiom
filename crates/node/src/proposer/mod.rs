@@ -469,7 +469,7 @@ impl<P: Preset> ProposerService<P> {
             }
         };
         let response = self.execution.fetch_payload::<P>(context.fork, id).await?;
-        Ok(EnginePayload::local_build(response))
+        EnginePayload::local_build(response, context.fork).map_err(ProposerError::Requests)
     }
 
     /// The build order of a proposal, with the proposer's fee recipient and gas limit.

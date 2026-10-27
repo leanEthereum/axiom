@@ -36,7 +36,9 @@ impl<P: Preset> SignedBuilderBid<P> {
     /// Fails when the bytes do not encode a bid of the fork.
     pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Option<Self>, DecodeError> {
         Ok(Some(match fork {
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => return Ok(None),
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
+                return Ok(None);
+            }
             ForkName::Bellatrix => Self::Bellatrix(Ssz::decode(bytes)?),
             ForkName::Capella => Self::Capella(Ssz::decode(bytes)?),
             ForkName::Deneb => Self::Deneb(Ssz::decode(bytes)?),

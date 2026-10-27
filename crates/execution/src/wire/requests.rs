@@ -11,6 +11,7 @@
 //! ```
 //!
 //! Electra defines three request types, and Gloas adds builder deposits and builder exits.
+//! Hstar adds key authorizations, see EIP-8450.
 //! See `get_execution_requests_list` in the Electra and Gloas beacon chain specs.
 //! Its inverse is `get_execution_requests`, in the Electra validator spec.
 
@@ -20,9 +21,9 @@ use axiom_types::{
     Preset,
     constants::{
         BUILDER_DEPOSIT_REQUEST_TYPE, BUILDER_EXIT_REQUEST_TYPE, CONSOLIDATION_REQUEST_TYPE,
-        DEPOSIT_REQUEST_TYPE, WITHDRAWAL_REQUEST_TYPE,
+        DEPOSIT_REQUEST_TYPE, PQ_KEY_AUTHORIZATION_REQUEST_TYPE, WITHDRAWAL_REQUEST_TYPE,
     },
-    electra, gloas,
+    electra, gloas, hstar,
 };
 
 use super::{JsonCodec, Reader};
@@ -99,6 +100,44 @@ impl TypedRequests for gloas::ExecutionRequests {
             CONSOLIDATION_REQUEST_TYPE => self.consolidations = Ssz::decode(data)?,
             BUILDER_DEPOSIT_REQUEST_TYPE => self.builder_deposits = Ssz::decode(data)?,
             _ => self.builder_exits = Ssz::decode(data)?,
+        }
+        Ok(())
+    }
+}
+
+impl TypedRequests for hstar::ExecutionRequests {
+    const TYPES: &'static [u8] = &[
+        DEPOSIT_REQUEST_TYPE,
+        WITHDRAWAL_REQUEST_TYPE,
+        CONSOLIDATION_REQUEST_TYPE,
+        BUILDER_DEPOSIT_REQUEST_TYPE,
+        BUILDER_EXIT_REQUEST_TYPE,
+        PQ_KEY_AUTHORIZATION_REQUEST_TYPE,
+    ];
+
+    fn encode_lists(&self) -> Vec<(u8, Vec<u8>)> {
+        vec![
+            (DEPOSIT_REQUEST_TYPE, self.deposits.encode()),
+            (WITHDRAWAL_REQUEST_TYPE, self.withdrawals.encode()),
+            (CONSOLIDATION_REQUEST_TYPE, self.consolidations.encode()),
+            (BUILDER_DEPOSIT_REQUEST_TYPE, self.builder_deposits.encode()),
+            (BUILDER_EXIT_REQUEST_TYPE, self.builder_exits.encode()),
+            (
+                PQ_KEY_AUTHORIZATION_REQUEST_TYPE,
+                self.pq_key_authorizations.encode(),
+            ),
+        ]
+    }
+
+    fn decode_list(&mut self, kind: u8, data: &[u8]) -> Result<(), DecodeError> {
+        // Invariant: the kind is one of the six types, checked by the caller.
+        match kind {
+            DEPOSIT_REQUEST_TYPE => self.deposits = Ssz::decode(data)?,
+            WITHDRAWAL_REQUEST_TYPE => self.withdrawals = Ssz::decode(data)?,
+            CONSOLIDATION_REQUEST_TYPE => self.consolidations = Ssz::decode(data)?,
+            BUILDER_DEPOSIT_REQUEST_TYPE => self.builder_deposits = Ssz::decode(data)?,
+            BUILDER_EXIT_REQUEST_TYPE => self.builder_exits = Ssz::decode(data)?,
+            _ => self.pq_key_authorizations = Ssz::decode(data)?,
         }
         Ok(())
     }
@@ -237,13 +276,27 @@ impl JsonCodec for gloas::ExecutionRequests {
     }
 }
 
+impl JsonCodec for hstar::ExecutionRequests {
+    /// The requests list in its JSON form.
+    fn to_json(&self) -> Json {
+        RequestsList::encode(self).to_json()
+    }
+
+    fn from_json(value: &Json) -> Result<Self, WireError> {
+        RequestsList::from_json(value)?
+            .decode()
+            .map_err(|error| WireError::new(WireErrorKind::Requests(error)))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use axiom_ssz::{List, ProgressiveList};
     use axiom_types::{
-        BlsPubkey, BlsSignature, Bytes32, ExecutionAddress, Gwei, Minimal,
+        BlsPubkey, BlsSignature, Bytes32, ExecutionAddress, Gwei, Minimal, Root,
         electra::{ConsolidationRequest, DepositRequest, ExecutionRequests, WithdrawalRequest},
         gloas::{BuilderDepositRequest, BuilderExitRequest},
+        hstar::PqKeyAuthorizationRequest,
     };
     use proptest::prelude::*;
 
@@ -366,6 +419,35 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn key_authorizations_exist_only_from_hstar() {
+        // One key authorization: address 20, BLS key 48, and keys root 32 bytes, typed 0x06.
+        //
+        //     0x06 || 0x11 * 20 || 0x22 * 48 || 0x33 * 32
+        let authorization = PqKeyAuthorizationRequest {
+            source_address: ExecutionAddress([0x11; 20]),
+            validator_pubkey: BlsPubkey([0x22; 48]),
+            public_keys_root: Root([0x33; 32]),
+        };
+        let hstar = hstar::ExecutionRequests {
+            pq_key_authorizations: ProgressiveList::from(vec![authorization]),
+            ..hstar::ExecutionRequests::default()
+        };
+        let list = RequestsList::encode(&hstar);
+        let expected = [vec![0x06], vec![0x11; 20], vec![0x22; 48], vec![0x33; 32]].concat();
+        assert_eq!(list.as_slice(), [expected]);
+
+        // Hstar reads it back; Gloas knows no type 0x06.
+        assert_eq!(list.decode::<hstar::ExecutionRequests>(), Ok(hstar));
+        assert_eq!(
+            list.decode::<gloas::ExecutionRequests>(),
+            Err(RequestsError::UnknownType {
+                index: 0,
+                kind: 0x06
+            })
+        );
+    }
+
     /// Any Electra requests with up to three of each type.
     pub(crate) fn electra_requests() -> impl Strategy<Value = ExecutionRequests<Minimal>> {
         let deposit =
@@ -465,6 +547,35 @@ pub(crate) mod tests {
             prop_assert_eq!(elements.len(), non_empty.iter().filter(|&&present| present).count());
             prop_assert!(elements.windows(2).all(|pair| pair[0][0] < pair[1][0]));
             prop_assert_eq!(gloas::ExecutionRequests::from_json(&requests.to_json()), Ok(requests));
+        }
+
+        #[test]
+        fn hstar_requests_list_round_trip(
+            gloas in gloas_requests(),
+            authorizations in proptest::collection::vec(any::<u8>(), 0..=2),
+        ) {
+            // Gloas's five types plus up to two key authorizations, typed 0x06.
+            let requests = hstar::ExecutionRequests {
+                deposits: gloas.deposits,
+                withdrawals: gloas.withdrawals,
+                consolidations: gloas.consolidations,
+                builder_deposits: gloas.builder_deposits,
+                builder_exits: gloas.builder_exits,
+                pq_key_authorizations: authorizations
+                    .into_iter()
+                    .map(|byte| PqKeyAuthorizationRequest {
+                        source_address: ExecutionAddress([byte; 20]),
+                        validator_pubkey: BlsPubkey([byte; 48]),
+                        public_keys_root: Root([byte; 32]),
+                    })
+                    .collect(),
+            };
+
+            // Still one element per non-empty type, ascending, and the JSON form decodes back.
+            let list = RequestsList::encode(&requests);
+            prop_assert!(list.as_slice().windows(2).all(|pair| pair[0][0] < pair[1][0]));
+            prop_assert_eq!(list.decode::<hstar::ExecutionRequests>(), Ok(requests.clone()));
+            prop_assert_eq!(hstar::ExecutionRequests::from_json(&requests.to_json()), Ok(requests));
         }
 
         #[test]

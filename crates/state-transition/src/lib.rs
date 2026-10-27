@@ -63,6 +63,7 @@ mod execution;
 mod fork;
 pub mod fulu;
 pub mod gloas;
+pub mod hstar;
 pub mod phase0;
 mod pubkeys;
 mod registry;

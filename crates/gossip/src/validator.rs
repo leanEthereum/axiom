@@ -4,19 +4,20 @@ use axiom_das::ColumnSidecar;
 use axiom_fork_choice::{BlockNode, ForkChoiceError};
 use axiom_kzg::Kzg;
 use axiom_ssz::Ssz;
-use axiom_state_transition::State;
+use axiom_state_transition::{State, hstar::block::PossessionProof};
 use axiom_types::{
     BlsPubkey, BlsSignature, ChainConfig, ColumnIndex, Domain, DomainType, Epoch, Gwei, Preset,
     Root, Slot, SubnetId, ValidatorIndex,
-    accessors::{CoreState, ForkState},
+    accessors::{BuilderState, CoreState, PqRegistryState},
     altair::{self, SignedContributionAndProof, SyncCommitteeContribution, SyncCommitteeMessage},
     bellatrix,
     capella::{self, SignedBlsToExecutionChange},
     combined::{self, BeaconState},
     constants::{
         BLS_WITHDRAWAL_PREFIX, BUILDER_INDEX_SELF_BUILD, DOMAIN_BEACON_BUILDER,
-        DOMAIN_BEACON_PROPOSER, DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_PROPOSER_PREFERENCES,
-        DOMAIN_PTC_ATTESTER, DOMAIN_SYNC_COMMITTEE, PAYLOAD_BUILDER_VERSION,
+        DOMAIN_BEACON_PROPOSER, DOMAIN_BLS_TO_EXECUTION_CHANGE, DOMAIN_PQ_KEY_REGISTRATION,
+        DOMAIN_PROPOSER_PREFERENCES, DOMAIN_PTC_ATTESTER, DOMAIN_SYNC_COMMITTEE,
+        G2_POINT_AT_INFINITY, PAYLOAD_BUILDER_VERSION, PQ_KEYS_VERSION_1,
         SYNC_COMMITTEE_SUBNET_COUNT, TARGET_AGGREGATORS_PER_COMMITTEE,
         TARGET_AGGREGATORS_PER_SYNC_SUBCOMMITTEE,
     },
@@ -30,6 +31,7 @@ use axiom_types::{
         self, Builder, ExecutionPayloadBid, PayloadAttestationMessage, SignedExecutionPayloadBid,
         SignedExecutionPayloadEnvelope, SignedProposerPreferences,
     },
+    hstar::{self, SignedPqKeyRegistration},
     phase0::{
         self, AttestationData, BeaconBlockHeader, ProposerSlashing, SignedVoluntaryExit, Validator,
     },
@@ -189,6 +191,9 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             }
             combined::SignedBeaconBlock::Gloas(block) => {
                 self.beacon_block::<gloas::BeaconState<P>>(block, now_ms)
+            }
+            combined::SignedBeaconBlock::Hstar(block) => {
+                self.beacon_block::<hstar::BeaconState<P>>(block, now_ms)
             }
         }
     }
@@ -825,6 +830,160 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         Ok(())
     }
 
+    /// Validates a post-quantum key registration, cheapest rules first.
+    ///
+    /// The owner path propagates only once the head state holds a matching authorization.
+    /// That authorization exists only after the withdrawal address paid the request fee.
+    /// The operator path propagates once per validator, as credential changes do.
+    /// See the gossip section of EIP-8450.
+    ///
+    /// # Errors
+    ///
+    /// Ignores or rejects as the EIP's rules say.
+    pub fn pq_key_registration(
+        &mut self,
+        signed: &SignedPqKeyRegistration,
+        now_ms: u64,
+    ) -> Verdict {
+        let registration = &signed.message;
+        let index = registration.validator_index;
+        let validator_detail = Detail::Validator(index);
+
+        // Rule 1: a parameter set this fork verifies.
+        let version = registration.public_keys.version;
+        if version != PQ_KEYS_VERSION_1 {
+            return Err(
+                GossipError::reject("unknown post-quantum key version").with(Detail::Mismatch {
+                    actual: u64::from(version),
+                    expected: u64::from(PQ_KEYS_VERSION_1),
+                }),
+            );
+        }
+
+        // Rule 2: the first message with its root.
+        let root = signed.hash_tree_root();
+        if self.seen.pq_key_registration_roots.contains(&root) {
+            return Err(
+                GossipError::ignore("already seen this key registration").with(validator_detail)
+            );
+        }
+        let hstar = self.view.config().hstar_fork_epoch;
+        if self.view.is_future_epoch(hstar, now_ms) {
+            return Err(
+                GossipError::ignore("current epoch is before the key registry").with(
+                    Detail::Epoch {
+                        epoch: self.view.current_slot(now_ms).epoch::<P>(),
+                        reference: hstar,
+                    },
+                ),
+            );
+        }
+
+        // Rule 3: a validator of the head state that has not initiated an exit.
+        let state = self.head_state()?;
+        let beacon = state.beacon();
+        let registry = beacon.pq_registry().ok_or_else(|| {
+            GossipError::ignore("head state has no key registry").with(validator_detail)
+        })?;
+        let validator = Self::registered(beacon, index, "validator index out of range")?;
+        if validator.exit_epoch != Epoch::FAR_FUTURE {
+            return Err(GossipError::reject("validator has initiated an exit").with(
+                Detail::Epoch {
+                    epoch: validator.exit_epoch,
+                    reference: Epoch::FAR_FUTURE,
+                },
+            ));
+        }
+
+        // Rule 4: the authority, by the path the BLS field selects.
+        let operator_path = signed.signature != G2_POINT_AT_INFINITY;
+        self.pq_key_authority(signed, beacon, registry, validator)?;
+
+        // Rule 5: a key no other validator registered.
+        let key = &registration.public_keys.xmss_public_key;
+        if let Some(holder) = registry.pq_public_key_holder(key, index) {
+            return Err(
+                GossipError::reject("key is registered by another validator")
+                    .with(Detail::Validator(holder)),
+            );
+        }
+
+        // Rule 6: the proof of possession, the most expensive check, last.
+        let proof = PossessionProof::new(registration, &signed.possession);
+        let signing_root = proof.signing_root(self.view.config(), beacon.genesis_validators_root());
+        if proof.check_leaf_index().is_err() || proof.verify(signing_root).is_err() {
+            return Err(GossipError::reject("invalid proof of possession").with(validator_detail));
+        }
+
+        self.seen.pq_key_registration_roots.insert(root);
+        if operator_path {
+            self.seen.pq_key_operator_registration_indices.insert(index);
+        }
+        Ok(())
+    }
+
+    /// Checks a key registration's authority, by the path its BLS field selects.
+    ///
+    /// The operator path needs a first-seen, valid BLS signature of a validator without keys.
+    /// The owner path needs an unexpired authorization of exactly these keys in the head state.
+    fn pq_key_authority(
+        &self,
+        signed: &SignedPqKeyRegistration,
+        beacon: &BeaconState<P>,
+        registry: &dyn PqRegistryState<Preset = P>,
+        validator: &Validator,
+    ) -> Verdict {
+        let registration = &signed.message;
+        let index = registration.validator_index;
+        let validator_detail = Detail::Validator(index);
+        let operator_path = signed.signature != G2_POINT_AT_INFINITY;
+        if operator_path {
+            if self
+                .seen
+                .pq_key_operator_registration_indices
+                .contains(&index)
+            {
+                return Err(GossipError::ignore(
+                    "already seen an operator key registration for this validator",
+                )
+                .with(validator_detail));
+            }
+            if registry.is_pq_registered(index) {
+                return Err(GossipError::reject("validator already has registered keys")
+                    .with(validator_detail));
+            }
+            let domain = Domain::compute(
+                DOMAIN_PQ_KEY_REGISTRATION,
+                self.view.config().genesis_fork_version,
+                beacon.genesis_validators_root(),
+            );
+            if !SigningClaim::new(registration, domain, &signed.signature)
+                .is_signed_by(&validator.pubkey)
+            {
+                return Err(GossipError::reject("invalid key registration signature")
+                    .with(validator_detail));
+            }
+        } else {
+            // Only a paid, unexpired authorization of exactly these keys lets the message through.
+            let keys_root = registration.public_keys.hash_tree_root();
+            let current = beacon.current_epoch();
+            let authorized = registry
+                .pq_key_authorization_position(index)
+                .map(|position| registry.pending_pq_key_authorizations()[position])
+                .is_some_and(|authorization| {
+                    authorization.public_keys_root == keys_root
+                        && authorization.expiry_epoch >= current
+                });
+            if !authorized {
+                return Err(
+                    GossipError::ignore("no pending authorization of these keys")
+                        .with(validator_detail),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Validates a data column sidecar on its subnet, including its cell proofs.
     ///
     /// See `validate_data_column_sidecar_gossip` in the Fulu p2p spec.
@@ -1414,16 +1573,16 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let state = self.view.store.block_state(&root).cloned().ok_or_else(|| {
             GossipError::ignore("envelope's block state is unavailable").with(Detail::Block(root))
         })?;
-        let gloas = Self::gloas_state(&state)?;
+        let gloas = Self::builder_state(&state)?;
         let pubkey = if envelope.builder_index == BUILDER_INDEX_SELF_BUILD {
-            let proposer = gloas.latest_block_header.proposer_index;
+            let proposer = gloas.latest_block_header().proposer_index;
             gloas
-                .validators
+                .validators()
                 .get(proposer.as_usize())
                 .map(|validator| validator.pubkey)
         } else {
             gloas
-                .builders
+                .builders()
                 .get(envelope.builder_index.as_usize())
                 .map(|builder| builder.pubkey)
         };
@@ -1505,7 +1664,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             }));
         }
         let state = self.head_state()?;
-        let gloas = Self::gloas_state(&state)?;
+        let gloas = Self::builder_state(&state)?;
         let validator = Self::registered(
             state.beacon(),
             message.validator_index,
@@ -1613,7 +1772,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
             return Err(GossipError::reject("bid's previous randao is incorrect"));
         }
         let advanced = self.parent_state(&parent_root, bid.slot)?;
-        let gloas = Self::gloas_state(&advanced)?;
+        let gloas = Self::builder_state(&advanced)?;
         let builder = self.bid_builder(bid, gloas)?;
         let domain = gloas.domain(DOMAIN_BEACON_BUILDER, gloas.current_epoch());
         if !SigningClaim::new(bid, domain, &signed.signature).is_signed_by(&builder.pubkey) {
@@ -1688,7 +1847,11 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
                     .with(Self::missing_block(&error))
             })?;
         let validator_detail = Detail::Validator(preferences.validator_index);
-        let lookahead = &Self::gloas_state(&state)?.proposer_lookahead;
+        let lookahead = state
+            .beacon()
+            .lookahead()
+            .ok_or_else(|| GossipError::ignore("state has no proposer lookahead"))?
+            .proposer_lookahead();
         let index = (slot.0 - lookahead_start.0) as usize;
         if lookahead.get(index) != Some(&preferences.validator_index) {
             return Err(
@@ -1723,18 +1886,16 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
     fn bid_builder<'s>(
         &self,
         bid: &ExecutionPayloadBid,
-        state: &'s gloas::BeaconState<P>,
+        state: &'s dyn BuilderState<Preset = P>,
     ) -> Result<&'s Builder, GossipError> {
         let builder_detail = Detail::Builder(bid.builder_index);
-        let builder = state
-            .builders
-            .get(bid.builder_index.as_usize())
-            .ok_or_else(|| {
-                GossipError::reject("builder index out of range").with(Detail::Bound {
-                    value: bid.builder_index.0,
-                    bound: state.builders.len() as u64,
-                })
-            })?;
+        let builders = state.builders();
+        let builder = builders.get(bid.builder_index.as_usize()).ok_or_else(|| {
+            GossipError::reject("builder index out of range").with(Detail::Bound {
+                value: bid.builder_index.0,
+                bound: builders.len() as u64,
+            })
+        })?;
         if builder.version != PAYLOAD_BUILDER_VERSION {
             return Err(
                 GossipError::reject("builder is not a payload builder").with(builder_detail)
@@ -1746,7 +1907,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         let finalized = self
             .view
             .state_finality
-            .unwrap_or(state.finalized_checkpoint)
+            .unwrap_or_else(|| state.finalized_checkpoint())
             .epoch;
         if !(builder.deposit_epoch < finalized && builder.withdrawable_epoch == Epoch::FAR_FUTURE) {
             return Err(GossipError::reject("builder is not active").with(builder_detail));
@@ -1756,7 +1917,7 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         }
         // The parent payload may carry the builder's exit, which would leave the bid unpaid.
         let owner = (builder.pubkey, builder.execution_address);
-        if bid.parent_block_hash == state.latest_execution_payload_bid.block_hash
+        if bid.parent_block_hash == state.latest_execution_payload_bid().block_hash
             && let Some(envelope) = self.view.payloads.get(&bid.parent_block_root)
             && envelope
                 .execution_requests
@@ -1962,10 +2123,12 @@ impl<'a, 'b, P: Preset> GossipValidator<'a, 'b, P> {
         Ok((block, bid))
     }
 
-    /// The Gloas state inside a state of any fork.
-    fn gloas_state(state: &State<P>) -> Result<&gloas::BeaconState<P>, GossipError> {
-        gloas::BeaconState::from_any(state.beacon())
-            .ok_or_else(|| GossipError::ignore("state is not a Gloas state"))
+    /// The builder registry and payment state of a state, from Gloas on.
+    fn builder_state(state: &State<P>) -> Result<&dyn BuilderState<Preset = P>, GossipError> {
+        state
+            .beacon()
+            .builders()
+            .ok_or_else(|| GossipError::ignore("state has no builders"))
     }
 
     /// Checks that a block header's slot has started and comes after finality.

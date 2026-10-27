@@ -1,7 +1,7 @@
 //! JSON forms of scalars and fixed-size byte strings.
 //!
 //! ```text
-//!     u64, U256, Slot, Gwei, flags, indices decimal string   "0", "1024"
+//!     u32, u64, U256, Slot, Gwei, indices   decimal string   "0", "1024"
 //!     bool                                  JSON boolean     true
 //!     roots, hashes, keys, signatures       hex              fixed length, checked
 //! ```
@@ -10,8 +10,8 @@ use axiom_json::{Data, Json};
 use axiom_ssz::U256;
 use axiom_types::{
     BlobIndex, BlsPubkey, BlsSignature, BuilderIndex, Bytes32, ColumnIndex, CommitteeIndex, Epoch,
-    ExecutionAddress, Gwei, Hash32, KzgCommitment, KzgProof, ParticipationFlags, Root, Slot,
-    ValidatorIndex, Version, WithdrawalIndex,
+    ExecutionAddress, Gwei, Hash16, Hash32, KzgCommitment, KzgProof, ParticipationFlags, Root,
+    Slot, ValidatorIndex, Version, WithdrawalIndex, XmssLeafIndex, XmssPublicKey,
 };
 
 use crate::{ApiJson, ApiJsonError, decimal::Decimal, reader::Reader};
@@ -174,6 +174,37 @@ impl ApiJson for ColumnIndex {
 
     fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
         u64::from_json(value).map(Self)
+    }
+}
+
+impl ApiJson for XmssLeafIndex {
+    /// A uint32, as every integer a decimal string.
+    fn to_json(&self) -> Json {
+        Json::String(self.0.to_string())
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        Reader::new(value).u32().map(Self)
+    }
+}
+
+impl ApiJson for Hash16 {
+    fn to_json(&self) -> Json {
+        self.0.to_json()
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        <[u8; 16]>::from_json(value).map(Self)
+    }
+}
+
+impl ApiJson for XmssPublicKey {
+    fn to_json(&self) -> Json {
+        self.0.to_json()
+    }
+
+    fn from_json(value: &Json) -> Result<Self, ApiJsonError> {
+        <[u8; 32]>::from_json(value).map(Self)
     }
 }
 

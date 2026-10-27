@@ -363,7 +363,7 @@ impl TestChain {
             | ForkName::Capella
             | ForkName::Deneb => committee_index,
             ForkName::Electra | ForkName::Fulu => CommitteeIndex(0),
-            ForkName::Gloas => CommitteeIndex(u64::from(self.head_slot < slot)),
+            ForkName::Gloas | ForkName::Hstar => CommitteeIndex(u64::from(self.head_slot < slot)),
         };
         AttestationData {
             slot,
@@ -454,7 +454,7 @@ impl TestChain {
                     committee_bits,
                 })
             }
-            ForkName::Gloas => {
+            ForkName::Gloas | ForkName::Hstar => {
                 let mut committee_bits = electra::CommitteeBits::<Minimal>::default();
                 committee_bits.set(committee_index.as_usize(), true);
                 Aggregate::Gloas(gloas::Attestation {
@@ -629,7 +629,7 @@ impl TestChain {
                     })
                     .collect(),
             ),
-            ForkName::Gloas => BlockAttestations::Gloas(
+            ForkName::Gloas | ForkName::Hstar => BlockAttestations::Gloas(
                 self.merged(&candidates)
                     .into_iter()
                     .take(Minimal::MAX_ATTESTATIONS_ELECTRA as usize)

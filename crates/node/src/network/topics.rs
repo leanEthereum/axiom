@@ -188,6 +188,7 @@ impl Subscriptions {
                 GossipKind::ExecutionPayloadBid,
                 GossipKind::ProposerPreferences,
             ],
+            ForkName::Hstar => &[GossipKind::PqKeyRegistration],
             ForkName::Bellatrix | ForkName::Deneb | ForkName::Electra | ForkName::Fulu => &[],
         });
         kinds
@@ -301,11 +302,11 @@ mod tests {
 
     #[test]
     fn each_fork_adds_its_own_global_topics() {
-        // Phase0 has five global topics; Altair adds three, Capella one, Gloas four.
+        // Phase0 has five global topics; Altair adds three, Capella one, Gloas four, Hstar one.
         let counts: Vec<usize> = ForkName::ALL
             .into_iter()
             .map(|fork| Subscriptions::global_kinds(fork).len())
             .collect();
-        assert_eq!(counts, [5, 8, 8, 9, 9, 9, 9, 13]);
+        assert_eq!(counts, [5, 8, 8, 9, 9, 9, 9, 13, 14]);
     }
 }

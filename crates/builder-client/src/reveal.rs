@@ -115,7 +115,7 @@ impl<P: Preset> RevealedPayload<P> {
     pub fn decode(bytes: &[u8], fork: ForkName) -> Result<Self, BuilderError> {
         let ssz = BuilderError::Ssz;
         Ok(match fork {
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(BuilderError::NoBuilderApi { fork });
             }
             ForkName::Bellatrix => Self::Bellatrix(Ssz::decode(bytes).map_err(ssz)?),
@@ -218,7 +218,7 @@ impl<P: Preset> ForkedJson for RevealedPayload<P> {
     fn from_json_in(fork: ForkName, value: &Json) -> Result<Self, ApiJsonError> {
         Ok(match fork {
             // The builder API reveals payloads from the merge until Gloas enshrines the bid.
-            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas => {
+            ForkName::Phase0 | ForkName::Altair | ForkName::Gloas | ForkName::Hstar => {
                 return Err(ApiJsonError::new(ApiJsonErrorKind::AbsentInFork {
                     fork,
                     container: "revealed payload",

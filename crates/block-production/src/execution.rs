@@ -4,6 +4,7 @@ use axiom_ssz::U256;
 use axiom_types::{
     ForkName, Preset, bellatrix, capella, combined, deneb, electra, fulu,
     gloas::{self, SignedExecutionPayloadBid},
+    hstar,
 };
 
 use crate::ProductionError;
@@ -51,6 +52,15 @@ pub enum LocalPayload<P: Preset> {
         /// Its requests, including builder requests.
         requests: gloas::ExecutionRequests,
     },
+    /// An Hstar payload, revealed in an envelope after the block.
+    Hstar {
+        /// The payload.
+        payload: gloas::ExecutionPayload<P>,
+        /// Its blobs, commitments, and cell proofs.
+        blobs: fulu::BlobsBundle<P>,
+        /// Its requests, including key authorizations.
+        requests: hstar::ExecutionRequests,
+    },
 }
 
 /// A locally built payload and what it pays the fee recipient, in wei.
@@ -62,15 +72,37 @@ pub struct LocalBuild<P: Preset> {
     pub value: U256,
 }
 
-/// Whether a Gloas block builds on its parent's payload or on the parent alone.
+/// Whether a block from Gloas on builds on its parent's payload or on the parent alone.
 ///
 /// See `should_build_on_full` in the Gloas fork choice spec.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParentPayload {
     /// The parent's payload is canonical; the block reports its requests.
-    Full(gloas::ExecutionRequests),
+    Full(RevealedRequests),
     /// The parent's payload is missing or not canonical.
     Empty,
+}
+
+/// The execution requests a revealed payload carried, in its envelope's container.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RevealedRequests {
+    /// Requests of a Gloas payload.
+    Gloas(gloas::ExecutionRequests),
+    /// Requests of an Hstar payload, which may include key authorizations.
+    Hstar(hstar::ExecutionRequests),
+}
+
+impl<P: Preset> From<&combined::SignedExecutionPayloadEnvelope<P>> for RevealedRequests {
+    fn from(envelope: &combined::SignedExecutionPayloadEnvelope<P>) -> Self {
+        match envelope {
+            combined::SignedExecutionPayloadEnvelope::Gloas(signed) => {
+                Self::Gloas(signed.message.execution_requests.clone())
+            }
+            combined::SignedExecutionPayloadEnvelope::Hstar(signed) => {
+                Self::Hstar(signed.message.execution_requests.clone())
+            }
+        }
+    }
 }
 
 /// Who builds a Gloas block's payload.

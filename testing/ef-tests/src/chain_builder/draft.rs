@@ -5,13 +5,13 @@ use axiom_state_transition::{
     State, capella::block::ValidatorSweep, electra::block::ExpectedWithdrawals,
 };
 use axiom_types::{
-    BlsSignature, Bytes32, ChainConfig, Hash32, Preset, Root, Slot, ValidatorIndex,
+    BlsSignature, Bytes32, ChainConfig, Epoch, Hash32, Preset, Root, Slot, ValidatorIndex,
     accessors::CoreState,
     altair, bellatrix,
     capella::{self, Withdrawal},
     combined,
     constants::DOMAIN_RANDAO,
-    deneb, electra, gloas,
+    deneb, electra, gloas, hstar,
     phase0::{self, Eth1Data, SigningData},
 };
 
@@ -43,6 +43,8 @@ pub(crate) struct Draft {
     votes: Votes,
     /// The terminal proof-of-work block, which the merge payload builds on.
     terminal_block_hash: Hash32,
+    /// Epoch Hstar activates, before which a bid commits to Gloas's requests.
+    hstar_fork_epoch: Epoch,
 }
 
 impl Draft {
@@ -77,6 +79,7 @@ impl Draft {
             timestamp,
             votes,
             terminal_block_hash: PayloadParts::terminal_block_hash(config),
+            hstar_fork_epoch: config.hstar_fork_epoch,
         })
     }
 
@@ -148,6 +151,18 @@ impl Draft {
             combined::BeaconState::Gloas(state) => {
                 let parent_hash = state.latest_execution_payload_bid.block_hash;
                 combined::BeaconBlock::Gloas(self.gloas_block(parent_hash, state_root))
+            }
+            // A Gloas parent's requests have no Hstar root, so no Hstar block can report them.
+            // The fork's first block builds on the payload the parent extended instead.
+            combined::BeaconState::Hstar(state) => {
+                let bid = &state.latest_execution_payload_bid;
+                let parent_is_gloas = bid.slot.epoch::<P>() < self.hstar_fork_epoch;
+                let parent_hash = if parent_is_gloas {
+                    bid.parent_block_hash
+                } else {
+                    bid.block_hash
+                };
+                combined::BeaconBlock::Hstar(self.hstar_block(parent_hash, state_root))
             }
         };
         Ok(block)
@@ -306,11 +321,38 @@ impl Draft {
                 eth1_data: self.eth1_data.clone(),
                 attestations: self.votes.gloas_attestations().into(),
                 sync_aggregate: self.votes.sync_aggregate(),
-                signed_execution_payload_bid: self
-                    .payload(parent_hash)
-                    .self_built_bid(self.parent_root),
+                signed_execution_payload_bid: self.payload(parent_hash).self_built_bid(
+                    self.parent_root,
+                    gloas::ExecutionRequests::default().hash_tree_root(),
+                ),
                 parent_execution_requests: gloas::ExecutionRequests::default(),
                 ..gloas::BeaconBlockBody::default()
+            },
+        }
+    }
+
+    /// The Hstar block: Gloas's, with Hstar's requests and no key registration.
+    fn hstar_block<P: Preset>(
+        &self,
+        parent_hash: Hash32,
+        state_root: Root,
+    ) -> hstar::BeaconBlock<P> {
+        hstar::BeaconBlock {
+            slot: self.slot,
+            proposer_index: self.proposer_index,
+            parent_root: self.parent_root,
+            state_root,
+            body: hstar::BeaconBlockBody {
+                randao_reveal: self.reveal,
+                eth1_data: self.eth1_data.clone(),
+                attestations: self.votes.gloas_attestations().into(),
+                sync_aggregate: self.votes.sync_aggregate(),
+                signed_execution_payload_bid: self.payload(parent_hash).self_built_bid(
+                    self.parent_root,
+                    hstar::ExecutionRequests::default().hash_tree_root(),
+                ),
+                parent_execution_requests: hstar::ExecutionRequests::default(),
+                ..hstar::BeaconBlockBody::default()
             },
         }
     }

@@ -39,6 +39,10 @@ pub struct Seen {
     pub sync_message_validator_slots: HashSet<(Slot, ValidatorIndex, SubnetId)>,
     /// Validators whose credential change was forwarded.
     pub bls_to_execution_change_indices: HashSet<ValidatorIndex>,
+    /// Roots of every forwarded post-quantum key registration.
+    pub pq_key_registration_roots: HashSet<Root>,
+    /// Validators whose operator-path key registration was forwarded.
+    pub pq_key_operator_registration_indices: HashSet<ValidatorIndex>,
     /// Slot, proposer, and column of every forwarded data column sidecar.
     pub data_column_sidecar_tuples: HashSet<(Slot, ValidatorIndex, ColumnIndex)>,
     /// Slot, proposer, and blob of every forwarded blob sidecar.

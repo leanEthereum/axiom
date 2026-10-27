@@ -38,6 +38,11 @@ impl<'a> Reader<'a> {
         self.decimal()?.to_u8().map_err(ApiJsonError::decimal)
     }
 
+    /// Reads a canonical decimal string of a 32-bit value.
+    pub(crate) fn u32(self) -> Result<u32, ApiJsonError> {
+        self.decimal()?.to_u32().map_err(ApiJsonError::decimal)
+    }
+
     /// Reads a canonical decimal string of a 64-bit value.
     pub(crate) fn u64(self) -> Result<u64, ApiJsonError> {
         self.decimal()?.to_u64().map_err(ApiJsonError::decimal)

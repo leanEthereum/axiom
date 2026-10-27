@@ -12,6 +12,7 @@
 //!     Electra    the block                  payload V3, versioned hashes, parent root, requests
 //!     Fulu       the block                  as Electra
 //!     Gloas      the envelope and its bid   payload V4, versioned hashes, parent root, requests
+//!     Hstar      the envelope and its bid   as Gloas, with key authorization requests
 //! ```
 //!
 //! The fork then picks the method version from the engine methods table.
@@ -21,7 +22,7 @@
 use axiom_json::Json;
 use axiom_ssz::Length;
 use axiom_types::{
-    ForkName, KzgCommitment, Preset, bellatrix, capella, combined, deneb, electra, gloas,
+    ForkName, KzgCommitment, Preset, bellatrix, capella, combined, deneb, electra, gloas, hstar,
 };
 
 use crate::{JsonCodec, NewPayloadError};
@@ -43,6 +44,8 @@ pub enum NewPayload<P: Preset> {
     Fulu(electra::NewPayloadRequest<P>),
     /// A Gloas payload, revealed in an envelope after its block.
     Gloas(gloas::NewPayloadRequest<P>),
+    /// An Hstar payload, whose requests include key authorizations.
+    Hstar(hstar::NewPayloadRequest<P>),
 }
 
 impl<P: Preset> NewPayload<P> {
@@ -63,7 +66,8 @@ impl<P: Preset> NewPayload<P> {
         match block {
             combined::BeaconBlock::Phase0(_)
             | combined::BeaconBlock::Altair(_)
-            | combined::BeaconBlock::Gloas(_) => None,
+            | combined::BeaconBlock::Gloas(_)
+            | combined::BeaconBlock::Hstar(_) => None,
             combined::BeaconBlock::Bellatrix(block) => {
                 let empty = block.body.execution_payload == bellatrix::ExecutionPayload::default();
                 (!empty).then(|| Self::Bellatrix(block.new_payload_request()))
@@ -79,7 +83,7 @@ impl<P: Preset> NewPayload<P> {
         }
     }
 
-    /// The request for a Gloas payload, from its envelope and the bid its block committed to.
+    /// The request for a revealed payload, from its envelope and the bid its block committed to.
     ///
     /// The bid supplies the blob commitments, and the envelope everything else.
     /// The envelope's parent root is the one the transition checks against the state.
@@ -88,11 +92,11 @@ impl<P: Preset> NewPayload<P> {
     ///
     /// Fails when the bid commits to more blobs than a block can hold.
     pub fn from_envelope(
-        envelope: &gloas::ExecutionPayloadEnvelope<P>,
+        envelope: &combined::SignedExecutionPayloadEnvelope<P>,
         bid: &gloas::ExecutionPayloadBid,
     ) -> Result<Self, NewPayloadError> {
         let commitments = &bid.blob_kzg_commitments;
-        let versioned_hashes = commitments
+        let versioned_hashes: gloas::VersionedHashes<P> = commitments
             .iter()
             .map(KzgCommitment::versioned_hash)
             .collect::<Vec<_>>()
@@ -101,12 +105,24 @@ impl<P: Preset> NewPayload<P> {
                 count: commitments.len(),
                 limit: P::MaxBlobCommitmentsPerBlock::LEN,
             })?;
-        Ok(Self::Gloas(gloas::NewPayloadRequest {
-            execution_payload: envelope.payload.clone(),
-            versioned_hashes,
-            parent_beacon_block_root: envelope.parent_beacon_block_root,
-            execution_requests: envelope.execution_requests.clone(),
-        }))
+        Ok(match envelope {
+            combined::SignedExecutionPayloadEnvelope::Gloas(signed) => {
+                Self::Gloas(gloas::NewPayloadRequest {
+                    execution_payload: signed.message.payload.clone(),
+                    versioned_hashes,
+                    parent_beacon_block_root: signed.message.parent_beacon_block_root,
+                    execution_requests: signed.message.execution_requests.clone(),
+                })
+            }
+            combined::SignedExecutionPayloadEnvelope::Hstar(signed) => {
+                Self::Hstar(hstar::NewPayloadRequest {
+                    execution_payload: signed.message.payload.clone(),
+                    versioned_hashes,
+                    parent_beacon_block_root: signed.message.parent_beacon_block_root,
+                    execution_requests: signed.message.execution_requests.clone(),
+                })
+            }
+        })
     }
 
     /// The fork the payload belongs to.
@@ -119,6 +135,7 @@ impl<P: Preset> NewPayload<P> {
             Self::Electra(_) => ForkName::Electra,
             Self::Fulu(_) => ForkName::Fulu,
             Self::Gloas(_) => ForkName::Gloas,
+            Self::Hstar(_) => ForkName::Hstar,
         }
     }
 
@@ -141,6 +158,12 @@ impl<P: Preset> NewPayload<P> {
                 request.execution_requests.to_json(),
             ],
             Self::Gloas(request) => vec![
+                request.execution_payload.to_json(),
+                request.versioned_hashes.to_json(),
+                request.parent_beacon_block_root.to_json(),
+                request.execution_requests.to_json(),
+            ],
+            Self::Hstar(request) => vec![
                 request.execution_payload.to_json(),
                 request.versioned_hashes.to_json(),
                 request.parent_beacon_block_root.to_json(),
@@ -208,12 +231,11 @@ mod tests {
             ]),
             ..gloas::ExecutionPayloadBid::default()
         };
-        let envelope = gloas::ExecutionPayloadEnvelope::<Minimal> {
-            parent_beacon_block_root: Root([0x09; 32]),
-            ..gloas::ExecutionPayloadEnvelope::default()
-        };
+        let mut signed = gloas::SignedExecutionPayloadEnvelope::<Minimal>::default();
+        signed.message.parent_beacon_block_root = Root([0x09; 32]);
+        let envelope = signed.message.clone();
 
-        let request = NewPayload::from_envelope(&envelope, &bid).unwrap();
+        let request = NewPayload::from_envelope(&signed.into(), &bid).unwrap();
 
         // One versioned hash per commitment, in bid order.
         let hashes = [KzgCommitment([0x11; 48]), KzgCommitment([0x22; 48])]
@@ -230,13 +252,36 @@ mod tests {
     }
 
     #[test]
+    fn an_hstar_request_carries_its_key_authorizations() {
+        // Fixture state: an Hstar envelope whose payload carried one key authorization.
+        let mut signed = hstar::SignedExecutionPayloadEnvelope::<Minimal>::default();
+        signed
+            .message
+            .execution_requests
+            .pq_key_authorizations
+            .push(hstar::PqKeyAuthorizationRequest::default());
+        let requests = signed.message.execution_requests.clone();
+
+        let request =
+            NewPayload::from_envelope(&signed.into(), &gloas::ExecutionPayloadBid::default())
+                .unwrap();
+
+        // The request is Hstar's, and the authorization reaches the engine with the payload.
+        assert_eq!(request.fork(), ForkName::Hstar);
+        let NewPayload::Hstar(request) = request else {
+            panic!("an Hstar envelope makes an Hstar request");
+        };
+        assert_eq!(request.execution_requests, requests);
+    }
+
+    #[test]
     fn a_bid_with_too_many_blobs_is_refused() {
         // The minimal preset holds at most 4096 commitments a block; the bid claims 4097.
         let bid = gloas::ExecutionPayloadBid {
             blob_kzg_commitments: ProgressiveList::from(vec![KzgCommitment([0; 48]); 4097]),
             ..gloas::ExecutionPayloadBid::default()
         };
-        let envelope = gloas::ExecutionPayloadEnvelope::<Minimal>::default();
+        let envelope = gloas::SignedExecutionPayloadEnvelope::<Minimal>::default().into();
         assert_eq!(
             NewPayload::from_envelope(&envelope, &bid),
             Err(NewPayloadError::TooManyBlobs {

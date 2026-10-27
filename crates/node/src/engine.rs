@@ -205,11 +205,12 @@ impl ExecutionLayer {
         envelope: &SignedExecutionPayloadEnvelope<P>,
         bid: &ExecutionPayloadBid,
     ) -> PayloadStatus {
-        match NewPayload::from_envelope(&envelope.message, bid) {
+        let envelope = combined::SignedExecutionPayloadEnvelope::from(envelope.clone());
+        match NewPayload::from_envelope(&envelope, bid) {
             Ok(request) => self.judge(&request).await,
             Err(error) => {
                 // The block's own checks bound the bid, so this cannot come from a valid block.
-                warn!(%error, root = %envelope.message.beacon_block_root, "envelope has no payload request");
+                warn!(%error, root = %envelope.beacon_block_root(), "envelope has no payload request");
                 PayloadStatus::NotValidated
             }
         }

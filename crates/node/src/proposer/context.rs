@@ -2,14 +2,14 @@
 
 use std::collections::BTreeSet;
 
-use axiom_block_production::{BlockProducer, ParentPayload, PayloadRequest, ProductionError};
+use axiom_block_production::{
+    BlockProducer, ParentPayload, PayloadRequest, ProductionError, RevealedRequests,
+};
 use axiom_builder_client::ChainHealth;
 use axiom_state_transition::State;
 use axiom_types::{
-    BlsPubkey, ForkName, Hash32, Preset, Root, Slot, ValidatorIndex,
-    accessors::{BuilderState, CoreState, ForkState},
-    combined,
-    gloas::{self, SignedExecutionPayloadBid},
+    BlsPubkey, ForkName, Hash32, Preset, Root, Slot, ValidatorIndex, accessors::CoreState,
+    combined, gloas::SignedExecutionPayloadBid,
 };
 
 use super::ProposerReorgs;
@@ -88,7 +88,7 @@ impl<P: Preset> ProposalContext<P> {
                 .envelope(extended.root)?
                 .map(|envelope| envelope.message.execution_requests)
                 .unwrap_or_default();
-            ParentPayload::Full(requests)
+            ParentPayload::Full(RevealedRequests::Gloas(requests))
         } else {
             ParentPayload::Empty
         };
@@ -96,9 +96,11 @@ impl<P: Preset> ProposalContext<P> {
         let execution = if advanced.beacon().is_merge_transition_complete() {
             // A Gloas payload extends the parent's payload, or the payload the parent extended.
             // Earlier, the block's post-state records the latest payload hash.
-            let head_hash = match gloas::BeaconState::<P>::from_any(advanced.beacon()) {
-                Some(gloas) if builds_on_full => gloas.latest_execution_payload_bid().block_hash,
-                Some(gloas) => gloas.latest_execution_payload_bid().parent_block_hash,
+            let head_hash = match advanced.beacon().builders() {
+                Some(builders) if builds_on_full => {
+                    builders.latest_execution_payload_bid().block_hash
+                }
+                Some(builders) => builders.latest_execution_payload_bid().parent_block_hash,
                 None => state
                     .beacon()
                     .latest_execution_block_hash()
@@ -173,6 +175,7 @@ impl<P: Preset> ProposalContext<P> {
             }
             combined::BeaconState::Fulu(state) => state.latest_execution_payload_header.gas_limit,
             combined::BeaconState::Gloas(state) => state.latest_execution_payload_bid.gas_limit,
+            combined::BeaconState::Hstar(state) => state.latest_execution_payload_bid.gas_limit,
         }
     }
 }

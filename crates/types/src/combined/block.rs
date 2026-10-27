@@ -7,7 +7,7 @@ use crate::{
     accessors::CoreState,
     altair, bellatrix, capella,
     combined::BeaconState,
-    deneb, electra, fulu, gloas, phase0,
+    deneb, electra, fulu, gloas, hstar, phase0,
     phase0::BeaconBlockHeader,
     vote::{CommitteeVote, ConflictingVotes},
 };
@@ -46,6 +46,8 @@ pub enum BeaconBlock<P: Preset> {
     Fulu(fulu::BeaconBlock<P>),
     /// A Gloas block.
     Gloas(gloas::BeaconBlock<P>),
+    /// An Hstar block.
+    Hstar(hstar::BeaconBlock<P>),
 }
 
 impl<P: Preset> BeaconBlock<P> {
@@ -61,6 +63,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Electra(_) => ForkName::Electra,
             Self::Fulu(_) => ForkName::Fulu,
             Self::Gloas(_) => ForkName::Gloas,
+            Self::Hstar(_) => ForkName::Hstar,
         }
     }
 
@@ -75,6 +78,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.slot,
             Self::Electra(block) | Self::Fulu(block) => block.slot,
             Self::Gloas(block) => block.slot,
+            Self::Hstar(block) => block.slot,
         }
     }
 
@@ -89,6 +93,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.proposer_index,
             Self::Electra(block) | Self::Fulu(block) => block.proposer_index,
             Self::Gloas(block) => block.proposer_index,
+            Self::Hstar(block) => block.proposer_index,
         }
     }
 
@@ -103,6 +108,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.parent_root,
             Self::Electra(block) | Self::Fulu(block) => block.parent_root,
             Self::Gloas(block) => block.parent_root,
+            Self::Hstar(block) => block.parent_root,
         }
     }
 
@@ -117,6 +123,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.state_root,
             Self::Electra(block) | Self::Fulu(block) => block.state_root,
             Self::Gloas(block) => block.state_root,
+            Self::Hstar(block) => block.state_root,
         }
     }
 
@@ -131,6 +138,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.header(),
             Self::Electra(block) | Self::Fulu(block) => block.header(),
             Self::Gloas(block) => block.header(),
+            Self::Hstar(block) => block.header(),
         }
     }
 
@@ -145,6 +153,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.hash_tree_root(),
             Self::Electra(block) | Self::Fulu(block) => block.hash_tree_root(),
             Self::Gloas(block) => block.hash_tree_root(),
+            Self::Hstar(block) => block.hash_tree_root(),
         }
     }
 
@@ -173,6 +182,10 @@ impl<P: Preset> BeaconBlock<P> {
                 let bid = &block.body.signed_execution_payload_bid.message;
                 (bid.parent_block_hash, bid.block_hash)
             }
+            Self::Hstar(block) => {
+                let bid = &block.body.signed_execution_payload_bid.message;
+                (bid.parent_block_hash, bid.block_hash)
+            }
         };
         ExecutionHashes {
             parent_block_hash,
@@ -187,7 +200,7 @@ impl<P: Preset> BeaconBlock<P> {
     #[must_use]
     pub fn carries_execution_payload(&self) -> bool {
         match self {
-            Self::Phase0(_) | Self::Altair(_) | Self::Gloas(_) => false,
+            Self::Phase0(_) | Self::Altair(_) | Self::Gloas(_) | Self::Hstar(_) => false,
             Self::Bellatrix(block) => {
                 block.body.execution_payload != bellatrix::ExecutionPayload::default()
             }
@@ -213,7 +226,8 @@ impl<P: Preset> BeaconBlock<P> {
             | Self::Altair(_)
             | Self::Bellatrix(_)
             | Self::Capella(_)
-            | Self::Gloas(_) => &[],
+            | Self::Gloas(_)
+            | Self::Hstar(_) => &[],
             Self::Deneb(block) => &block.body.blob_kzg_commitments,
             Self::Electra(block) | Self::Fulu(block) => &block.body.blob_kzg_commitments,
         }
@@ -260,6 +274,12 @@ impl<P: Preset> BeaconBlock<P> {
                 .map(electra::Attestation::committee_vote)
                 .collect(),
             Self::Gloas(block) => block
+                .body
+                .attestations
+                .iter()
+                .map(gloas::Attestation::committee_vote)
+                .collect(),
+            Self::Hstar(block) => block
                 .body
                 .attestations
                 .iter()
@@ -314,6 +334,12 @@ impl<P: Preset> BeaconBlock<P> {
                 .iter()
                 .map(gloas::AttesterSlashing::conflicting_votes)
                 .collect(),
+            Self::Hstar(block) => block
+                .body
+                .attester_slashings
+                .iter()
+                .map(gloas::AttesterSlashing::conflicting_votes)
+                .collect(),
         }
     }
 
@@ -328,6 +354,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => &block.body.voluntary_exits,
             Self::Electra(block) | Self::Fulu(block) => &block.body.voluntary_exits,
             Self::Gloas(block) => &block.body.voluntary_exits,
+            Self::Hstar(block) => &block.body.voluntary_exits,
         }
     }
 
@@ -342,6 +369,23 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => &block.body.proposer_slashings,
             Self::Electra(block) | Self::Fulu(block) => &block.body.proposer_slashings,
             Self::Gloas(block) => &block.body.proposer_slashings,
+            Self::Hstar(block) => &block.body.proposer_slashings,
+        }
+    }
+
+    /// The post-quantum key registrations the block carries, none before Hstar.
+    #[must_use]
+    pub fn pq_key_registrations(&self) -> &[hstar::SignedPqKeyRegistration] {
+        match self {
+            Self::Phase0(_)
+            | Self::Altair(_)
+            | Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_)
+            | Self::Electra(_)
+            | Self::Fulu(_)
+            | Self::Gloas(_) => &[],
+            Self::Hstar(block) => &block.body.pq_key_registrations,
         }
     }
 
@@ -412,6 +456,13 @@ impl<P: Preset> BeaconBlock<P> {
                 state_root,
                 body: gloas::BeaconBlockBody::default(),
             }),
+            ForkName::Hstar => Self::Hstar(hstar::BeaconBlock {
+                slot,
+                proposer_index,
+                parent_root,
+                state_root,
+                body: hstar::BeaconBlockBody::default(),
+            }),
         }
     }
 
@@ -426,6 +477,7 @@ impl<P: Preset> BeaconBlock<P> {
             Self::Deneb(block) => block.encode(),
             Self::Electra(block) | Self::Fulu(block) => block.encode(),
             Self::Gloas(block) => block.encode(),
+            Self::Hstar(block) => block.encode(),
         }
     }
 
@@ -444,6 +496,7 @@ impl<P: Preset> BeaconBlock<P> {
             ForkName::Electra => Self::Electra(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Fulu(Ssz::decode(bytes)?),
             ForkName::Gloas => Self::Gloas(Ssz::decode(bytes)?),
+            ForkName::Hstar => Self::Hstar(Ssz::decode(bytes)?),
         })
     }
 

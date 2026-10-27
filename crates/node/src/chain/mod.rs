@@ -49,6 +49,7 @@ use axiom_types::{
     deneb::BlobSidecar,
     fulu,
     gloas::{self, PayloadAttestationMessage, SignedExecutionPayloadEnvelope},
+    hstar::SignedPqKeyRegistration,
     phase0::{Checkpoint, ProposerSlashing, SignedVoluntaryExit},
     vote::{CommitteeVote, ConflictingVotes, PayloadClaim},
 };
@@ -1597,6 +1598,20 @@ impl<P: Preset> Chain<P> {
         self.pool
             .requests_mut()
             .insert_credential_change(state, change)?;
+        Ok(())
+    }
+
+    /// Keeps a post-quantum key registration that passed gossip checks, for a coming block.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the validator is unknown or has initiated an exit.
+    pub fn on_pq_key_registration(
+        &mut self,
+        registration: SignedPqKeyRegistration,
+    ) -> Result<(), ChainError> {
+        let state = Self::head_beacon(&self.store, self.head)?;
+        self.pool.registrations_mut().insert(state, registration)?;
         Ok(())
     }
 

@@ -2,7 +2,7 @@
 
 use axiom_block_production::ProductionError;
 use axiom_builder_client::BuilderError;
-use axiom_execution::EngineError;
+use axiom_execution::{EngineError, RequestsError};
 use axiom_types::{ForkName, Slot};
 use thiserror::Error;
 
@@ -30,6 +30,10 @@ pub enum ProposerError {
     /// The engine failed.
     #[error("engine: {0}")]
     Engine(#[source] EngineError),
+
+    /// The engine's payload carries a requests list the slot's fork cannot read.
+    #[error("engine payload requests: {0}")]
+    Requests(#[source] RequestsError),
 
     /// A blinded block came in, and no builder is configured to reveal it.
     #[error("no builder is configured")]

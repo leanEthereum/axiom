@@ -55,7 +55,8 @@ impl Format {
             ForkName::Capella => Ok(Self::Capella),
             ForkName::Deneb => Ok(Self::Deneb),
             ForkName::Electra | ForkName::Fulu => Ok(Self::Electra),
-            ForkName::Gloas => Ok(Self::Gloas),
+            // Hstar keeps Gloas's headers and indices, so its data is in Gloas's format.
+            ForkName::Gloas | ForkName::Hstar => Ok(Self::Gloas),
         }
     }
 

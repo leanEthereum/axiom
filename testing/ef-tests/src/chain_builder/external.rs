@@ -98,6 +98,9 @@ impl<P: Preset> BlockInputs<P> {
             (BlockAttestations::Gloas(votes), combined::BeaconBlock::Gloas(block)) => {
                 block.body.attestations = votes.clone().into();
             }
+            (BlockAttestations::Gloas(votes), combined::BeaconBlock::Hstar(block)) => {
+                block.body.attestations = votes.clone().into();
+            }
             _ => return Err(shape()),
         }
         let Some(aggregate) = &self.sync_aggregate else {
@@ -115,6 +118,7 @@ impl<P: Preset> BlockInputs<P> {
                 &mut block.body.sync_aggregate
             }
             combined::BeaconBlock::Gloas(block) => &mut block.body.sync_aggregate,
+            combined::BeaconBlock::Hstar(block) => &mut block.body.sync_aggregate,
         };
         *target = aggregate.clone();
         Ok(())

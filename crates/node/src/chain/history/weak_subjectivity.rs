@@ -104,7 +104,7 @@ impl WeakSubjectivity {
             combined::BeaconState::Fulu(_) => {
                 Self::balance_churn_epochs::<fulu::BeaconState<P>>(ActiveBalance::of(state), config)
             }
-            combined::BeaconState::Gloas(_) => {
+            combined::BeaconState::Gloas(_) | combined::BeaconState::Hstar(_) => {
                 Self::split_churn_epochs::<P>(ActiveBalance::of(state), config)
             }
         };

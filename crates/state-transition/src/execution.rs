@@ -1,6 +1,6 @@
 //! The boundary between consensus and the execution engine.
 
-use axiom_types::{Preset, bellatrix, capella, deneb, electra, gloas};
+use axiom_types::{Preset, bellatrix, capella, deneb, electra, gloas, hstar};
 
 /// The execution engine's verdict on one fork's new payload request.
 ///
@@ -9,6 +9,7 @@ use axiom_types::{Preset, bellatrix, capella, deneb, electra, gloas};
 /// The transition itself stays a pure function.
 ///
 /// See `verify_and_notify_new_payload` in the Bellatrix through Gloas beacon chain specs.
+/// Hstar keeps Gloas's rule, with its own requests in the request, see EIP-8450.
 pub trait ExecutionEngine<R> {
     /// Whether the payload's block hash, versioned hashes, and execution are valid.
     fn verify_and_notify_new_payload(&self, request: &R) -> bool;
@@ -23,6 +24,7 @@ pub trait PayloadEngine<P: Preset>:
     + ExecutionEngine<deneb::NewPayloadRequest<P>>
     + ExecutionEngine<electra::NewPayloadRequest<P>>
     + ExecutionEngine<gloas::NewPayloadRequest<P>>
+    + ExecutionEngine<hstar::NewPayloadRequest<P>>
 {
 }
 
@@ -32,6 +34,7 @@ impl<P: Preset, E> PayloadEngine<P> for E where
         + ExecutionEngine<deneb::NewPayloadRequest<P>>
         + ExecutionEngine<electra::NewPayloadRequest<P>>
         + ExecutionEngine<gloas::NewPayloadRequest<P>>
+        + ExecutionEngine<hstar::NewPayloadRequest<P>>
 {
 }
 

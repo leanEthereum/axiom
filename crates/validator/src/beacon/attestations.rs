@@ -62,7 +62,7 @@ impl<P: Preset> PoolAttestation<P> {
                     signature,
                 }))
             }
-            ForkName::Electra | ForkName::Fulu | ForkName::Gloas => {
+            ForkName::Electra | ForkName::Fulu | ForkName::Gloas | ForkName::Hstar => {
                 Ok(Self::Single(electra::SingleAttestation {
                     committee_index: duty.committee_index,
                     attester_index: duty.validator_index,
@@ -98,7 +98,7 @@ impl<P: Preset> ForkedJson for PoolAttestation<P> {
             | ForkName::Bellatrix
             | ForkName::Capella
             | ForkName::Deneb => phase0::Attestation::from_json(json).map(Self::Phase0),
-            ForkName::Electra | ForkName::Fulu | ForkName::Gloas => {
+            ForkName::Electra | ForkName::Fulu | ForkName::Gloas | ForkName::Hstar => {
                 electra::SingleAttestation::from_json(json).map(Self::Single)
             }
         }
@@ -173,7 +173,9 @@ impl<P: Preset> ForkedJson for Aggregate<P> {
             ForkName::Electra | ForkName::Fulu => {
                 electra::Attestation::from_json(json).map(Self::Electra)
             }
-            ForkName::Gloas => gloas::Attestation::from_json(json).map(Self::Gloas),
+            ForkName::Gloas | ForkName::Hstar => {
+                gloas::Attestation::from_json(json).map(Self::Gloas)
+            }
         }
     }
 }
@@ -247,7 +249,9 @@ impl<P: Preset> ForkedJson for SignedAggregate<P> {
             ForkName::Electra | ForkName::Fulu => {
                 electra::SignedAggregateAndProof::from_json(json).map(Self::Electra)
             }
-            ForkName::Gloas => gloas::SignedAggregateAndProof::from_json(json).map(Self::Gloas),
+            ForkName::Gloas | ForkName::Hstar => {
+                gloas::SignedAggregateAndProof::from_json(json).map(Self::Gloas)
+            }
         }
     }
 }

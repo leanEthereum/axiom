@@ -2,7 +2,7 @@
 
 use axiom_ssz::Const;
 
-use crate::{Gwei, Preset};
+use crate::{Epoch, Gwei, Preset};
 
 /// A preset with tiny committees and epochs, for fast tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -89,6 +89,9 @@ impl Preset for Minimal {
     const MAX_SIGNED_AGGREGATE_AND_PROOF_SIZE: u64 = 1462;
     const MAX_ATTESTER_SLASHING_SIZE: u64 = 131_536;
     const MAX_SIGNED_EXECUTION_PAYLOAD_BID_SIZE: u64 = 196_932;
+    const MAX_PQ_KEY_REGISTRATIONS: u64 = 8;
+    const MAX_PQ_KEY_AUTHORIZATION_REQUESTS_PER_PAYLOAD: u64 = 16;
+    const PQ_KEY_AUTHORIZATION_EXPIRY: Epoch = Epoch(256);
 
     type MaxValidatorsPerCommittee = Const<2048>;
     type MaxValidatorsPerSlot = Const<8192>;

@@ -95,7 +95,8 @@ impl<P: Preset> Proposal<P> {
             | ForkName::Altair
             | ForkName::Bellatrix
             | ForkName::Capella
-            | ForkName::Gloas => Self::Block(combined::SignedBeaconBlock::decode(bytes, fork)?),
+            | ForkName::Gloas
+            | ForkName::Hstar => Self::Block(combined::SignedBeaconBlock::decode(bytes, fork)?),
             ForkName::Deneb => Self::DenebBlobs(Ssz::decode(bytes)?),
             ForkName::Electra => Self::ElectraBlobs(Ssz::decode(bytes)?),
             ForkName::Fulu => Self::Columns(Ssz::decode(bytes)?),
@@ -115,7 +116,8 @@ impl<P: Preset> Proposal<P> {
             | ForkName::Altair
             | ForkName::Bellatrix
             | ForkName::Capella
-            | ForkName::Gloas => {
+            | ForkName::Gloas
+            | ForkName::Hstar => {
                 Self::Block(combined::SignedBeaconBlock::from_json_in(fork, value)?)
             }
             ForkName::Deneb => Self::DenebBlobs(ApiJson::from_json(value)?),

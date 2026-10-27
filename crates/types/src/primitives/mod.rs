@@ -10,6 +10,7 @@ mod kzg;
 mod participation;
 mod slot;
 mod slot_clock;
+mod xmss;
 
 pub use bls::{BlsPubkey, BlsSignature};
 pub use bytes::{
@@ -25,3 +26,4 @@ pub use kzg::{KzgCommitment, KzgProof};
 pub use participation::ParticipationFlags;
 pub use slot::Slot;
 pub use slot_clock::SlotClock;
+pub use xmss::{Hash16, XmssLeafIndex, XmssPublicKey};

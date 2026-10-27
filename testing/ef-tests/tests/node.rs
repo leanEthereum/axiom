@@ -435,7 +435,10 @@ impl TestNode {
     ///
     /// Genesis fills slot 0, so phase0 is checked at slot 1.
     async fn serves_each_fork(&self, config: &ChainConfig, proposals: &[Proposal<Minimal>]) {
-        for fork in ForkName::ALL {
+        for fork in ForkName::ALL
+            .into_iter()
+            .take_while(|fork| *fork != ForkName::Hstar)
+        {
             let slot = config.fork_epoch(fork).start_slot::<Minimal>().0.max(1);
             let expected = format!("{}", proposals[(slot - 1) as usize].block().block_root());
             let root = self
@@ -901,7 +904,12 @@ fn every_fork() -> ChainConfig {
         terminal_total_difficulty: U256::from_u64(TERMINAL_TOTAL_DIFFICULTY),
         ..ChainConfig::minimal()
     };
-    for (epoch, fork) in (1..).zip(ForkName::ALL.into_iter().skip(1)) {
+    for (epoch, fork) in (1..).zip(
+        ForkName::ALL
+            .into_iter()
+            .skip(1)
+            .take_while(|fork| *fork != ForkName::Hstar),
+    ) {
         config = config.with_fork_epoch(fork, Epoch(epoch));
     }
     config

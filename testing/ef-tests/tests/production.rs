@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, mem};
 
 use axiom_block_production::{
     BlockProducer, ExecutionChoice, GloasBid, LocalBuild, LocalPayload, ParentPayload,
-    PayloadRequest, ProducedBlock, ProposalRequest, RandaoCheck,
+    PayloadRequest, ProducedBlock, ProposalRequest, RandaoCheck, RevealedRequests,
 };
 use axiom_bls::SecretKey;
 use axiom_das::BlockColumns;
@@ -53,7 +53,15 @@ fn schedule() -> ChainConfig {
         terminal_block_hash: TERMINAL,
         ..ChainConfig::minimal()
     };
-    for (epoch, fork) in ForkName::ALL.into_iter().enumerate().skip(1) {
+    // Fixture state: one fork per epoch from Altair to Gloas.
+    // Hstar stays in the far future.
+    // Its envelopes need a pipeline this harness drives for Gloas only.
+    for (epoch, fork) in ForkName::ALL
+        .into_iter()
+        .enumerate()
+        .skip(1)
+        .take_while(|(_, fork)| *fork != ForkName::Hstar)
+    {
         config = config.with_fork_epoch(fork, Epoch(epoch as u64));
     }
     config
@@ -268,7 +276,7 @@ impl Chain {
             return (ExecutionChoice::PreMerge, None);
         }
         let parent = if fork == ForkName::Gloas {
-            ParentPayload::Full(gloas::ExecutionRequests::default())
+            ParentPayload::Full(RevealedRequests::Gloas(gloas::ExecutionRequests::default()))
         } else {
             ParentPayload::Empty
         };
@@ -565,6 +573,7 @@ fn sync_seats(state: &State<Minimal>, validator: ValidatorIndex) -> Option<Vec<u
         }
         combined::BeaconState::Fulu(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
         combined::BeaconState::Gloas(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
+        combined::BeaconState::Hstar(beacon) => SyncPool::<Minimal>::seats(beacon, validator).ok(),
     }
 }
 
@@ -817,7 +826,9 @@ fn builder_bid(
                 combined::ExecutionPayload::Fulu(payload),
             )
         }
-        LocalPayload::Gloas { .. } => unreachable!("Gloas bids come through the protocol"),
+        LocalPayload::Gloas { .. } | LocalPayload::Hstar { .. } => {
+            unreachable!("bids from Gloas on come through the protocol")
+        }
     }
 }
 

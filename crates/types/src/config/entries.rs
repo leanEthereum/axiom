@@ -289,6 +289,10 @@ impl ChainConfig {
                 ConfigValue::Number(self.gloas_fork_epoch.0),
             ),
             (
+                "HSTAR_FORK_EPOCH",
+                ConfigValue::Number(self.hstar_fork_epoch.0),
+            ),
+            (
                 "GENESIS_FORK_VERSION",
                 ConfigValue::Text(self.genesis_fork_version.to_string()),
             ),
@@ -319,6 +323,10 @@ impl ChainConfig {
             (
                 "GLOAS_FORK_VERSION",
                 ConfigValue::Text(self.gloas_fork_version.to_string()),
+            ),
+            (
+                "HSTAR_FORK_VERSION",
+                ConfigValue::Text(self.hstar_fork_version.to_string()),
             ),
             (
                 "TERMINAL_BLOCK_HASH_ACTIVATION_EPOCH",

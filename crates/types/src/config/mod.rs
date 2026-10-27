@@ -88,6 +88,10 @@ pub struct ChainConfig {
     pub gloas_fork_version: Version,
     /// Activation epoch of Gloas.
     pub gloas_fork_epoch: Epoch,
+    /// Fork version of Hstar.
+    pub hstar_fork_version: Version,
+    /// Activation epoch of Hstar.
+    pub hstar_fork_epoch: Epoch,
 
     /// Length of a slot, in milliseconds.
     pub slot_duration_ms: u64,
@@ -283,6 +287,8 @@ impl ChainConfig {
             fulu_fork_epoch: Epoch(411_392),
             gloas_fork_version: Version([0x07, 0, 0, 0]),
             gloas_fork_epoch: Epoch::FAR_FUTURE,
+            hstar_fork_version: Version([0x08, 0, 0, 0]),
+            hstar_fork_epoch: Epoch::FAR_FUTURE,
             slot_duration_ms: 12_000,
             seconds_per_eth1_block: 14,
             min_validator_withdrawability_delay: 256,
@@ -425,6 +431,8 @@ impl ChainConfig {
             fulu_fork_epoch: Epoch::FAR_FUTURE,
             gloas_fork_version: Version([0x07, 0, 0, 0x01]),
             gloas_fork_epoch: Epoch::FAR_FUTURE,
+            hstar_fork_version: Version([0x08, 0, 0, 0x01]),
+            hstar_fork_epoch: Epoch::FAR_FUTURE,
             slot_duration_ms: 6000,
             seconds_per_eth1_block: 14,
             min_validator_withdrawability_delay: 256,
@@ -472,6 +480,7 @@ impl ChainConfig {
             ForkName::Electra => self.electra_fork_epoch,
             ForkName::Fulu => self.fulu_fork_epoch,
             ForkName::Gloas => self.gloas_fork_epoch,
+            ForkName::Hstar => self.hstar_fork_epoch,
         }
     }
 
@@ -488,6 +497,7 @@ impl ChainConfig {
             ForkName::Electra => Some(&mut self.electra_fork_epoch),
             ForkName::Fulu => Some(&mut self.fulu_fork_epoch),
             ForkName::Gloas => Some(&mut self.gloas_fork_epoch),
+            ForkName::Hstar => Some(&mut self.hstar_fork_epoch),
         }
     }
 
@@ -503,6 +513,7 @@ impl ChainConfig {
             ForkName::Electra => self.electra_fork_version,
             ForkName::Fulu => self.fulu_fork_version,
             ForkName::Gloas => self.gloas_fork_version,
+            ForkName::Hstar => self.hstar_fork_version,
         }
     }
 
@@ -520,7 +531,7 @@ impl ChainConfig {
             | ForkName::Deneb
             | ForkName::Electra
             | ForkName::Fulu => self.sync_message_due_bps,
-            ForkName::Gloas => self.sync_message_due_bps_gloas,
+            ForkName::Gloas | ForkName::Hstar => self.sync_message_due_bps_gloas,
         }
     }
 
@@ -538,7 +549,7 @@ impl ChainConfig {
             | ForkName::Deneb
             | ForkName::Electra
             | ForkName::Fulu => self.attestation_due_bps,
-            ForkName::Gloas => self.attestation_due_bps_gloas,
+            ForkName::Gloas | ForkName::Hstar => self.attestation_due_bps_gloas,
         }
     }
 
@@ -556,7 +567,7 @@ impl ChainConfig {
             | ForkName::Deneb
             | ForkName::Electra
             | ForkName::Fulu => self.aggregate_due_bps,
-            ForkName::Gloas => self.aggregate_due_bps_gloas,
+            ForkName::Gloas | ForkName::Hstar => self.aggregate_due_bps_gloas,
         }
     }
 
@@ -574,7 +585,7 @@ impl ChainConfig {
             | ForkName::Deneb
             | ForkName::Electra
             | ForkName::Fulu => self.contribution_due_bps,
-            ForkName::Gloas => self.contribution_due_bps_gloas,
+            ForkName::Gloas | ForkName::Hstar => self.contribution_due_bps_gloas,
         }
     }
 

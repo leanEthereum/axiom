@@ -108,6 +108,7 @@ impl<P: Preset> LightClientHeader<P> {
                 Self::Electra(signed.message.light_client_header())
             }
             SignedBeaconBlock::Gloas(signed) => Self::Gloas(signed.message.light_client_header()),
+            SignedBeaconBlock::Hstar(signed) => Self::Gloas(signed.message.light_client_header()),
         }
     }
 

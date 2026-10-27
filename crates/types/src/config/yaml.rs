@@ -183,6 +183,7 @@ impl<'a> ConfigEntry<'a> {
             "ELECTRA_FORK_EPOCH" => config.electra_fork_epoch = Epoch(number()?),
             "FULU_FORK_EPOCH" => config.fulu_fork_epoch = Epoch(number()?),
             "GLOAS_FORK_EPOCH" => config.gloas_fork_epoch = Epoch(number()?),
+            "HSTAR_FORK_EPOCH" => config.hstar_fork_epoch = Epoch(number()?),
             "GENESIS_FORK_VERSION" => config.genesis_fork_version = Version(bytes4()?),
             "ALTAIR_FORK_VERSION" => config.altair_fork_version = Version(bytes4()?),
             "BELLATRIX_FORK_VERSION" => config.bellatrix_fork_version = Version(bytes4()?),
@@ -191,6 +192,7 @@ impl<'a> ConfigEntry<'a> {
             "ELECTRA_FORK_VERSION" => config.electra_fork_version = Version(bytes4()?),
             "FULU_FORK_VERSION" => config.fulu_fork_version = Version(bytes4()?),
             "GLOAS_FORK_VERSION" => config.gloas_fork_version = Version(bytes4()?),
+            "HSTAR_FORK_VERSION" => config.hstar_fork_version = Version(bytes4()?),
             "TERMINAL_TOTAL_DIFFICULTY" => {
                 config.terminal_total_difficulty = value
                     .as_str()

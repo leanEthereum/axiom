@@ -121,7 +121,8 @@ impl EngineMethods {
                 GetPayloadVersion::V5,
                 Some(GetBlobsVersion::V2),
             ),
-            ForkName::Gloas => (
+            // Hstar's key authorizations travel in the requests list, so no method changes.
+            ForkName::Gloas | ForkName::Hstar => (
                 NewPayloadVersion::V5,
                 ForkchoiceVersion::V4,
                 GetPayloadVersion::V6,
@@ -330,6 +331,12 @@ mod tests {
                 NewPayloadVersion::V4,
                 ForkchoiceVersion::V3,
                 GetPayloadVersion::V5,
+                Some(GetBlobsVersion::V2),
+            )),
+            Some(row(
+                NewPayloadVersion::V5,
+                ForkchoiceVersion::V4,
+                GetPayloadVersion::V6,
                 Some(GetBlobsVersion::V2),
             )),
             Some(row(
