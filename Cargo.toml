@@ -106,7 +106,7 @@ axiom-tls = { path = "crates/tls" }
 thiserror = "2"
 
 # SHA-256 with hardware acceleration where the CPU offers it.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Async runtime for the adapters at the edge: sockets, timers, tasks, and signals.
 # The pure layers never see it.
