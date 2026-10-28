@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: testing/vectors
           key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
@@ -86,7 +86,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: testing/vectors
           key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
@@ -206,7 +206,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: testing/vectors
           key: vectors-${{ hashFiles('testing/ef-tests/Makefile') }}
