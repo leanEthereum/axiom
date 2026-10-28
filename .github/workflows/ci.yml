@@ -95,7 +95,7 @@ jobs:
           .github/ci/test-binaries.sh run ${{ matrix.group }}
           ran-${{ matrix.platform.name }}-${{ matrix.group }}
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ran-${{ matrix.platform.name }}-${{ matrix.group }}
           path: ran-${{ matrix.platform.name }}-${{ matrix.group }}
